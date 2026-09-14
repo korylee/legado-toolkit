@@ -5,6 +5,12 @@ from __future__ import annotations
 
 import json
 import tempfile
+import os
+
+# 系统临时目录在沙箱/CI 下可能不可写，测试改用仓库内 .tmp
+_TMP_ROOT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), chr(34).join([chr(34), chr(34)]) if False else ".tmp")
+os.makedirs(_TMP_ROOT, exist_ok=True)
+
 import unittest
 from pathlib import Path
 
@@ -37,7 +43,7 @@ def make_source(url: str, search_url: str = "https://example.com/search?q={{key}
 
 class ImportSourcesTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.temp_dir = tempfile.TemporaryDirectory()
+        self.temp_dir = tempfile.TemporaryDirectory(dir=_TMP_ROOT)
         self.base_dir = Path(self.temp_dir.name)
         self.candidate_path = self.base_dir / "candidates.json"
         self.incoming_path = self.base_dir / "incoming.json"
