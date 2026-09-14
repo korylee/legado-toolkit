@@ -1,15 +1,22 @@
-# ---- 运行时数据 / 大文件：不进版本库（请自行备份 candidates.json！）----
+# ---- 运行时数据（体积大、变动频繁）：不进版本库 ----
+data/archive/
+data/backups/
+data/cache/
+data/check_cache*/
+data/imports/
+data/out/
 candidates*.json
 final_*.json
 auto_added.json
 shareBookSource*.json
 book_sources.sqlite3
 *.ndjson
-check_cache*/
-out/
-imports/
-archive/
 index.json
+
+# 待删除的搬迁残留（沙箱只读，需手动删；删掉后可移除本节）
+data/tests/
+data/registry.py
+data/__pycache__/
 
 # ---- Python ----
 __pycache__/
@@ -25,4 +32,7 @@ __pycache__/
 .idea/
 *.log
 _probe*.txt
+_migrate*.py
+_fix*.py
+_inspect*.py
 
