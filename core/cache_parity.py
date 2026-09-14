@@ -37,10 +37,23 @@ def load_store_cache(store_path: Optional[str] = None) -> Dict[str, dict]:
         ck.close()
 
 
-def load_legacy_cache(cache_dir: Optional[str] = None) -> Dict[str, dict]:
-    """走旧 NDJSON 后端（use_store=False）。"""
-    ck = AsyncChecker(cache_dir=cache_dir or data_path("check_cache"), use_store=False)
-    return ck.load_cache()
+def load_legacy_cache(cache_dirs=None):
+    # 迁移读的是 check_cache + check_cache_current 两个目录，
+    # 对比必须同口径，否则会把 check_cache_current 独有的记录误判为差异。
+    dirs = list(cache_dirs or (data_path("check_cache"),
+                              data_path("check_cache_current")))
+    raw_n = 0
+    merged = {}
+    for d in dirs:
+        ck = AsyncChecker(cache_dir=d, use_store=False)
+        items = ck.load_cache() or {}
+        raw_n += len(items)
+        for k, v in items.items():
+            nk = _normalize_url(k)
+            cur = merged.get(nk)
+            if not cur or str(v.get("checked_at", "")) >= str(cur.get("checked_at", "")):
+                merged[nk] = v
+    return raw_n, merged
 
 
 def _snapshot(raw: Dict[str, Any], index: int, item: Dict[str, Any]) -> Dict[str, Any]:
@@ -49,7 +62,7 @@ def _snapshot(raw: Dict[str, Any], index: int, item: Dict[str, Any]) -> Dict[str
     return {f: getattr(rec, f, None) for f in FIELDS}
 
 
-def compare(sample: int = 0, candidates: str = "", cache_dir: Optional[str] = None,
+def compare(sample: int = 0, candidates: str = "", cache_dirs=None,
             store_path: Optional[str] = None, show: int = 20) -> Dict[str, Any]:
     path = candidates or data_path("candidates.json")
     srcs = load_json_file(path)
@@ -61,12 +74,8 @@ def compare(sample: int = 0, candidates: str = "", cache_dir: Optional[str] = No
         srcs = srcs[::step][:sample]
 
     raw_store = load_store_cache(store_path)
-    raw_legacy = load_legacy_cache(cache_dir)
+    legacy_raw_n, legacy = load_legacy_cache(cache_dirs)
 
-    # SQLite 侧 key 已是规范化 URL；NDJSON 侧是原始 url，需同口径归一
-    legacy = {}
-    for k, v in raw_legacy.items():
-        legacy[_normalize_url(k)] = v
 
     stats: Counter = Counter()
     diffs: Counter = Counter()
@@ -107,9 +116,9 @@ def compare(sample: int = 0, candidates: str = "", cache_dir: Optional[str] = No
         "candidates_total": total,
         "sample": len(srcs),
         "store_entries": len(raw_store),
-        "legacy_raw_entries": len(raw_legacy),
+        "legacy_raw_entries": legacy_raw_n,
         "legacy_normalized_entries": len(legacy),
-        "legacy_deduped": len(raw_legacy) - len(legacy),
+        "legacy_deduped": legacy_raw_n - len(legacy),
         "hit_matrix": dict(stats),
         "field_diffs": dict(diffs),
         "details": details,
