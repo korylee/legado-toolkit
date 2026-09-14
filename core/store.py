@@ -572,14 +572,21 @@ class Store:
         # 不能 JOIN sources：两表都有 deleted_at/name/source_url 等列，
         # _where 生成的是不带表名的条件，SQLite 会报 ambiguous column name。
         # 用子查询取 raw_json，_where 里的列在 v_sources 里全都有。
-        sql = ("SELECT (SELECT raw_json FROM sources WHERE id = v.id) AS rj "
+        sql = ("SELECT (SELECT raw_json FROM sources WHERE id = v.id) AS raw_json "
                "FROM v_sources v %s ORDER BY v.id" % where)
-        out = []
+        out, bad = [], 0
         for row in self.conn.execute(sql, args):
-            try:
-                out.append(json.loads(row["raw_json"]))
-            except Exception:
+            rj = row["raw_json"]
+            if not rj:
+                bad += 1
                 continue
+            try:
+                out.append(json.loads(rj))
+            except Exception:
+                bad += 1
+        if bad:
+            print("WARN export_by_filter: %d/%d 条 raw_json 缺失或无法解析，已跳过"
+                  % (bad, bad + len(out)))
         return out
 
     # ---------------------------------------------------------------- 回收站
