@@ -91,6 +91,18 @@ DDL = [
         created_at    TEXT NOT NULL
     )""",
     "CREATE INDEX IF NOT EXISTS idx_repairs_url ON repairs(source_url, created_at DESC)",
+    """CREATE TABLE IF NOT EXISTS exports (
+        uid         TEXT PRIMARY KEY,
+        name        TEXT DEFAULT "",
+        count       INTEGER DEFAULT 0,
+        urls_json   TEXT DEFAULT "",
+        filename    TEXT NOT NULL,
+        created_at  TEXT NOT NULL,
+        expires_at  TEXT NOT NULL,
+        hits        INTEGER DEFAULT 0,
+        pinned      INTEGER DEFAULT 0
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_exports_exp ON exports(expires_at)",
     """CREATE TABLE IF NOT EXISTS jobs (
         id          TEXT PRIMARY KEY,
         kind        TEXT NOT NULL DEFAULT '',
@@ -458,6 +470,72 @@ class Store:
         return [dict(r) for r in self.conn.execute(
             "SELECT id, kind, status, progress, total, created_at, updated_at"
             " FROM jobs ORDER BY created_at DESC LIMIT ?", (int(limit),))]
+
+
+    # ---------------------------------------------------------------- exports
+    def create_export(self, uid: str, name: str, urls, filename: str,
+                      ttl_days: int = 7) -> Dict[str, Any]:
+        # 临时导出：uid 唯一，到期由 sweep_exports 清理；pinned=1 永不过期
+        ts = now()
+        exp = time.strftime("%Y-%m-%d %H:%M:%S",
+                            time.localtime(time.time() + max(1, int(ttl_days)) * 86400))
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO exports(uid,name,count,urls_json,filename,created_at,"
+                "expires_at,hits,pinned) VALUES (?,?,?,?,?,?,?,0,0)",
+                (uid, name or "", len(urls or []),
+                 json.dumps(urls or [], ensure_ascii=False), filename, ts, exp))
+        return {"uid": uid, "expires_at": exp}
+
+    def get_export(self, uid: str, bump: bool = False):
+        row = self.conn.execute("SELECT * FROM exports WHERE uid = ?", (uid,)).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        if bump:
+            with self.conn:
+                self.conn.execute("UPDATE exports SET hits = hits + 1 WHERE uid = ?", (uid,))
+            d["hits"] = (d.get("hits") or 0) + 1
+        d["expired"] = (not d.get("pinned")) and str(d.get("expires_at", "")) < now()
+        return d
+
+    def list_exports(self, include_expired: bool = False):
+        sql = "SELECT * FROM exports"
+        args = ()
+        if not include_expired:
+            sql += " WHERE pinned = 1 OR expires_at >= ?"
+            args = (now(),)
+        sql += " ORDER BY created_at DESC LIMIT 200"
+        cur = now()
+        out = []
+        for r in self.conn.execute(sql, args):
+            d = dict(r)
+            d["expired"] = (not d.get("pinned")) and str(d.get("expires_at", "")) < cur
+            out.append(d)
+        return out
+
+    def set_export_pinned(self, uid: str, pinned: bool) -> bool:
+        with self.conn:
+            cur = self.conn.execute("UPDATE exports SET pinned = ? WHERE uid = ?",
+                                    (1 if pinned else 0, uid))
+        return bool(cur.rowcount)
+
+    def delete_export(self, uid: str) -> bool:
+        with self.conn:
+            cur = self.conn.execute("DELETE FROM exports WHERE uid = ?", (uid,))
+        return bool(cur.rowcount)
+
+    def sweep_exports(self):
+        # 清理过期导出，返回被清掉的 uid（调用方负责删对应文件）
+        args = (now(),)
+        rows = self.conn.execute(
+            "SELECT uid FROM exports WHERE pinned = 0 AND expires_at < ?", args).fetchall()
+        uids = [r["uid"] for r in rows]
+        if uids:
+            with self.conn:
+                self.conn.execute(
+                    "DELETE FROM exports WHERE pinned = 0 AND expires_at < ?", args)
+        return uids
 
 
 def _tri(v: Any) -> Optional[int]:
