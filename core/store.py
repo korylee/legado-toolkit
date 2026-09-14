@@ -18,7 +18,7 @@ import sqlite3
 import time
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 DB_NAME = "sources.sqlite3"
 
 PRAGMAS = (
@@ -40,6 +40,7 @@ DDL = [
         enabled      INTEGER NOT NULL DEFAULT 1,
         raw_json     TEXT NOT NULL,
         fingerprint  TEXT NOT NULL DEFAULT '',
+        deleted_at   TEXT NOT NULL DEFAULT '',
         created_at   TEXT NOT NULL,
         updated_at   TEXT NOT NULL
     )""",
@@ -115,16 +116,6 @@ DDL = [
         updated_at  TEXT NOT NULL
     )""",
     # 源 + 最近一次校验：前端列表页就查这个视图
-    """CREATE VIEW IF NOT EXISTS v_sources AS
-        SELECT s.id, s.source_url, s.name, s.source_type, s.group_name, s.enabled,
-               s.fingerprint, s.updated_at,
-               c.health, c.stars, c.checked_at, c.probe_depth,
-               c.toc_complete, c.content_ok, c.search_hit
-        FROM sources s
-        LEFT JOIN checks c ON c.id = (
-            SELECT id FROM checks WHERE source_url = s.source_url
-            ORDER BY checked_at DESC LIMIT 1)
-    """,
 ]
 
 
@@ -160,12 +151,35 @@ class Store:
         if not readonly:
             self._init_schema()
 
+    #: 需要幂等补加的新列 {表: [(列名, 定义)]}
+    #: CREATE TABLE IF NOT EXISTS 不会给已存在的表加列，必须显式 ALTER
+    NEW_COLUMNS = {"sources": [("deleted_at", "TEXT NOT NULL DEFAULT ''")]}
+
+    #: v_sources 视图每次重建：CREATE VIEW IF NOT EXISTS 不会更新已存在的视图定义
+    VIEW_DDL = """CREATE VIEW v_sources AS
+        SELECT s.id, s.source_url, s.name, s.source_type, s.group_name, s.enabled,
+               s.fingerprint, s.deleted_at, s.updated_at,
+               c.health, c.stars, c.checked_at, c.probe_depth,
+               c.toc_complete, c.content_ok, c.search_hit
+        FROM sources s
+        LEFT JOIN checks c ON c.id = (
+            SELECT id FROM checks WHERE source_url = s.source_url
+            ORDER BY checked_at DESC LIMIT 1)"""
+
     def _init_schema(self) -> None:
         for stmt in DDL:
             self.conn.execute(stmt)
+        for table, cols in self.NEW_COLUMNS.items():
+            have = {r["name"] for r in self.conn.execute("PRAGMA table_info(%s)" % table)}
+            for name, decl in cols:
+                if name not in have:
+                    self.conn.execute("ALTER TABLE %s ADD COLUMN %s %s" % (table, name, decl))
+        self.conn.execute("DROP VIEW IF EXISTS v_sources")
+        self.conn.execute(self.VIEW_DDL)
         self.conn.execute(
-            "INSERT OR IGNORE INTO meta(key, value) VALUES (?, ?)",
-            ("schema_version", str(SCHEMA_VERSION)))
+            "INSERT OR IGNORE INTO meta(key, value) VALUES (?, ?)", ("schema_version", "1"))
+        self.conn.execute("UPDATE meta SET value = ? WHERE key = ?",
+                          (str(SCHEMA_VERSION), "schema_version"))
         self.conn.commit()
 
     def close(self) -> None:
@@ -243,7 +257,8 @@ class Store:
     def export_sources(self) -> List[Dict[str, Any]]:
         """导出全部书源（保持入库顺序），用于重新生成给 Legado 的 JSON。"""
         out = []
-        for row in self.conn.execute("SELECT raw_json FROM sources ORDER BY id"):
+        for row in self.conn.execute(
+                "SELECT raw_json FROM sources WHERE deleted_at = '' ORDER BY id"):
             try:
                 out.append(json.loads(row["raw_json"]))
             except Exception:
@@ -257,14 +272,19 @@ class Store:
         dump_json_file(path, data)
         return len(data)
 
-    def count_sources(self) -> int:
-        return self.conn.execute("SELECT COUNT(*) AS c FROM sources").fetchone()["c"]
+    def count_sources(self, include_deleted: bool = False) -> int:
+        sql = "SELECT COUNT(*) AS c FROM sources"
+        if not include_deleted:
+            sql += " WHERE deleted_at = ''"
+        return self.conn.execute(sql).fetchone()["c"]
 
     def query(self, source_type: Optional[int] = None, group: str = "",
               health: str = "", q: str = "", only_enabled: bool = False,
-              limit: int = 50, offset: int = 0, order: str = "id") -> List[Dict[str, Any]]:
+              limit: int = 50, offset: int = 0, order: str = "id",
+              include_deleted: bool = False) -> List[Dict[str, Any]]:
         """前端列表页用：服务端筛选 + 排序 + 分页（不要全量传给浏览器）。"""
-        where, args = self._where(source_type, group, health, q, only_enabled)
+        where, args = self._where(source_type, group, health, q, only_enabled,
+                                 include_deleted)
         allowed = ("id", "name", "source_type", "group_name", "stars",
                    "checked_at", "updated_at")
         key = (order or "id").lstrip("-")
@@ -276,13 +296,18 @@ class Store:
         return [dict(r) for r in self.conn.execute(sql, args + [int(limit), int(offset)])]
 
     def count_query(self, source_type: Optional[int] = None, group: str = "",
-                    health: str = "", q: str = "", only_enabled: bool = False) -> int:
-        where, args = self._where(source_type, group, health, q, only_enabled)
+                    health: str = "", q: str = "", only_enabled: bool = False,
+                    include_deleted: bool = False) -> int:
+        where, args = self._where(source_type, group, health, q, only_enabled,
+                                  include_deleted)
         sql = "SELECT COUNT(*) AS c FROM v_sources %s" % where
         return self.conn.execute(sql, args).fetchone()["c"]
 
-    def _where(self, source_type, group, health, q, only_enabled):
+    def _where(self, source_type, group, health, q, only_enabled,
+               include_deleted: bool = False):
         sql, args = ["WHERE 1=1"], []
+        if not include_deleted:
+            sql.append("AND deleted_at = ''")
         if source_type is not None:
             sql.append("AND source_type = ?")
             args.append(int(source_type))
@@ -336,7 +361,8 @@ class Store:
 
     def stats(self) -> Dict[str, Any]:
         c = self.conn.execute
-        out: Dict[str, Any] = {"sources": self.count_sources()}
+        out: Dict[str, Any] = {"sources": self.count_sources(),
+                                "deleted": self.count_deleted()}
         out["checks"] = c("SELECT COUNT(*) AS c FROM checks").fetchone()["c"]
         out["types"] = {str(r["source_type"]): r["c"] for r in c(
             "SELECT source_type, COUNT(*) AS c FROM sources GROUP BY source_type")}
@@ -536,6 +562,66 @@ class Store:
                 self.conn.execute(
                     "DELETE FROM exports WHERE pinned = 0 AND expires_at < ?", args)
         return uids
+
+
+    # ---------------------------------------------------------------- 回收站
+    # 设计：UI 永不硬删除。软删时把整条 raw_json 快照到
+    # data/backups/deleted_<时间戳>.json，彻底删除由使用者在该文件层面处理。
+    def soft_delete(self, urls, reason: str = ""):
+        # 返回 (删除条数, 快照路径)
+        from core.loader import _normalize_url
+        from core.paths import data_path
+
+        keys = [_normalize_url(u) for u in (urls or []) if u]
+        if not keys:
+            return 0, ""
+        marks = ",".join("?" * len(keys))
+        rows = list(self.conn.execute(
+            "SELECT source_url, raw_json FROM sources "
+            "WHERE deleted_at = '' AND source_url IN (%s)" % marks, keys))
+        if not rows:
+            return 0, ""
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        path = data_path("backups", "deleted_%s.json" % ts)
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        payload = {
+            "deleted_at": now(),
+            "reason": reason or "",
+            "count": len(rows),
+            "sources": [json.loads(r["raw_json"]) for r in rows],
+        }
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        with self.conn:
+            self.conn.execute(
+                "UPDATE sources SET deleted_at = ?, updated_at = ? "
+                "WHERE deleted_at = '' AND source_url IN (%s)" % marks,
+                [now(), now()] + keys)
+        return len(rows), path
+
+    def restore(self, urls) -> int:
+        from core.loader import _normalize_url
+
+        keys = [_normalize_url(u) for u in (urls or []) if u]
+        if not keys:
+            return 0
+        marks = ",".join("?" * len(keys))
+        with self.conn:
+            cur = self.conn.execute(
+                "UPDATE sources SET deleted_at = '', updated_at = ? "
+                "WHERE deleted_at <> '' AND source_url IN (%s)" % marks,
+                [now()] + keys)
+        return cur.rowcount or 0
+
+    def list_deleted(self, limit: int = 200, offset: int = 0):
+        return [dict(r) for r in self.conn.execute(
+            "SELECT id, source_url, name, source_type, group_name, deleted_at "
+            "FROM sources WHERE deleted_at <> '' "
+            "ORDER BY deleted_at DESC LIMIT ? OFFSET ?", (int(limit), int(offset)))]
+
+    def count_deleted(self) -> int:
+        return self.conn.execute(
+            "SELECT COUNT(*) AS c FROM sources WHERE deleted_at <> ''").fetchone()["c"]
 
 
 def _tri(v: Any) -> Optional[int]:

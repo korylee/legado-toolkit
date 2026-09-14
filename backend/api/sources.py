@@ -16,16 +16,18 @@ def list_sources(
     group: str = "",
     q: str = "",
     only_enabled: bool = False,
+    include_deleted: bool = False,
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
     order: str = Query("id", description="id/name/stars/checked_at，前缀 - 表示倒序"),
     st=Depends(get_store),
 ):
     # 服务端筛选 + 排序 + 分页：不要把 3700 行全量传给浏览器
-    total = st.count_query(source_type=type, group=group, health=health,
-                           q=q, only_enabled=only_enabled)
+    total = st.count_query(source_type=type, group=group, health=health, q=q,
+                           only_enabled=only_enabled, include_deleted=include_deleted)
     items = st.query(source_type=type, group=group, health=health, q=q,
-                     only_enabled=only_enabled, limit=limit, offset=offset, order=order)
+                     only_enabled=only_enabled, limit=limit, offset=offset, order=order,
+                     include_deleted=include_deleted)
     return {"total": total, "items": items}
 
 
@@ -56,6 +58,25 @@ def patch_group(body: GroupPatch, st=Depends(get_store)):
 
 
 @router.delete("")
-def delete_sources(urls: str, st=Depends(get_store)):
+def soft_delete_sources(urls: str, reason: str = "", st=Depends(get_store)):
+    # 软删除：UI 永不硬删。软删的源不再进导出，可随时恢复；
+    # 整条 raw_json 会快照到 data/backups/deleted_<时间戳>.json，
+    # 彻底删除由使用者在该文件层面处理。
     keys = [u.strip() for u in urls.split(",") if u.strip()]
-    return {"deleted": st.delete_sources(keys)}
+    n, snapshot = st.soft_delete(keys, reason)
+    return {
+        "deleted": n,
+        "snapshot": snapshot,
+        "hint": "已软删除（不会再导出到 App）。彻底删除请处理上面这个快照文件。",
+    }
+
+
+@router.post("/restore")
+def restore_sources(body: dict, st=Depends(get_store)):
+    return {"restored": st.restore(body.get("urls") or [])}
+
+
+@router.get("/deleted")
+def list_deleted(limit: int = Query(200, ge=1, le=1000),
+                 offset: int = Query(0, ge=0), st=Depends(get_store)):
+    return {"total": st.count_deleted(), "items": st.list_deleted(limit, offset)}
