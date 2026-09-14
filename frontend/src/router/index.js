@@ -8,12 +8,7 @@ const routes = [
     component: MainLayout,
     redirect: "/sources",
     children: [
-      { path: "sources", name: "sources", component: () => import("../views/SourcesView.vue"),
-        meta: { title: "源浏览器" } },
-      { path: "source/new", name: "source-new", component: () => import("../views/SourceEditView.vue"),
-        meta: { title: "新建源" } },
-      { path: "source/edit", name: "source-edit", component: () => import("../views/SourceEditView.vue"),
-        meta: { title: "编辑源" } },
+      { path: "sources", name: "sources", component: () => import("../views/SourcesView.vue") },
       { path: "export", name: "export", component: () => import("../views/ExportView.vue"),
         meta: { title: "导出与导入到 App" } },
       { path: "import", name: "import", component: () => import("../views/ImportView.vue"),

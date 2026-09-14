@@ -1,11 +1,13 @@
 <script setup>
 import { ref, reactive, onMounted } from "vue";
-import { useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { listSources, listGroups, patchGroup, deleteSources } from "../api/sources";
+import SourceEditDialog from "../components/SourceEditDialog.vue";
 
-const router = useRouter();
 const loading = ref(false);
+const dlgVisible = ref(false);
+const dlgUrl = ref("");
+const batchGroup = ref("");
 const rows = ref([]);
 const total = ref(0);
 const groups = ref([]);
@@ -69,6 +71,24 @@ async function removeSelected() {
   } catch (e) { /* 取消 */ }
 }
 
+function openNew() { dlgUrl.value = ""; dlgVisible.value = true; }
+function openEdit(row) { dlgUrl.value = row.source_url; dlgVisible.value = true; }
+function onSaved() { dlgVisible.value = false; load(); }
+
+async function applyBatchGroup() {
+  if (!selected.value.length) return ElMessage.warning("先勾选源");
+  if (!batchGroup.value) return ElMessage.warning("先填要设置的分组");
+  try {
+    for (const r of selected.value) await patchGroup(r.source_url, batchGroup.value);
+    ElMessage.success("已更新 " + selected.value.length + " 条分组");
+    selected.value = [];
+    load();
+    groups.value = await listGroups();
+  } catch (e) {
+    ElMessage.error(e.message);
+  }
+}
+
 onMounted(async () => {
   load();
   try { groups.value = await listGroups(); } catch (e) { /* 忽略 */ }
@@ -99,7 +119,11 @@ onMounted(async () => {
       <el-button type="primary" @click="search">查询</el-button>
       <el-button @click="reset">重置</el-button>
       <span class="grow" />
-      <el-button @click="router.push('/source/new')">新建源</el-button>
+      <el-input v-model="batchGroup" placeholder="批量设置分组" size="small" style="width: 160px" />
+      <el-button size="small" :disabled="!selected.length" @click="applyBatchGroup">
+        应用到选中
+      </el-button>
+      <el-button @click="openNew">新建源</el-button>
       <el-button type="danger" plain :disabled="!selected.length" @click="removeSelected">
         删除 ({{ selected.length }})
       </el-button>
@@ -111,9 +135,7 @@ onMounted(async () => {
         <el-table-column type="selection" width="42" />
         <el-table-column prop="name" label="名称" min-width="170" show-overflow-tooltip>
           <template #default="{ row }">
-            <a href="#" @click.prevent="router.push({ name: 'source-edit', query: { url: row.source_url } })">
-              {{ row.name || "(无名)" }}
-            </a>
+            <a href="#" @click.prevent="openEdit(row)">{{ row.name || "(无名)" }}</a>
           </template>
         </el-table-column>
         <el-table-column label="类型" width="88" align="center">
@@ -147,8 +169,15 @@ onMounted(async () => {
           <template #default="{ row }"><span class="mono">{{ row.source_url }}</span></template>
         </el-table-column>
         <el-table-column prop="checked_at" label="校验时间" width="146" />
+      <el-table :data="rows" v-loading="loading" border stripe size="small" height="100%"
+                @selection-change="(v) => (selected = v)">
+        <template #empty>
+          <el-empty description="没有匹配的书源，试试放宽筛选条件" :image-size="80" />
+        </template>
       </el-table>
     </div>
+
+    <SourceEditDialog v-model="dlgVisible" :source-url="dlgUrl" @saved="onSaved" />
 
     <el-pagination class="page-footer" background
                    layout="total, sizes, prev, pager, next, jumper"
