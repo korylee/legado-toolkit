@@ -5,10 +5,12 @@
 import { ref, computed, watch } from "vue";
 import { ElMessage } from "element-plus";
 import { listDeleted, restoreSources } from "../api/sources";
+import { useMobile } from "../composables/useMobile";
 
 const props = defineProps({ modelValue: { type: Boolean, default: false } });
 const emit = defineEmits(["update:modelValue", "changed"]);
 
+const isMobile = useMobile();
 const visible = computed({
   get: () => props.modelValue,
   set: (v) => emit("update:modelValue", v),
@@ -17,6 +19,7 @@ const rows = ref([]);
 const total = ref(0);
 const loading = ref(false);
 const selected = ref([]);
+const showHeight = computed(() => (isMobile.value ? "58vh" : "calc(100vh - 260px)"));
 
 async function load() {
   loading.value = true;
@@ -77,7 +80,8 @@ async function restoreSelected() {
       <span class="muted">共 {{ total }} 条</span>
     </div>
 
-    <el-table :data="rows" v-loading="loading" border size="small" height="calc(100vh - 260px)"
+    <el-table :data="rows" v-loading="loading" border size="small"
+              :height="showHeight"
               @selection-change="(v) => (selected = v)">
       <el-table-column type="selection" width="42" />
       <el-table-column prop="name" label="名称" min-width="150" show-overflow-tooltip>

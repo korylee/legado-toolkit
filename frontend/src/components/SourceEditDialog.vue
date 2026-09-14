@@ -4,12 +4,14 @@ import { ref, computed, watch } from "vue";
 import { ElMessage } from "element-plus";
 import { api } from "../api/client";
 import { getDetail } from "../api/sources";
+import { useMobile } from "../composables/useMobile";
 
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
   sourceUrl: { type: String, default: "" },   // 空 = 新建
 });
 const emit = defineEmits(["update:modelValue", "saved"]);
+const isMobile = useMobile();
 
 const visible = computed({
   get: () => props.modelValue,
@@ -82,7 +84,8 @@ function save() {
              width="1080px" top="4vh" destroy-on-close class="edit-dialog">
     <el-row :gutter="16" v-loading="loading">
       <el-col :span="13">
-        <el-form label-width="96px" size="small">
+        <el-form :label-width="isMobile ? 'auto' : '96px'"
+                 :label-position="isMobile ? 'top' : 'right'" size="small">
           <el-form-item label="名称"><el-input v-model="form.bookSourceName" /></el-form-item>
           <el-form-item label="域名">
             <el-input v-model="form.bookSourceUrl" placeholder="https://example.com" />

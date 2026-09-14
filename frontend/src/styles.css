@@ -189,6 +189,18 @@ body {
   .el-pagination { justify-content: center; }
   .el-pagination__jump, .el-pagination__sizes { display: none; }
 
+  /* 所有 el-row/el-col 两栏布局在手机上堆叠。
+     这个应用里每一处 el-row 都是「左内容 + 右说明」的桌面布局，
+     手机上必须竖排 —— 一处改好，三个抽屉/对话框同时受益。 */
+  .el-col { flex: 0 0 100% !important; max-width: 100% !important; }
+  .el-row { row-gap: 12px; }
+
+  /* 表单标签上置，避免 96px 标签把输入框挤窄 */
+  .el-form-item__label { justify-content: flex-start; }
+
+  /* 描述列表在窄屏单列 */
+  .el-descriptions__body .el-descriptions__table { table-layout: auto; }
+
   /* 桌面专用元素隐藏 */
   .desktop-only { display: none !important; }
 }
