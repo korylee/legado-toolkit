@@ -13,11 +13,6 @@ book_sources.sqlite3
 *.ndjson
 index.json
 
-# 待删除的搬迁残留（沙箱只读，需手动删；删掉后可移除本节）
-data/tests/
-data/registry.py
-data/__pycache__/
-
 # ---- Python ----
 __pycache__/
 *.py[cod]
