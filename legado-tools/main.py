@@ -646,6 +646,11 @@ def cmd_diagnose(args: argparse.Namespace) -> int:
     return _impl(args)
 
 
+def cmd_repair(args: argparse.Namespace) -> int:
+    from repair import cmd_repair as _impl
+    return _impl(args)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="legado-tools",
@@ -811,6 +816,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_dg.add_argument("-t", "--timeout", type=float, default=8.0)
     p_dg.add_argument("--keywords", nargs="*", default=None, help="搜索探测关键词")
     p_dg.set_defaults(func=cmd_diagnose)
+
+    # repair —— AI 规则修复循环（提议 -> 回放验证 -> 重试）
+    p_rp = sub.add_parser("repair", help="AI 修复失效规则：抓证据 -> 模型提议 -> 回放验证 -> 重试")
+    p_rp.add_argument("-i", "--input", required=True, help="书源 JSON 数组（通常是 diagnose 后的批次）")
+    p_rp.add_argument("-o", "--output", help="修复结果写回的文件（默认覆盖输入）")
+    p_rp.add_argument("--report", help="Markdown 修复报告输出路径")
+    p_rp.add_argument("--write", action="store_true", help="把修复成功的源回写")
+    p_rp.add_argument("--limit", type=int, default=0, help="只处理前 N 个（0=全部）")
+    p_rp.add_argument("--rounds", type=int, default=3, help="每个源最多重试轮数")
+    p_rp.add_argument("--keyword", default="我的", help="用于取样的搜索关键词")
+    p_rp.add_argument("-c", "--concurrency", type=int, default=4)
+    p_rp.add_argument("-t", "--timeout", type=float, default=15.0)
+    p_rp.set_defaults(func=cmd_repair)
 
     return parser
 

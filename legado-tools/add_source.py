@@ -459,31 +459,15 @@ def _abs_url(base_url: str, href: str) -> str:
 
 
 def apply_css_rule(html: str, rule: str) -> list:
+    """委托 legado_rules.extract_all。
+
+    支持 class./id./tag. 简写、@ 链式选择、.-1 索引、##正则##替换、JSONPath 子集。
+    不支持的语法（@js/@xpath/||）返回空列表；需要区分「无法验证」时直接用
+    legado_rules.extract_all_ex。
     """
-    执行 Legado CSS 规则（selector[@attr|@text|@textNodes]），返回提取值列表。
-    兼容大小写不敏感的多 attr 写法，如 .a@href、.a@title、.a@text。
-    """
-    if not rule:
-        return []
-    selector = rule
-    attr = "text"
-    # 拆分 @ 后缀（取最后一个 @ 之后部分；selector 本身可能含 @ 属性能处理）
-    if "@" in rule:
-        selector, _, attr = rule.rpartition("@")
-    from bs4 import BeautifulSoup
-    try:
-        soup = BeautifulSoup(html, "lxml")
-        elems = soup.select(selector)
-    except Exception:
-        return []
-    results = []
-    for el in elems:
-        if attr in ("text", "textNodes"):
-            txt = el.get_text(" ", strip=True)
-            results.append(txt)
-        else:
-            results.append(el.get(attr, "") or "")
-    return results
+    from legado_rules import extract_all
+
+    return extract_all(html, rule)
 
 
 def analyze_detail_page(html: str, book_url: str) -> dict:
