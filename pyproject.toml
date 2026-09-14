@@ -1,15 +1,19 @@
 [project]
 name = "legado-source-tools"
 version = "0.2.0"
-description = "Legado 书源管理工具：校验 / 归因 / AI 修复"
+description = "Legado 书源管理工具：校验 / 归因 / AI 修复 / Web 前后端"
 requires-python = ">=3.10"
-dependencies = ["aiohttp>=3.9", "orjson>=3.9", "beautifulsoup4>=4.12"]
+dependencies = [
+    "aiohttp>=3.9",
+    "orjson>=3.9",
+    "beautifulsoup4>=4.12",
+    "fastapi>=0.110",
+    "uvicorn>=0.27",
+]
 
-[project.scripts]
-legado = "cli.main:main"
+[tool.uv]
+# uv run 会按上面的 dependencies 同步环境；
+# 依赖漏写会导致 uv run 把已装的包从 .venv 移除，务必与 requirements.txt 保持一致。
 
 [tool.setuptools]
-packages = ["core", "core.rules", "core.repair", "services", "cli"]
-
-[tool.setuptools.package-data]
-"*" = ["*.json"]
+packages = ["core", "core.rules", "core.repair", "services", "cli", "backend", "backend.api", "backend.jobs", "tools"]
