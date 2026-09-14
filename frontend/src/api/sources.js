@@ -13,3 +13,7 @@ export const listGroups = () => api.get("/sources/groups");
 export const getStats = () => api.get("/sources/stats");
 export const patchGroup = (url, group) => api.patch("/sources/group", { url, group });
 export const deleteSources = (urls) => api.del("/sources?urls=" + encodeURIComponent(urls.join(",")));
+
+export const listDeleted = (limit = 200, offset = 0) =>
+  api.get("/sources/deleted?limit=" + limit + "&offset=" + offset);
+export const restoreSources = (urls) => api.post("/sources/restore", { urls });

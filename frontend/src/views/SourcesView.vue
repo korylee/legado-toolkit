@@ -3,11 +3,13 @@ import { ref, reactive, onMounted } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { listSources, listGroups, patchGroup, deleteSources } from "../api/sources";
 import SourceEditDialog from "../components/SourceEditDialog.vue";
+import TrashDrawer from "../components/TrashDrawer.vue";
 
 const loading = ref(false);
 const dlgVisible = ref(false);
 const dlgUrl = ref("");
 const batchGroup = ref("");
+const trashVisible = ref(false);
 const rows = ref([]);
 const total = ref(0);
 const groups = ref([]);
@@ -62,10 +64,10 @@ async function removeSelected() {
   if (!selected.value.length) return ElMessage.warning("先勾选要删除的源");
   try {
     await ElMessageBox.confirm(
-      "将删除 " + selected.value.length + " 条源。注意：目前是硬删除，不可撤销。",
-      "确认删除", { type: "warning" });
+      "将把 " + selected.value.length + " 条源移入回收站。它们不会再被导出到 App，可随时恢复。",
+      "移入回收站", { type: "warning" });
     const res = await deleteSources(selected.value.map((r) => r.source_url));
-    ElMessage.success("已删除 " + res.deleted + " 条");
+    ElMessage.success("已移入回收站 " + res.deleted + " 条，可在回收站恢复");
     selected.value = [];
     load();
   } catch (e) { /* 取消 */ }
@@ -124,8 +126,9 @@ onMounted(async () => {
         应用到选中
       </el-button>
       <el-button @click="openNew">新建源</el-button>
+      <el-button plain @click="trashVisible = true">回收站</el-button>
       <el-button type="danger" plain :disabled="!selected.length" @click="removeSelected">
-        删除 ({{ selected.length }})
+        移入回收站 ({{ selected.length }})
       </el-button>
     </div>
 
@@ -176,6 +179,7 @@ onMounted(async () => {
     </div>
 
     <SourceEditDialog v-model="dlgVisible" :source-url="dlgUrl" @saved="onSaved" />
+    <TrashDrawer v-model="trashVisible" @changed="load" />
 
     <el-pagination class="page-footer" background
                    layout="total, sizes, prev, pager, next, jumper"
