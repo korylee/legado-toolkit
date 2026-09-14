@@ -34,10 +34,22 @@ def create_export(body: dict, st=Depends(get_store)):
     name = str(body.get("name") or "").strip()
     ttl = int(body.get("ttl_days") or 7)
     pinned = bool(body.get("pinned"))
+    filt = body.get("filter") or {}
 
     if urls:
+        # 模式一：导出勾选的源
         srcs = [s for s in (st.get_source(u) for u in urls) if s]
+    elif filt:
+        # 模式二：导出当前筛选结果（复用列表页的筛选条件，不受分页限制）
+        srcs = st.export_by_filter(
+            source_type=(int(filt["type"]) if filt.get("type") not in (None, "") else None),
+            group=str(filt.get("group") or ""),
+            health=str(filt.get("health") or ""),
+            q=str(filt.get("q") or ""),
+            only_enabled=bool(filt.get("only_enabled")),
+        )
     else:
+        # 模式三：全量
         srcs = st.export_sources()
     if not srcs:
         raise HTTPException(400, "没有可导出的源")

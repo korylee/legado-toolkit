@@ -564,6 +564,24 @@ class Store:
         return uids
 
 
+    def export_by_filter(self, source_type=None, group: str = "", health: str = "",
+                         q: str = "", only_enabled: bool = False):
+        # 按筛选条件导出全部命中源（不分页）。
+        # 走 v_sources 视图，这样 health 等只有视图才有的列也能筛。
+        where, args = self._where(source_type, group, health, q, only_enabled)
+        # 不能 JOIN sources：两表都有 deleted_at/name/source_url 等列，
+        # _where 生成的是不带表名的条件，SQLite 会报 ambiguous column name。
+        # 用子查询取 raw_json，_where 里的列在 v_sources 里全都有。
+        sql = ("SELECT (SELECT raw_json FROM sources WHERE id = v.id) AS rj "
+               "FROM v_sources v %s ORDER BY v.id" % where)
+        out = []
+        for row in self.conn.execute(sql, args):
+            try:
+                out.append(json.loads(row["raw_json"]))
+            except Exception:
+                continue
+        return out
+
     # ---------------------------------------------------------------- 回收站
     # 设计：UI 永不硬删除。软删时把整条 raw_json 快照到
     # data/backups/deleted_<时间戳>.json，彻底删除由使用者在该文件层面处理。
