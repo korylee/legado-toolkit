@@ -1,0 +1,28 @@
+# ---- 运行时数据 / 大文件：不进版本库（请自行备份 candidates.json！）----
+candidates*.json
+final_*.json
+auto_added.json
+shareBookSource*.json
+book_sources.sqlite3
+*.ndjson
+check_cache*/
+out/
+imports/
+archive/
+index.json
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.uvcache/
+
+# ---- 工具 / 编辑器 ----
+.codegraph/
+.omo/
+.vscode/
+.idea/
+*.log
+_probe*.txt
+

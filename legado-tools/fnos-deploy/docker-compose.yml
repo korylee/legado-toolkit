@@ -1,0 +1,67 @@
+# ============================================================
+# 飞牛OS (fnOS) 书库部署方案
+# 阅读服务器 (Kavita) + 小说下载器 (go-novel) + 漫画可选 (Komga/Kavita)
+#
+# 使用方式：飞牛桌面 Docker → Compose → 新增项目 → 选择本目录
+# 详细说明见同目录 README.md
+# ============================================================
+
+services:
+  # ----------------------------------------------------------
+  # 1. Kavita —— 书库/阅读服务器（主推荐）
+  #    小说 (epub/pdf/txt) + 漫画 (cbz/cbr/zip/rar) 统一管理阅读
+  #    自带元数据刮削 + 在线书架 + 多端阅读
+  # ----------------------------------------------------------
+  kavita:
+    image: jvmilazz0/kavita:latest
+    container_name: kavita
+    restart: always
+    ports:
+      - "15000:5000"
+    volumes:
+      # 配置与数据库
+      - ./data/kavita/config:/kavita/config
+      # 小说书库（把 epub/pdf/txt 放进 /小说 即可自动入库）
+      - /vol1/1000/books/小说:/books
+      # 漫画书库（cbz/cbr/zip/rar 放进 /漫画 即可自动入库）
+      - /vol1/1000/books/漫画:/manga
+    environment:
+      - TZ=Asia/Shanghai
+      - PUID=1000
+      - PGID=1000
+
+  # ----------------------------------------------------------
+  # 2. go-novel —— 小说批量下载器（规则式抓取）
+  #    Web UI: http://<nas-ip>:7765
+  #    下载的小说会保存到 /vol1/1000/books/小说 下，Kavita 自动识别
+  # ----------------------------------------------------------
+  go-novel:
+    image: zsyo/go-novel:latest
+    container_name: go-novel
+    restart: always
+    ports:
+      - "7765:7765"
+    volumes:
+      - ./data/go-novel/configs:/app/configs
+      # 下载目录直接映射到 Kavita 的小说书库（打通「下载→入库」链路）
+      - /vol1/1000/books/小说:/app/downloads
+    environment:
+      - TZ=Asia/Shanghai
+
+  # ----------------------------------------------------------
+  # 3. Komga —— 漫画专用服务器（可选，二选一：Kavita 或 Komga）
+  #    若你以漫画为主，建议启用 Komga（漫画管理更专业）
+  #    默认注释掉，需要时取消 # 号即可
+  # ----------------------------------------------------------
+  # komga:
+  #   image: gotson/komga:latest
+  #   container_name: komga
+  #   restart: always
+  #   ports:
+  #     - "15001:8080"
+  #   volumes:
+  #     - ./data/komga/config:/config
+  #     # 漫画书库（与 Kavita 共用目录）
+  #     - /vol1/1000/books/漫画:/manga
+  #   environment:
+  #     - TZ=Asia/Shanghai
