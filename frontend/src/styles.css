@@ -2,7 +2,7 @@
 html, body, #app {
   height: 100%;
   margin: 0;
-  /* 关键：禁止 window 出现滚动条，滚动一律交给内部容器 */
+  /* window 永不滚动，滚动交给内部容器 */
   overflow: hidden;
 }
 * { box-sizing: border-box; }
@@ -12,9 +12,11 @@ body {
   background: #f5f7fa;
   color: #303133;
   -webkit-font-smoothing: antialiased;
+  -webkit-tap-highlight-color: transparent;
 }
 
 /* ================= 骨架 ================= */
+/* min-height:0 让 flex 子项能收缩并内部滚动；少了它最外层会冒出滚动条 */
 .app-shell { height: 100%; display: flex; flex-direction: column; }
 
 .app-header {
@@ -25,16 +27,14 @@ body {
   border-bottom: 1px solid #e4e7ed;
   z-index: 10;
 }
-.app-header .title { font-size: 16px; font-weight: 600; }
+.app-header .title { font-size: 16px; font-weight: 600; white-space: nowrap; }
 .app-header .spacer { flex: 1 1 auto; }
 
-/* min-height:0 —— 让 flex 子项能「收缩并内部滚动」。
-   少了它子项会被内容撑大，父容器跟着长高，最外层就冒出滚动条。 */
 .app-body { flex: 1 1 auto; min-height: 0; display: flex; }
 
 .app-aside {
   flex: 0 0 200px;
-  height: 100%;            /* 撑满整列，不再只到菜单高度 */
+  height: 100%;
   overflow-y: auto;
   background: #fff;
   border-right: 1px solid #e4e7ed;
@@ -44,14 +44,33 @@ body {
 .app-main {
   flex: 1 1 auto;
   min-height: 0;
-  overflow-y: auto;        /* 内容滚动发生在这里，不是 window */
+  overflow-y: auto;
   scrollbar-gutter: stable;
 }
+
+/* 底部 Tab Bar：仅移动端，拇指可达 */
+.app-tabbar {
+  flex: 0 0 auto;
+  display: flex;
+  background: #fff;
+  border-top: 1px solid #e4e7ed;
+  padding-bottom: env(safe-area-inset-bottom, 0);
+}
+.tab-item {
+  flex: 1 1 0;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 2px;
+  min-height: 52px;
+  font-size: 11px;
+  color: #909399;
+  text-decoration: none;
+}
+.tab-item.active { color: #409eff; }
 
 /* ================= 页面容器 ================= */
 .page { padding: 12px 16px; }
 
-/* 表格类页面：表头/工具条固定，表格内部滚动 */
+/* 表格类页面：工具条/分页固定，列表内部滚动 */
 .page-flex {
   display: flex; flex-direction: column; gap: 12px;
   height: 100%; overflow: hidden;
@@ -62,28 +81,7 @@ body {
 .page-fill { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
 .page-fill > * { min-height: 0; }
 
-/* ================= 通用 ================= */
-.toolbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-.toolbar .grow { flex: 1 1 auto; }
-
-.muted { color: #909399; font-size: 12px; }
-.mono { font-family: Consolas, Monaco, monospace; font-size: 12px; }
-.nowrap { white-space: nowrap; }
-.card-gap { margin-bottom: 12px; }
-
-/* 让长域名不撑破表格 */
-.el-table .cell { word-break: break-all; }
-
-/* ================= 窄屏（手机） ================= */
-@media (max-width: 900px) {
-  .app-aside { flex: 0 0 58px; }
-  .app-aside .el-menu-item span { display: none; }
-  .app-header { padding: 0 10px; gap: 8px; }
-  .page { padding: 10px; }
-}
-
 /* ================= 工具栏 ================= */
-/* 统一容器：白底 + 圆角，让控件有归属感，不再飘在灰底上 */
 .bar {
   display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
   padding: 10px 12px;
@@ -93,7 +91,6 @@ body {
 }
 .bar .grow { flex: 1 1 auto; }
 
-/* 统一宽度，替代散落的内联 style */
 .w-search { width: 210px; }
 .w-type   { width: 116px; }
 .w-health { width: 124px; }
@@ -101,7 +98,7 @@ body {
 .w-order  { width: 126px; }
 .w-batch  { width: 170px; }
 
-/* 批量操作条：只在有勾选时出现，淡蓝底与筛选栏区分 */
+/* 批量操作条：仅勾选时出现 */
 .batch-bar {
   display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
   padding: 8px 12px;
@@ -111,3 +108,92 @@ body {
 }
 .batch-bar .batch-text { font-size: 13px; color: #409eff; }
 .batch-bar .batch-text b { font-size: 15px; margin: 0 2px; }
+
+/* ================= 卡片列表（移动端主视图） ================= */
+.card-list {
+  flex: 1 1 auto; min-height: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  display: flex; flex-direction: column; gap: 8px;
+  padding-bottom: 4px;
+}
+.src-card {
+  background: #fff;
+  border: 1px solid #e4e7ed;
+  border-radius: 8px;
+  padding: 10px 12px;
+  display: flex; gap: 10px; align-items: flex-start;
+}
+.src-card.sel { border-color: #409eff; background: #ecf5ff; }
+.src-card .chk { flex: 0 0 auto; padding-top: 1px; }
+.src-card .main { flex: 1 1 auto; min-width: 0; }
+.src-card .row1 { display: flex; align-items: baseline; gap: 8px; }
+.src-card .nm {
+  font-weight: 600; font-size: 15px; flex: 1 1 auto; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.src-card .stars { color: #e6a23c; font-size: 12px; white-space: nowrap; }
+.src-card .host {
+  font-size: 12px; color: #909399; margin-top: 2px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.src-card .meta { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 7px; align-items: center; }
+.src-card .grp { font-size: 12px; color: #606266; word-break: break-all; margin-top: 6px; }
+
+/* 移动端筛选抽屉 */
+.sheet { display: flex; flex-direction: column; gap: 14px; padding: 4px 2px 8px; }
+.sheet .fld > label { display: block; font-size: 13px; color: #606266; margin-bottom: 6px; }
+.sheet .btns { display: flex; gap: 8px; padding-top: 4px; }
+.sheet .btns .el-button { flex: 1 1 0; }
+
+/* ================= 通用 ================= */
+.toolbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.toolbar .grow { flex: 1 1 auto; }
+
+.muted { color: #909399; font-size: 12px; }
+.mono { font-family: Consolas, Monaco, monospace; font-size: 12px; }
+.nowrap { white-space: nowrap; }
+.card-gap { margin-bottom: 12px; }
+.el-table .cell { word-break: break-all; }
+
+/* ================= 移动端（<=900px） ================= */
+@media (max-width: 900px) {
+  .app-header { padding: 0 12px; gap: 8px; flex-basis: 48px; flex-grow: 0; }
+  .app-header .title { font-size: 15px; }
+  .page { padding: 10px; }
+  .page-flex { gap: 10px; }
+
+  /* 触摸目标：不再用 small，按钮/输入统一高度 */
+  .el-button:not(.is-link):not(.is-circle) { min-height: 36px; }
+  .el-input__wrapper, .el-select__wrapper { min-height: 36px; }
+
+  /* 对话框：占满宽度，顶部对齐留出键盘空间 */
+  .el-dialog {
+    width: 94vw !important;
+    max-width: 94vw;
+    margin-top: 4vh !important;
+  }
+  .el-dialog__body { padding: 12px 14px; }
+  .el-message-box { width: 88vw !important; max-width: 88vw; }
+
+  /* 抽屉：右侧抽屉在手机上占满宽；底部抽屉限高 88vh */
+  .el-drawer.rtl, .el-drawer.ltr { width: 100% !important; }
+  .el-drawer.btt { max-height: 88vh; }
+  .el-drawer__header { margin-bottom: 10px; padding: 14px 14px 0; }
+  .el-drawer__body { padding: 10px 14px; }
+
+  /* 表格：移动端基本不用，但保留最小可用性 */
+  .el-table { font-size: 12px; }
+
+  /* 分页：手机只留必要按钮 */
+  .el-pagination { justify-content: center; }
+  .el-pagination__jump, .el-pagination__sizes { display: none; }
+
+  /* 桌面专用元素隐藏 */
+  .desktop-only { display: none !important; }
+}
+
+@media (min-width: 901px) {
+  .mobile-only { display: none !important; }
+  .app-tabbar { display: none; }
+}
