@@ -3,7 +3,7 @@ import { ref, onMounted } from "vue";
 import { useRoute } from "vue-router";
 import { getStats } from "../api/sources";
 import {
-  Monitor, Upload, Download, List, DataAnalysis, Refresh,
+  Monitor, List, DataAnalysis, Refresh,
 } from "@element-plus/icons-vue";
 
 const route = useRoute();
@@ -11,8 +11,6 @@ const stats = ref(null);
 
 const menus = [
   { path: "/sources", label: "书源列表", icon: List },
-  { path: "/export", label: "导出到 App", icon: Upload },
-  { path: "/import", label: "导入书源", icon: Download },
   { path: "/jobs", label: "任务中心", icon: Monitor },
   { path: "/dashboard", label: "诊断看板", icon: DataAnalysis },
 ];

@@ -4,12 +4,16 @@ import { ElMessage, ElMessageBox } from "element-plus";
 import { listSources, listGroups, patchGroup, deleteSources } from "../api/sources";
 import SourceEditDialog from "../components/SourceEditDialog.vue";
 import TrashDrawer from "../components/TrashDrawer.vue";
+import ExportDrawer from "../components/ExportDrawer.vue";
+import ImportDialog from "../components/ImportDialog.vue";
 
 const loading = ref(false);
 const dlgVisible = ref(false);
 const dlgUrl = ref("");
 const batchGroup = ref("");
 const trashVisible = ref(false);
+const exportVisible = ref(false);
+const importVisible = ref(false);
 const rows = ref([]);
 const total = ref(0);
 const groups = ref([]);
@@ -126,6 +130,8 @@ onMounted(async () => {
         应用到选中
       </el-button>
       <el-button @click="openNew">新建源</el-button>
+      <el-button type="primary" plain @click="exportVisible = true">导出到 App</el-button>
+      <el-button plain @click="importVisible = true">导入书源</el-button>
       <el-button plain @click="trashVisible = true">回收站</el-button>
       <el-button type="danger" plain :disabled="!selected.length" @click="removeSelected">
         移入回收站 ({{ selected.length }})
@@ -180,6 +186,9 @@ onMounted(async () => {
 
     <SourceEditDialog v-model="dlgVisible" :source-url="dlgUrl" @saved="onSaved" />
     <TrashDrawer v-model="trashVisible" @changed="load" />
+    <ExportDrawer v-model="exportVisible" :selected="selected"
+                  :filter="query" :filtered-total="total" />
+    <ImportDialog v-model="importVisible" @imported="load" />
 
     <el-pagination class="page-footer" background
                    layout="total, sizes, prev, pager, next, jumper"
