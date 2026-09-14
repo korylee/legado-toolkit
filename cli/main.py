@@ -21,6 +21,8 @@ Legado 书源整理工具 CLI。
 """
 
 from __future__ import annotations
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
 
 import argparse
 import glob
@@ -32,8 +34,8 @@ import time
 # 确保本文件所在目录在 sys.path 中（Windows 下直接运行需要）
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from loader import load_json_file, dump_json_file, dedupe_sources, merge_sources, fingerprint  # noqa: E402
-from models import build_record, Health  # noqa: E402
+from core.loader import load_json_file, dump_json_file, dedupe_sources, merge_sources, fingerprint  # noqa: E402
+from core.models import build_record, Health  # noqa: E402
 
 
 def _load_records(path: str, limit: int = 0):
@@ -130,7 +132,7 @@ def _ask_confirm(prompt: str = "确认？[y/N] ") -> bool:
 
 # ---------------------------------------------------------------- check
 def cmd_check(args: argparse.Namespace) -> int:
-    from checker import run_check
+    from core.checker import run_check
     input_path = _resolve_input(args)
     records, sources = _load_records(input_path, args.limit)
     cache_dir, refresh_cache = _resolve_check_cache(args)
@@ -165,7 +167,7 @@ def cmd_check(args: argparse.Namespace) -> int:
     # 统计
     from collections import Counter
     health_counter = Counter(r.health for r in results)
-    from models import HEALTH_NAMES
+    from core.models import HEALTH_NAMES
     print("\n===== 校验结果 =====")
     for h in sorted(health_counter, key=lambda x: -health_counter[x]):
         print(f"  {HEALTH_NAMES.get(h, h):<8} {health_counter[h]}")
@@ -175,7 +177,7 @@ def cmd_check(args: argparse.Namespace) -> int:
     # 结果保存
     output = getattr(args, "output", "") or DEFAULT_OUTPUTS["check"]
     if output:
-        from organizer import organize_sources
+        from core.organizer import organize_sources
         data = organize_sources(results, skip_disabled=not args.keep_disabled)
         dump_json_file(output, data)
         print(f"已保存整理结果: {output}")
@@ -188,7 +190,7 @@ def cmd_organize(args: argparse.Namespace) -> int:
     records, sources = _load_records(input_path, args.limit)
     # 若提供 -r 校验缓存，则合并缓存结果
     if getattr(args, "check_dir", ""):
-        from checker import AsyncChecker, is_cache_item_valid, restore_from_cache
+        from core.checker import AsyncChecker, is_cache_item_valid, restore_from_cache
         cache = AsyncChecker(cache_dir=args.check_dir).load_cache()
         for rec in records:
             if rec.url in cache and is_cache_item_valid(rec, cache[rec.url]):
@@ -198,12 +200,12 @@ def cmd_organize(args: argparse.Namespace) -> int:
         print(f"合并缓存结果: {n_cached}/{len(records)}")
     else:
         # 无缓存时从旧分组迁移明确状态；无法确认的源必须保守标为待验证
-        from organizer import infer_health_from_group
+        from core.organizer import infer_health_from_group
         for rec in records:
             if rec.health == Health.SKIPPED:
                 rec.health = infer_health_from_group(rec.group)
 
-    from organizer import organize_sources
+    from core.organizer import organize_sources
     output = getattr(args, "output", "") or DEFAULT_OUTPUTS["organize"]
     drop_dead = bool(getattr(args, "drop_dead", False))
     keep_only_ok = bool(getattr(args, "keep_only_ok", False))
@@ -222,12 +224,12 @@ def cmd_organize(args: argparse.Namespace) -> int:
 
 # ---------------------------------------------------------------- report
 def cmd_report(args: argparse.Namespace) -> int:
-    from reporter import build_report
+    from core.reporter import build_report
     input_path = _resolve_input(args)
     records, sources = _load_records(input_path, args.limit)
     # 合并缓存
     if getattr(args, "check_dir", ""):
-        from checker import AsyncChecker, is_cache_item_valid, restore_from_cache
+        from core.checker import AsyncChecker, is_cache_item_valid, restore_from_cache
         cache = AsyncChecker(cache_dir=args.check_dir).load_cache()
         for rec in records:
             if rec.url in cache and is_cache_item_valid(rec, cache[rec.url]):
@@ -292,7 +294,7 @@ def cmd_prepare(args: argparse.Namespace) -> int:
     merged = dedupe_sources(merged, prefer_keep="first" if args.prefer_input == "first" else "last")
     dump_json_file(args.merged_output, merged)
 
-    from organizer import infer_health_from_group, organize_sources
+    from core.organizer import infer_health_from_group, organize_sources
     records = [build_record(source, index) for index, source in enumerate(merged)]
     for record in records:
         if record.health == Health.SKIPPED:
@@ -310,7 +312,7 @@ def cmd_prepare(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------- import-sources / review-imports
 def cmd_import_sources(args: argparse.Namespace) -> int:
     """导入外部书源，但不直接修改候选库。"""
-    from registry import import_sources
+    from core.registry import import_sources
 
     try:
         summary = import_sources(
@@ -330,7 +332,7 @@ def cmd_import_sources(args: argparse.Namespace) -> int:
 
 def cmd_review_imports(args: argparse.Namespace) -> int:
     """列出待审冲突，或批准指定 URL 的外部规则。"""
-    from registry import (
+    from core.registry import (
         approve_pending_source,
         approve_review,
         list_pending_reviews,
@@ -400,7 +402,7 @@ def cmd_sanitize(args: argparse.Namespace) -> int:
     variableComment 期望 str。外部合并文件常出现 ''/[] 等脏值导致导入报错
     （如 IllegalStateException: Expected a boolean but was BEGIN_ARRAY）。
     """
-    from sanitize import clean_source
+    from core.sanitize import clean_source
     input_path = _resolve_input(args)
     sources = load_json_file(input_path)
     if not isinstance(sources, list):
@@ -426,7 +428,7 @@ def cmd_sanitize(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------- add
 def cmd_add(args: argparse.Namespace) -> int:
     """快捷新增书源：给定一个带真实关键词的搜索 URL，自动推断规则生成书源。"""
-    from add_source import run_add
+    from services.add_source import run_add
     url = args.url
     if url == "-" or url is None:
         # 从 stdin 读 URL：
@@ -459,7 +461,7 @@ def cmd_add(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------- run（一条龙）
 def cmd_run(args: argparse.Namespace) -> int:
     """一条龙：check → organize → report，产出 checked.json / organized.json / report.md。"""
-    from checker import run_check
+    from core.checker import run_check
 
     input_path = _resolve_input(args)
     records, sources = _load_records(input_path, args.limit)
@@ -485,7 +487,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         refresh_cache=refresh_cache,
     )
     from collections import Counter
-    from models import HEALTH_NAMES
+    from core.models import HEALTH_NAMES
     health_counter = Counter(r.health for r in results)
     for h in sorted(health_counter, key=lambda x: -health_counter[x]):
         print(f"  {HEALTH_NAMES.get(h, h):<8} {health_counter[h]}")
@@ -493,7 +495,7 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     # 2) organize（直接保存带分组的整理结果）
     print("\n===== [2/3] 整理分组 =====")
-    from organizer import organize_sources
+    from core.organizer import organize_sources
     drop_dead = bool(getattr(args, "drop_dead", False))
     keep_only_ok = bool(getattr(args, "keep_only_ok", False))
     if drop_dead:
@@ -508,7 +510,7 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     # 3) report
     print("\n===== [3/3] 生成报告 =====")
-    from reporter import build_report
+    from core.reporter import build_report
     report = build_report(results, source_path=input_path)
     report_path = "report.md"
     with open(report_path, "w", encoding="utf-8") as f:
@@ -565,7 +567,7 @@ def cmd_menu(args: argparse.Namespace) -> int:
         stype = _safe_input("类型 [novel/manga/audio/video]（回车 novel）：").strip() or "novel"
         sgroup = _safe_input("分组（回车 📖新增源）：").strip() or "📖新增源"
         out = _safe_input("输出文件（回车 auto_added.json）：").strip() or "auto_added.json"
-        from add_source import run_add
+        from services.add_source import run_add
         return run_add(url, name=sname, source_type=stype, group=sgroup,
                        output=out, no_ask=True, probe=True, interactive=False)
 
@@ -637,17 +639,17 @@ def cmd_menu(args: argparse.Namespace) -> int:
 
 # ---------------------------------------------------------------- main
 def cmd_reclassify(args: argparse.Namespace) -> int:
-    from reclassify import cmd_reclassify as _impl
+    from core.reclassify import cmd_reclassify as _impl
     return _impl(args)
 
 
 def cmd_diagnose(args: argparse.Namespace) -> int:
-    from reclassify import cmd_diagnose as _impl
+    from core.reclassify import cmd_diagnose as _impl
     return _impl(args)
 
 
 def cmd_repair(args: argparse.Namespace) -> int:
-    from repair import cmd_repair as _impl
+    from core.repair.loop import cmd_repair as _impl
     return _impl(args)
 
 

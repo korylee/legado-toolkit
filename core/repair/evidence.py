@@ -87,7 +87,7 @@ def count_repeats(html: str, limit: int = 8) -> List[Tuple[str, int]]:
 
 
 def _first_nodes(html: str, rule: str) -> List[Any]:
-    from legado_rules import parse_list
+    from core.rules.replayer import parse_list
 
     if not rule:
         return []
@@ -96,7 +96,7 @@ def _first_nodes(html: str, rule: str) -> List[Any]:
 
 
 def _abs(base: str, href: str) -> str:
-    from add_source import _abs_url
+    from core.urls import abs_url as _abs_url
 
     return _abs_url(base, href or "")
 
@@ -106,8 +106,8 @@ async def build_evidence(source: Dict[str, Any], keyword: str,
     """抓取搜索页 / 详情页 / 章节页，压缩成证据包。"""
     import urllib.parse
 
-    import add_source as A
-    from legado_rules import image_ratio, parse_field_first
+    from services import add_source as A
+    from core.rules.replayer import image_ratio, parse_field_first
 
     ev: Dict[str, Any] = {
         "ok": False,
@@ -206,7 +206,7 @@ async def build_evidence(source: Dict[str, Any], keyword: str,
 
 
 def _extract(html: str, rule: str):
-    from legado_rules import extract_all_ex
+    from core.rules.replayer import extract_all_ex
 
     if not rule:
         return [], "无规则"

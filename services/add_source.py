@@ -465,7 +465,7 @@ def apply_css_rule(html: str, rule: str) -> list:
     不支持的语法（@js/@xpath/||）返回空列表；需要区分「无法验证」时直接用
     legado_rules.extract_all_ex。
     """
-    from legado_rules import extract_all
+    from core.rules.replayer import extract_all
 
     return extract_all(html, rule)
 

@@ -26,7 +26,7 @@ from collections import Counter, defaultdict
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote
 
-from models import BOOK_SOURCE_TYPE_NAMES, build_record
+from core.models import BOOK_SOURCE_TYPE_NAMES, build_record
 
 # ------------------------------------------------------------------ 类型信号表
 
@@ -69,7 +69,7 @@ def infer_type_static(source: Dict[str, Any]) -> Tuple[int, int, int, List[str]]
 
     返回 (候选类型, 漫画分, 小说分, 理由列表)；候选类型为 -1 表示证据不足、保持原样。
     """
-    from legado_rules import looks_like_image_rule
+    from core.rules.replayer import looks_like_image_rule
 
     host = _host(str(source.get("bookSourceUrl", "") or ""))
     text = _text_of(source)
@@ -230,8 +230,8 @@ ACTION_OF = {
 
 async def diagnose_source(session, source, timeout=8.0, keywords=None):
     # 对单个书源做归因探测：域名可达性 -> 反爬特征 -> 类型信号 -> 搜索页可解析性
-    from checker import parse_search_request, build_domain_url, DEFAULT_UA, ANTI_BOT_MARKERS, LOGIN_MARKERS
-    from legado_rules import parse_list
+    from core.checker import parse_search_request, build_domain_url, DEFAULT_UA, ANTI_BOT_MARKERS, LOGIN_MARKERS
+    from core.rules.replayer import parse_list
 
     keywords = keywords or ["海贼王", "斗破苍穹"]
     url = str(source.get("bookSourceUrl", "") or "")
@@ -401,7 +401,7 @@ def cmd_diagnose(args) -> int:
         print("输入必须是书源数组（JSON array）")
         return 2
     if args.only_dead:
-        from models import Health, build_record
+        from core.models import Health, build_record
         data = [s for s in data if build_record(s, 0).health != Health.OK]
     print("待归因源: %d" % len(data))
     results = asyncio.run(_diagnose_all(data, args))

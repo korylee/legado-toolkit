@@ -4,7 +4,7 @@
 import asyncio
 import unittest
 
-import repair as R
+from core.repair import loop as R
 
 EVIDENCE = {"ok": True, "name": "测试站", "url": "http://x", "keyword": "海贼王",
             "pages": {"search": "DOM-search", "detail": "DOM-detail"},

@@ -26,14 +26,14 @@ from urllib.parse import quote
 
 import aiohttp
 
-from models import (
+from core.models import (
     Health, BookSourceRecord, build_record, ANTI_BOT_MARKERS, LOGIN_MARKERS,
     NOVEL_TEST_KEYWORDS, MANGA_TEST_KEYWORDS, TEST_TITLES, TOC_COMPLETE_THRESHOLD,
 )
-from add_source import _abs_url
-from legado_rules import (extract_all as apply_css_rule, extract_all_ex,
+from core.urls import abs_url as _abs_url
+from core.rules.replayer import (extract_all as apply_css_rule, extract_all_ex,
                           rule_kind, parse_list, parse_field, rule_supported)
-from loader import fingerprint
+from core.loader import fingerprint
 
 # 常见 User-Agent（规避简单 UA 拦截）
 DEFAULT_UA = (

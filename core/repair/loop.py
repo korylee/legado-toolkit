@@ -117,7 +117,7 @@ def merge_proposal(current: Dict[str, Any], proposal: Dict[str, Any]) -> Dict[st
 
 def verify_source(source: Dict[str, Any], keyword: str, detail_url: str = "") -> Dict[str, Any]:
     """回放验证（复用 add_source.verify_chain，规则解析走 legado_rules）。"""
-    from add_source import verify_chain
+    from services.add_source import verify_chain
 
     try:
         return verify_chain(dict(source), keyword, detail_url or "")
@@ -135,8 +135,8 @@ async def repair_one(session, client, source: Dict[str, Any], keyword: str,
 
     evidence / verifier 可注入，便于离线测试。
     """
-    from evidence import build_evidence
-    from llm import extract_json
+    from core.repair.evidence import build_evidence
+    from core.repair.llm import extract_json
 
     verify_fn = verifier or verify_source
     ev = evidence if evidence is not None else await build_evidence(source, keyword, timeout)
@@ -206,7 +206,7 @@ async def repair_many(sources: List[Dict[str, Any]], keyword: str = "我的",
                       on_done=None) -> List[Dict[str, Any]]:
     import aiohttp
 
-    from llm import LLMClient
+    from core.repair.llm import LLMClient
 
     client = client or LLMClient()
     sem = asyncio.Semaphore(concurrency)
@@ -289,7 +289,7 @@ def save_sources(path: str, data: Any) -> None:
 
 
 def cmd_repair(args) -> int:
-    from llm import LLMClient
+    from core.repair.llm import LLMClient
 
     data = load_sources(args.input)
     if not isinstance(data, list):

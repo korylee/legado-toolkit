@@ -3,7 +3,7 @@
 
 import unittest
 
-import legado_rules as R
+from core.rules import replayer as R
 
 HTML = """
 <div class="book-list">

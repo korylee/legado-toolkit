@@ -16,7 +16,7 @@ from __future__ import annotations
 from collections import Counter
 from typing import Any, Dict, List
 
-from models import BookSourceRecord, Health, DEAD_TAG_PATTERNS
+from core.models import BookSourceRecord, Health, DEAD_TAG_PATTERNS
 
 
 def build_report(
@@ -199,7 +199,7 @@ def build_report(
         # ---- 可用源分组预览
         lines.append("### 可用源按新分组预览")
         lines.append("")
-        from organizer import summarize_grouping
+        from core.organizer import summarize_grouping
         summary = summarize_grouping([r for r in records if r.health == Health.OK])
         lines.append("| 分组 | 数量 |")
         lines.append("|------|-----:|")
@@ -266,7 +266,7 @@ def build_report(
 
 def _find_duplicates(records: List[BookSourceRecord]) -> Dict[str, List[BookSourceRecord]]:
     """按 URL（归一化后）与名称查找重复。"""
-    from loader import _normalize_url
+    from core.loader import _normalize_url
     groups: Dict[str, List[BookSourceRecord]] = {}
     for r in records:
         key = _normalize_url(r.url) or r.name.strip()

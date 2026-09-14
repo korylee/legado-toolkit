@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List
 
-from models import BookSourceRecord, Health, BOOK_SOURCE_TYPE_NAMES, HEALTH_NAMES
+from core.models import BookSourceRecord, Health, BOOK_SOURCE_TYPE_NAMES, HEALTH_NAMES
 
 # 分组排序：类型优先，健康次之，星级再之
 TYPE_ORDER = {0: 0, 2: 1, 1: 2, 3: 3, 4: 4}
