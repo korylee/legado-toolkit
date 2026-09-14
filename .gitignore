@@ -34,3 +34,8 @@ _inspect*.py
 
 # 测试临时目录（仓库内，避免系统 %TEMP% 不可写）
 .tmp/
+
+# SQLite 管理库（二进制、变动频繁）
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
