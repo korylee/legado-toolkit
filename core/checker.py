@@ -327,6 +327,8 @@ class AsyncChecker:
         proxy: Optional[str] = None,
         probe_depth: int = 1,
         test_titles: Optional[Dict[str, Dict[str, Any]]] = None,
+        use_store: Optional[bool] = None,
+        store_path: Optional[str] = None,
     ):
         self.concurrency = concurrency
         self.timeout = timeout
@@ -349,6 +351,26 @@ class AsyncChecker:
         self._sem: Optional[asyncio.Semaphore] = None
         self.refresh_cache = False
 
+        if use_store is None:
+            use_store = not os.getenv("LEGADO_LEGACY_CACHE")
+        self.use_store = bool(use_store)
+        self.store_path = store_path
+        self._store_conn = None
+
+    def _store(self):
+        if self._store_conn is None:
+            from core.store import Store
+            self._store_conn = Store(self.store_path)
+        return self._store_conn
+
+    def close(self) -> None:
+        if self._store_conn is not None:
+            try:
+                self._store_conn.close()
+            except Exception:
+                pass
+            self._store_conn = None
+
     def keywords_for(self, record: BookSourceRecord) -> List[str]:
         """按书源类型选择测试关键词（漫画源用漫画名，其余用小说名）。"""
         if record.source_type == 2:
@@ -361,6 +383,11 @@ class AsyncChecker:
 
     def load_cache(self) -> Dict[str, Dict[str, Any]]:
         """读取历史校验结果缓存 {url: result}。"""
+        if self.use_store:
+            try:
+                return self._store().checks_map()
+            except Exception:
+                return {}
         if not self.cache_dir or not os.path.isdir(self.cache_dir):
             return {}
         cache: Dict[str, Dict[str, Any]] = {}
@@ -385,7 +412,7 @@ class AsyncChecker:
 
     def save_cache_append(self, record: BookSourceRecord) -> None:
         """追加一条校验结果到缓存。"""
-        if not self.cache_dir or not should_cache_result(record.health):
+        if not should_cache_result(record.health):
             return
         os.makedirs(self.cache_dir, exist_ok=True)
         url_key = re.sub(r"[^\w\-.]", "_", record.url or f"idx{record.index}")[:80]
@@ -413,6 +440,14 @@ class AsyncChecker:
             "content_fail_reason": record.content_fail_reason,
             "content_response_ms": record.content_response_ms,
         }
+        if self.use_store:
+            try:
+                self._store().save_checks([item])
+            except Exception:
+                pass
+            return
+        if not self.cache_dir:
+            return
         with open(path, "a", encoding="utf-8") as f:
             f.write(json.dumps(item, ensure_ascii=False) + "\n")
 
@@ -788,7 +823,7 @@ class AsyncChecker:
 
         self._sem = asyncio.Semaphore(self.concurrency)
         # 缓存目录就绪
-        if self.cache_dir:
+        if self.use_store or self.cache_dir:
             os.makedirs(self.cache_dir, exist_ok=True)
         connector = aiohttp.TCPConnector(
             limit=self.concurrency,
@@ -815,6 +850,7 @@ class AsyncChecker:
         if self.cache_dir:
             for r in results:
                 self.save_cache_append(r)
+        self.close()
         return records  # 已合并缓存结果
 
 

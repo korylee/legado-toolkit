@@ -677,6 +677,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_check.add_argument("--insecure", action="store_true", help="不校验证书（规避 SSL 报错）")
     p_check.add_argument("--keep-disabled", action="store_true", help="输出时保留 enabled=false 的源")
     p_check.add_argument("--cache-dir", default="", help=f"校验缓存目录（缺省 {DEFAULT_CACHE_DIR}）")
+    p_check.add_argument("--legacy-cache", action="store_true",
+                         help="退回旧 NDJSON 缓存（默认走 SQLite 管理库）")
     p_check.add_argument("--no-cache", action="store_true",
                          help="完全禁用缓存：不读取旧缓存，也不写入本次结果（优先级高于 --refresh-cache）")
     p_check.add_argument("--refresh-cache", action="store_true",
@@ -776,6 +778,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--keep-only-ok", action="store_true",
                        help="只保留 ✅可用 源（精简导入版）")
     p_run.add_argument("--cache-dir", default="", help=f"校验缓存目录（缺省 {DEFAULT_CACHE_DIR}）")
+    p_run.add_argument("--legacy-cache", action="store_true",
+                       help="退回旧 NDJSON 缓存（默认走 SQLite 管理库）")
     p_run.add_argument("--no-cache", action="store_true",
                        help="完全禁用缓存：不读取旧缓存，也不写入本次结果（优先级高于 --refresh-cache）")
     p_run.add_argument("--refresh-cache", action="store_true",
@@ -838,6 +842,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
+    if getattr(args, "legacy_cache", False):
+        os.environ["LEGADO_LEGACY_CACHE"] = "1"
     # Windows 控制台 UTF-8
     if sys.platform == "win32":
         try:
