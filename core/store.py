@@ -34,12 +34,12 @@ DDL = [
     """CREATE TABLE IF NOT EXISTS sources (
         id           INTEGER PRIMARY KEY,
         source_url   TEXT NOT NULL UNIQUE,
-        name         TEXT NOT NULL DEFAULT "",
+        name         TEXT NOT NULL DEFAULT '',
         source_type  INTEGER NOT NULL DEFAULT 0,
-        group_name   TEXT NOT NULL DEFAULT "",
+        group_name   TEXT NOT NULL DEFAULT '',
         enabled      INTEGER NOT NULL DEFAULT 1,
         raw_json     TEXT NOT NULL,
-        fingerprint  TEXT NOT NULL DEFAULT "",
+        fingerprint  TEXT NOT NULL DEFAULT '',
         created_at   TEXT NOT NULL,
         updated_at   TEXT NOT NULL
     )""",
@@ -49,30 +49,30 @@ DDL = [
     """CREATE TABLE IF NOT EXISTS checks (
         id                  INTEGER PRIMARY KEY,
         source_url          TEXT NOT NULL,
-        fingerprint         TEXT NOT NULL DEFAULT "",
+        fingerprint         TEXT NOT NULL DEFAULT '',
         cache_version       INTEGER NOT NULL DEFAULT 0,
-        health              TEXT NOT NULL DEFAULT "",
+        health              TEXT NOT NULL DEFAULT '',
         status_code         INTEGER,
         response_time_ms    INTEGER,
-        search_hit          TEXT DEFAULT "",
+        search_hit          TEXT DEFAULT '',
         search_response_ms  INTEGER,
         stars               INTEGER DEFAULT 0,
-        quality_tags        TEXT DEFAULT "",
+        quality_tags        TEXT DEFAULT '',
         probe_depth         INTEGER DEFAULT 1,
         chapter_count       INTEGER DEFAULT 0,
         toc_complete        INTEGER,
         content_ok          INTEGER,
-        error               TEXT DEFAULT "",
+        error               TEXT DEFAULT '',
         checked_at          TEXT NOT NULL
     )""",
     "CREATE INDEX IF NOT EXISTS idx_checks_url ON checks(source_url, checked_at DESC)",
     """CREATE TABLE IF NOT EXISTS diagnosis (
         id           INTEGER PRIMARY KEY,
         source_url   TEXT NOT NULL,
-        bucket       TEXT NOT NULL DEFAULT "",
-        attribution  TEXT DEFAULT "",
+        bucket       TEXT NOT NULL DEFAULT '',
+        attribution  TEXT DEFAULT '',
         type_guess   INTEGER,
-        evidence_json TEXT DEFAULT "",
+        evidence_json TEXT DEFAULT '',
         diagnosed_at TEXT NOT NULL
     )""",
     "CREATE INDEX IF NOT EXISTS idx_diag_url ON diagnosis(source_url, diagnosed_at DESC)",
@@ -80,22 +80,22 @@ DDL = [
         id            INTEGER PRIMARY KEY,
         source_url    TEXT NOT NULL,
         round         INTEGER DEFAULT 0,
-        status        TEXT NOT NULL DEFAULT "",
-        model         TEXT DEFAULT "",
-        before_rules  TEXT DEFAULT "",
-        proposal_json TEXT DEFAULT "",
-        verify_json   TEXT DEFAULT "",
+        status        TEXT NOT NULL DEFAULT '',
+        model         TEXT DEFAULT '',
+        before_rules  TEXT DEFAULT '',
+        proposal_json TEXT DEFAULT '',
+        verify_json   TEXT DEFAULT '',
         created_at    TEXT NOT NULL
     )""",
     "CREATE INDEX IF NOT EXISTS idx_repairs_url ON repairs(source_url, created_at DESC)",
     """CREATE TABLE IF NOT EXISTS jobs (
         id          TEXT PRIMARY KEY,
-        kind        TEXT NOT NULL DEFAULT "",
-        status      TEXT NOT NULL DEFAULT "",
+        kind        TEXT NOT NULL DEFAULT '',
+        status      TEXT NOT NULL DEFAULT '',
         progress    INTEGER DEFAULT 0,
         total       INTEGER DEFAULT 0,
-        payload     TEXT DEFAULT "",
-        result_json TEXT DEFAULT "",
+        payload     TEXT DEFAULT '',
+        result_json TEXT DEFAULT '',
         created_at  TEXT NOT NULL,
         updated_at  TEXT NOT NULL
     )""",
@@ -176,21 +176,7 @@ class Store:
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value", (key, str(value)))
         self.conn.commit()
 
-
-
-def _tri(v: Any) -> Optional[int]:
-    """三态：None 保持 None，True->1，False->0。"""
-    if v is None:
-        return None
-    return 1 if v else 0
-
-
-def _untri(v: Any) -> Optional[bool]:
-    return None if v is None else bool(v)
-
-
-def _store_methods_sources():
-    # sources ------------------------------------------------------------
+# sources ------------------------------------------------------------
     def upsert_sources(self, sources, with_fingerprint: bool = True) -> int:
         """批量写入/更新书源。同一 source_url 覆盖，raw_json 全量替换。"""
         from core.loader import _normalize_url, fingerprint as fp_of
@@ -355,16 +341,13 @@ def _store_methods_sources():
         self.conn.execute("VACUUM INTO ?", (path,))
         return path
 
-    return locals()
+
+def _tri(v: Any) -> Optional[int]:
+    """三态：None 保持 None，True->1，False->0。"""
+    if v is None:
+        return None
+    return 1 if v else 0
 
 
-for _name, _fn in list(locals().get("_extend", {}).items()) if False else []:
-    pass
-
-def _attach():
-    for k, v in _store_methods_sources().items():
-        if callable(v):
-            setattr(Store, k, v)
-
-
-_attach()
+def _untri(v: Any) -> Optional[bool]:
+    return None if v is None else bool(v)
