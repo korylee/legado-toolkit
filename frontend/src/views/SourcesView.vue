@@ -169,8 +169,6 @@ onMounted(async () => {
           <template #default="{ row }"><span class="mono">{{ row.source_url }}</span></template>
         </el-table-column>
         <el-table-column prop="checked_at" label="校验时间" width="146" />
-      <el-table :data="rows" v-loading="loading" border stripe size="small" height="100%"
-                @selection-change="(v) => (selected = v)">
         <template #empty>
           <el-empty description="没有匹配的书源，试试放宽筛选条件" :image-size="80" />
         </template>
