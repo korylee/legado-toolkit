@@ -1,3 +1,5 @@
 aiohttp>=3.9
 orjson>=3.9
 beautifulsoup4>=4.12
+fastapi>=0.110
+uvicorn>=0.27
