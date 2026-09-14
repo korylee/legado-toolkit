@@ -1,0 +1,9 @@
+html, body, #app { height: 100%; margin: 0; }
+body {
+  font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+  background: #f5f7fa;
+}
+.page { padding: 16px; }
+.toolbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; }
+.muted { color: #909399; font-size: 12px; }
+.mono { font-family: Consolas, Monaco, monospace; font-size: 12px; }
