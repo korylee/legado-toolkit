@@ -61,6 +61,9 @@ DDL = [
         probe_depth         INTEGER DEFAULT 1,
         chapter_count       INTEGER DEFAULT 0,
         toc_complete        INTEGER,
+        toc_fail_reason     TEXT DEFAULT '',
+        content_fail_reason TEXT DEFAULT '',
+        content_response_ms INTEGER,
         content_ok          INTEGER,
         error               TEXT DEFAULT '',
         checked_at          TEXT NOT NULL
@@ -340,6 +343,121 @@ class Store:
             os.remove(path)
         self.conn.execute("VACUUM INTO ?", (path,))
         return path
+
+    # ---------------------------------------------------------------- checks
+    def save_checks(self, rows) -> int:
+        # rows 为 check_cache 的 NDJSON 条目（dict）列表
+        # 注意：url 必须与 sources.source_url 用同一套规范化，否则 v_sources 关联不上
+        from core.loader import _normalize_url
+
+        ts = now()
+        out = []
+        for r in rows or []:
+            if not isinstance(r, dict):
+                continue
+            url = _normalize_url(str(r.get("url", "") or ""))
+            if not url:
+                continue
+            tags = r.get("quality_tags")
+            if isinstance(tags, list):
+                tags = ",".join(str(t) for t in tags)
+            out.append((
+                url,
+                str(r.get("fingerprint", "") or ""),
+                int(r.get("v", 0) or 0),
+                str(r.get("health", "") or ""),
+                r.get("status_code"),
+                r.get("response_time_ms"),
+                str(r.get("search_hit", "") or ""),
+                r.get("search_response_ms"),
+                int(r.get("quality_stars", 0) or 0),
+                tags or "",
+                int(r.get("probe_depth", 1) or 1),
+                int(r.get("chapter_count", 0) or 0),
+                _tri(r.get("toc_complete")),
+                _tri(r.get("content_ok")),
+                str(r.get("toc_fail_reason", "") or ""),
+                str(r.get("content_fail_reason", "") or ""),
+                r.get("content_response_ms"),
+                str(r.get("error", "") or ""),
+                str(r.get("checked_at", "") or ts),
+            ))
+        if not out:
+            return 0
+        sql = (
+            "INSERT INTO checks(source_url,fingerprint,cache_version,health,"
+            "status_code,response_time_ms,search_hit,search_response_ms,stars,"
+            "quality_tags,probe_depth,chapter_count,toc_complete,content_ok,"
+            "toc_fail_reason,content_fail_reason,content_response_ms,error,checked_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+        with self.conn:
+            self.conn.executemany(sql, out)
+        return len(out)
+
+    def last_check(self, url: str) -> Optional[Dict[str, Any]]:
+        row = self.conn.execute(
+            "SELECT * FROM checks WHERE source_url = ? ORDER BY checked_at DESC LIMIT 1",
+            (url,)).fetchone()
+        return dict(row) if row else None
+
+    def checks_map(self) -> Dict[str, Dict[str, Any]]:
+        # 返回 {url: 最近一条缓存}；字段与旧 check_cache 的 NDJSON 完全兼容，
+        # 可直接顶替 AsyncChecker.load_cache() 的返回值。
+        out: Dict[str, Dict[str, Any]] = {}
+        sql = ("SELECT * FROM checks c WHERE c.id = ("
+               "SELECT id FROM checks WHERE source_url = c.source_url "
+               "ORDER BY checked_at DESC LIMIT 1)")
+        for r in self.conn.execute(sql):
+            d = dict(r)
+            d["url"] = d.pop("source_url", "")
+            d["v"] = d.pop("cache_version", 0)
+            d["quality_stars"] = d.pop("stars", 0)
+            d["quality_tags"] = [t for t in (d.pop("quality_tags", "") or "").split(",") if t]
+            d["toc_complete"] = _untri(d.get("toc_complete"))
+            d["content_ok"] = _untri(d.get("content_ok"))
+            out[d["url"]] = d
+        return out
+
+    def count_checks(self) -> int:
+        return self.conn.execute("SELECT COUNT(*) AS c FROM checks").fetchone()["c"]
+
+    # ---------------------------------------------------------------- jobs
+    def create_job(self, job_id: str, kind: str, total: int = 0, payload=None) -> None:
+        ts = now()
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO jobs(id,kind,status,progress,total,payload,created_at,updated_at)"
+                " VALUES (?,?,?,?,?,?,?,?)",
+                (job_id, kind, "pending", 0, int(total),
+                 json.dumps(payload or {}, ensure_ascii=False), ts, ts))
+
+    def update_job(self, job_id: str, status=None, progress=None, total=None,
+                   result=None) -> None:
+        sets, args = ["updated_at = ?"], [now()]
+        if status is not None:
+            sets.append("status = ?")
+            args.append(status)
+        if progress is not None:
+            sets.append("progress = ?")
+            args.append(int(progress))
+        if total is not None:
+            sets.append("total = ?")
+            args.append(int(total))
+        if result is not None:
+            sets.append("result_json = ?")
+            args.append(json.dumps(result, ensure_ascii=False))
+        args.append(job_id)
+        with self.conn:
+            self.conn.execute("UPDATE jobs SET %s WHERE id = ?" % ", ".join(sets), args)
+
+    def get_job(self, job_id: str) -> Optional[Dict[str, Any]]:
+        row = self.conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        return dict(row) if row else None
+
+    def list_jobs(self, limit: int = 50) -> List[Dict[str, Any]]:
+        return [dict(r) for r in self.conn.execute(
+            "SELECT id, kind, status, progress, total, created_at, updated_at"
+            " FROM jobs ORDER BY created_at DESC LIMIT ?", (int(limit),))]
 
 
 def _tri(v: Any) -> Optional[int]:
