@@ -1,6 +1,7 @@
 <script setup>
 import { ref, reactive, onMounted } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
+import { Search, Plus, Upload, Download, Delete } from "@element-plus/icons-vue";
 import { listSources, listGroups, patchGroup, deleteSources } from "../api/sources";
 import SourceEditDialog from "../components/SourceEditDialog.vue";
 import TrashDrawer from "../components/TrashDrawer.vue";
@@ -14,6 +15,7 @@ const batchGroup = ref("");
 const trashVisible = ref(false);
 const exportVisible = ref(false);
 const importVisible = ref(false);
+const tableRef = ref(null);
 const rows = ref([]);
 const total = ref(0);
 const groups = ref([]);
@@ -77,6 +79,11 @@ async function removeSelected() {
   } catch (e) { /* 取消 */ }
 }
 
+function clearSelection() {
+  selected.value = [];
+  if (tableRef.value) tableRef.value.clearSelection();
+}
+
 function openNew() { dlgUrl.value = ""; dlgVisible.value = true; }
 function openEdit(row) { dlgUrl.value = row.source_url; dlgVisible.value = true; }
 function onSaved() { dlgVisible.value = false; load(); }
@@ -86,8 +93,9 @@ async function applyBatchGroup() {
   if (!batchGroup.value) return ElMessage.warning("先填要设置的分组");
   try {
     for (const r of selected.value) await patchGroup(r.source_url, batchGroup.value);
-    ElMessage.success("已更新 " + selected.value.length + " 条分组");
-    selected.value = [];
+    const n = selected.value.length;
+    ElMessage.success("已更新 " + n + " 条分组");
+    clearSelection();
     load();
     groups.value = await listGroups();
   } catch (e) {
@@ -103,43 +111,52 @@ onMounted(async () => {
 
 <template>
   <div class="page page-flex">
-    <div class="toolbar page-toolbar">
-      <el-input v-model="query.q" placeholder="搜名称 / 域名" style="width: 200px"
-                clearable @keyup.enter="search" />
-      <el-select v-model="query.type" placeholder="类型" clearable style="width: 116px">
+    <!-- 筛选栏：查询条件 + 全局操作 -->
+    <div class="bar page-toolbar">
+      <el-input class="w-search" v-model="query.q" placeholder="搜名称 / 域名" clearable
+                size="small" :prefix-icon="Search" @keyup.enter="search" />
+      <el-select class="w-type" v-model="query.type" placeholder="类型" clearable size="small">
         <el-option v-for="t in TYPES" :key="t.value" :value="t.value" :label="t.label" />
       </el-select>
-      <el-select v-model="query.health" placeholder="健康度" clearable style="width: 124px">
+      <el-select class="w-health" v-model="query.health" placeholder="健康度" clearable size="small">
         <el-option v-for="h in HEALTH" :key="h.value" :value="h.value" :label="h.label" />
       </el-select>
-      <el-select v-model="query.group" placeholder="分组" clearable filterable style="width: 190px">
+      <el-select class="w-group" v-model="query.group" placeholder="分组" clearable filterable
+                 size="small">
         <el-option v-for="g in groups" :key="g.group" :value="g.group"
                    :label="g.group + ' (' + g.count + ')'" />
       </el-select>
-      <el-select v-model="query.order" style="width: 130px">
+      <el-select class="w-order" v-model="query.order" size="small">
         <el-option value="-stars" label="星级 ↓" />
         <el-option value="stars" label="星级 ↑" />
         <el-option value="-checked_at" label="校验时间 ↓" />
         <el-option value="name" label="名称 ↑" />
       </el-select>
-      <el-button type="primary" @click="search">查询</el-button>
-      <el-button @click="reset">重置</el-button>
+      <el-button type="primary" size="small" @click="search">查询</el-button>
+      <el-button size="small" @click="reset">重置</el-button>
+
       <span class="grow" />
-      <el-input v-model="batchGroup" placeholder="批量设置分组" size="small" style="width: 160px" />
-      <el-button size="small" :disabled="!selected.length" @click="applyBatchGroup">
-        应用到选中
-      </el-button>
-      <el-button @click="openNew">新建源</el-button>
-      <el-button type="primary" plain @click="exportVisible = true">导出到 App</el-button>
-      <el-button plain @click="importVisible = true">导入书源</el-button>
-      <el-button plain @click="trashVisible = true">回收站</el-button>
-      <el-button type="danger" plain :disabled="!selected.length" @click="removeSelected">
-        移入回收站 ({{ selected.length }})
-      </el-button>
+
+      <el-button size="small" :icon="Plus" @click="openNew">新建源</el-button>
+      <el-button size="small" :icon="Upload" @click="exportVisible = true">导出</el-button>
+      <el-button size="small" :icon="Download" @click="importVisible = true">导入</el-button>
+      <el-button size="small" :icon="Delete" @click="trashVisible = true">回收站</el-button>
+    </div>
+
+    <!-- 批量操作条：仅在有勾选时出现 -->
+    <div class="batch-bar" v-if="selected.length">
+      <span class="batch-text">已选 <b>{{ selected.length }}</b> 条</span>
+      <el-divider direction="vertical" />
+      <el-input class="w-batch" v-model="batchGroup" placeholder="输入分组，如 原创"
+                size="small" @keyup.enter="applyBatchGroup" />
+      <el-button size="small" :disabled="!batchGroup" @click="applyBatchGroup">应用分组</el-button>
+      <el-divider direction="vertical" />
+      <el-button size="small" type="danger" plain @click="removeSelected">移入回收站</el-button>
+      <el-button size="small" link @click="clearSelection">取消选择</el-button>
     </div>
 
     <div class="page-fill">
-      <el-table :data="rows" v-loading="loading" border stripe size="small" height="100%"
+      <el-table ref="tableRef" :data="rows" v-loading="loading" border stripe size="small" height="100%"
                 @selection-change="(v) => (selected = v)">
         <el-table-column type="selection" width="42" />
         <el-table-column prop="name" label="名称" min-width="170" show-overflow-tooltip>

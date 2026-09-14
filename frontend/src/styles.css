@@ -81,3 +81,33 @@ body {
   .app-header { padding: 0 10px; gap: 8px; }
   .page { padding: 10px; }
 }
+
+/* ================= 工具栏 ================= */
+/* 统一容器：白底 + 圆角，让控件有归属感，不再飘在灰底上 */
+.bar {
+  display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+  padding: 10px 12px;
+  background: #fff;
+  border: 1px solid #e4e7ed;
+  border-radius: 6px;
+}
+.bar .grow { flex: 1 1 auto; }
+
+/* 统一宽度，替代散落的内联 style */
+.w-search { width: 210px; }
+.w-type   { width: 116px; }
+.w-health { width: 124px; }
+.w-group  { width: 190px; }
+.w-order  { width: 126px; }
+.w-batch  { width: 170px; }
+
+/* 批量操作条：只在有勾选时出现，淡蓝底与筛选栏区分 */
+.batch-bar {
+  display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+  padding: 8px 12px;
+  background: #ecf5ff;
+  border: 1px solid #d9ecff;
+  border-radius: 6px;
+}
+.batch-bar .batch-text { font-size: 13px; color: #409eff; }
+.batch-bar .batch-text b { font-size: 15px; margin: 0 2px; }
