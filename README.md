@@ -386,6 +386,7 @@ pnpm build
 - 规则验证必须由规则回放器完成，AI 只负责提议。
 - 不支持的规则语法要显式返回原因，不能静默返回空。
 - URL 一律先规范化再作为 key，避免缓存/校验关联不上。
+- 前端改弹窗/抽屉的样式要写全局 `frontend/src/styles.css`——el-dialog 是 teleport 到 body 的，组件内的 scoped 样式够不到它内部。
 - 运行时数据全部放在 data/，不要提交数据库、缓存、导出和 API Key。
 - 改代码后建议运行：
 
