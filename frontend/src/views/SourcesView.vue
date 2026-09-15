@@ -1,7 +1,7 @@
 <script setup>
 import { ref, reactive, computed, nextTick, watch, onMounted, onUnmounted } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { Search, Plus, Upload, Download, Delete, Filter, Refresh, Monitor, Setting } from "@element-plus/icons-vue";
+import { Search, Plus, Upload, Download, Delete, Filter, Refresh, Monitor } from "@element-plus/icons-vue";
 import { listSources, listGroups, patchTags, deleteSources, listTags, getStats } from "../api/sources";
 import { api, subscribeJob } from "../api/client";
 import { ensureTagMeta, isQualityTag, splitTags, tagOfType, sourceTypes } from "../utils/tags";
@@ -57,36 +57,49 @@ const checkStatusText = computed(() => {
   return "正在校验 " + n + " 条";
 });
 
-// 校验参数的「本次覆盖」：只含与全局设置不同的键，空对象 = 全走全局设置。
-// 对所有校验入口生效（全量 / 选中 / 单行）——设了代理就是为了能校验被墙源，
-// 而按行校验单个源恰恰是最常见的用法。生效时必须看得见，否则会变成
-// 「上次覆盖了忘了」的静默差异，所以按钮上有计数徽标。
-//: 「忽略缓存，全部重校」。**不是覆盖项**（没有全局对应值可比），是纯粹的本次
-//: 动作。放在同一个容器里是为了让「这次怎么测」只有一个入口——它原本挂在
-//: 全量校验的 split-button 下拉里，而那个下拉只有这一项，旁边又站着「校验参数」，
-//: 两个入口并列反而不知道该点哪个。
+// 批量校验的「本次覆盖」：只含与全局设置不同的键，空对象 = 全走全局设置。
+//: 「忽略缓存，全部重校」。**不是覆盖项**（没有全局对应值可比），是纯粹的本次动作。
 const refreshThisRun = ref(false);
 const checkOverride = ref({});
-const overrideSummary = ref("");
-const overrideVisible = ref(false);
-const overrideDialog = ref(false);
-const overrideRef = ref(null);
-const overrideDialogRef = ref(null);
-//: 徽标显示"本次有 N 项不是全局默认"，覆盖项与忽略缓存都算
-const runOptionCount = computed(
-  () => Object.keys(checkOverride.value).length + (refreshThisRun.value ? 1 : 0));
 
-// 打开时才去拉全局设置（拿到的是最新全局值），所以必须等容器渲染完再调。
+// 批量校验的确认弹框。**选项就长在这个框里**。
 //
-// **不能用 el-popover 的 @show**：ElPopover 声明的 emits 只有
-// update:visible / before-enter / before-leave / after-enter / after-leave，
-// 没有 show —— 写上去不报错、永远不触发，表单会一直空着（实测踩过）。
-// 监听 visible 本身，两个容器共用一套机制，也不依赖过渡时序。
-function reloadOverride(target) {
-  nextTick(() => { if (target.value) target.value.reload(); });
+// 以前「校验参数」是工具栏上一个独立按钮，而「全量校验」另弹一个只问"确定吗"的
+// 空确认框：选项和动作分在两处，那个确认框纯粹是减速带。合起来之后工具栏少一个
+// 按钮，确认框变成有用的一步，选项也不再是"长在全量校验旁边、却影响行按钮"的隐形状态
+// ——它只在批量动作的弹框里出现，一一对应。
+//
+// 单条校验（表格行 / 卡片图标）**不弹框**，直接用全局设置：单条本来就没什么可调的。
+const checkDialog = ref(false);
+const checkDialogRef = ref(null);
+//: 弹框确认后要校验的 URL 列表；空数组 = 全量
+const pendingCheckUrls = ref([]);
+
+// 打开时才去拉全局设置（拿到的是最新全局值），所以必须等容器渲染完再调
+watch(checkDialog, (v) => {
+  if (v) nextTick(() => { if (checkDialogRef.value) checkDialogRef.value.reload(); });
+});
+
+const checkDialogTitle = computed(
+  () => (pendingCheckUrls.value.length ? "校验选中" : "全量校验"));
+const checkDialogHint = computed(() => {
+  if (pendingCheckUrls.value.length) {
+    return "将校验选中的 " + pendingCheckUrls.value.length + " 条源。";
+  }
+  const n = stats.value ? stats.value.sources : "?";
+  return "将校验全部未删除书源（共 " + n + " 条），可能耗时数分钟。";
+});
+
+/** 打开批量校验的弹框。批量入口都走这里，单条不走。 */
+function openCheckDialog(urls = []) {
+  pendingCheckUrls.value = urls;
+  checkDialog.value = true;
 }
-watch(overrideVisible, (v) => { if (v) reloadOverride(overrideRef); });
-watch(overrideDialog, (v) => { if (v) reloadOverride(overrideDialogRef); });
+
+function startPendingCheck() {
+  checkDialog.value = false;
+  checkSources(pendingCheckUrls.value);
+}
 
 // 统计条（替代已删掉的「诊断」页）与「任务」抽屉
 const stats = ref(null);
@@ -304,21 +317,6 @@ async function cancelCheck() {
   }
 }
 
-async function checkAll() {
-  const refresh = refreshThisRun.value;
-  try {
-    // 确认文案里写清楚这次会不会用缓存、以及有没有别的本次设置——不然用户点完
-    // 只看到「完成」，既不知道是刚查了一遍还是全走了缓存，也想不起上次改过什么
-    await ElMessageBox.confirm(
-      (refresh
-        ? "忽略缓存，对全部未删除书源重新发起校验。"
-        : "校验全部未删除书源；有效期内的缓存会直接复用、不重新请求。")
-      + (overrideSummary.value ? overrideSummary.value + "。" : "")
-      + "可能耗时数分钟，确认继续？",
-      refresh ? "全量重校" : "全量校验", { type: "warning" });
-  } catch (e) { return; }
-  checkSources([]);
-}
 
 async function onTagsChanged() {
   await load();
@@ -412,23 +410,9 @@ onUnmounted(() => {
 
       <div class="bar-row">
         <el-button size="small" :icon="Plus" @click="openNew">新建源</el-button>
-        <!-- 「这次怎么测」的唯一入口：参数覆盖 + 忽略缓存。生效时按钮上有计数徽标——
-             这些只存在内存里，不显示出来就成了「看不见的生效参数」。
-             原来「忽略缓存」挂在全量校验的 split-button 下拉里，那下拉只有这一项，
-             旁边又站着这个按钮，两个入口并列反而不知道该点哪个 -->
-        <el-popover v-model:visible="overrideVisible" trigger="click" :width="330"
-                    placement="bottom-end">
-          <template #reference>
-            <el-button size="small" :type="runOptionCount ? 'primary' : ''">
-              <el-icon style="margin-right: 4px; vertical-align: -2px"><Setting /></el-icon>
-              校验参数<span v-if="runOptionCount">（{{ runOptionCount }}）</span>
-            </el-button>
-          </template>
-          <CheckOverrideForm ref="overrideRef" v-model="checkOverride"
-                             v-model:refresh="refreshThisRun"
-                             @summary="overrideSummary = $event" />
-        </el-popover>
-        <el-button size="small" :icon="Refresh" :disabled="checking" @click="checkAll()">
+        <!-- 本次的选项（参数覆盖 + 忽略缓存）在点开后的弹框里，不再单独占一个按钮 -->
+        <el-button size="small" :icon="Refresh" :disabled="checking"
+                   @click="openCheckDialog([])">
           全量校验
         </el-button>
         <span class="grow" />
@@ -469,7 +453,7 @@ onUnmounted(() => {
       </template>
       <el-divider direction="vertical" />
       <el-button size="small" :icon="Refresh" :loading="checking" :disabled="!selected.length"
-                 @click="checkSources(selected.map((r) => r.source_url))">
+                 @click="openCheckDialog(selected.map((r) => r.source_url))">
         校验选中
       </el-button>
       <el-button size="small" type="danger" plain @click="removeSelected">移入回收站</el-button>
@@ -635,11 +619,9 @@ onUnmounted(() => {
           <el-button :icon="Download" @click="importVisible = true; filterVisible = false">
             导入书源
           </el-button>
-          <el-button :icon="Refresh" :loading="checking" @click="checkAll(); filterVisible = false">
-            全量校验<span v-if="runOptionCount">（{{ runOptionCount }}）</span>
-          </el-button>
-          <el-button @click="overrideDialog = true">
-            校验参数<span v-if="runOptionCount">（{{ runOptionCount }}）</span>
+          <el-button :icon="Refresh" :loading="checking"
+                     @click="openCheckDialog([]); filterVisible = false">
+            全量校验
           </el-button>
           <el-button :icon="Delete" @click="trashVisible = true; filterVisible = false">
             回收站
@@ -657,15 +639,17 @@ onUnmounted(() => {
     <ImportDialog v-model="importVisible" @imported="load" />
     <JobsDrawer ref="jobsRef" v-model="jobsVisible" @running-change="jobBadge = $event" />
 
-    <!-- 移动端的校验参数覆盖。用 dialog 而不是在 btt 抽屉里展开一块：那个抽屉是
-         size="auto"，高度在打开时就定好了，往里插一块会伸缩的表单是个不必要的赌注 -->
-    <el-dialog v-model="overrideDialog" title="校验参数（本次）" width="90%" append-to-body>
-      <CheckOverrideForm ref="overrideDialogRef" v-model="checkOverride"
-                         v-model:refresh="refreshThisRun"
-                         @summary="overrideSummary = $event" />
-      <div class="muted" style="margin-top: 8px">仅对本次校验生效，不改全局设置</div>
+    <!-- 批量校验的确认弹框：选项 + 开始。桌面与移动端共用（移动端宽度由
+         styles.css 的媒体查询压到 94vw）。单条校验不弹框，直接用全局设置。 -->
+    <el-dialog v-model="checkDialog" :title="checkDialogTitle" width="420px" append-to-body>
+      <div class="muted" style="margin-bottom: 12px">{{ checkDialogHint }}</div>
+      <CheckOverrideForm ref="checkDialogRef" v-model="checkOverride"
+                         v-model:refresh="refreshThisRun" />
       <template #footer>
-        <el-button @click="overrideDialog = false">关闭</el-button>
+        <el-button @click="checkDialog = false">取消</el-button>
+        <el-button type="primary" :disabled="checking" @click="startPendingCheck">
+          开始校验
+        </el-button>
       </template>
     </el-dialog>
   </div>
