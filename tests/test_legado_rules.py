@@ -156,7 +156,7 @@ class UnsupportedTests(unittest.TestCase):
     def test_template_reported_before_fourth_segment(self):
         """多个 {{...}} 里的 ## 会被跨串计数误判成四段式，必须先报模板。
 
-        `raw.count("##")` 是跨整串计数的：这条规则看起来有三对 `##`，但它们
+        `raw.count("##")` 是跨整串计数的：这条规则里有 3 个 `##`，但它们
         全部落在两个 `{{...}}` 内部，根本没有四段式——只有把 `{{` 检测排在
         前面，报出的原因才是对的。
         """
