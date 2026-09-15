@@ -1005,6 +1005,29 @@ git commit -m "feat(replayer): 新增 extract_all_nodes 返回命中节点的 HT
             self.assertFalse(ok, rule)
             self.assertIn("JS", why,
                           "原因必须指向 JS 而不是别的 token：%s -> %s" % (rule, why))
+
+    def test_template_braces_reported(self):
+        """{{}} 模板按 JS 求值，回放不了——以前它不被识别。
+
+        这条是**真正在防误杀**：假 supported 会让规则被当 CSS 跑出空结果，
+        于是判「源坏了」（红）。必须归 unknown（灰）。
+        """
+        for rule in ("{{$.name}}", "class.a@text{{$.tags}}", "{{@@.top@h1@text}}"):
+            ok, why = R.rule_supported(rule)
+            self.assertFalse(ok, rule)
+            self.assertIn("{{", why, "%s -> %s" % (rule, why))
+
+    def test_template_reported_before_fourth_segment(self):
+        """多个 {{...}} 里的 ## 会被跨串计数误判成四段式，必须先报模板。
+
+        `raw.count("##")` 是跨整串计数的：这条规则里有 5 个 `##`，全部落在
+        两个 `{{...}}` 内部，根本没有四段式——但只有把 `{{` 检测排在前面，
+        报出的原因才是对的。
+        """
+        rule = "标签：{{$.tags##换行##,}} 简介：{{$.intro##免责声明：|，.*}}"
+        ok, why = R.rule_supported(rule)
+        self.assertFalse(ok, rule)
+        self.assertIn("{{", why, "应报模板而不是四段式：%s" % why)
 ```
 
 - [ ] **Step 2: 跑测试，确认失败**
@@ -1060,29 +1083,48 @@ Expected: `test_legado_only_syntax_reported` FAIL（第一条 `@@class.a@text` �
 
 ```python
     # 3) 不支持的语法 -> 明确标注，避免被当成「解析为空 = 规则失效」
-    bl = body.lower()
+    bl = body.lower()      # body 是剥掉 ##正则##替换 之后的主体
+    rl = raw.lower()       # raw 是整条规则（含 ## 段）
 
-    # 3.0) JS 检测必须排在下面那批**之前**
+    # 3.0) JS 检测必须排在下面那批**之前**，且必须扫**整条规则**（rl）而不是主体（bl）
     #
-    #  `selector@js:code` 这种形态里，JS 体内部完全可能出现 $1、&&、@get: 这些
-    #  token。若先命中下面的检测，报出的原因就是错的——实测真实语料里，错误原因
-    #  语料实测：那类错报归零。刻意不写具体条数——它随统计口径而变
-    #  源规则会因此显示「$n 取列表第 n 项暂未支持」，而真实原因是 JS 无法离线回放。
-    #  结论仍是 unknown（灰），但「为什么测不了」正是调试功能的核心价值，
-    #  报错原因等于把用户引向错误的方向。
+    #  两个原因：
+    #   1. `selector@js:code` 这种形态里，JS 体内部完全可能出现 $1、&&、@get: 这些
+    #      token。若先命中下面的检测，报出的原因就是错的——把用户引向错误的方向，
+    #      而这个工具的全部价值就是告诉他为什么。
+    #   2. JS 也可能出现在 `##` 之后（如 `##总字数：X##$1###@js:result+'字'`）。
+    #      只看 body 会漏掉这一批，让它们改报「## 第四段」——同样是错的原因。
+    #
+    #  语料实测：顺序修正 + 扫整条规则之后，这类错报归零。**这里刻意不写具体条数**
+    #  ——它随「怎么算一条规则」的统计口径而变（同一份语料换口径能差好几倍），
+    #  写死会变成一个既无法复现、也无法被推翻的断言。
     #
     #  原检测只认 `<js`/`</js`/开头 `js:`，从来不认中间形态的 `@js:`，所以
-    #  `@js:` 这个条件是本任务顺带补上的（属既有的检测缺口，不是本次引入）。
-    if (pr.kind == "js" or "<js" in bl or "</js>" in bl
-            or bl.startswith("js:") or "@js:" in bl):
+    #  `@js:` 这个条件是顺带补上的（属既有的检测缺口，不是本次引入）。
+    if (pr.kind == "js" or "<js" in rl or "</js>" in rl
+            or rl.startswith("js:") or "@js:" in rl):
         pr.unsupported = "JS 规则（@js:/<js>）需要 Legado 的 Rhino 引擎，无法离线回放"
+        return pr
+
+    # 3.05) {{ }} 模板 / 变量求值。Legado 里它按 JS 求值（绑定 java / cookie / book
+    #       等对象），离线做不到。
+    #
+    #       **这条是真正在防误杀**：以前它不被识别，会被当成 CSS 选择器跑出空结果，
+    #       于是判「源坏了」（红）；现在归 unknown（灰）。
+    #
+    #       它还必须排在 `## 第四段` 之前：`raw.count("##")` 是**跨整串**计数的，一条
+    #       含多个 `{{...##...}}` 的正文模板会把各自的 `##` 累加成 ≥3，被误报成四段式
+    #       ——而那条规则里根本没有四段式。（实测语料里这类误报占「## 第四段」翻转
+    #       的相当一部分。）
+    if "{{" in raw:
+        pr.unsupported = "{{}} 模板/变量求值需要 Legado 的 JS 引擎，无法离线回放"
         return pr
 
     # 3.1) Legado 支持但本项目回放不了的语法（详见设计文档 7.2）
     if raw.startswith("@@"):
         pr.unsupported = "@@ 强制 jsoup 规则暂未支持"
         return pr
-    if bl.startswith("@webjs:"):
+    if rl.startswith("@webjs:"):
         pr.unsupported = "@webjs: 注入 WebView 执行 JS，需要 Legado 引擎，无法离线回放"
         return pr
     if "@get:{" in body or "@put:{" in body:
@@ -1102,11 +1144,11 @@ Expected: `test_legado_only_syntax_reported` FAIL（第一条 `@@class.a@text` �
         return pr
 ```
 
-> **注意这与原计划的顺序相反**：原计划是把新检测段插在 JS 检测**之前**，实测证明那样会让一批真实规则报出错误的原因。现在 JS 检测在前，新检测段在后。
+> **顺序与本计划最初版本相反**：原计划把新检测段插在 JS 检测**之前**，实测证明那样会让一批真实规则报出错误的原因。现在 JS 在最前，`{{}}` 次之，其余在后。
 >
-> **`@js:` 用精确匹配而不是裸 `"js:" in bl`**：后者会把任何含 `js:` 的选择器也判为不支持，造成「明明能跑却显示无法判定」的反向噪音。`"@js:" in bl` 加 `bl.startswith("js:")` 已覆盖 Legado 的全部 JS 书写形态。
+> **`@js:` 用精确匹配而不是裸 `"js:" in`**：后者会把任何含 `js:` 的选择器也判为不支持，造成「明明能跑却显示无法判定」的反向噪音。`"@js:" in rl` 加 `rl.startswith("js:")` 已覆盖 Legado 的全部 JS 书写形态。实测边界：`div#js:2@text`、`a.js:not(div)@text`、`span@text##js:` 都**不应**被判为不支持。
 >
-> **`$n` 检测要小心**：`body` 在剥离 `##` 之后，正则 `$\d` 只在规则主体上匹配。但 `$.data.list[*].name` 这种 JSONPath 不含 `$数字`，不会被误伤。若发现误伤，把正则收紧为 `r"\$\d{1,2}$"`。
+> **`$n` 检测要小心**：它只在 `body`（剥离 `##` 之后的主体）上匹配，所以 `$.data.list[*].name` 这类 JSONPath 不受影响。已知残留：URL 字面量里的 `$1`（如 `.../content/$1`）会被误判；量级极小，若日后成问题把正则收紧为 `r"\$\d{1,2}$"`。
 
 - [ ] **Step 4: 跑测试**
 
