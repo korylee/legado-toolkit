@@ -3350,23 +3350,41 @@ for u, b, n in moved[:40]:
 
 - [ ] **Step 4: 逐项确认变化都落在预期内**
 
-| 预期变化 | 方向 |
-|---|---|
-| 漫画源（实测正文为图片）的 `content_ok` 由 `False` → `True`/`None` | 修正误杀 |
-| 空规则 + 无 webView 的文本源 `content_ok` 由 `True` → `False` | 修正误放 |
-| 含 JS/XPath/`\|\|`/`{{}}` 等语法的源由 `False` → `None`（`unknown`） | 修正误判（工具的能力边界） |
-| **`toc_complete` 由 `None` → `False`（规则已配但解析为空）→ 星级 `4★ → 3★`** | **修正误放**——这是本次对 3700 源影响面最大的一处，见下方说明 |
-| 空正文规则的音图源 `content_ok` 由 `False` → `True` | 修正误杀 |
-| 正文非空但短于 100 字符的源 `content_ok` 由 `False` → `True` | 修正误杀（自创长度阈值） |
+> ⚠️ **前提：下表描述的判定变化只在 `--refresh-cache --probe-depth 3` 的那一次运行里才会发生。**
+> 现有 3861 条缓存全是 `probe_depth=1`（`toc_complete`/`content_ok` 全为 `None`），
+> 而 `_probe_toc`/`_probe_content` 受 `core/checker.py:585` 的 `>= 2` 门控——
+> 用默认深度跑，被改的代码一次都不执行，下表一条都不会出现。
 
-> **`toc_complete` 那一行为什么是对的，以及为什么它影响最大**：
-> 旧代码在「chapterList 解析为空」时给 `None`（无法验证），而 `calc_stars` 对 `None`
-> 会**回退静态判定**（规则非空）→ 给到 4★。收拢后按 spec §4 决策 1，这一档属于
-> 「解析结果为空」= `fail`（对应 `TocEmptyException`）→ `False` → **不再回退** → 封顶 3★。
+| # | 类别 | 输入情形 | 判定 旧 → 新 | 星级 |
+|---|---|---|---|---|
+| **A** | **主档** | `chapterList` 已配、请求到详情页但**解析为空** | `toc_complete: None → False` | **5★→3★**（正文规则非空，真实数据 **98.2%**）／4★→3★（正文规则为空，1.8%） |
+| B | 主体 | 正文非空但**短于 100 字符** | `content_ok: False → True` | 4★→5★ |
+| C | 主体 | 正文规则含**任何**不可回放语法（`@js:` / `<js>` / `\|\|` / `@xpath` / `{{}}`） | `content_ok: False → None` | 4★→5★ |
+| D | 主体 | `bookSourceType == 3`（下载源）且**正文规则非空** | `content_ok: False/True → None` | 4★→5★ |
+| E | 主体 | 空正文规则的**音图源**（type 1/2） | `content_ok: False → True` | 4★→5★ |
+| F | 主体 | 漫画源用 content 规则抓图（值全是图片 URL） | `content_ok: False → True` | 4★→5★ |
+| G | 目录 | 下载源（type 3）**能解析出 ≥3 章** | `toc_complete: True → None`（下载源豁免） | 不变 |
+| H | 目录 | 正则清空全部值 / toc 命中纯空白 | `toc_complete: None → False` | 同 A |
+| I | 其它 | `bookSourceType ∉ {0,1,2,3}`（如 5、-1）+ 空正文规则 | `content_ok: False → None` | 不变（静态规则也空） |
+| **J** | **文案** | 全部 fail/unknown 的 **reason 文案**变化 | — | — |
+
+> **A 行为什么掉 2 星而不是 1 星**（我第一版写错了，这里是订正后的）：
+> `content_ok` 默认 `None`，而 `_probe_toc` 返回 `None` 时 **`_probe_content` 不执行**（fail-fast），
+> 于是 `content_ok` 保持在 `None` → `calc_stars` 的**第 5 级也回退静态规则**（正文规则非空 → True）
+> → 旧行为是 **5★**。收拢后 `toc_complete` 变 `False` → 第 4 级就不通过 → **封顶 3★**。
+> 实测：`正文规则非空: toc=None → 5★ / toc=False → 3★`。
 >
-> 语义上这是对的：一个 `chapterList` 规则**跑不出任何章节**的源就是坏了，
-> 4★ 比 3★ 不诚实。但它会让**一批「规则写了但跑不出章节」的源集体掉 1 星**——
-> 这是本次 diff 里最显眼的变化，排查时**先看这一档**，别把它当成意外。
+> 语义上这是对的：一个 `chapterList` 规则**跑不出任何章节**的源就是坏了。
+> 但它是本次 diff 里**最显眼、量级最大**的变化（98.2% 的源适用），
+> 排查时**先看这一档**，别把它当成意外。
+
+> **J 行说明**：fail/unknown 的 `reason` 文案会变（例如
+> 「正文提取为空或长度不足（疑似反爬/需登录/图片源）」→「正文提取为空」；
+> 「无正文规则且正文不足」→「正文规则为空；Legado 会把章节链接当作正文，无法阅读」）。
+> 这些文案直接出现在 `core/reporter.py:105/115/126` 生成的报表表格里，**报表会看起来变了很多，
+> 但那是措辞而非判定**。另外三态取值变化会重排报表分区（`core/reporter.py:88-98`）：
+> 正文 `False→None` 的源从「目录完整但正文验证失败」挪到「深度验证无法完成」，
+> 目录 `None→False` 的源挪到「疑似目录不完整」——**分区重排也是预期的**。
 
 **出现上表之外的变化 → 停下排查，不要刷新缓存。** 排查手段：对单个源跑
 

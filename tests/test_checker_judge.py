@@ -7,7 +7,7 @@
   3. `CACHE_VERSION` 5 → 6（旧缓存的 toc_complete / content_ok 是旧逻辑算的）
 
 **三态字段一律用 assertIs / assertIsNone 断言**：`assertFalse(record.content_ok)`
-对 False 与 None 同时成立，被测分支生效与否都过——那正是本项目已产出 6 条的假测试形态。
+对 False 与 None 同时成立，被测分支生效与否都过——那正是本项目已产出 7 条的假测试形态。
 
 本文件每条关键断言都做过变异验证（改坏被它守的那行 → 必须变红），变异表见文件末尾。
 """
