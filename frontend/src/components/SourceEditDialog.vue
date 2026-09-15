@@ -19,7 +19,13 @@ const visible = computed({
   get: () => props.modelValue,
   set: (v) => emit("update:modelValue", v),
 });
-const isNew = computed(() => !props.sourceUrl);
+// 另存为新源：本质是「以当前编辑中的源为模板，创建一个不同域名的新源」。
+// 编辑模式下域名输入框被禁用（Legado 按域名做主键，改域名等于换源），
+// 原先的提示只写了「请另存为新源」却没有任何入口——这个 ref 就是那个入口。
+// 一旦置 true：域名输入框解禁、标题变「另存为新源」、跳过「域名已存在」探测。
+const isDuplicate = ref(false);
+// isNew 有两个真值来源：真正的新建（无 sourceUrl），以及从编辑态切过来的「另存」。
+const isNew = computed(() => isDuplicate.value || !props.sourceUrl);
 const loading = ref(false);
 const testing = ref(false);
 const testKey = ref("我的");
@@ -168,7 +174,13 @@ function tabDot(name) {
     if (steps.some((s) => s.verdict === "unknown")) return "unknown";
     return "ok";
   }
-  if (name === "basic") return "ok";
+  if (name === "basic") {
+    // 名称与域名是保存的前置条件（见 save()），两者齐全才算填好。
+    // 原来这里恒定返回 "ok"，名称/域名为空时也是绿的——零信息量
+    const filledBasic = String(form.value.bookSourceName || "").trim()
+      && String(form.value.bookSourceUrl || "").trim();
+    return filledBasic ? "ok" : "err";
+  }
   if (name === "rules") {
     // 四级优先：有 fail 红；无 fail 但有附注（通过了但有疑点）黄；
     // unknown 灰（无法判定，与徽章 tagTypeOf 的灰色 info 对齐，不能落到绿色）；
@@ -250,6 +262,10 @@ watch(() => [props.modelValue, props.sourceUrl], async ([show, url]) => {
   // 下次打开就会自己弹出来；而且挂载时 modelValue 已是 true，
   // 抽屉里那个没有 immediate 的 watch 不触发，:initial-step 会被忽略
   debugVisible.value = false;
+  // 同理：本组件在 SourcesView 里是常驻挂载、从不卸载的，isDuplicate 会跨
+  // 「关闭 → 再打开」残留。不复位的话下次打开编辑弹窗会直接是「另存」状态
+  // （域名框解禁、标题错成「另存为新源」、跳过查重），而用户以为自己只是在编辑。
+  isDuplicate.value = false;
   loadTagOptions();
   activeTab.value = url ? "basic" : "quick";
   activeRuleTab.value = "search";
@@ -378,6 +394,22 @@ function openDebug(step) {
   debugVisible.value = true;
 }
 
+// 抽屉请求跳到某个页签（目前只有类型不符的 note「去改类型」在用它）。
+// **这里绝不做任何写入**：改类型是写操作，必须走用户明确确认的保存流程，
+// 此处只把人送到「基本信息」页签。
+function onDebugGoto(tab) {
+  debugVisible.value = false;
+  activeTab.value = tab;
+}
+
+// 「另存为新源」：编辑模式下域名不可改，原先只提示「请另存为新源」却没有这个入口。
+// 清空域名是刻意的——另存为必须换个域名（Legado 以域名为主键，域名相同就是覆盖原源）。
+function startDuplicate() {
+  isDuplicate.value = true;
+  form.value.bookSourceUrl = "";
+  ElMessage.info("已切换为另存模式，请填写新的域名");
+}
+
 async function save() {
   // 保存前必须 sanitize：bookSourceType 为 ""/[]/"2" 会让 Legado 导入报 IllegalStateException
   const s = JSON.parse(JSON.stringify(form.value));
@@ -387,7 +419,8 @@ async function save() {
   if (!String(s.bookSourceUrl || "").trim()) return ElMessage.warning("域名不能为空");
   // 新建书源时若填了已存在的域名，后端 upsert_sources 会按 URL 主键
   // **静默覆盖原源的全部规则**——用户全程无感。保存前先探一下。
-  if (isNew.value) {
+  // 另存模式下用户的旧域名已被清空，走的是全新域名，不该再拿旧域名去查重
+  if (isNew.value && !isDuplicate.value) {
     try {
       const r = await sourceExists(s.bookSourceUrl);
       if (r.exists) {
@@ -422,10 +455,18 @@ async function doSave(s) {
 </script>
 
 <template>
-  <el-dialog v-model="visible" :title="isNew ? '新建书源' : '编辑书源'"
+  <el-dialog v-model="visible"
              width="1120px" top="4vh" destroy-on-close class="edit-dialog"
              modal-class="edit-dialog-overlay"
              :close-on-click-modal="false" :before-close="handleBeforeClose">
+    <!-- 标题改用插槽：要在标题旁挂「另存为新源」入口（编辑模式专属） -->
+    <template #header>
+      <div class="dialog-header">
+        <span>{{ isDuplicate ? "另存为新源" : (isNew ? "新建书源" : "编辑书源") }}</span>
+        <el-button v-if="!isNew && !isDuplicate" size="small" link type="primary"
+                   @click="startDuplicate">另存为新源</el-button>
+      </div>
+    </template>
     <el-row :gutter="16" v-loading="loading" class="main-rule-form">
       <el-col :xs="24" :sm="24" :md="15">
         <el-tabs v-model="activeTab" :tab-position="isMobile ? 'top' : 'left'"
@@ -476,7 +517,7 @@ async function doSave(s) {
               <el-form-item label="域名">
                 <el-input v-model="form.bookSourceUrl" :disabled="!isNew"
                           placeholder="https://example.com" />
-                <span v-if="!isNew" class="muted">编辑模式下域名不可改；需要更换请另存为新源。</span>
+                <span v-if="!isNew" class="muted">编辑模式下域名不可改；需要更换请点右上角「另存为新源」。</span>
               </el-form-item>
               <el-form-item label="类型">
                 <el-radio-group v-model="form.bookSourceType">
@@ -752,7 +793,7 @@ async function doSave(s) {
          immediate，initialStep 只在 modelValue 由 false → true 时生效，用 v-if 会让
          首帧落到 steps[0] 而忽略 :initial-step -->
     <RuleDebugDrawer v-model="debugVisible" :result="testResult"
-                     :initial-step="debugStep" />
+                     :initial-step="debugStep" @goto="onDebugGoto" />
   </el-dialog>
 </template>
 
@@ -760,6 +801,7 @@ async function doSave(s) {
 .source-tabs { min-height: 520px; }
 .source-tabs :deep(.el-tabs__header) { flex: 0 0 auto; }
 .tab-label { display: inline-flex; align-items: center; gap: 6px; }
+.dialog-header { display: flex; align-items: center; gap: 12px; }
 .dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; background: #c0c4cc; }
 .dot.ok { background: #67c23a; }
 .dot.warn { background: #e6a23c; }
