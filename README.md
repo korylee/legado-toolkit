@@ -247,7 +247,7 @@ python cli/main.py review-imports --candidate candidates.json --registry book_so
 
 系统标签由程序维护：
 
-- 类型：📖小说、🎧听书、🎨漫画、🎬视频、❓未知
+- 类型：📖小说、🎧听书、🎨漫画、📥下载（对应 bookSourceType 0/1/2/3）
 - 健康状态：可用、待验证、已失效、需代理复检
 - 规则质量：规则完整
 

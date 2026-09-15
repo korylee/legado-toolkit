@@ -12,7 +12,8 @@ import urllib.request
 
 DEFAULT_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
-TYPE_MAP = {"novel": 0, "manga": 2, "audio": 1, "video": 3}
+# 对齐 Legado BookSourceType：3 是「只提供下载服务的网站」，不是视频，键名用 file
+TYPE_MAP = {"novel": 0, "manga": 2, "audio": 1, "file": 3}
 DISCOVER_ONLY_TAG = "仅发现"
 COVER_URL_HINTS = ("cover", "uploads", "book", "img", "image", "pic", "comic", "novel", ".webp", ".jpg", ".png")
 STATIC_LINK_HINTS = (".css", ".js", ".ico", ".png", ".jpg", ".webp", "javascript:", "mailto:", "/static/", "/uploads/")
@@ -48,9 +49,9 @@ STATIC_LINK_HINTS = ["/css", "/js/", "/images/", "/img/", "/uploads/", ".jpg",
                      ".png", ".gif", ".webp", ".css", ".js", "javascript:",
                      "mailto:", "#", "/tag/", "/category/", "/search", "?"]
 TYPE_LABELS = [("novel", "📖 小说"), ("manga", "🎨 漫画"),
-               ("audio", "🎧 听书"), ("video", "🎬 视频")]
+               ("audio", "🎧 听书"), ("file", "📥 下载")]
 DEFAULT_GROUPS = {"novel": "📖小说/✅★★★☆☆", "manga": "🎨漫画/✅★★★☆☆",
-                  "audio": "🎧听书/✅★★★☆☆", "video": "🎬视频/✅★★★☆☆"}
+                  "audio": "🎧听书/✅★★★☆☆", "file": "📥下载/✅★★★☆☆"}
 SITEMAP_PATHS = [
     "/sitemap.xml",
     "/sitemap_index.xml",

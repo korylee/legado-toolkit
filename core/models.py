@@ -15,13 +15,14 @@ from typing import Any, Dict, List, Optional
 
 # ---------------------------------------------------------------- 类型枚举
 
-#: 书源类型 -> 中文类型名（Legado: 0=文本 1=音频 2=漫画 3=视频 4=?）
+#: 书源类型 -> 中文类型名
+#: 对齐 Legado BookSourceType.kt:8-11 —— 0 文本 / 1 音频 / 2 图片 / 3 只提供下载服务的网站。
+#: 注意：Legado 的 @IntDef 里没有 4，任何 4 都是脏值，不得在此定义中文名。
 BOOK_SOURCE_TYPE_NAMES: Dict[int, str] = {
     0: "📖小说",
     1: "🎧听书",
     2: "🎨漫画",
-    3: "🎬视频",
-    4: "❓未知",
+    3: "📥下载",
 }
 
 #: 校验健康状态
@@ -170,7 +171,8 @@ class BookSourceRecord:
 
     @property
     def type_name(self) -> str:
-        return BOOK_SOURCE_TYPE_NAMES.get(self.source_type, "❓未知")
+        # 兜底为空串：4 之类的脏值在 Legado 里不存在类型名，不再编造「未知」
+        return BOOK_SOURCE_TYPE_NAMES.get(self.source_type, "")
 
     @property
     def health_name(self) -> str:

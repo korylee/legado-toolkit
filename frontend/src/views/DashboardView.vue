@@ -4,7 +4,8 @@ import { getStats } from "../api/sources";
 
 const stats = ref(null);
 const HEALTH_CN = { ok: "✅可用", dead: "❌失效", auth: "🔒需验证", gfw: "🌐需翻墙", None: "未校验" };
-const TYPE_CN = { 0: "📖小说", 1: "🎧听书", 2: "🎨漫画", 3: "🎬视频", 4: "❓未知" };
+// 3 = Legado 的「只提供下载服务的网站」；Legado 无 4，不设该项
+const TYPE_CN = { 0: "📖小说", 1: "🎧听书", 2: "🎨漫画", 3: "📥下载" };
 
 onMounted(async () => { try { stats.value = await getStats(); } catch (e) {} });
 </script>

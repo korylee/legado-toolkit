@@ -564,7 +564,7 @@ def cmd_menu(args: argparse.Namespace) -> int:
             print("未提供 URL，退出。")
             return 0
         sname = _safe_input("书源名称（回车用域名）：").strip()
-        stype = _safe_input("类型 [novel/manga/audio/video]（回车 novel）：").strip() or "novel"
+        stype = _safe_input("类型 [novel/manga/audio/file]（回车 novel）：").strip() or "novel"
         sgroup = _safe_input("分组（回车 📖新增源）：").strip() or "📖新增源"
         out = _safe_input("输出文件（回车 auto_added.json）：").strip() or "auto_added.json"
         from services.add_source import run_add
@@ -790,7 +790,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_add = sub.add_parser("add", help="快捷新增书源：URL→自动推断搜索规则→生成书源")
     p_add.add_argument("url", nargs="?", help="带真实关键词的搜索 URL，如 https://host/search?q=绍宋；传 - 从 stdin 读取")
     p_add.add_argument("--name", default="", help="书源名称（默认取域名）")
-    p_add.add_argument("--type", choices=["novel", "manga", "audio", "video"], default="novel",
+    p_add.add_argument("--type", choices=["novel", "manga", "audio", "file"], default="novel",
                        help="内容类型（默认 novel 小说）")
     p_add.add_argument("--group", default="📖新增源", help="分组名（默认 📖新增源）")
     p_add.add_argument("--output", default="auto_added.json", help="输出书源文件（默认 auto_added.json）")

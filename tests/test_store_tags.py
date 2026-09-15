@@ -58,12 +58,12 @@ class StoreTagTests(unittest.TestCase):
     def test_type_change_rebuilds_type_tag_keeps_health_quality(self) -> None:
         with Store(self.db) as st:
             st.upsert_sources([make_source(
-                "❓未知,可用,原创,规则完整",
+                "📥下载,可用,原创,规则完整",
                 url="https://type-change.example",
-                source_type=4,
+                source_type=3,
             )])
             st.upsert_sources([make_source(
-                "❓未知,可用,原创,规则完整",
+                "📥下载,可用,原创,规则完整",
                 url="https://type-change.example",
                 source_type=0,
             )])
@@ -94,31 +94,31 @@ class StoreTagTests(unittest.TestCase):
             self.assertTrue(overview["原创"]["editable"])
             self.assertEqual(overview["原创"]["kind"], "user")
 
-    def test_unknown_source_type_tag_is_system(self) -> None:
+    def test_download_source_type_tag_is_system(self) -> None:
         with Store(self.db) as st:
             st.upsert_sources([make_source(
-                "❓未知,可用,原创", url="https://unknown.example", source_type=4)])
+                "📥下载,可用,原创", url="https://download.example", source_type=3)])
             row = st.conn.execute(
                 "SELECT group_name, user_tags FROM sources").fetchone()
-            self.assertEqual(row["group_name"], "❓未知,可用")
+            self.assertEqual(row["group_name"], "📥下载,可用")
             self.assertEqual(row["user_tags"], "原创")
             overview = {x["tag"]: x for x in st.tags_overview()}
-            self.assertEqual(overview["❓未知"]["kind"], "system")
+            self.assertEqual(overview["📥下载"]["kind"], "system")
 
     def test_cleanup_system_tags_from_user_tags(self) -> None:
         with Store(self.db) as st:
             st.upsert_sources([make_source(
-                "❓未知,可用,原创", url="https://unknown.example", source_type=4)])
+                "📥下载,可用,原创", url="https://download.example", source_type=3)])
             st.conn.execute(
                 "UPDATE sources SET user_tags=? WHERE source_url=?",
-                ("❓未知,原创", "https://unknown.example"))
+                ("📥下载,原创", "https://download.example"))
             st.conn.execute(
                 "DELETE FROM meta WHERE key=?", ("system_tags_cleaned_at",))
             st.conn.commit()
             self.assertTrue(st.cleanup_system_tags_once())
             row = st.conn.execute(
                 "SELECT user_tags FROM sources WHERE source_url=?",
-                ("https://unknown.example",)).fetchone()
+                ("https://download.example",)).fetchone()
             self.assertEqual(row["user_tags"], "原创")
 
     def test_system_status_override_survives_rebuild_and_upsert(self) -> None:

@@ -6,7 +6,8 @@ from __future__ import annotations
 import re
 from typing import Iterable, List, Sequence, Tuple
 
-SYSTEM_TYPE_TAGS = {"📖小说", "🎧听书", "🎨漫画", "🎬视频", "❓未知"}
+# 类型标签与 Legado 的 bookSourceType 一一对应（0/1/2/3），不含任何未定义类型
+SYSTEM_TYPE_TAGS = {"📖小说", "🎧听书", "🎨漫画", "📥下载"}
 SYSTEM_STATUS_TAGS = {"可用", "待验证", "已失效", "需代理复检"}
 SYSTEM_QUALITY_TAGS = {"规则完整"}
 SYSTEM_TAGS = SYSTEM_TYPE_TAGS | SYSTEM_STATUS_TAGS | SYSTEM_QUALITY_TAGS

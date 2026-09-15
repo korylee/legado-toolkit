@@ -50,8 +50,9 @@ const quickProgress = ref("");
 const quickVerify = ref(null);
 let quickStop = null;
 
-const TYPE_KEYS = { 0: "novel", 1: "audio", 2: "manga", 3: "video" };
-const TYPE_TAGS = { 0: "📖小说", 1: "🎧听书", 2: "🎨漫画", 3: "🎬视频", 4: "❓未知" };
+// 类型键名对齐后端 TYPE_MAP：3 是「只提供下载服务的网站」（file），不是视频
+const TYPE_KEYS = { 0: "novel", 1: "audio", 2: "manga", 3: "file" };
+const TYPE_TAGS = { 0: "📖小说", 1: "🎧听书", 2: "🎨漫画", 3: "📥下载" };
 const TYPE_TAG_SET = new Set(Object.values(TYPE_TAGS));
 const STATUS_TAGS = ["可用", "待验证", "已失效", "需代理复检"];
 const STATUS_TAG_SET = new Set(STATUS_TAGS);
@@ -85,14 +86,15 @@ const form = ref(blank());
 const displaySystemTags = computed(() => {
   // 类型标签以当前表单类型为准；健康状态可手动覆盖；规则完整沿用详情数据。
   if (!systemTags.value.length && isNew.value) return [];
-  const typeTag = TYPE_TAGS[Number(form.value.bookSourceType)] || TYPE_TAGS[4];
+  // 4 之类的脏值在 Legado 里没有对应类型名，留空并过滤，避免渲染出空标签
+  const typeTag = TYPE_TAGS[Number(form.value.bookSourceType)] || "";
   const rest = systemTags.value.filter(
     (t) => !TYPE_TAG_SET.has(t) && !STATUS_TAG_SET.has(t),
   );
   const status = manualStatus.value
     || systemTags.value.find((t) => STATUS_TAG_SET.has(t))
     || "";
-  return [typeTag, ...(status ? [status] : []), ...rest];
+  return [typeTag, ...(status ? [status] : []), ...rest].filter(Boolean);
 });
 
 function filled(name) {
@@ -472,7 +474,8 @@ async function save() {
   // 保存前必须 sanitize：bookSourceType 为 ""/[]/"2" 会让 Legado 导入报 IllegalStateException
   const s = JSON.parse(JSON.stringify(form.value));
   s.bookSourceType = Number(s.bookSourceType);
-  if (![0, 1, 2, 3, 4].includes(s.bookSourceType)) s.bookSourceType = 0;
+  // 合法取值只有 Legado 的 0/1/2/3；4 及其它脏值一律归 0（文本）
+  if (![0, 1, 2, 3].includes(s.bookSourceType)) s.bookSourceType = 0;
   if (!String(s.bookSourceName || "").trim()) return ElMessage.warning("名称不能为空");
   if (!String(s.bookSourceUrl || "").trim()) return ElMessage.warning("域名不能为空");
   // 新建书源时若填了已存在的域名，后端 upsert_sources 会按 URL 主键
@@ -585,8 +588,7 @@ async function doSave(s) {
                   <el-radio-button :value="0">📖小说</el-radio-button>
                   <el-radio-button :value="1">🎧听书</el-radio-button>
                   <el-radio-button :value="2">🎨漫画</el-radio-button>
-                  <el-radio-button :value="3">🎬视频</el-radio-button>
-                  <el-radio-button :value="4">❓未知</el-radio-button>
+                  <el-radio-button :value="3">📥下载</el-radio-button>
                 </el-radio-group>
               </el-form-item>
               <el-form-item label="启用"><el-switch v-model="form.enabled" /></el-form-item>

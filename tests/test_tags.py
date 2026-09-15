@@ -41,11 +41,12 @@ class TagUtilsTests(unittest.TestCase):
         self.assertTrue(is_system_tag("可用"))
         self.assertFalse(is_system_tag("原创"))
 
-    def test_unknown_source_type_tag_is_system(self) -> None:
-        self.assertTrue(is_system_tag("❓未知"))
+    def test_download_source_type_tag_is_system(self) -> None:
+        # 类型标签对齐 Legado：3 是「只提供下载服务的网站」，标签为「📥下载」
+        self.assertTrue(is_system_tag("📥下载"))
         self.assertEqual(
-            split_system_user(parse_group_tags("❓未知,可用,原创")),
-            (["❓未知", "可用"], ["原创"]),
+            split_system_user(parse_group_tags("📥下载,可用,原创")),
+            (["📥下载", "可用"], ["原创"]),
         )
 
     def test_alias_mapping(self) -> None:

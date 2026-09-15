@@ -451,7 +451,7 @@ def main():
     p_add = sub.add_parser("add", help="从搜索 URL 生成书源")
     p_add.add_argument("url", nargs="?", help="带真实关键词的搜索 URL，如 https://www.doubaomanhua.com/search?q=绍宋。也支持传 - 从 stdin 读取")
     p_add.add_argument("--name", default="", help="书源名称（默认取域名）")
-    p_add.add_argument("--type", choices=["novel", "manga", "audio", "video"], default="novel",
+    p_add.add_argument("--type", choices=["novel", "manga", "audio", "file"], default="novel",
                        help="内容类型（默认 novel 小说）")
     p_add.add_argument("--group", default="📖新增源", help="分组名（默认 📖新增源）")
     p_add.add_argument("--output", default="auto_added.json", help="输出书源文件（默认 auto_added.json）")

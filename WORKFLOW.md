@@ -151,7 +151,7 @@ python main.py report -i out/organized.json -r check_cache -o out/final_report.m
 | 📖 | 小说 | 0 |
 | 🎧 | 听书 | 1 |
 | 🎨 | 漫画 | 2 |
-| 🎬 | 视频 | 3 |
+| 📥 | 下载 | 3 |
 
 ### 第二层：健康度（联网校验结果）
 | 标签 | 含义 |

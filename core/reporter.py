@@ -42,7 +42,8 @@ def build_report(
     lines.append("| 类型 | 数量 | 占比 |")
     lines.append("|------|-----:|-----:|")
     type_counter = Counter(r.source_type for r in enabled)
-    type_names = {0: "📖小说", 1: "🎧听书", 2: "🎨漫画", 3: "🎬视频", 4: "❓未知"}
+    # 与 core/models.py 的 BOOK_SOURCE_TYPE_NAMES 保持一致；Legado 无 4，兜底直接显示原始数值
+    type_names = {0: "📖小说", 1: "🎧听书", 2: "🎨漫画", 3: "📥下载"}
     for t in sorted(type_counter, key=lambda x: -type_counter[x]):
         c = type_counter[t]
         lines.append(f"| {type_names.get(t, t)} | {c} | {c/len(enabled)*100:.1f}% |")

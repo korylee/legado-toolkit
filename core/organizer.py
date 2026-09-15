@@ -52,7 +52,8 @@ def infer_health_from_group(group: str) -> str:
 
 def group_title(source_type: int, health: str, stars: int = 0, style: str = "status") -> str:
     """生成面向使用的分组；默认不把星级和临时检测证据写入分组。"""
-    type_name = BOOK_SOURCE_TYPE_NAMES.get(source_type, "❓未知")
+    # 兜底口径同 models.type_name：未定义类型（如 4）留空，由 _dedupe 丢弃空段
+    type_name = BOOK_SOURCE_TYPE_NAMES.get(source_type, "")
     if style != "status":
         health_name = HEALTH_NAMES.get(health, health)
         if stars and health == Health.OK:

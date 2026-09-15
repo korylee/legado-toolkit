@@ -234,7 +234,8 @@ class Store:
         from core.organizer import group_title, infer_health_from_group
 
         system, _user = _split_group(raw_group)
-        type_tag = BOOK_SOURCE_TYPE_NAMES.get(int(source_type), "❓未知")
+        # 兜底口径同 models.type_name：未定义类型（如 4）留空，由 _merge_group 丢弃空段
+        type_tag = BOOK_SOURCE_TYPE_NAMES.get(int(source_type), "")
         status_tags = [t for t in system if t in _SYSTEM_STATUS_TAGS]
         quality_tags = [t for t in system if t in _SYSTEM_QUALITY_TAGS]
         has_old_type = any(t in _SYSTEM_TYPE_TAGS for t in system)

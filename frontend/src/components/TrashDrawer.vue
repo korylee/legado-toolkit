@@ -90,7 +90,7 @@ async function restoreSelected() {
       <el-table-column label="类型" width="88" align="center">
         <template #default="{ row }">
           {{ row.source_type === 2 ? "🎨漫画" : row.source_type === 1 ? "🎧听书"
-             : row.source_type === 3 ? "🎬视频" : "📖小说" }}
+             : row.source_type === 3 ? "📥下载" : "📖小说" }}
         </template>
       </el-table-column>
       <el-table-column prop="group_name" label="原分组" min-width="150" show-overflow-tooltip />

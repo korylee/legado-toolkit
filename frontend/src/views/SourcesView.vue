@@ -39,7 +39,7 @@ const query = reactive({
 
 const TYPES = [
   { value: 0, label: "📖小说" }, { value: 1, label: "🎧听书" },
-  { value: 2, label: "🎨漫画" }, { value: 3, label: "🎬视频" },
+  { value: 2, label: "🎨漫画" }, { value: 3, label: "📥下载" },
 ];
 const HEALTH = [
   { value: "ok", label: "✅可用" }, { value: "dead", label: "❌失效" },
