@@ -142,6 +142,29 @@ class UnsupportedTests(unittest.TestCase):
             self.assertIn("JS", why,
                           "原因必须指向 JS 而不是别的 token：%s -> %s" % (rule, why))
 
+    def test_template_braces_reported(self):
+        """{{}} 模板按 JS 求值，回放不了——以前它不被识别。
+
+        这条是**真正在防误杀**：假 supported 会让规则被当 CSS 跑出空结果，
+        于是判「源坏了」（红）。必须归 unknown（灰）。
+        """
+        for rule in ("{{$.name}}", "class.a@text{{$.tags}}", "{{@@.top@h1@text}}"):
+            ok, why = R.rule_supported(rule)
+            self.assertFalse(ok, rule)
+            self.assertIn("{{", why, "%s -> %s" % (rule, why))
+
+    def test_template_reported_before_fourth_segment(self):
+        """多个 {{...}} 里的 ## 会被跨串计数误判成四段式，必须先报模板。
+
+        `raw.count("##")` 是跨整串计数的：这条规则里有 5 个 `##`，全部落在
+        两个 `{{...}}` 内部，根本没有四段式——但只有把 `{{` 检测排在前面，
+        报出的原因才是对的。
+        """
+        rule = "标签：{{$.tags##换行##,}} 简介：{{$.intro##免责声明：|，.*}}"
+        ok, why = R.rule_supported(rule)
+        self.assertFalse(ok, rule)
+        self.assertIn("{{", why, "应报模板而不是四段式：%s" % why)
+
 
 class ImageHeuristicTests(unittest.TestCase):
     def test_image_ratio(self):
