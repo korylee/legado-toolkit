@@ -96,6 +96,33 @@ class UnsupportedTests(unittest.TestCase):
         ok, _ = R.rule_supported("")
         self.assertFalse(ok)
 
+    def test_legado_only_syntax_reported(self):
+        """Legado 支持、我们回放不了的语法，必须报 unsupported 而不是静默跑空。"""
+        rules = [
+            "@@class.a@text",              # 强制 jsoup
+            "@webjs:return document.body",  # 注入 WebView
+            "class.a@text&&class.b@text",   # && 合并
+            "class.a@text%%class.b@text",   # %% 按索引交替
+            "tag.div[2:5]",                 # 区间索引
+            "tag.div[0:10:2]",              # 区间索引（带步长）
+            "$.data.list$1",                # $n 取列表第 n 项
+            "id.content@text##广告##x###",   # ## 第四段（只替换第一个）
+            "class.a@text@get:{name}",      # 变量读取
+        ]
+        for rule in rules:
+            ok, why = R.rule_supported(rule)
+            self.assertFalse(ok, "应判为不支持：%s" % rule)
+            self.assertTrue(why, "必须给出原因：%s" % rule)
+
+    def test_supported_syntax_not_affected(self):
+        """反向断言：新检测不能误伤本来能跑通的规则。"""
+        for rule in ("class.a@tag.b@text", "class.item@href", "@css:class.a@text",
+                     "$.data.list[*].name", "id.content@text##广告##",
+                     "id.content@text##广告##替换",
+                     "class.a@text", "text", "class.list@tag.li"):
+            ok, why = R.rule_supported(rule)
+            self.assertTrue(ok, "被误伤：%s (%s)" % (rule, why))
+
 
 class ImageHeuristicTests(unittest.TestCase):
     def test_image_ratio(self):

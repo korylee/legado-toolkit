@@ -247,6 +247,32 @@ def parse_rule(rule: str) -> ParsedRule:
 
     # 3) 不支持的语法 -> 明确标注，避免被当成「解析为空 = 规则失效」
     bl = body.lower()
+
+    # 2.5) Legado 支持但本项目回放不了的语法（详见设计文档 7.2）
+    #      必须显式报 unsupported，否则会被静默当成 CSS 选择器跑出空结果，
+    #      让试跑把「工具测不了」误判成「源坏了」
+    if raw.startswith("@@"):
+        pr.unsupported = "@@ 强制 jsoup 规则暂未支持"
+        return pr
+    if bl.startswith("@webjs:"):
+        pr.unsupported = "@webjs: 注入 WebView 执行 JS，需要 Legado 引擎，无法离线回放"
+        return pr
+    if "@get:{" in body or "@put:{" in body:
+        pr.unsupported = "@get: / @put: 变量读写暂未支持"
+        return pr
+    if "&&" in body or "%%" in body:
+        pr.unsupported = "多规则合并（&& / %%）暂未支持"
+        return pr
+    if re.search(r"\[\s*-?\d+(?:\s*:\s*-?\d+){1,2}\s*\]", body):
+        pr.unsupported = "区间索引（[start:end:step]）暂未支持"
+        return pr
+    if re.search(r"\$\d{1,2}", body):
+        pr.unsupported = "$n 取列表第 n 项暂未支持"
+        return pr
+    if raw.count("##") >= 3:
+        pr.unsupported = "## 第四段（只替换第一个匹配）暂未实现"
+        return pr
+
     if pr.kind == "js" or "<js" in bl or "</js>" in bl or bl.startswith("js:"):
         pr.unsupported = "JS 规则（@js:/<js>）需要 Legado 的 Rhino 引擎，无法离线回放"
         return pr
