@@ -479,6 +479,9 @@ class DirtySourceTypeTests(unittest.TestCase):
 #  M26 早退的 return _done() 改回手写字典（丢掉 pages）       | EarlyExitShapeTests.test_search_extract_fail_early_exit
 #  M27 searchUrl 取空时不再走发现模式                         | test_discovery_mode_without_detail_url_early_exit
 #  M28 空列表规则 + 旧哨兵（rule="" 且 rule_error="空规则"）  | test_quality.test_empty_rule_beats_stale_sentinel_rule_error
+#  M29 _done() 的 local_approx → False                        | LocalApproxFlagTests 全 3 条
+#      （标记只写在 _done() 一处、6 个出口共用；哪个出口改回手写字典，
+#        上面 3 条与 M26 那条会一起变红）
 #
 # 对照组（证明被替换掉的 6 条旧断言确实没有区分力）：
 # 把旧用例的**原样**放回来，在同样的变异下单独跑——

@@ -17,8 +17,8 @@ webView、正文分页全都在。我们只当客户端——**App 一行源码�
   core/loader.py），实测与原文有 20.7% 不一致（主要是尾部斜杠）。用错时 App 的
   ``getBookSource(tag)?.let{}`` 查不到源就**什么都不做**——表现为静默无响应，
   极难排查。所以本模块的任何调用方都必须传原文，别图省事传库里的键。
-- ``key`` 三种格式：``关键字`` 从搜索开始 / ``++<URL>`` 从目录页开始 /
-  ``--<URL>`` 从正文页开始
+- ``key`` 四种格式：``关键字`` 从搜索开始 / ``发现::<URL>`` 从发现页开始 /
+  ``++<URL>`` 从目录页开始 / ``--<URL>`` 从正文页开始
 - 响应是一串带 ``[mm:ss.SSS]`` 相对耗时前缀的文本消息，对端跑完主动关闭
   （``CloseReason`` "调试结束"）
 
@@ -53,30 +53,47 @@ DEFAULT_DEBUG_PORT = 1123
 CONNECT_TIMEOUT = 10
 #: 单帧等待上限（秒）。对端跑完会主动 close，这里只是兜底
 RECV_TIMEOUT = 20
-#: 最多抓几个页面。搜索页 / 详情页 / 正文页各一个就够
+#: 最多抓几个页面。**这个上限是按「去重后的 page_id 个数」算的，不是按段数**：
+#:   - 关键字模式：搜索 / 详情 / 正文 → 3 个 id（目录页与详情页共用 detail，见下）
+#:   - 发现模式：发现 / 详情 / 正文 → 3 个 id（同样是 3，正文页不会被挤掉。
+#:     发现页→详情页→目录页→正文页 是 4 个段，但目录页仍与详情页共用 detail）
+#: 但**余量为零**：若将来有人把 ``PAGE_IDS["toc"]`` 拆成独立 id，发现模式就会
+#: 出现第 4 个 id，而 ``fetch_debug_pages`` 的上限判断在循环**开头**——被丢掉的
+#: 恰恰是排在最后的正文页（最不该丢的一页）。改 ``PAGE_IDS`` 前先看
+#: ``tests/test_app_debug.py:TestFetchPages`` 里的两条页面数用例。
 MAX_PAGES = 3
 
-#: App 的段名 → ``steps[].name``。抽屉的 STEP_LABELS 只认这 4 个名字，
-#: 拼错会退化成显示原始 name（不影响功能，但没必要）
-SEGMENT_NAMES = {"搜索": "search", "详情": "bookUrl", "目录": "toc", "正文": "content"}
+#: App 的段名 → ``steps[].name``。抽屉的 STEP_LABELS 认的就是这 5 个名字
+#: （``explore`` 是本次新增的第 5 个），拼错会退化成显示原始 name
+#: （不影响功能，但没必要）
+SEGMENT_NAMES = {"搜索": "search", "发现": "explore", "详情": "bookUrl",
+                 "目录": "toc", "正文": "content"}
 
 #: ``steps[].name`` → ``pages[].id``。**目录页与详情页共用 detail**：Legado 在
 #: ``ruleBookInfo.tocUrl`` 为空时复用 book URL 解析目录（Debug.kt:318-322），
 #: 两者本就是同一个页面的可能性最大；共用后最多正好 3 页，正文页不会被挤掉。
-PAGE_IDS = {"search": "search", "bookUrl": "detail", "toc": "detail", "content": "chapter"}
+#:
+#: **发现页必须单独一个 id，不能并进 detail**：发现页是分类/榜单页，详情页是
+#: 某本书的页，两者是**不同的 URL**。共用 id 的话 ``quality.new_page`` 的
+#: 「先到先得」会让先抓到的发现页 HTML 顶掉详情页（或反过来），抽屉里两页都
+#: 失真——那正是「看源码改规则」失去地基。多出的这一个 id 不破 MAX_PAGES，
+#: 因为发现模式里没有搜索段（理由见 MAX_PAGES 的注释）。
+PAGE_IDS = {"search": "search", "explore": "explore", "bookUrl": "detail",
+            "toc": "detail", "content": "chapter"}
 
 # ------------------------------------------------------------------ 正则
 
 #: App 给每条消息加的 ``[mm:ss.SSS]`` 相对耗时前缀
 _PREFIX_RE = re.compile(r"^\[(\d{1,2}):(\d{2})(?:\.(\d{1,3}))?\]\s*")
-#: 段起始：``︾开始解析搜索页``
-_START_RE = re.compile(r"^︾开始解析(搜索|详情|目录|正文)页")
-#: 段结束：``︽搜索页解析完成``
-_DONE_RE = re.compile(r"^︽(搜索|详情|目录|正文)页解析完成")
+#: 段起始：``︾开始解析搜索页`` / ``︾开始解析发现页``
+_START_RE = re.compile(r"^︾开始解析(搜索|发现|详情|目录|正文)页")
+#: 段结束：``︽搜索页解析完成`` / ``︽发现页解析完成``
+_DONE_RE = re.compile(r"^︽(搜索|发现|详情|目录|正文)页解析完成")
 #: 抓取成功：``≡获取成功:https://...``
 _URL_RE = re.compile(r"^≡获取成功[:：](.+)$")
-#: 入口事件：``⇒开始搜索关键字:我`` / ``⇒开始访目录页:<URL>``
-_ENTRY_RE = re.compile(r"^⇒开始(?:搜索关键字|访(搜索|详情|目录|正文)页)")
+#: 入口事件：``⇒开始搜索关键字:我`` / ``⇒开始访目录页:<URL>`` /
+#: ``⇒开始访问发现页:<URL>``（发现是「访问」而不是「访」，故 ``问`` 可选）
+_ENTRY_RE = re.compile(r"^⇒开始(?:搜索关键字|访(?:问)?(搜索|发现|详情|目录|正文)页)")
 #: 统计行前缀（``◇目录总数:108``）
 _STAT_MARK = "◇"
 
@@ -310,7 +327,8 @@ def build_steps(events: Sequence[Any]) -> List[Dict[str, Any]]:
 
     每段产出与 ``verify_chain`` 完全同形的 step（经
     ``quality.Judgement.as_step_dict`` 摊平，**不在这里抄一份字典字面量**）：
-      - ``name``：search / bookUrl / toc / content
+      - ``name``：search / explore / bookUrl / toc / content
+        （``explore`` 只在 key 为 ``发现::<URL>`` 时出现，见 ``SEGMENT_NAMES``）
       - ``verdict``：段内有错误行 → fail；有 ``︽X页解析完成`` → pass；否则 unknown
       - ``values``：该段内所有事件原文（已去耗时前缀，保留 ┌/└ 成对结构）
       - ``url``：段内 ``≡获取成功:<URL>`` 的 URL（没有则空）
@@ -372,7 +390,9 @@ def fetch_debug_pages(steps: Sequence[Dict[str, Any]], source: Optional[Dict[str
                       proxy: str = "", timeout: int = 15) -> List[Dict[str, Any]]:
     """按 steps 抓页面，返回 ``pages[]``（与 verify_chain 同形状）。
 
-    只抓「搜索页 / 详情页 / 正文页」各一个（``page_id`` 去重后天然 ≤ 3 个）。
+    只抓「搜索页 / 详情页 / 正文页 / 发现页」各一个——按 ``page_id`` 去重后
+    天然 ≤ ``MAX_PAGES`` 个（发现模式是 发现/详情/正文，关键字模式是
+    搜索/详情/正文，不会同时出现；上限的余量分析见 ``MAX_PAGES`` 的注释）。
 
     **必须用书源自己的 header / charset**——与 verify.py 一致：不带书源头抓回来
     的 HTML 是失真的，「看源码改规则」就失去地基。

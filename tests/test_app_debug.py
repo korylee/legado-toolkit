@@ -18,7 +18,8 @@ from unittest.mock import patch
 
 from core import quality as Q
 from core.app_debug import (
-    MAX_PAGES, build_steps, collect_debug_events, fetch_debug_pages, run_app_debug,
+    MAX_PAGES, PAGE_IDS, build_steps, collect_debug_events, fetch_debug_pages,
+    run_app_debug,
 )
 
 #: 实测样本：关键字模式，走完 搜索 → 详情 → 目录 → 正文
@@ -53,6 +54,33 @@ SAMPLE = [
     "[00:03.060]︽正文页解析完成",
 ]
 
+#: 发现模式的样本（key = ``发现::<URL>``，如 ``发现::http://m.qudushu.com/sort/1/1.html``）。
+#: 事件序列依据 Legado ``Debug.kt:246-250``（``⇒开始访问发现页``）与 ``:281-293``
+#: （``︾开始解析发现页`` / ``≡获取成功`` / ``└列表大小`` / ``︽发现页解析完成``）：
+#: 发现页解析完取第 0 条，继续走 详情页 → 目录页 → 正文页。
+EXPLORE_URL = "http://m.qudushu.com/sort/1/1.html"
+EXPLORE_SAMPLE = [
+    "[00:00.100]⇒开始访问发现页:http://m.qudushu.com/sort/1/1.html",
+    "[00:00.200]︾开始解析发现页",
+    "[00:00.900]≡获取成功:http://m.qudushu.com/sort/1/1.html",
+    "[00:00.950]┌获取书籍列表",
+    "[00:01.000]└列表大小:20",
+    "[00:01.050]︽发现页解析完成",
+    "[00:01.100]︾开始解析详情页",
+    "[00:01.500]≡获取成功:https://www.52shuku.net/bjUIK.html",
+    "[00:01.520]┌获取书名",
+    "[00:01.540]└孤悬_虞渊【完结+番外】",
+    "[00:01.560]︽详情页解析完成",
+    "[00:01.600]︾开始解析目录页",
+    "[00:02.100]◇目录总数:108",
+    "[00:02.120]︽目录页解析完成",
+    "[00:02.200]︾开始解析正文页",
+    "[00:02.900]≡获取成功:https://www.52shuku.net/bjUIK_2.html",
+    "[00:02.920]┌获取正文内容",
+    "[00:02.940]└\n　　正文全文",
+    "[00:02.960]︽正文页解析完成",
+]
+
 #: 服务端推来的正文全文（断言 values 保留全文、不被截断）
 CONTENT_URL = "https://www.52shuku.net/bjUIK_2.html"
 TOC_URL = "https://www.52shuku.net/bjUIK.html"
@@ -62,6 +90,7 @@ PAGES = {
     SEARCH_URL: "<html>搜索页</html>",
     TOC_URL: "<html>详情页</html>",
     CONTENT_URL: "<html>正文页</html>",
+    EXPLORE_URL: "<html>发现页</html>",
 }
 
 
@@ -142,6 +171,63 @@ class TestSegmenting(unittest.TestCase):
         self.assertEqual(search["verdict"], "unknown")
         self.assertTrue(search["ok"])          # unknown 仍算 ok（verify 的旧语义）
         self.assertEqual(search["reason"], "该段没有解析完成信号")
+
+
+# ------------------------------------------------------------------ 发现段
+
+class TestExploreSegment(unittest.TestCase):
+    """key = ``发现::<URL>`` 的链路：发现页 → 详情页 → 目录页 → 正文页。
+
+    发现是 App 调试的 5 个目标之一（``Debug.kt:246-250/281-293``）。我们这边
+    原本只认 4 个段名，``︾开始解析发现页`` 会被当成「不是分段信号」而并进上一段
+    ——整条链的段名与页 id 就全错位了，所以这一组用例盯的是段名与页 id。
+    """
+
+    def test_explore_sample_splits_into_four_steps_in_order(self):
+        steps = build_steps(EXPLORE_SAMPLE)
+        self.assertEqual([s["name"] for s in steps],
+                         ["explore", "bookUrl", "toc", "content"])
+        self.assertEqual([s["verdict"] for s in steps], ["pass"] * 4)
+
+    def test_explore_step_keeps_its_own_url_and_entry_event(self):
+        explore = step_of(build_steps(EXPLORE_SAMPLE), "explore")
+        self.assertEqual(explore["url"], EXPLORE_URL)
+        # 入口事件（⇒开始访问发现页）归入发现段
+        self.assertEqual(explore["values"][0],
+                         "⇒开始访问发现页:http://m.qudushu.com/sort/1/1.html")
+        self.assertEqual(explore["values"][1], "︾开始解析发现页")
+        self.assertIn("└列表大小:20", explore["values"])
+        self.assertIn("︽发现页解析完成", explore["values"])
+
+    def test_explore_has_its_own_page_id_not_detail(self):
+        """**发现页与详情页是不同的 URL，绝不能共用一个 page_id**。
+
+        共用的话 ``quality.new_page`` 的「先到先得」会让先抓到的发现页 HTML
+        顶掉详情页（或反过来），抽屉里两页都失真。这条用例同时钉住「不与
+        detail 共用」和「映射就是 explore 本身」两层。
+        """
+        self.assertEqual(PAGE_IDS["explore"], "explore")
+        self.assertNotEqual(PAGE_IDS["explore"], PAGE_IDS["bookUrl"])
+        steps = build_steps(EXPLORE_SAMPLE)
+        self.assertEqual(step_of(steps, "explore")["page_id"], "explore")
+        self.assertEqual(step_of(steps, "bookUrl")["page_id"], "detail")
+        self.assertEqual(step_of(steps, "toc")["page_id"], "detail")
+        self.assertEqual(step_of(steps, "content")["page_id"], "chapter")
+        # 发现段不会去挤详情段：这一段链上页面 id 恰好是三个
+        self.assertEqual({s["page_id"] for s in steps},
+                         {"explore", "detail", "chapter"})
+
+    def test_explore_entry_event_alone_still_names_the_segment(self):
+        """连 ︾/︽ 都没推时，凭 ``⇒开始访问发现页`` 也能定段名。
+
+        注意是「访问发现页」而不是「访目录页」——正则里 ``问`` 必须可选，
+        否则这个兜底会把发现段错标成 content。
+        """
+        steps = build_steps(["⇒开始访问发现页:http://a.com/sort/1.html",
+                             "└列表大小:20"])
+        self.assertEqual(len(steps), 1)
+        self.assertEqual(steps[0]["name"], "explore")
+        self.assertEqual(steps[0]["page_id"], "explore")
 
 
 # ------------------------------------------------------------------ 单段输入
@@ -326,6 +412,26 @@ class TestFetchPages(unittest.TestCase):
         """抓回空 HTML 不登记（new_page 的口径），但不报错。"""
         with patch("core.app_debug.fetch", side_effect=lambda *a, **k: ""):
             self.assertEqual(fetch_debug_pages(self._steps()), [])
+
+    def test_explore_chain_keeps_four_steps_to_three_pages(self):
+        """发现链路（4 个段）仍然只登记 3 页，且**正文页不会被 MAX_PAGES 挤掉**。
+
+        这是 MAX_PAGES == 3 在新链路下的实测依据：发现模式没有搜索段，
+        页 id 是 发现/详情/正文 三个（目录页与详情页共用 detail），而
+        ``fetch_debug_pages`` 的上限判断在循环开头——少算一个就会丢掉排在最后、
+        也最不该丢的正文页。所以「4 个段 → 3 个 id」这件事必须有用例守着。
+        """
+        steps = build_steps(EXPLORE_SAMPLE)
+        with patch("core.app_debug.fetch", side_effect=fake_fetch):
+            pages = fetch_debug_pages(steps)
+        self.assertEqual([p["id"] for p in pages], ["explore", "detail", "chapter"])
+        self.assertEqual(len(pages), MAX_PAGES)
+        # 发现页与详情页各自拿到自己的 HTML（没有互相覆盖）
+        self.assertEqual(pages[0]["url"], EXPLORE_URL)
+        self.assertEqual(pages[0]["html"], "<html>发现页</html>")
+        self.assertEqual(pages[1]["url"], TOC_URL)
+        self.assertEqual(pages[2]["html"], "<html>正文页</html>")
+        self.assertEqual(step_of(steps, "content")["url"], CONTENT_URL)
 
     def test_toc_page_shares_detail_id_so_content_is_not_dropped(self):
         """目录页与详情页共用 detail id：3 页上限下正文页不会被挤掉。"""
@@ -549,6 +655,17 @@ class TestQualityNewPageShared(unittest.TestCase):
 #       → test_page_ids_match_drawer_pages、test_only_toc_segment（2 条）
 #   M3  ``_is_error`` 的「行首匹配」 → 「正文里含『失败』也算」
 #       → test_failure_word_inside_content_is_not_an_error（1 条，正文被误判成 fail）
+#   M4  PAGE_IDS 的 ``"explore": "explore"`` → ``"detail"``（与详情页共用）
+#       → 3 条变红：test_explore_has_its_own_page_id_not_detail、
+#         test_explore_chain_keeps_four_steps_to_three_pages、
+#         test_explore_entry_event_alone_still_names_the_segment
+#   M5  ``_START_RE`` / ``_DONE_RE`` 去掉 ``发现``
+#       → 4 条变红：TestExploreSegment 全 3 条 + test_explore_chain_…（发现段不再分段）
+#   M6  ``_ENTRY_RE`` 的 ``(?:问)?`` 去掉（只认「访」不认「访问」）
+#       → 1 条变红：test_explore_entry_event_alone_still_names_the_segment
+#   M7  ``MAX_PAGES`` 3 → 4
+#       → 2 条变红：test_pages_have_verify_chain_shape、
+#         test_explore_chain_keeps_four_steps_to_three_pages（上限两个方向都有用例守）
 
 if __name__ == "__main__":
     unittest.main()
