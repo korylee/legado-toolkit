@@ -3043,13 +3043,27 @@ function openDebug(step) {
 > Task 12 会在这行上加一个 `@goto="onDebugGoto"`（类型不符 note 的「去改类型」入口）。现在先不加。
 
 > ⚠️ **`initialStep` 只在 `modelValue` 由 `false → true` 时生效**——抽屉里的 `watch`
-> 没有 `immediate`。所以：
-> - 若用 `v-if` 挂载抽屉，或挂载那一刻 `modelValue` 已经是 `true`，**首帧会落到 `steps[0]`，
->   `:initial-step` 被忽略**
-> - 上面这种写法（抽屉常驻、靠 `v-model` 控制显隐）没问题；**一旦改成 `v-if`，就要给
->   抽屉里的 watch 加 `{ immediate: true }`**（一行）
+> 没有 `immediate`。所以：若挂载那一刻 `modelValue` 已经是 `true`，**首帧会落到
+> `steps[0]`，`:initial-step` 被忽略**。
 >
-> 这条是实现 Task 9 时发现的，此处记录以免接线时踩。
+> ⚠️⚠️ **而 `el-dialog` 带 `destroy-on-close`，所以「常驻挂载」并不能避开这个陷阱**：
+> element-plus 的 dialog 把默认插槽整体包在 `rendered ? ... : comment` 里，
+> **弹窗一关，插槽里的抽屉就跟着被卸载**。后果链：
+>
+> 1. 在**抽屉开着**的时候关掉弹窗（例如按 ESC——`useEscapeKeydown` 是全局广播，
+>    所有 overlay 都会响应）
+> 2. `debugVisible` 留在 `true`（没有代码把它清掉）
+> 3. 下次打开弹窗 → 抽屉**自己弹出来**
+> 4. 而挂载那一刻 `modelValue` 已经是 `true` → 抽屉的 `watch` 不触发 →
+>    `activeStep` 落到 `steps[0]`，`:initial-step` 被忽略
+>
+> **修法（一行，必须在 Step 1 的弹窗打开 watch 里补）**：
+> ```js
+> debugVisible.value = false;   // 关弹窗时抽屉被 destroy-on-close 卸载了，
+>                               // 但 debugVisible 会留在 true，下次打开就会自己弹出来
+> ```
+>
+> 这条是实现 Task 10 时发现的（前面的版本只记了 `v-if` 那条，不够）。
 
 - [ ] **Step 8: 手工验证**
 
