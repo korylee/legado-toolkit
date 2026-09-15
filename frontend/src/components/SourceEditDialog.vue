@@ -471,7 +471,10 @@ async function doSave(s) {
       <el-col :xs="24" :sm="24" :md="15">
         <el-tabs v-model="activeTab" :tab-position="isMobile ? 'top' : 'left'"
                  class="source-tabs">
-          <el-tab-pane v-if="isNew" name="quick">
+          <!-- 另存模式不显示「快速生成」：它是「整份替换表单」的入口
+               （applyGenerated 里 form.value = {...blank(), ...src}），
+               在另存模式下点它会丢掉正要另存的那份规则 -->
+          <el-tab-pane v-if="isNew && !isDuplicate" name="quick">
             <template #label>
               <span class="tab-label">快速生成<i class="dot" :class="tabDot('quick')"></i></span>
             </template>
