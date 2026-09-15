@@ -162,17 +162,34 @@ function applyRawJson() {
   }
 }
 
+// 单步 → 圆点级别。**顺序必须与 tagTypeOf / 抽屉的 dotClass 一致**
+// （fail → unknown → has_notes），否则同一步会出现「页签黄、徽章灰」。
+// unknown 要排在 has_notes 之前：`unknown` + 附注时的附注只是**解释为什么测不了**
+// （如「仅发现模式，无搜索规则」），不是「有疑点」，显示成黄是误导。
+function stepDot(s) {
+  // 兜底：快速生成的结果存在 SQLite 里，可能是改动前产生的旧结果（无 verdict）。
+  // 与 tagTypeOf 同款兜底——不兜的话 `undefined === "fail"` 全不成立，
+  // 旧结果的失败步会渲染成绿色
+  if (!s.verdict) return s.ok ? "ok" : "err";
+  if (s.verdict === "fail") return "err";
+  if (s.verdict === "unknown") return "unknown";
+  return s.has_notes ? "warn" : "ok";
+}
+const DOT_RANK = { err: 3, warn: 2, unknown: 1, ok: 0 };
+// 取最 alarming 的一档。**无状态（""）与 ok 都不参与**，全无状态时返回 ""
+function worstDot(steps) {
+  let worst = "";
+  for (const s of steps || []) {
+    const d = stepDot(s);
+    if (worst === "" || DOT_RANK[d] > DOT_RANK[worst]) worst = d;
+  }
+  return worst;
+}
+
 function tabDot(name) {
   if (name === "quick") {
-    // 与试跑卡片同口径，四级优先（从最 alarming 往下）：fail 红；有附注（通过了但有疑点）黄；
-    // unknown 灰（我们的工具回放不了，无法判定——显示成绿色就是绿灯撒谎）；其余绿。
-    // **不能再读 all_ok**——all_ok 只看 fail，会把「pass + 附注」显示成绿
     const steps = (quickVerify.value && quickVerify.value.steps) || [];
-    if (!steps.length) return "";
-    if (steps.some((s) => s.verdict === "fail")) return "err";
-    if (steps.some((s) => s.has_notes)) return "warn";
-    if (steps.some((s) => s.verdict === "unknown")) return "unknown";
-    return "ok";
+    return steps.length ? worstDot(steps) : "";
   }
   if (name === "basic") {
     // 名称与域名是保存的前置条件（见 save()），两者齐全才算填好。
@@ -182,13 +199,9 @@ function tabDot(name) {
     return filledBasic ? "ok" : "err";
   }
   if (name === "rules") {
-    // 四级优先：有 fail 红；无 fail 但有附注（通过了但有疑点）黄；
-    // unknown 灰（无法判定，与徽章 tagTypeOf 的灰色 info 对齐，不能落到绿色）；
-    // 都没有才看规则是否填全
     const steps = (testResult.value && testResult.value.steps) || [];
-    if (steps.some((s) => s.verdict === "fail")) return "err";
-    if (steps.some((s) => s.has_notes)) return "warn";
-    if (steps.some((s) => s.verdict === "unknown")) return "unknown";
+    const dot = worstDot(steps);
+    if (dot) return dot;
     return ["search", "detail", "toc", "content"].every(filled) ? "ok" : "warn";
   }
   if (name === "ext") {
@@ -209,11 +222,27 @@ function tagTypeOf(step) {
 }
 const STEP_LABELS = { search: "搜索", bookUrl: "详情链接", toc: "目录", content: "正文" };
 
-// 「全部通过」按 verdict 算，不再用 all_ok。**有附注的 pass 仍算通过**
-// 试跑与快速生成两份结果共用这一个判定，避免同一件事写两处
-function allPassed(steps) {
+// 整体汇总。**三态，不是二态**——原来只有「全部通过 / 未全部通过」，
+// 而 `unknown`（我们的工具回放不了）被算进「未通过」会误报：
+// 仅发现模式下 search 步是预期内的 skip（unknown），每个真实执行的步都通过，
+// 整体却说「未全部通过」，还跟着「补充详情页 URL 后重试」——
+// 而用户正是**主动**选的仅发现模式。
+//
+// 试跑与快速生成两份结果共用这一个判定，避免同一件事写两处。
+function testSummary(steps) {
   const list = steps || [];
-  return list.length > 0 && list.every((s) => s.verdict === "pass");
+  if (!list.length) return { level: "none", text: "" };
+  const failed = list.some((s) => s.verdict === "fail"
+    || (!s.verdict && s.ok === false));        // 旧结果（无 verdict）兜底
+  if (failed) return { level: "fail", text: "未通过" };
+  if (list.some((s) => s.verdict === "unknown")) {
+    return { level: "unknown", text: "部分无法判定" };
+  }
+  return { level: "pass", text: "全部通过" };
+}
+// 只有真的 fail 才提示「去改规则」——unknown 是工具的能力边界，改规则没用
+function summaryHint(summary) {
+  return summary.level === "fail" ? "，可手动修改规则，或补充详情页 URL 后重试。" : "";
 }
 
 function expandTestFailures(res) {
@@ -504,9 +533,9 @@ async function doSave(s) {
               </div>
               <p v-if="quickVerify.steps && quickVerify.steps.length"
                  class="muted" style="margin: 6px 0 0">
-                <b>{{ allPassed(quickVerify.steps) ? "全部通过" : "未全部通过" }}</b>
-                <span v-if="quickVerify.steps.some((s) => s.has_notes)">（有疑点，见附注）</span>
-                <span v-if="!allPassed(quickVerify.steps)">，可手动修改规则，或补充详情页 URL 后重试。</span>
+                <b>{{ testSummary(quickVerify.steps).text }}</b>
+                <span v-if="quickVerify.steps.some((s) => s.has_notes)">（有疑点，见调试详情）</span>
+                <span>{{ summaryHint(testSummary(quickVerify.steps)) }}</span>
               </p>
             </div>
           </el-tab-pane>
@@ -761,7 +790,7 @@ async function doSave(s) {
                       style="margin-top: 10px"
                       title="规则已改动，结果已过期，请重跑" />
             <p v-else style="margin: 10px 0 0">
-              <b>{{ allPassed(testResult.steps) ? "全部通过" : "未全部通过" }}</b>
+              <b>{{ testSummary(testResult.steps).text }}</b>
               <span v-if="testResult.steps.some((s) => s.has_notes)"
                     class="muted">（有疑点，见附注）</span>
             </p>
@@ -805,10 +834,10 @@ async function doSave(s) {
 .source-tabs :deep(.el-tabs__header) { flex: 0 0 auto; }
 .tab-label { display: inline-flex; align-items: center; gap: 6px; }
 .dialog-header { display: flex; align-items: center; gap: 12px; }
-.dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; background: #c0c4cc; }
-.dot.ok { background: #67c23a; }
-.dot.warn { background: #e6a23c; }
-.dot.err { background: #f56c6c; }
+/* 圆点样式已上移到全局 styles.css（那里有完整的 .dot / .ok / .warn / .err / .unknown）。
+   这里原先重复定义了一遍基础规则，而 scoped 版本的注入更晚、特异性同为 0,2,0，
+   会把全局的 .dot.unknown 盖掉——导致「无法判定」的灰点落回基础灰，与徽章的灰不同色。
+   删掉这份重复，统一从全局取。 */
 .quick-verify { border-top: 1px solid #ebeef5; margin-top: 4px; padding-top: 8px; }
 .quick-step { display: flex; align-items: center; gap: 8px; padding: 3px 0; }
 .raw-json :deep(textarea) { font-family: Consolas, Monaco, monospace; font-size: 12px; }
