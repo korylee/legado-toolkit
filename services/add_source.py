@@ -197,8 +197,12 @@ def run_add(url, name="", source_type="novel", group="📖新增源",
             print(f"    → 保存后合入主库：{to_merge}")
 
     # 4) 组装 Legado 书源（source_type 字符串 → Legado 数字类型）
+    # 用 .get 而不是下标：type 是外部（HTTP 请求体 / 旧前端 bundle）传进来的，
+    # 传一个不在表里的值（例如改枚举前的 "video"）下标会 KeyError → 接口 500。
+    # 降级为 0（Legado 的默认类型 文本）最保守——总比整个请求失败强。
     source_name = name or domain
-    source = build_source(url, keyword, analysis, source_name, TYPE_MAP[source_type], group)
+    source = build_source(url, keyword, analysis, source_name,
+                          TYPE_MAP.get(source_type, 0), group)
     if search_url_template:
         source["searchUrl"] = search_url_template
     if discover_mode:
