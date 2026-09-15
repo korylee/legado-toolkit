@@ -123,6 +123,25 @@ class UnsupportedTests(unittest.TestCase):
             ok, why = R.rule_supported(rule)
             self.assertTrue(ok, "被误伤：%s (%s)" % (rule, why))
 
+    def test_js_in_middle_reports_js_reason(self):
+        """`selector@js:code` 的 JS 体里出现 $1/&&/@get: 时，报的原因必须是 JS。
+
+        实测真实语料里 1139 条源规则属于这一类。结论（unknown）本来就对，
+        但如果 JS 检测排在新检测段后面，报出的原因会变成「$n 取列表第 n 项
+        暂未支持」——把用户引向错误的方向，而这个工具的全部价值就是告诉他
+        为什么。断言必须检查**原因内容**，否则这类错报不会被任何用例发现。
+        """
+        rules = [
+            r"text@js:result.replace(/^(\d+)章/,'第$1章')",
+            "id.c@text@js:return result + '&&'",
+            "id.c@text@js:java.get('x')@get:{y}",
+        ]
+        for rule in rules:
+            ok, why = R.rule_supported(rule)
+            self.assertFalse(ok, rule)
+            self.assertIn("JS", why,
+                          "原因必须指向 JS 而不是别的 token：%s -> %s" % (rule, why))
+
 
 class ImageHeuristicTests(unittest.TestCase):
     def test_image_ratio(self):

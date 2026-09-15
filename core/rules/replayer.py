@@ -248,7 +248,24 @@ def parse_rule(rule: str) -> ParsedRule:
     # 3) 不支持的语法 -> 明确标注，避免被当成「解析为空 = 规则失效」
     bl = body.lower()
 
-    # 2.5) Legado 支持但本项目回放不了的语法（详见设计文档 7.2）
+    # 3.0) JS 检测必须排在下面那批**之前**
+    #
+    #  `selector@js:code` 这种形态里，JS 体内部完全可能出现 $1、&&、@get: 这些
+    #  token。若先命中下面的检测，报出的原因就是错的——实测真实语料里 1139 条
+    #  源规则会因此显示「$n 取列表第 n 项暂未支持」，而真实原因是 JS 无法离线回放。
+    #  结论仍是 unknown（灰），但「为什么测不了」正是调试功能的核心价值，
+    #  报错原因等于把用户引向错误的方向。
+    #
+    #  原检测只认 `<js`/`</js`/开头 `js:`，从来不认中间形态的 `@js:`，所以
+    #  `@js:` 这个条件是本任务顺带补上的（属既有的检测缺口，不是本次引入）。
+    #  注意必须是精确的 `@js:`：写成裸的 `js:` 会把任何含 `js:` 的选择器
+    #  也判为不支持，反而制造「明明能跑却显示无法判定」的噪音。
+    if (pr.kind == "js" or "<js" in bl or "</js>" in bl
+            or bl.startswith("js:") or "@js:" in bl):
+        pr.unsupported = "JS 规则（@js:/<js>）需要 Legado 的 Rhino 引擎，无法离线回放"
+        return pr
+
+    # 3.1) Legado 支持但本项目回放不了的语法（详见设计文档 7.2）
     #      必须显式报 unsupported，否则会被静默当成 CSS 选择器跑出空结果，
     #      让试跑把「工具测不了」误判成「源坏了」
     if raw.startswith("@@"):
@@ -273,9 +290,6 @@ def parse_rule(rule: str) -> ParsedRule:
         pr.unsupported = "## 第四段（只替换第一个匹配）暂未实现"
         return pr
 
-    if pr.kind == "js" or "<js" in bl or "</js>" in bl or bl.startswith("js:"):
-        pr.unsupported = "JS 规则（@js:/<js>）需要 Legado 的 Rhino 引擎，无法离线回放"
-        return pr
     if pr.kind == "xpath" or bl.startswith("@xpath"):
         pr.unsupported = "XPath 规则需要 Legado 引擎，无法离线回放"
         return pr
