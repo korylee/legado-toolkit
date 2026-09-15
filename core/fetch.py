@@ -1,7 +1,55 @@
 # -*- coding: utf-8 -*-
 """由 services/add_source.py 拆分而来。"""
 
+import threading
+import time
+from typing import Any, Dict, Optional, Tuple
+
 from core.constants import *
+from core.quality import rate_interval_ms
+
+# ------------------------------------------------------------------ 限速
+# 源可以声明 concurrentRate（就是「这么打我你会被封」）。四条抓取链路里 checker 走
+# 异步 aiohttp，其余三条——全链路试跑、连 App 调试补抓页面、快速新增源——都走本模块。
+#
+# 限速必须两边都管：repair_many 是**自动批量**的（Semaphore(4) + gather，默认 3 轮 ×
+# 每轮最多 3 次抓取 = 单源最多 9 次），只给 checker 加限速等于「批量校验守规矩、
+# 自动修复连打九下」，而修复的目标恰恰是失效源——里面混着「可修」的站，连打容易
+# 把能修的打成真封。
+#
+# 模块级状态 + 锁：fetch 是同步函数，repair 里会被多个线程同时调用。
+_rate_last: Dict[str, float] = {}
+_rate_lock = threading.Lock()
+
+
+def _throttle(key: str, interval_ms: int) -> None:
+    """等距上次同 key 请求满 ``interval_ms`` 毫秒再返回。"""
+    if not key or interval_ms <= 0:
+        return
+    with _rate_lock:
+        now = time.monotonic() * 1000.0
+        last = _rate_last.get(key)
+        wait_ms = 0.0 if last is None else max(0.0, interval_ms - (now - last))
+        # 先占位再睡：别的线程读到的是「已排到的时刻」，不会有两个请求同时被放出去。
+        # 锁也不能握进 sleep —— 那样一个慢源的等待会把所有源一起卡住
+        _rate_last[key] = now + wait_ms
+    if wait_ms > 0:
+        time.sleep(wait_ms / 1000.0)
+
+
+def _rate_key(source) -> Tuple[str, int]:
+    """书源 dict → ``(限速键, 间隔毫秒)``。不传 source / 没声明限速 → ``("", 0)``。
+
+    键用书的**导入原文 URL**：App 的 ``ConcurrentRateLimiter`` 也是按
+    ``source.getKey()`` 记的（``ConcurrentRateLimiter.kt:64``）。别用规范化后的
+    URL 当键——``strip().rstrip("/").lower()`` 会把两个不同的源合成一个。
+    """
+    if not isinstance(source, dict):
+        return "", 0
+    interval = rate_interval_ms(source.get("concurrentRate"))
+    if interval <= 0:
+        return "", 0
+    return str(source.get("bookSourceUrl", "") or "").strip(), interval
 
 def parse_source_header(raw: str) -> tuple:
     """解析 Legado 书源的 ``header`` 字段，返回 ``(请求头, 不可用原因)``。
@@ -67,7 +115,8 @@ def parse_source_header(raw: str) -> tuple:
 
 
 def fetch(url: str, timeout: int = 15,
-          headers: dict = None, charset: str = "", proxy: str = "") -> str:
+          headers: dict = None, charset: str = "", proxy: str = "",
+          source: Optional[Dict[str, Any]] = None) -> str:
     """抓取页面 HTML。
 
     与 Legado 的 ``AnalyzeUrl`` 对齐的部分：
@@ -79,6 +128,9 @@ def fetch(url: str, timeout: int = 15,
         （会抛 ``unknown url type: socks5``）。项目别处（cli/main.py --proxy 帮助、
         WORKFLOW.md、checker.py 注释）宣传的 socks5 同样不成立，是既有的文档失实，
         不属本模块要修的范围，但这里**不要**再写 socks5 以免加深误导。
+      - ``source``：完整的书源 dict。传了才会遵守它自己声明的 ``concurrentRate``
+        限速（见文件头的「限速」一节）。**调用方应当传**——不传不会报错，只是
+        那条链路不受限速约束，而这是静默的。
     """
     h = {"User-Agent": DEFAULT_UA,
          "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
@@ -97,6 +149,10 @@ def fetch(url: str, timeout: int = 15,
     # safe 保留全部 URL 结构字符**以及 `%`**：这样已经编码好的 `%E6%88%91`
     # 不会被二次编码成 `%25E6...`，对纯 ASCII 的 URL 完全幂等。
     url = urllib.parse.quote(url, safe=":/?#[]@!$&'()*+,;=%~")
+
+    # 遵守源自己声明的限速。紧挨着真正的网络调用放，别提到函数开头——
+    # 那样参数校验失败也会白白占掉一个限速名额
+    _throttle(*_rate_key(source))
 
     req = urllib.request.Request(url, headers=h)
 

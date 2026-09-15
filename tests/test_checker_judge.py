@@ -17,14 +17,20 @@ from datetime import datetime, timedelta
 import sys
 import types
 import unittest
+from unittest import mock
 
 # 本文件用假的 _request 替掉网络层，不依赖真实客户端（与 test_checker_cache 同约定）
+#
+# **这行是全局副作用**：它把空壳 aiohttp 塞进 sys.modules，全量 discover 时后面的
+# 测试文件也会拿到它。后果是任何真的要跑 AsyncChecker._request 的用例，走到
+# `except aiohttp.XxxError` 求值就会抛 AttributeError——而单独跑那个文件时又是好的。
+# 新加涉及 aiohttp 的测试时，要么别真调 _request，要么别依赖它的返回值。
 sys.modules.setdefault("aiohttp", types.ModuleType("aiohttp"))
 
 from core import checker
 from core.checker import AsyncChecker
 from core.loader import fingerprint
-from core.models import BookSourceRecord, Health
+from core.models import BookSourceRecord, Health, build_record
 
 
 # ------------------------------------------------------------ 固定页面
@@ -61,8 +67,10 @@ class _StubChecker(AsyncChecker):
         self.pages = pages          # {url: 页面字符串}
         self.requested = []         # 实际请求过的 URL，用于钉住取哪一章
 
-    async def _request(self, session, url, method="GET", headers=None,
+    async def _request(self, session, record, url, method="GET", headers=None,
                        allow_redirects=True):
+        # 签名必须与 AsyncChecker._request 一致（record 是第二个位置参数）。
+        # 漏改的话 url 会绑到 record 上——桩照样"能跑"，只是测的不是真东西
         self.requested.append(url)
         page = self.pages.get(url)
         if page is None:
@@ -294,6 +302,50 @@ class ContentProbeTests(unittest.TestCase):
         self.assertIs(rec.content_ok, False)
 
 
+# ------------------------------------------------------------ 命中判定降级留痕
+
+class HitDowngradeTests(unittest.TestCase):
+    """``_confirm_hit`` 的异常分支必须留痕。
+
+    该分支把「规则回放不了」当成「命中了」——方向是对的（保守不误杀），但它同时
+    是 lessons §二 那次 bs4 缺失事故的入口：ModuleNotFoundError 被吞掉之后，命中
+    判定退化成「响应体里含关键词就算命中」，而且**没有任何痕迹**。
+
+    留痕不等于翻案：这里只验证「记下来了」，不改变它仍然返回 True。
+    """
+
+    def _record(self, rule="class.book"):
+        return build_record({"bookSourceUrl": "https://a.example/",
+                             "bookSourceName": "A",
+                             "ruleSearch": {"bookList": rule}}, 0)
+
+    def test_exception_is_recorded_but_still_counts_as_hit(self):
+        ck = AsyncChecker(concurrency=1)
+        with mock.patch.object(checker, "apply_css_rule",
+                               side_effect=RuntimeError("模拟依赖缺失")):
+            self.assertTrue(ck._confirm_hit(b"<html>x</html>", self._record()))
+        self.assertEqual(len(ck.hit_downgrades), 1)
+        self.assertIn("RuntimeError", ck.hit_downgrades[0])
+        self.assertIn("https://a.example/", ck.hit_downgrades[0])
+
+    def test_normal_rule_records_nothing(self):
+        ck = AsyncChecker(concurrency=1)
+        with mock.patch.object(checker, "apply_css_rule", return_value=["书名"]):
+            self.assertTrue(ck._confirm_hit(b"<html>x</html>", self._record()))
+        self.assertEqual(ck.hit_downgrades, [])
+
+    def test_js_rule_is_a_known_tradeoff_not_a_downgrade(self):
+        # JS 规则回放不了是**明知的能力边界**。每次都记会变成噪音，
+        # 恰好淹没真正需要看见的那种异常（依赖缺失、解析器坏掉）
+        ck = AsyncChecker(concurrency=1)
+        # 两个断言缺一不可：只断言「没记降级」的话，把 JS 那条早退删掉也能过
+        # （<js> 规则走 apply_css_rule 同样取不到值 → 同样不记降级），
+        # 但那时行为已经变了：本该「保守算命中」的源会被判成未命中
+        self.assertTrue(ck._confirm_hit(b"<html>x</html>",
+                                        self._record(rule="<js>x</js>")))
+        self.assertEqual(ck.hit_downgrades, [])
+
+
 # ------------------------------------------------------------------ 变异表
 #
 # 每条变异都真实执行过：改坏 core/checker.py 的一处 → 跑全量
@@ -320,6 +372,15 @@ class ContentProbeTests(unittest.TestCase):
 #                                                            | test_empty_rule_on_image_source_passes
 #  M10 judge_list_step 的步骤名 "toc" → "search"            | test_download_source_toc_is_unknown_not_pass
 #  M11 judge_list_step 的 source_type 写死 0                | test_download_source_toc_is_unknown_not_pass
+#  M12 两处，都守 _confirm_hit 的降级留痕：
+#      a) 删掉 hit_downgrades.append（还原成静默吞异常）     | test_exception_is_recorded_but_still_counts_as_hit
+#      b) 去掉 `<js` 那条早退（JS 规则也走回放）             | test_js_rule_is_a_known_tradeoff_not_a_downgrade
+#
+#  M12b **第一次跑是绿的**：当时那条用例只断言「没记降级」，而删掉早退后
+#  `<js>` 规则走 apply_css_rule 同样取不到值、同样不记降级——两个实现都能过，
+#  但行为已经变了（本该「保守算命中」的源会被判成未命中）。补上
+#  `assertTrue(...)` 守返回值之后才变红。**只断言副作用、不断言返回值的用例，
+#  守不住分支被删。**
 #
 # 前向钉子（改坏之前就已经通过，不区分新旧实现，只区分上面那批变异）：
 #   test_toc_pass_reaches_ratio_check（旧实现同样 True，它守的是 M2）

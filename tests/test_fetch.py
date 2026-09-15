@@ -107,17 +107,20 @@ class FetchSignatureTests(unittest.TestCase):
         """只验证签名，不发真实请求。"""
         import inspect
         sig = inspect.signature(F.fetch)
-        for name in ("headers", "charset", "proxy"):
+        for name in ("headers", "charset", "proxy", "source"):
             self.assertIn(name, sig.parameters)
 
     def test_signature_defaults_and_order(self):
         """新参数必须都有默认值，且追加在原 timeout 之后——否则既有位置调用会错位。"""
         import inspect
         sig = inspect.signature(F.fetch)
-        self.assertEqual(list(sig.parameters), ["url", "timeout", "headers", "charset", "proxy"])
-        for name in ("headers", "charset", "proxy"):
+        self.assertEqual(list(sig.parameters),
+                         ["url", "timeout", "headers", "charset", "proxy", "source"])
+        for name in ("headers", "charset", "proxy", "source"):
             self.assertIsNot(sig.parameters[name].default, inspect.Parameter.empty)
         self.assertEqual(sig.parameters["timeout"].default, 15)
+        # source 默认 None：不传就只是那条链路不受限速约束，不能报错
+        self.assertIsNone(sig.parameters["source"].default)
 
 
 class FetchBehaviorTests(unittest.TestCase):
@@ -263,6 +266,118 @@ class FetchBehaviorTests(unittest.TestCase):
         self.assertTrue(uo.called, "没走直连")
         self.assertFalse(bo.called, "不该建 opener")
 
+
+class RateLimitTests(unittest.TestCase):
+    """fetch 侧的限速：源声明了 concurrentRate，每条抓取链路都得遵守。
+
+    checker 走异步 aiohttp、其余三条（全链路试跑 / 连 App 调试补抓 / 快速新增源）
+    走本模块。**两条链路必须用同一份解析**——复制一份到自己模块里就是第二个口径。
+    """
+
+    def setUp(self):
+        # 模块级状态，用例之间必须清干净，否则会互相插间隔
+        F._rate_last.clear()
+        self.addCleanup(F._rate_last.clear)
+
+    @staticmethod
+    def _resp(*_a, **_k):
+        class FakeResp:
+            def read(self): return b"ok"
+            def __enter__(self): return self
+            def __exit__(self, *exc): return False
+        return FakeResp()
+
+    def test_parser_is_the_same_object_checker_uses(self):
+        from core import checker, quality
+        self.assertIs(quality.rate_interval_ms, checker.rate_interval_ms)
+
+    def test_rate_key_for_absent_or_unparsable_rates(self):
+        # 不传 source 不能报错（add_source 的探测阶段就是没有源的状态），
+        # 也不能凭空插一个间隔
+        for source in (None, {}, [], "x",
+                       {"bookSourceUrl": "https://a/"},
+                       {"bookSourceUrl": "https://a/", "concurrentRate": "0"},
+                       {"bookSourceUrl": "https://a/", "concurrentRate": "abc"}):
+            with self.subTest(source=source):
+                self.assertEqual(F._rate_key(source), ("", 0))
+
+    def test_rate_key_keeps_the_raw_url(self):
+        # 键必须是导入原文：规范化过的 URL（去尾斜杠 / 转小写）会把两个不同的源
+        # 合成一个键，等于给它们共用一份限速预算
+        self.assertEqual(
+            F._rate_key({"bookSourceUrl": "https://A.com/Path/",
+                         "concurrentRate": "1/2000"}),
+            ("https://A.com/Path/", 2000))
+
+    def test_fetch_hands_the_source_to_the_throttle(self):
+        # 接线验证：只测 _throttle 本身的话，把 fetch 里那行删掉也照样全绿
+        calls = []
+        with patch.object(F, "_throttle", side_effect=lambda *a: calls.append(a)), \
+             patch("urllib.request.urlopen", side_effect=self._resp):
+            F.fetch("https://a.com/x",
+                    source={"bookSourceUrl": "https://a.com/",
+                            "concurrentRate": "1/500"})
+        self.assertEqual(calls, [("https://a.com/", 500)])
+
+    def test_fetch_without_source_still_works(self):
+        calls = []
+        with patch.object(F, "_throttle", side_effect=lambda *a: calls.append(a)), \
+             patch("urllib.request.urlopen", side_effect=self._resp):
+            self.assertEqual(F.fetch("https://a.com/x"), "ok")
+        self.assertEqual(calls, [("", 0)])     # 键为空 → 限速函数立刻返回
+
+    def test_throttle_waits_between_consecutive_calls(self):
+        # 假时钟，**单位必须是秒**：time.monotonic() 返回秒，_throttle 内部自己乘 1000。
+        # 假时钟若按毫秒累加就是双重放大（200 → 200 秒），等待次数会算错。
+        # 每次 sleep 要把时钟推着走，否则冻结的时钟会让等待越算越长
+        clock = [0.0]
+        slept = []
+
+        def fake_sleep(seconds):
+            slept.append(seconds)
+            clock[0] += seconds
+
+        with patch.object(F.time, "sleep", side_effect=fake_sleep), \
+             patch.object(F.time, "monotonic", side_effect=lambda: clock[0]):
+            F._throttle("k", 200)      # 第一次：不等
+            F._throttle("k", 200)      # 第二次：等满间隔
+            F._throttle("k", 200)      # 第三次：同样
+        self.assertEqual(len(slept), 2)
+        for seconds in slept:
+            self.assertAlmostEqual(seconds, 0.2, places=3)
+
+    def test_throttle_is_per_key(self):
+        slept = []
+        with patch.object(F.time, "sleep", side_effect=lambda s: slept.append(s)), \
+             patch.object(F.time, "monotonic", return_value=0.0):
+            F._throttle("a", 5000)
+            F._throttle("b", 5000)     # 另一个源，不该被 a 拖住
+        self.assertEqual(slept, [])
+
+    def test_throttle_is_a_noop_without_interval(self):
+        slept = []
+        with patch.object(F.time, "sleep", side_effect=lambda s: slept.append(s)):
+            F._throttle("k", 0)
+            F._throttle("", 5000)
+        self.assertEqual(slept, [])
+
+
+# ---------------------------------------------------------------- 变异记录
+# 以下为实测（改坏 → `python -B -m unittest tests.test_fetch` → 确认变红 → 还原）。
+#
+#  M1  fetch 里删掉 `_throttle(*_rate_key(source))`
+#        → test_fetch_hands_the_source_to_the_throttle
+#          test_fetch_without_source_still_works 红
+#  M2  _rate_key 改用规范化 URL（.rstrip("/").lower()）
+#        → test_rate_key_keeps_the_raw_url
+#          test_fetch_hands_the_source_to_the_throttle 红
+#  M3  _rate_key 不再读 concurrentRate（interval 恒 0）
+#        → test_rate_key_keeps_the_raw_url
+#          test_fetch_hands_the_source_to_the_throttle 红
+#
+#  **没覆盖的**：`_rate_lock` 的并发正确性。本文件的用例都是单线程的，把锁去掉
+#  或把 sleep 挪进锁里都不会变红——这类行为要写并发用例才能守，而那种用例容易
+#  抖动。这里明确记下来，免得下次以为"有测试守着"。
 
 if __name__ == "__main__":
     unittest.main()

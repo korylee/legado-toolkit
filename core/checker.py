@@ -38,6 +38,10 @@ from core.loader import fingerprint
 # 判定口径的唯一来源（与「全链路试跑」共用，避免同源两判）。
 # 依赖方向：checker → quality，quality 不依赖 replayer，这是刻意的。
 from core import quality as Q
+# 限速口径的唯一实现在 quality：checker（异步）与 fetch（同步）共用同一份。
+# 早先它定义在本模块，而 fetch 也要用时就只能反向依赖 checker——lessons §十记过
+# 这个坑（core 层不该反向依赖）。这里只是引用，不是第二份定义
+from core.quality import rate_interval_ms
 
 # 常见 User-Agent（规避简单 UA 拦截）
 DEFAULT_UA = (
@@ -357,6 +361,14 @@ class AsyncChecker:
         self.test_titles = test_titles or TEST_TITLES
         self._sem: Optional[asyncio.Semaphore] = None
         self.refresh_cache = False
+        # 命中判定降级的次数与原因（见 _confirm_hit）。**必须留痕**：那条路径
+        # 把「规则回放不了」当成「命中了」，静默的话与 lessons §二 记的那次
+        # bs4 缺失事故是同一个形状——当时就是这样让命中判定悄悄退化成
+        # 「响应体里出现关键词就算命中」的。这里只收集，由 run() 收尾汇总
+        self.hit_downgrades: List[str] = []
+        # 每个源上一次发请求的时刻（monotonic 毫秒），用于遵守该书源自己声明的
+        # concurrentRate。见 _throttle
+        self._rate_last: Dict[str, float] = {}
 
         if use_store is None:
             use_store = not os.getenv("LEGADO_LEGACY_CACHE")
@@ -459,9 +471,32 @@ class AsyncChecker:
             f.write(json.dumps(item, ensure_ascii=False) + "\n")
 
     # ------------------------------------------------------------ 单源探测
+    async def _throttle(self, record: BookSourceRecord) -> None:
+        """按源**自己声明**的 concurrentRate 等够间隔再发下一个请求。
+
+        为什么需要：源声明 ``concurrentRate`` 就是在说「这么打我会封你」，而
+        check 一次要连发好几个请求（域名 → 搜索 ×N → 详情 → 章节）。不遵守的话
+        轻则触发反爬被判失效（而失效会被缓存 7 天），重则让对方封掉整个 IP。
+
+        源内的请求本来就是顺序发出的（``check_one`` 里逐个 await），所以不需要锁，
+        只要记住这个源上次发请求的时刻。等的时候仍然占着一个并发槽——声明了限速的
+        源本来就不该被并发地打，这是期望行为而不是缺陷。
+        """
+        interval = rate_interval_ms((record.raw or {}).get("concurrentRate"))
+        if interval <= 0:
+            return
+        now = time.monotonic() * 1000.0
+        last = self._rate_last.get(record.url)
+        if last is not None:
+            wait_ms = interval - (now - last)
+            if wait_ms > 0:
+                await asyncio.sleep(wait_ms / 1000.0)
+        self._rate_last[record.url] = time.monotonic() * 1000.0
+
     async def _request(
         self,
         session: aiohttp.ClientSession,
+        record: BookSourceRecord,
         url: str,
         method: str = "GET",
         headers: Optional[Dict[str, str]] = None,
@@ -471,7 +506,12 @@ class AsyncChecker:
 
         失败原因分为：dns / timeout / reset / tls / proxy / other
         用于区分「真死」与「被墙」。
+
+        ``record`` **必填且不给默认值**：它用来读该书源的 concurrentRate 限速。
+        留默认值的话，将来新增的调用点漏传就会静默不受限速约束——而「静默地打了
+        不该打的频次」正是会招来封禁的那种错。
         """
+        await self._throttle(record)
         t0 = time.perf_counter()
         h = {"User-Agent": DEFAULT_UA}
         if headers:
@@ -555,7 +595,7 @@ class AsyncChecker:
 
             # 1) 域名连通性探测
             domain_url = build_domain_url(record.url)
-            status, body, cost, err = await self._request(session, domain_url)
+            status, body, cost, err = await self._request(session, record, domain_url)
             record.status_code = status or 0
             record.response_time_ms = int(cost)
             record.checked_at = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -608,6 +648,11 @@ class AsyncChecker:
           - 无 bookList 规则（搜不到列表规则，仅按响应体判定）
           - 规则含 <js / js: / @xpath 前缀（非 CSS 选择器，apply_css_rule 不支持）
           - 解析抛异常（页面结构异常，不因工具限制误判）
+
+        **前两种是明知的取舍，第三种是异常**——异常那条必须留痕：它会把
+        「规则回放不了」当成「命中了」，正是 lessons §二 那次 bs4 缺失事故的形状
+        （ModuleNotFoundError 被吞 → 命中判定退化成「含关键词就算命中」，且无任何
+        痕迹）。降级仍返回 True（保守不误杀），但会记进 ``hit_downgrades``。
         """
         rule = str(((record.raw or {}).get("ruleSearch") or {}).get("bookList", "") or "").strip()
         if not rule:
@@ -619,7 +664,9 @@ class AsyncChecker:
             items = apply_css_rule(html, _strip_rule_prefix(rule))
             items = [i for i in items if str(i or "").strip()]
             return len(items) >= 1
-        except Exception:
+        except Exception as e:
+            self.hit_downgrades.append(
+                "%s: %s: %s" % (record.url, type(e).__name__, e))
             return True
 
     async def _probe_search(
@@ -643,7 +690,7 @@ class AsyncChecker:
                 elif not search_url.startswith(("http://", "https://")):
                     search_url = domain_url + "/" + search_url
                 s_status, s_body, s_cost, s_err = await self._request(
-                    session, search_url, method=method, headers=headers
+                    session, record, search_url, method=method, headers=headers
                 )
                 record.search_response_ms = int(s_cost)
                 if s_status is None:
@@ -715,7 +762,7 @@ class AsyncChecker:
                 return None
             # 取第一条详情 URL（相对链接补全为绝对地址）
             detail_url = _abs_url(domain_url, urls[0])
-            d_status, d_body, d_cost, d_err = await self._request(session, detail_url)
+            d_status, d_body, d_cost, d_err = await self._request(session, record, detail_url)
             if d_status is None or d_status >= 400:
                 record.toc_complete = None
                 record.toc_fail_reason = f"详情页请求失败(status={d_status})"
@@ -794,7 +841,7 @@ class AsyncChecker:
             # 中位章节（>1 时取中间），单章源取唯一章节
             pick = urls[len(urls) // 2] if len(urls) > 1 else urls[0]
             chap_url = _abs_url(domain_url, pick)
-            c_status, c_body, c_cost, c_err = await self._request(session, chap_url)
+            c_status, c_body, c_cost, c_err = await self._request(session, record, chap_url)
             record.content_response_ms = int(c_cost)
             if c_status is None or c_status >= 400:
                 record.content_ok = None
@@ -871,6 +918,16 @@ class AsyncChecker:
             for r in results:
                 self.save_cache_append(r)
         self.close()
+        if self.hit_downgrades:
+            # 降级 = 「规则回放不了」被当成了「命中」，星级会偏高。零星几次是页面
+            # 结构异常；成片出现说明是工具本身坏了（依赖缺失之类），这时必须看见。
+            # 只印前几条示例：目的是让人判断「零星还是成片」，不是列清单
+            print("警告: %d 个源的命中判定降级（规则无法回放，已按「命中」处理）"
+                  % len(self.hit_downgrades))
+            for line in self.hit_downgrades[:5]:
+                print("  " + line)
+            if len(self.hit_downgrades) > 5:
+                print("  ...（其余 %d 条省略）" % (len(self.hit_downgrades) - 5))
         return records  # 已合并缓存结果
 
 

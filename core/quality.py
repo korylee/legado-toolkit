@@ -474,12 +474,56 @@ def static_misconfig_notes(source: Dict[str, Any]) -> List[str]:
     return notes
 
 
+def rate_interval_ms(value: Any) -> int:
+    """``concurrentRate`` → 同一书源两次请求之间的最小间隔（毫秒）。0 = 不限速。
+
+    这是源**自己声明**的限速，语义照 Legado（``ConcurrentRateLimiter.kt:82`` 的
+    注释：「并发控制为 次数/毫秒，非并发实际为 1/毫秒」）：
+
+      - ``"n/m"``：n 次 / m 毫秒 → 折算成每 m/n 毫秒一次
+      - 纯数字 ``x``：1 次 / x 毫秒
+
+    **关于 ``"n/m"`` 的近似**：App 是**窗口/突发**语义——n 次可以连着发完，再等到
+    窗口满 m 毫秒。这里折算成**均匀间隔**，总速率一致但突发形状不同（我们不允许
+    开头连发）。方向是**更严格**，防封上更安全，但这不是与 App 的精确等价，
+    别当成"和 App 一样"来依赖。
+
+    没声明、``"0"``、解析不了 → 一律 0（不限速）。方向同样是保守的：宁可多打几个
+    请求，也不凭猜测给正常源插一个间隔把它拖慢。
+
+    放在 quality 而不是 checker：checker（异步批量校验）与 fetch（同步抓取，
+    试跑 / App 调试补抓 / 快速新增源都走它）都要用，而 fetch 不该反向依赖 checker
+    （lessons §十记过这个反向依赖的坑）。判定与限速的口径全仓库只此一处。
+
+    注意这个字段在 Legado 里是 String（``BaseSource.kt:35``），别按 int 解析——
+    ``"1/2"`` 会被 int() 打回 0，那正是我们曾经在 sanitize 里犯过的错。
+    """
+    if value is None:
+        return 0
+    text = str(value).strip()
+    if not text or text == "0":
+        return 0
+    if "/" in text:
+        head, _, tail = text.partition("/")
+        try:
+            limit, interval = int(head), int(tail)
+        except (TypeError, ValueError):
+            return 0
+        if limit <= 0 or interval <= 0:
+            return 0
+        return max(1, round(interval / limit))
+    try:
+        return max(0, int(float(text)))
+    except (TypeError, ValueError):
+        return 0
+
+
 __all__ = [
     "Judgement", "VERDICT_PASS", "VERDICT_FAIL", "VERDICT_UNKNOWN",
     "SHAPE_TEXT", "SHAPE_IMAGE", "SHAPE_AUDIO", "SHAPE_MIXED", "SHAPE_EMPTY",
     "STEP_SEARCH", "STEP_BOOK_URL", "STEP_TOC",
     "sniff_shape", "build_evidence", "judge_content", "judge_list_step",
-    "static_misconfig_notes", "new_page",
+    "static_misconfig_notes", "new_page", "rate_interval_ms",
     "EXPECTED_SHAPE", "STRUCT_TAG_RE", "CONTENT_NOISE_MARKERS",
     "MAX_PAGE_HTML_CHARS", "MAX_MATCHED_HTML_CHARS", "MATCHED_NODES_LIMIT",
     "MAX_VALUE_CHARS", "VALUES_PREVIEW_LIMIT", "MAX_EVIDENCE_TOTAL_CHARS",
