@@ -7,6 +7,7 @@
 // 改过字符的源码会与真实响应不一致。改为 pre-wrap 软换行 +
 // 按字符偏移分片渲染，保证「复制出来的就是原文」。
 import { ref, computed, watch, nextTick } from "vue";
+import { ElMessage } from "element-plus";
 
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
@@ -23,6 +24,9 @@ const visible = computed({
 const STEP_LABELS = { search: "搜索", bookUrl: "详情链接", toc: "目录", content: "正文" };
 //: 每次渲染的字符数。整页 HTML 可能 100 万字符，全量进 DOM 会卡
 const RENDER_CHUNK = 20000;
+//: 搜索最多索引的命中数。整页 HTML 里搜 div / class 必然远超此数，
+//: 超限时必须显式告知，否则计数器会把「前 200 处」说成全部
+const HIT_LIMIT = 200;
 
 const activeStep = ref("");
 const subTab = ref("values");
@@ -58,20 +62,32 @@ function verdictText(s) {
   return (s && VERDICT_TEXT[s.verdict]) || "";
 }
 
-// 搜索在**完整原文**上做（纯字符串扫描，结果不进 DOM），最多记 200 处
+// 搜索在**完整原文**上做（纯字符串扫描，结果不进 DOM），最多记 HIT_LIMIT 处
 const hitOffsets = computed(() => {
   const key = searchKey.value.trim();
   const html = (currentPage.value && currentPage.value.html) || "";
   if (!key || !html) return [];
   const out = [];
   let from = 0;
-  while (out.length < 200) {
+  while (out.length < HIT_LIMIT) {
     const i = html.indexOf(key, from);
     if (i < 0) break;
     out.push(i);
     from = i + Math.max(1, key.length);
   }
   return out;
+});
+
+// 命中是否被 HIT_LIMIT 截断：索引已占满，且最后一处之后还能再找到
+// （只看长度不够——恰好 200 处时不该提示「命中过多」）
+const hitsTruncated = computed(() => {
+  const offsets = hitOffsets.value;
+  if (offsets.length < HIT_LIMIT) return false;
+  const key = searchKey.value.trim();
+  const html = (currentPage.value && currentPage.value.html) || "";
+  if (!key || !html) return false;
+  const last = offsets[offsets.length - 1];
+  return html.indexOf(key, last + Math.max(1, key.length)) >= 0;
 });
 
 // 只渲染前 renderLimit 个字符，避免百万字符全量进 DOM
@@ -141,9 +157,25 @@ function loadMore() {
   renderLimit.value += RENDER_CHUNK;
 }
 
-function copyMatched() {
+// 标签占比：后端给的是 0~1 的比值，展示成百分比才有单位
+function formatRatio(value) {
+  if (value === null || value === undefined || value === "") return "";
+  const ratio = Number(value);
+  return Number.isFinite(ratio) ? (ratio * 100).toFixed(1) + "%" : String(value);
+}
+
+async function copyMatched() {
   const text = (current.value && current.value.matched_html) || "";
-  navigator.clipboard.writeText(text);
+  try {
+    // navigator.clipboard 只在安全上下文（https / localhost）存在。
+    // 本前端开了 server.host，用户会从局域网 IP 用 http 打开——
+    // 那里它是 undefined，直接调用会同步抛 TypeError，界面毫无反应。
+    // 必须包在 try 里，并给出明确反馈。
+    await navigator.clipboard.writeText(text);
+    ElMessage.success("已复制命中源码");
+  } catch (e) {
+    ElMessage.warning("复制失败，请手动选中文本");
+  }
 }
 </script>
 
@@ -153,8 +185,10 @@ function copyMatched() {
 
     <template v-else>
       <div class="debug-step-tabs">
+        <!-- 高亮要跟着「实际显示的那一步」（current 在 activeStep 失效时会回退到
+             steps[0]），否则重跑后会出现「有内容、没有任何页签高亮」 -->
         <span v-for="s in steps" :key="s.name" class="debug-step-tab"
-              :class="{ active: s.name === activeStep }" @click="selectStep(s.name)">
+              :class="{ active: !!current && s.name === current.name }" @click="selectStep(s.name)">
           <i class="dot" :class="dotClass(s)"></i>{{ STEP_LABELS[s.name] || s.name }}
         </span>
       </div>
@@ -185,15 +219,17 @@ function copyMatched() {
             <span>字符 {{ current.evidence.chars }}</span>
             <span>中文 {{ current.evidence.cjk_chars }}</span>
             <span>块级分隔 {{ current.evidence.block_seps }}</span>
-            <span>标签占比 {{ current.evidence.tag_ratio }}</span>
+            <span>标签占比 {{ formatRatio(current.evidence.tag_ratio) }}</span>
             <span v-if="current.evidence.noise_hit">噪声命中「{{ current.evidence.noise_hit }}」</span>
           </div>
           <p class="muted" style="margin: 6px 0">
-            这里是规则**实际取到的值**。正文规则通常只有 1 条、就是全文。
+            这里是规则<b>实际取到的值</b>。正文规则通常只有 1 条、就是全文。
           </p>
           <div v-for="(v, i) in (current ? current.values : [])" :key="i" class="debug-value">
             <div class="debug-value-idx">#{{ i + 1 }}（{{ v.length }} 字符）</div>
-            <pre class="debug-pre">{{ v }}</pre>
+            <!-- 提取值经 replayer 的 text 动作把 \s+ 折成了空格，通常是一行超长文本，
+                 必须和「命中源码」一样软换行，否则只能横向滚动阅读 -->
+            <pre class="debug-pre debug-pre-wrap">{{ v }}</pre>
           </div>
           <el-empty v-if="current && !current.values.length"
                     description="没有取到值" :image-size="60" />
@@ -201,11 +237,13 @@ function copyMatched() {
 
         <el-tab-pane label="命中源码" name="matched">
           <p class="muted" style="margin: 6px 0">
-            规则**选中的那块 DOM** 的 outerHTML——改规则时看这个，
+            规则<b>选中的那块 DOM</b> 的 outerHTML——改规则时看这个，
             比在整页里猜要快得多。
           </p>
+          <!-- 没有命中片段时按钮禁用，避免「点一下复制了空串」 -->
           <div class="toolbar">
-            <el-button size="small" @click="copyMatched">复制</el-button>
+            <el-button size="small" :disabled="!(current && current.matched_html)"
+                       @click="copyMatched">复制</el-button>
           </div>
           <pre v-if="current && current.matched_html"
                class="debug-pre debug-pre-wrap">{{ current.matched_html }}</pre>
@@ -220,9 +258,16 @@ function copyMatched() {
               <template v-if="hitOffsets.length">
                 <el-button size="small" @click="gotoHit(activeHit - 1)">上一处</el-button>
                 <el-button size="small" @click="gotoHit(activeHit + 1)">下一处</el-button>
-                <span class="muted">第 {{ activeHit + 1 }} / {{ hitOffsets.length }} 处</span>
+                <!-- 被截断时用 200+ 表示，不把「前 200 处」说成全部 -->
+                <span class="muted">
+                  第 {{ activeHit + 1 }} / {{ hitOffsets.length }}{{ hitsTruncated ? "+" : "" }} 处
+                </span>
+                <span v-if="hitsTruncated" class="muted">
+                  命中过多，仅索引前 {{ HIT_LIMIT }} 处
+                </span>
               </template>
-              <span v-else-if="searchKey" class="muted">未找到</span>
+              <!-- 用 trim 后的值判断，与 hitOffsets 保持一致：纯空格不算搜过 -->
+              <span v-else-if="searchKey.trim()" class="muted">未找到</span>
             </div>
             <el-alert v-if="currentPage.truncated" type="warning" :closable="false"
                       show-icon style="margin-bottom: 8px"
