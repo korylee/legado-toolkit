@@ -1,5 +1,5 @@
 <script setup>
-import { ref, reactive, computed, nextTick, onMounted, onUnmounted } from "vue";
+import { ref, reactive, computed, nextTick, watch, onMounted, onUnmounted } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { Search, Plus, Upload, Download, Delete, Filter, Refresh, Monitor, Setting } from "@element-plus/icons-vue";
 import { listSources, listGroups, patchTags, deleteSources, listTags, getStats } from "../api/sources";
@@ -46,10 +46,17 @@ const overrideRef = ref(null);
 const overrideDialogRef = ref(null);
 const overrideCount = computed(() => Object.keys(checkOverride.value).length);
 
-// 打开时才去拉全局设置，所以必须等容器渲染完再调——popover 与 dialog 共用
+// 打开时才去拉全局设置（拿到的是最新全局值），所以必须等容器渲染完再调。
+//
+// **不能用 el-popover 的 @show**：ElPopover 声明的 emits 只有
+// update:visible / before-enter / before-leave / after-enter / after-leave，
+// 没有 show —— 写上去不报错、永远不触发，表单会一直空着（实测踩过）。
+// 监听 visible 本身，两个容器共用一套机制，也不依赖过渡时序。
 function reloadOverride(target) {
   nextTick(() => { if (target.value) target.value.reload(); });
 }
+watch(overrideVisible, (v) => { if (v) reloadOverride(overrideRef); });
+watch(overrideDialog, (v) => { if (v) reloadOverride(overrideDialogRef); });
 
 // 统计条（替代已删掉的「诊断」页）与「任务」抽屉
 const stats = ref(null);
@@ -338,7 +345,7 @@ onUnmounted(() => {
       <!-- 校验参数的本次覆盖，不写回全局设置。生效时按钮上有计数徽标——
            覆盖只存在内存里，不显示出来就成了「看不见的生效参数」 -->
       <el-popover v-model:visible="overrideVisible" trigger="click" :width="330"
-                  placement="bottom-end" @show="reloadOverride(overrideRef)">
+                  placement="bottom-end">
         <template #reference>
           <el-button size="small" :type="overrideCount ? 'primary' : ''">
             <el-icon style="margin-right: 4px; vertical-align: -2px"><Setting /></el-icon>
@@ -585,8 +592,7 @@ onUnmounted(() => {
 
     <!-- 移动端的校验参数覆盖。用 dialog 而不是在 btt 抽屉里展开一块：那个抽屉是
          size="auto"，高度在打开时就定好了，往里插一块会伸缩的表单是个不必要的赌注 -->
-    <el-dialog v-model="overrideDialog" title="校验参数（本次）" width="90%" append-to-body
-               @open="reloadOverride(overrideDialogRef)">
+    <el-dialog v-model="overrideDialog" title="校验参数（本次）" width="90%" append-to-body>
       <CheckOverrideForm ref="overrideDialogRef" v-model="checkOverride"
                          @summary="overrideSummary = $event" />
       <div class="muted" style="margin-top: 8px">仅对本次校验生效，不改全局设置</div>
