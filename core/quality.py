@@ -253,7 +253,7 @@ def _shape_label(shape: str) -> str:
     }.get(shape, shape)
 
 
-def _safe_int(value: Any, default: int = 0) -> int:
+def safe_int(value: Any, default: int = 0) -> int:
     """宽松取整。脏值（"" / [] / "abc" / None）一律降级为默认值。
 
     书源的 bookSourceType 是从外部 JSON 来的，历史上就出现过 ''/[]/字符串数字
@@ -306,7 +306,7 @@ def judge_content(
     rule_error: str = "",
 ) -> Judgement:
     """正文判定。前置分流顺序**不可调换**。"""
-    st = _safe_int(source_type)
+    st = safe_int(source_type)
     clean = [str(v or "") for v in (values or [])]
     shape, _counts = sniff_shape(clean)
     evidence = build_evidence(clean, matched_html)
@@ -366,7 +366,7 @@ def judge_list_step(
     evidence = build_evidence(clean, matched_html)
 
     # 下载源不解析目录（Debug.kt:329-332）
-    if step_key == STEP_TOC and _safe_int(source_type) == 3:
+    if step_key == STEP_TOC and safe_int(source_type) == 3:
         return Judgement(VERDICT_UNKNOWN, "文件类书源不解析目录", shape, [], evidence)
 
     if str(rule_error or "").strip():
@@ -417,7 +417,7 @@ def static_misconfig_notes(source: Dict[str, Any]) -> List[str]:
         notes.append("ruleContent.webJs 已配置，但 URL 规则未开启 webView，"
                      "该段 JS 在 Legado 中不会生效（AnalyzeUrl.kt:441）")
 
-    if _safe_int(src.get("bookSourceType", 0)) == 4:
+    if safe_int(src.get("bookSourceType", 0)) == 4:
         notes.append("bookSourceType=4 是 Legado 不存在的取值，导出后行为未定义，"
                      "建议改为 0~3")
 
@@ -433,5 +433,5 @@ __all__ = [
     "EXPECTED_SHAPE", "STRUCT_TAG_RE", "CONTENT_NOISE_MARKERS",
     "MAX_PAGE_HTML_CHARS", "MAX_MATCHED_HTML_CHARS", "MATCHED_NODES_LIMIT",
     "MAX_VALUE_CHARS", "VALUES_PREVIEW_LIMIT", "MAX_EVIDENCE_TOTAL_CHARS",
-    "SHORT_CONTENT_CHARS",
+    "SHORT_CONTENT_CHARS", "safe_int",
 ]

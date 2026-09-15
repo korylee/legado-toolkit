@@ -23,6 +23,9 @@ CONTENT_HTML = '<div id="content">' + "正文内容" * 50 + "</div>"
 PAGES = {
     "https://site/search?q=%E6%88%91": SEARCH_HTML,
     "https://site/book/1": TOC_HTML,
+    # `ruleBookInfo.tocUrl` 分支用它：必须与搜索结果里的详情链接**不同**，
+    # 否则「分支有没有生效」区分不出来
+    "https://site/toc-page": TOC_HTML,
     "https://site/read/1.html": CONTENT_HTML,
 }
 
@@ -98,15 +101,22 @@ class CompatibilityTests(unittest.TestCase):
 
 class TocUrlBranchTests(unittest.TestCase):
     def test_toc_url_skips_detail_page(self):
-        """ruleBookInfo.tocUrl 非空时跳过详情页。对齐 Debug.kt:318-322。"""
+        """ruleBookInfo.tocUrl 非空时跳过详情页。对齐 Debug.kt:318-322。
+
+        **tocUrl 必须与搜索结果里的详情链接不同**：若两者相同（比如都写
+        "/book/1"），分支生效与否断言都成立，这条用例等于没测。同理
+        page_id 恒为 "detail"，断言 pages 里有没有 "detail" 也是恒真的，
+        要断言的是那个页面的 **url**。
+        """
         src = dict(SOURCE)
-        src["ruleBookInfo"] = {"tocUrl": "https://site/book/1"}
         src["ruleSearch"] = dict(SOURCE["ruleSearch"])
+        src["ruleBookInfo"] = {"tocUrl": "https://site/toc-page"}
         r = run_chain(src)
-        ids = [p["id"] for p in r["pages"]]
-        self.assertIn("detail", ids)      # tocUrl 指向的页面仍在 pages 里
         toc = [s for s in r["steps"] if s["name"] == "toc"][0]
-        self.assertEqual(toc["url"], "https://site/book/1")
+        self.assertEqual(toc["url"], "https://site/toc-page")
+        detail = [p for p in r["pages"] if p["id"] == "detail"]
+        self.assertEqual(len(detail), 1)
+        self.assertEqual(detail[0]["url"], "https://site/toc-page")
 
 
 class FileTypeTests(unittest.TestCase):
@@ -117,6 +127,22 @@ class FileTypeTests(unittest.TestCase):
         toc = [s for s in r["steps"] if s["name"] == "toc"][0]
         self.assertEqual(toc["verdict"], "unknown")
         self.assertTrue(toc["ok"])      # unknown 不是 fail
+
+
+class DirtySourceTypeTests(unittest.TestCase):
+    """bookSourceType 来自外部 JSON，脏值不能让试跑整体失败。
+
+    裸 int() 会让 'abc' 抛 ValueError、[1] 抛 TypeError、inf 抛 OverflowError——
+    而 rules.py 会把它变成 HTTP 400、ops.py 的任务会整体失败。
+    """
+
+    def test_dirty_types_do_not_raise(self):
+        for bad in ("abc", "3.5", [1], {"a": 1}, float("inf"), None, "", []):
+            with self.subTest(bad=repr(bad)):
+                src = dict(SOURCE)
+                src["bookSourceType"] = bad
+                r = run_chain(src)          # 不抛即通过
+                self.assertIn("steps", r)
 
 
 if __name__ == "__main__":

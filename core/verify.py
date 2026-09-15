@@ -100,7 +100,10 @@ def verify_chain(source: dict, keyword: str, detail_url: str = "",
     steps: list = []
     pages: dict = {}
     src = source or {}
-    source_type = int(src.get("bookSourceType", 0) or 0)
+    # 用 quality.safe_int 而不是裸 int()：这个字段来自外部 JSON，脏值会让
+    # rules.py 变成 HTTP 400、让 ops.py 的快速生成任务整体失败。
+    # quality 里那条「唯一防线」的注释说的就是这件事——别在这里绕过它
+    source_type = Q.safe_int(src.get("bookSourceType", 0))
 
     # 书源自身的请求头：不带它抓回来的 HTML 是失真的，「看源码改规则」就失去地基
     headers, header_why = parse_source_header(str(src.get("header", "") or ""))
