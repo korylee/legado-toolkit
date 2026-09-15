@@ -247,3 +247,46 @@ def verify_chain(source: dict, keyword: str, detail_url: str = "",
 
     # 静态错配附注已在函数开头算好，由 _done() 统一追加——这里不再重复
     return _done()
+
+
+def strip_evidence(verify_result):
+    """剥掉试跑结果里的大体积证据字段，**只留判定结论**。
+
+    三处消费方都需要它，原因各不相同但都是「留不住」：
+      - ``backend/api/ops.py``：结果会写进 SQLite 的 ``result_json`` 并经 SSE 推送
+        （``jobs/runner.py:51`` / ``api/jobs.py:47``），几 MB 会撑爆 jobs 表与推送流
+      - ``core/repair/loop.py``：``before`` / ``out["after"]`` / ``history[]``（最多 3 轮）
+        各持一份完整结果，``repair_many`` 还用 ``asyncio.gather`` 把全部结果留在内存里
+        ——百源级修复就是数百 MB 常驻
+      - 将来任何把试跑结果落库/落历史的地方
+
+    **放在这里而不是某个消费方里**：证据的形状是在本模块定义的，而且消费方有三个，
+    抄在某一条消费路径上，下一个人就得再抄一份——那正是本次改造反复在消灭的
+    「同一件事写两处」。
+
+    保留 ``verdict`` / ``reason`` / ``notes`` / ``has_notes`` / ``evidence`` / ``ok`` /
+    ``all_ok`` / 其余标量字段；只清空 ``pages[].html``、``steps[].values``、
+    ``steps[].matched_html`` 这三处原文。
+
+    **返回新对象，不改动入参**——``loop.py`` 会同时持有剥离前后两份，就地改写会把
+    另一份也一起改掉（``tests/test_strip_evidence.py`` 有测试守这条）。
+
+    注意：``verify_chain`` 产出的每一步都必然带这两个键（口径在
+    ``quality.Judgement.as_step_dict``），所以正常情况下两个分支等价；这里按
+    「键存在才清」写，是为了不给外部注入的合成结果凭空添键。
+    """
+    # None / {} 原样返回：ops.py 的 skipped 分支就是空 dict，别把它变成 {"pages": []}
+    if not verify_result:
+        return verify_result
+    steps = []
+    for s in verify_result.get("steps", []) or []:
+        new_step = dict(s)
+        # 只清证据原文，逐个键判存在——不要用 dict 字面量重建，那会丢掉
+        # verdict / reason / notes / evidence 等判定字段（消费方靠它们做决策）
+        if "values" in new_step:
+            new_step["values"] = []
+        if "matched_html" in new_step:
+            new_step["matched_html"] = ""
+        steps.append(new_step)
+    # pages 是「页面列表」，整份都是证据，直接置空；steps 已换新列表，入参不受影响
+    return {**verify_result, "steps": steps, "pages": []}

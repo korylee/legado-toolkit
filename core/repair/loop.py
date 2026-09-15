@@ -137,11 +137,17 @@ async def repair_one(session, client, source: Dict[str, Any], keyword: str,
     """
     from core.repair.evidence import build_evidence
     from core.repair.llm import extract_json
+    # 惰性导入：与本函数内其余项目内导入保持一致，避免 core.repair.loop 顶层
+    # 引入 core.verify（连带 fetch / replayer）这条较重的依赖链
+    from core.verify import strip_evidence
 
     verify_fn = verifier or verify_source
     ev = evidence if evidence is not None else await build_evidence(source, keyword, timeout)
     detail_url = (ev.get("pages") or {}).get("detail_url", "")
-    before = verify_fn(source, keyword, detail_url)
+    # 剥离点 1/2：before 会存进 out["before"] 并作为第 1 轮的 cur_verify 跨轮持有，
+    # 而 repair_many 用 asyncio.gather 同时留住全部源的结果——不剥就是数百 MB 常驻。
+    # 剥的只是证据原文，后续只读 all_ok 与 steps[].name/ok/detail，判定不受影响。
+    before = strip_evidence(verify_fn(source, keyword, detail_url))
 
     out: Dict[str, Any] = {
         "name": ev.get("name") or source.get("bookSourceName", ""),
@@ -178,7 +184,12 @@ async def repair_one(session, client, source: Dict[str, Any], keyword: str,
                             "raw": str(text)[:200]})
             continue
         merged = merge_proposal(current, proposal)
-        v = verify_fn(merged, keyword, detail_url)
+        # 剥离点 2/2：v 会被塞进 history[].verify（最多 3 轮）、out["after"] 与
+        # cur_verify 三处长期持有，所以在**存进 history 之前**这一处就剥掉，
+        # 而不是等组装 out["after"] 时再剥——那时 history 里已经留了一份完整的。
+        # 剥离后仍只被读 all_ok / steps[].name/ok/detail（见 _fail_brief 与
+        # build_user_prompt），决策口径不变。
+        v = strip_evidence(verify_fn(merged, keyword, detail_url))
         history.append({"round": r, "reason": str(proposal.get("reason", ""))[:200],
                         "verify": v, "rules": {k: merged.get(k) for k in RULE_KEYS}})
         if v.get("all_ok"):

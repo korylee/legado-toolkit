@@ -62,7 +62,7 @@ async def run_add_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
     from core.build import load_sources
     from core.fetch import extract_keyword
     from core.paths import data_path
-    from core.verify import verify_chain
+    from core.verify import strip_evidence, verify_chain
     from services.add_source import run_add
 
     url = str(payload.get("url") or "").strip()
@@ -115,6 +115,10 @@ async def run_add_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
         keyword = extract_keyword(url) or str(payload.get("keyword") or "我")
         if verify:
             v = await asyncio.to_thread(verify_chain, source, keyword, detail_url, pick)
+            # 快速生成的结果会写进 jobs 表（jobs/runner.py:51）并走 SSE 推送
+            # （api/jobs.py:47），整页 HTML + 正文全文会撑爆 jobs 表与推送流；
+            # 剥掉证据原文，判定结论（ok/detail/all_ok）完整保留，前端预览不受影响
+            v = strip_evidence(v)
         else:
             v = {"steps": [], "all_ok": None, "skipped": True}
         st.update_job(job_id, progress=3)
