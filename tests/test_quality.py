@@ -116,8 +116,13 @@ class PinnedOrderTests(unittest.TestCase):
         self.assertIn("无法离线回放", j.reason)
 
     def test_list_step_rule_error_with_empty_values_is_unknown(self):
-        """列表步同样要 rule_error 先于「解析结果为空」。"""
-        j = Q.judge_list_step(Q.STEP_TOC, [], rule_error="JS 规则无法离线回放")
+        """列表步同样要 rule_error 先于「解析结果为空」。
+
+        **rule 必须非空**：rule="" 会被空规则分支先截住判 fail，这条用例就
+        变成在测空规则而不是 rule_error 的优先级了。
+        """
+        j = Q.judge_list_step(Q.STEP_TOC, [], rule="class.chapter@tag.a",
+                              rule_error="JS 规则无法离线回放")
         self.assertEqual(j.verdict, Q.VERDICT_UNKNOWN)
         self.assertIn("无法离线回放", j.reason)
 
@@ -148,12 +153,16 @@ class NoteTests(unittest.TestCase):
 
 
 class ListStepTests(unittest.TestCase):
+    #: 非空规则。这几条用例测的是「解析结果为空」与 toc 附注，
+    #: 传 "" 会被空规则分支先截住，测的就不是本来那件事了
+    RULE = "class.chapter@tag.a"
+
     def test_toc_empty_is_fail(self):
-        j = Q.judge_list_step("toc", [])
+        j = Q.judge_list_step("toc", [], rule=self.RULE)
         self.assertEqual(j.verdict, Q.VERDICT_FAIL)
 
     def test_toc_few_chapters_is_pass_with_note(self):
-        j = Q.judge_list_step("toc", ["/c/1", "/c/2"])
+        j = Q.judge_list_step("toc", ["/c/1", "/c/2"], rule=self.RULE)
         self.assertEqual(j.verdict, Q.VERDICT_PASS)
         self.assertTrue(any("章节数偏少" in n for n in j.notes))
 
@@ -162,8 +171,44 @@ class ListStepTests(unittest.TestCase):
         self.assertEqual(j.verdict, Q.VERDICT_UNKNOWN)
 
     def test_search_empty_is_fail(self):
-        j = Q.judge_list_step("search", [])
+        j = Q.judge_list_step("search", [], rule=self.RULE)
         self.assertEqual(j.verdict, Q.VERDICT_FAIL)
+
+
+class ListStepEmptyRuleTests(unittest.TestCase):
+    """空规则 = **源的配置错误** → fail；规则回放不了 = 能力边界 → unknown。
+
+    这两件事曾被 `_extract` 的 "空规则" 哨兵压进同一条通道，后果是
+    `bookList` 为空的源被判 unknown → `all_ok=True` →
+    `core/repair/loop.py` 认为「已经修好了」，AI 修复循环永远不去碰它。
+    """
+
+    def test_search_empty_rule_is_fail(self):
+        self.assertEqual(Q.judge_list_step("search", [], rule="").verdict,
+                         Q.VERDICT_FAIL)
+
+    def test_toc_empty_rule_is_fail(self):
+        j = Q.judge_list_step("toc", [], rule="")
+        self.assertEqual(j.verdict, Q.VERDICT_FAIL)
+        self.assertIn("为空", j.reason)
+
+    def test_whitespace_only_rule_is_fail(self):
+        self.assertEqual(Q.judge_list_step("toc", [], rule="   ").verdict,
+                         Q.VERDICT_FAIL)
+
+    def test_empty_rule_beats_stale_sentinel_rule_error(self):
+        """rule="" 且 rule_error="空规则"（旧哨兵的形态）→ fail，不是 unknown。
+
+        这是本次回归的**唯一入口**：哨兵一旦回来，这条立刻变 unknown。
+        """
+        j = Q.judge_list_step("search", [], rule="", rule_error="空规则")
+        self.assertEqual(j.verdict, Q.VERDICT_FAIL)
+
+    def test_download_source_exemption_beats_empty_rule(self):
+        """下载源豁免排在空规则判定之前（Debug.kt:329-332）。"""
+        self.assertEqual(
+            Q.judge_list_step("toc", [], source_type=3, rule="").verdict,
+            Q.VERDICT_UNKNOWN)
 
 
 class ListStepStepKeyTests(unittest.TestCase):
@@ -178,8 +223,9 @@ class ListStepStepKeyTests(unittest.TestCase):
         self.assertEqual(j.verdict, Q.VERDICT_UNKNOWN)
 
     def test_uppercase_toc_behaves_same_as_lowercase(self):
-        upper = Q.judge_list_step("TOC", ["/c/1"])
-        lower = Q.judge_list_step("toc", ["/c/1"])
+        # rule 必须非空：两种写法在空规则下都判 fail，比对就失去区分力了
+        upper = Q.judge_list_step("TOC", ["/c/1"], rule="class.c@tag.a")
+        lower = Q.judge_list_step("toc", ["/c/1"], rule="class.c@tag.a")
         self.assertEqual(upper.verdict, lower.verdict)
         self.assertEqual(upper.reason, lower.reason)
         self.assertEqual(upper.notes, lower.notes)
@@ -223,9 +269,16 @@ class CheckerStateMapTests(unittest.TestCase):
         self.assertIsNone(Q.Judgement(Q.VERDICT_UNKNOWN).checker_state)
 
     def test_ok_only_fail_is_false(self):
+        """``ok`` 只在 fail 时为 False。unknown 那一支才是本规则的全部价值——
+        happy path 上 pass 与 unknown 无法区分，映射写错也照样绿。"""
         self.assertTrue(Q.Judgement(Q.VERDICT_PASS).ok)
         self.assertTrue(Q.Judgement(Q.VERDICT_UNKNOWN).ok)
         self.assertFalse(Q.Judgement(Q.VERDICT_FAIL).ok)
+
+    def test_notes_do_not_flip_ok(self):
+        """启发式附注绝不改变 verdict，也就绝不能改变 ok。"""
+        self.assertIs(Q.Judgement(Q.VERDICT_PASS, notes=["x"]).ok, True)
+        self.assertIs(Q.Judgement(Q.VERDICT_FAIL, notes=["x"]).ok, False)
 
 
 class DirtySourceTypeTests(unittest.TestCase):
@@ -240,7 +293,8 @@ class DirtySourceTypeTests(unittest.TestCase):
                 # 降级为 0 = 文本源：空规则 → fail；列表空 → fail
                 self.assertEqual(content_judge(dirty, [], rule="").verdict, Q.VERDICT_FAIL)
                 self.assertEqual(
-                    Q.judge_list_step("toc", [], source_type=dirty).verdict, Q.VERDICT_FAIL)
+                    Q.judge_list_step("toc", [], source_type=dirty,
+                                      rule="class.c@tag.a").verdict, Q.VERDICT_FAIL)
 
     def test_string_number_is_accepted(self):
         # "3" 是合法字符串数字，应识别为下载源而不是降级
@@ -252,7 +306,8 @@ class DirtySourceTypeTests(unittest.TestCase):
         inf = float("inf")
         self.assertEqual(content_judge(inf, [], rule="").verdict, Q.VERDICT_FAIL)
         self.assertEqual(
-            Q.judge_list_step("toc", [], source_type=inf).verdict, Q.VERDICT_FAIL)
+            Q.judge_list_step("toc", [], source_type=inf,
+                              rule="class.c@tag.a").verdict, Q.VERDICT_FAIL)
 
     def test_static_misconfig_survives_dirty_type(self):
         # 必须用 "abc" 这类 int() 真会抛的脏值："" / [] / None / {} 经

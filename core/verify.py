@@ -47,7 +47,10 @@ def _extract(html: str, rule: str):
     对接点，别绕过它直接调 replayer。
     """
     if not str(rule or "").strip():
-        return [], [], "空规则"
+        # **不要在这里塞 "空规则" 哨兵**：空规则是源的配置错误，规则回放不了
+        # 才是我们的能力边界，两者的 verdict 不同。判定交给 judge_list_step /
+        # judge_content，它们各自有显式的空规则分支；这里只负责返回空值。
+        return [], [], ""
     return extract_all_nodes(
         html, rule, Q.MATCHED_NODES_LIMIT, Q.MAX_MATCHED_HTML_CHARS)
 
@@ -112,38 +115,63 @@ def verify_chain(source: dict, keyword: str, detail_url: str = "",
     def _fetch(url: str) -> str:
         return fetch(url, headers=headers, charset=charset, proxy=proxy)
 
+    # 静态错配（webJs 未生效 / bookSourceType==4）与 header 不可用的原因，
+    # **在任何抓取之前**就能算出来。必须在每个 return 点都带上——失败链全都
+    # 早退，而失败链恰恰是最需要这些提示的场景。只在末尾追加等于「出问题时看不到」。
+    misconfigs = Q.static_misconfig_notes(src)
+    if header_why:
+        misconfigs = [header_why] + misconfigs
+
+    def _done() -> dict:
+        """**唯一的出口**：追加附注 → 封顶证据 → 组装返回体。
+
+        所有 return 都走它。附注逻辑放在这里而不是 ``_step`` 里——`_step` 一旦
+        有逻辑，每个调用点都得先知道附注内容，摊平口径就重新分叉了。
+        """
+        if misconfigs:
+            for s in steps:
+                if s["name"] == "search":
+                    # 浅拷贝后再拼，避免同一列表被重复追加
+                    s["notes"] = list(s["notes"]) + misconfigs
+                    s["has_notes"] = True
+                    break
+        steps[:] = _cap_evidence(steps, pages)
+        return {"steps": steps,
+                "pages": list(pages.values()),
+                "all_ok": all(s["ok"] for s in steps)}
+
     search_tpl = src.get("searchUrl", "") or ""
     s_html = ""
     book_url = ""
 
     # ---- Step 1: 搜索（仅发现模式无搜索规则则跳过） ----
     if not search_tpl:
+        # header_why 由 _done() 统一追加，这里**不要**再拼一次——留着会写出两份
         skip_notes = ["仅发现模式，无搜索规则"]
-        if header_why:
-            skip_notes.append(header_why)
         j_skip = Q.Judgement("unknown", "", "empty", skip_notes)
         steps.append(_step("search", j_skip, "", ""))
         steps[-1]["detail"] = "跳过（仅发现模式，无搜索规则）"
         book_url = detail_url
         if not book_url:
             steps.append(_step("bookUrl", Q.Judgement("fail", "仅发现模式需提供详情页 URL"), "", ""))
-            return {"steps": steps, "pages": [], "all_ok": False}
+            return _done()
     else:
         search_url = search_tpl.replace("{{key}}", urllib.parse.quote(keyword))
         try:
             s_html = _fetch(search_url)
             book_list_rule = (src.get("ruleSearch") or {}).get("bookList", "")
             vals, hits, rule_error = _extract(s_html, book_list_rule)
-            j = Q.judge_list_step("search", vals, "".join(hits), rule_error, source_type)
+            j = Q.judge_list_step("search", vals, "".join(hits), rule_error,
+                                  source_type, rule=book_list_rule)
             page_id = _new_page(pages, "search", search_url, s_html, charset=charset)
             st = _step("search", j, search_url, page_id, vals, "".join(hits), rule_error)
             st["detail"] = j.reason or ("%d 条结果" % len(vals))
             steps.append(st)
             if not j.ok:
-                return {"steps": steps, "pages": list(pages.values()), "all_ok": False}
+                return _done()
         except Exception as e:
             steps.append(_step("search", Q.Judgement("fail", "抓取失败 %s" % e), search_url, ""))
-            return {"steps": steps, "pages": list(pages.values()), "all_ok": False}
+            return _done()
 
 
         # ---- Step 2: 详情链接（取第 pick 条） ----
@@ -153,7 +181,7 @@ def verify_chain(source: dict, keyword: str, detail_url: str = "",
         if not hrefs or pick > len(hrefs):
             j = Q.Judgement("fail", "取不到详情链接")
             steps.append(_step("bookUrl", j, search_url, "", hrefs))
-            return {"steps": steps, "pages": list(pages.values()), "all_ok": False}
+            return _done()
         chosen = hrefs[pick - 1]
         book_url = chosen if chosen.startswith("http") else _abs_url(search_url, chosen)
         bu = _step("bookUrl", Q.Judgement("pass"), search_url,
@@ -177,16 +205,17 @@ def verify_chain(source: dict, keyword: str, detail_url: str = "",
         toc = src.get("ruleToc") or {}
         chapter_list_rule = toc.get("chapterList", "")
         chapters, hits, rule_error = _extract(t_html, chapter_list_rule)
-        j = Q.judge_list_step("toc", chapters, "".join(hits), rule_error, source_type)
+        j = Q.judge_list_step("toc", chapters, "".join(hits), rule_error,
+                              source_type, rule=chapter_list_rule)
         page_id = _new_page(pages, "detail", book_url, t_html, charset=charset)
         st = _step("toc", j, book_url, page_id, chapters, "".join(hits), rule_error)
         st["detail"] = j.reason or ("%d 章" % len(chapters))
         steps.append(st)
         if not j.ok:
-            return {"steps": steps, "pages": list(pages.values()), "all_ok": False}
+            return _done()
     except Exception as e:
         steps.append(_step("toc", Q.Judgement("fail", "抓取失败 %s" % e), book_url, ""))
-        return {"steps": steps, "pages": list(pages.values()), "all_ok": False}
+        return _done()
 
     # ---- Step 4: 正文（抓第一章 URL） ----
     try:
@@ -199,7 +228,7 @@ def verify_chain(source: dict, keyword: str, detail_url: str = "",
                        ("javascript:", "#", "mailto:", "tel:"))]
         if not ch_urls:
             steps.append(_step("content", Q.Judgement("fail", "取不到章节URL"), book_url, ""))
-            return {"steps": steps, "pages": list(pages.values()), "all_ok": False}
+            return _done()
         first_ch = ch_urls[0]
         ch_url = _abs_url(book_url, first_ch) if not first_ch.startswith("http") else first_ch
         c_html = _fetch(ch_url)
@@ -213,20 +242,5 @@ def verify_chain(source: dict, keyword: str, detail_url: str = "",
     except Exception as e:
         steps.append(_step("content", Q.Judgement("fail", "抓取失败 %s" % e), "", ""))
 
-    # 静态错配检查（只有读 Legado 源码才知道的坑）
-    misconfigs = Q.static_misconfig_notes(src)
-    if header_why:
-        misconfigs = [header_why] + misconfigs
-    if misconfigs:
-        for s in steps:
-            if s["name"] in ("search", "content"):
-                s["notes"] = list(s["notes"]) + misconfigs
-                s["has_notes"] = True
-                break
-
-    steps = _cap_evidence(steps, pages)
-    return {
-        "steps": steps,
-        "pages": list(pages.values()),
-        "all_ok": all(s["ok"] for s in steps),
-    }
+    # 静态错配附注已在函数开头算好，由 _done() 统一追加——这里不再重复
+    return _done()

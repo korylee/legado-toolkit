@@ -356,8 +356,18 @@ def judge_list_step(
     matched_html: str = "",
     rule_error: str = "",
     source_type: int = 0,
+    rule: str = "",
 ) -> Judgement:
-    """目录 / 搜索结果列表判定（search / bookUrl / toc 三步共用）。"""
+    """目录 / 搜索结果列表判定（search / bookUrl / toc 三步共用）。
+
+    ``rule`` 用来区分「规则为空」与「规则回放不了」——这两件事性质完全不同：
+      - **规则为空**是**源的配置错误**（Legado 也解析不出东西）→ `fail`
+      - **规则回放不了**是**我们的能力边界**（JS / 模板 / XPath）→ `unknown`
+
+    压进同一个通道过（`_extract` 曾对空规则返回 ``"空规则"`` 哨兵），后果是
+    `bookList` 为空的源被判成 unknown → `all_ok=True` → `core/repair/loop.py`
+    把它当成「已经修好了」，AI 修复循环永远不会碰它。
+    """
     # 入口归一化：只有精确等于 STEP_TOC 才启用 toc 语义，
     # 而调用方一个大写笔误（"TOC"）就会把本该 unknown 的结果变成 fail
     step_key = str(step or "").strip().lower()
@@ -365,10 +375,15 @@ def judge_list_step(
     shape, _counts = sniff_shape(clean)
     evidence = build_evidence(clean, matched_html)
 
-    # 下载源不解析目录（Debug.kt:329-332）
+    # 下载源不解析目录（Debug.kt:329-332）——豁免排在空规则判定之前
     if step_key == STEP_TOC and safe_int(source_type) == 3:
         return Judgement(VERDICT_UNKNOWN, "文件类书源不解析目录", shape, [], evidence)
 
+    # 规则为空：与 judge_content 的空规则分支对称，同样是**源的配置错误**
+    if not str(rule or "").strip():
+        return Judgement(VERDICT_FAIL, "列表规则为空，Legado 无法解析", shape, [], evidence)
+
+    # 规则回放不了：是工具的能力边界，不是源坏了
     if str(rule_error or "").strip():
         return Judgement(VERDICT_UNKNOWN, str(rule_error), shape, [], evidence)
 
