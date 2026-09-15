@@ -382,6 +382,7 @@ watch(() => [props.modelValue, props.sourceUrl], async ([show, url]) => {
   // 抽屉里那个没有 immediate 的 watch 不触发，:initial-step 会被忽略
   debugVisible.value = false;
   appPreflightState.value = null;   // 预检结果是上一次会话的，别带到这次
+  pushed.value = "";
   // 同理：本组件在 SourcesView 里是常驻挂载、从不卸载的，isDuplicate 会跨
   // 「关闭 → 再打开」残留。不复位的话下次打开编辑弹窗会直接是「另存」状态
   // （域名框解禁、标题错成「另存为新源」、跳过查重），而用户以为自己只是在编辑。
@@ -505,7 +506,7 @@ async function quickGenerate() {
 // 跑不了 JS 规则的源更是只有 App 那边验得了（Rhino / cookie / webView 全在 App 里）。
 // 结果**直接塞进 testResult**——App 调试返回的形状与离线回放一致，
 // 所以卡片与调试抽屉零改动。
-async function appDebugRun({ push = false } = {}) {
+async function appDebugRun() {
   const host = appHost.value.trim();
   if (!host) return ElMessage.warning("请先填 App 的 IP（App 通知栏里有）");
   const key = buildDebugKey();
@@ -516,22 +517,31 @@ async function appDebugRun({ push = false } = {}) {
   appDebugging.value = true;
   testResult.value = null;
   testStale.value = false;
+  pushed.value = "";
   try {
-    // **先预检**：调试 WS 对 App 库里查不到的 tag 什么都不做，只能干等到超时。
-    // 连不上 / 缺源这两种情况在这里就能判出来，不必让用户白等 60 秒
+    // **先预检**。调试 WS 对 App 库里查不到的 tag 什么都不做，只能干等到超时；
+    // 而且它跑的始终是 **App 里那份规则**，所以「App 里是旧版本」这种情况会
+    // 悄悄答非所问——预检一并判掉
     const pf = await runPreflight(host, { quiet: true });
-    if (pf.state === "unreachable" || (pf.state === "missing" && !push)) {
+    if (pf.state === "unreachable") {
       testResult.value = { error: pf.error };
-    } else {
-      // 传 form.value（当前编辑中的源）：它的 bookSourceUrl 来自详情接口，是
-      // 导入原文——后端要拿它当 tag，规范化过的 URL 会让 App 静默无响应
-      const r = await appDebug(form.value, key, host, 0, push);
-      // 连不上时后端返回的是 {source:"app", error:"..."}，不是 HTTP 错误；
-      // 这里翻成卡片认得的形状（卡片读 testResult.error）
-      testResult.value = r && r.error ? { error: r.error } : r;
-      if (push && !testResult.value.error) {
-        appPreflightState.value = { state: "ready", error: "" };
-      }
+      return;
+    }
+    // 没有 / 是旧版本 → 得先把当前表单推过去，否则调试跑的是 App 那份而不是你在
+    // 改的这份。但推送会写 App 的数据，**必须问过用户**（见 confirmPush）
+    const needPush = pf.state !== "ready";
+    if (needPush && !(await confirmPush(pf.state))) {
+      return;   // 取消：不推也不调试，预检结果留在卡片上
+    }
+    // 传 form.value（当前编辑中的源）：它的 bookSourceUrl 来自详情接口，是
+    // 导入原文——后端要拿它当 tag，规范化过的 URL 会让 App 静默无响应
+    const r = await appDebug(form.value, key, host, 0, needPush);
+    // 连不上时后端返回的是 {source:"app", error:"..."}，不是 HTTP 错误；
+    // 这里翻成卡片认得的形状（卡片读 testResult.error）
+    testResult.value = r && r.error ? { error: r.error } : r;
+    if (!testResult.value.error) {
+      pushed.value = needPush ? pf.state : "";
+      appPreflightState.value = { state: "ready", error: "", detail: "" };
     }
   } catch (e) {
     testResult.value = { error: String(e.message) };
@@ -544,17 +554,26 @@ async function appDebugRun({ push = false } = {}) {
 }
 
 //: 预检状态 → 卡片上的短标签与颜色
-const PREFLIGHT_TEXT = { ready: "已连接", missing: "App 里没有这个源", unreachable: "连不上" };
-const PREFLIGHT_TYPE = { ready: "success", missing: "warning", unreachable: "danger" };
+const PREFLIGHT_TEXT = {
+  ready: "已连接", missing: "App 里没有该源",
+  stale: "App 里是旧版本", unreachable: "连不上",
+};
+const PREFLIGHT_TYPE = {
+  ready: "success", missing: "warning", stale: "warning", unreachable: "danger",
+};
 const preflightText = computed(
   () => PREFLIGHT_TEXT[(appPreflightState.value || {}).state] || "");
 const preflightType = computed(
   () => PREFLIGHT_TYPE[(appPreflightState.value || {}).state] || "info");
 
+//: 本次调试前做了什么推送："" | "missing"（新建）| "stale"（覆盖旧规则）
+const pushed = ref("");
+
 async function runPreflight(host, { quiet = false } = {}) {
   appChecking.value = true;
   try {
-    // 用 form.value：它的 bookSourceUrl 是导入原文，App 那边按精确字符串匹配
+    // 用 form.value：它的 bookSourceUrl 是导入原文，App 那边按精确字符串匹配；
+    // 整份传过去才能和 App 里那份比对规则（见 core/app_debug.py:preflight）
     appPreflightState.value = await appPreflight(form.value, host, 0);
   } catch (e) {
     appPreflightState.value = { state: "unreachable", error: String(e.message) };
@@ -562,10 +581,13 @@ async function runPreflight(host, { quiet = false } = {}) {
     appChecking.value = false;
   }
   const s = appPreflightState.value;
+  // 原始异常只记 console，不往界面上摆（那是开发者视角）。但也不能丢——
+  // 「连不上」必须留得下痕迹
+  if (s.detail) console.warn("[app-debug] 预检失败:", s.detail);
   if (!quiet) {
-    if (s.state === "ready") ElMessage.success("已连上 App，可以调试");
-    else if (s.state === "missing") ElMessage.warning(s.error);
-    else ElMessage.error(s.error);
+    if (s.state === "ready") ElMessage.success("已连上 App，规则一致");
+    else if (s.state === "unreachable") ElMessage.error(s.error);
+    else ElMessage.warning(PREFLIGHT_TEXT[s.state] + "，调试前会先推过去");
   }
   return s;
 }
@@ -574,6 +596,24 @@ async function appPreflightRun() {
   const host = appHost.value.trim();
   if (!host) return ElMessage.warning("请先填 App 的 IP（App 通知栏里有）");
   await runPreflight(host);
+}
+
+//: 推送前确认，返回用户是否同意。
+//:
+//: 「调试」和「往 App 里写数据」是两件事——把后者做成前者的隐式副作用，用户点的
+//: 是调试、App 里的源却被改了。少了这一步，「连 App 调试」就变成一个有写副作用的
+//: 按钮，而这在界面上完全看不出来。
+//:
+//: stale 那档尤其要说清楚：它不只是确认，更是把「你现在调试的是 App 那份，不是你
+//: 正在改的」摆到用户面前——不知道这件事的话，他会拿着一份答非所问的结果去改规则。
+function confirmPush(state) {
+  const text = state === "missing"
+    ? "App 里没有这个源。要先推送到 App 再调试吗？"
+    : "App 里是旧版本——直接调试跑的是 App 那份规则，不是你正在改的。"
+      + "要先推过去覆盖它再调试吗？";
+  return ElMessageBox.confirm(text, "推送并调试", {
+    confirmButtonText: "推送并调试", cancelButtonText: "取消", type: "warning",
+  }).then(() => true).catch(() => false);
 }
 
 function openDebug(step) {
@@ -979,8 +1019,7 @@ async function doSave(s) {
                       style="flex: 1 1 150px" @keyup.enter="appDebugRun()" />
           </div>
           <p class="muted" style="margin: 8px 0 0">
-            目标决定<b>从哪一步开始跑</b>：<b>搜索</b>从关键词开始（取第一条 → 目录 → 正文），
-            <b>发现</b>从发现页开始，<b>详情 / 目录 / 正文</b>各从对应页面开始。
+            目标决定<b>从哪一步开始跑</b>；输入框的提示就是这一步该填什么。
           </p>
           <!-- 连 App 调试：我们离线回放不了 JS 规则（<js> / @js:），
                而 App 内建的调试 WebSocket 能跑完整链路。IP 填 App 通知栏里
@@ -998,25 +1037,26 @@ async function doSave(s) {
             <el-tag size="small" :type="preflightType">{{ preflightText }}</el-tag>
             <span class="muted" style="margin-left: 6px">{{ appPreflightState.error }}</span>
           </p>
+          <!-- 一个按钮就够：该不该先推送由预检的三态决定（App 里没有 / 是旧版本 /
+               一致），用户不必知道这一层。推送走 App 的 HTTP 接口，幂等 -->
           <div class="toolbar" style="margin-top: 8px">
             <el-button type="primary" size="small" :loading="appDebugging"
                        @click="appDebugRun()">
               连 App 调试
             </el-button>
-            <!-- App 的调试 WS 要求源已经在它的库里（按 bookSourceUrl 精确匹配），
-                 否则静默无响应。推送走 App 的 HTTP 接口，幂等覆盖 -->
-            <el-button size="small" :loading="appDebugging"
-                       @click="appDebugRun({ push: true })">
-              推送并调试
-            </el-button>
           </div>
+          <p v-if="pushed" style="margin: 8px 0 0">
+            <el-tag size="small" type="success">已推送到 App</el-tag>
+            <span class="muted" style="margin-left: 6px">
+              {{ pushed === "missing" ? "（新建）" : "（覆盖了 App 里的旧规则）" }}
+            </span>
+          </p>
           <p class="muted" style="margin: 8px 0 0">
-            需要 App 里打开「Web 服务」，且手机与电脑在同一局域网。
-            含 JS 规则的源只有这里验得了。
+            需要 App 打开「Web 服务」，手机与电脑在同一局域网。
           </p>
           <p class="muted" style="margin: 4px 0 0">
-            App 只能调试<b>它库里已有的源</b>。「推送并调试」会把当前表单
-            （含未保存的改动）发到 App 再调试——<b>会覆盖 App 里同 URL 的源</b>。
+            调试跑的是 App 里那个源：App 里没有、或与这里不一致时会先问你
+            要不要推过去（<b>覆盖 App 里同 URL 的源</b>）。
           </p>
 
           <div v-if="!testResult" class="muted" style="padding: 22px; text-align: center">

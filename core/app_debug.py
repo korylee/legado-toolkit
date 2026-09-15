@@ -178,9 +178,13 @@ def push_source(host: str, source: Dict[str, Any], ws_port: Optional[int] = None
                 timeout: int = 15) -> Tuple[bool, str]:
     """把书源推进 App 的库（幂等：App 侧 insert 是 REPLACE）。
 
-    返回 ``(是否成功, 错误信息)``。**这会改动用户 App 里的数据**——必须由
-    用户显式触发，不要在流程里自动调用。名字或 URL 为空时 App 会拒绝，
-    这里先拦一道，省得把"转换源失败"这种模糊报错丢给用户。
+    返回 ``(是否成功, 错误信息)``。名字或 URL 为空时 App 会拒绝，这里先拦一道，
+    省得把「转换源失败」这种模糊报错丢给用户。
+
+    **这会改动用户 App 里的数据**。边界是：只能在**用户主动发起调试、且明确确认
+    之后**、由预检结论（App 里没有 / 是旧版本）决定要不要推；不得有后台的、没人
+    触发或没问过用户的推送。「调试」和「往 App 里写」是两件事，别把后者做成
+    前者的隐式副作用。
     """
     name = str((source or {}).get("bookSourceName", "") or "").strip()
     url = str((source or {}).get("bookSourceUrl", "") or "").strip()
@@ -195,45 +199,106 @@ def push_source(host: str, source: Dict[str, Any], ws_port: Optional[int] = None
     return ok, "" if ok else str(d.get("errorMsg") or "App 未接受该源")
 
 
-def app_has_source(host: str, source_url: str, ws_port: Optional[int] = None,
-                   timeout: int = HTTP_TIMEOUT) -> bool:
-    """问 App 里有没有这个源（按 ``bookSourceUrl`` 精确匹配）。
+def app_get_source(host: str, source_url: str, ws_port: Optional[int] = None,
+                   timeout: int = HTTP_TIMEOUT) -> Optional[Dict[str, Any]]:
+    """取 App 里那个源（按 ``bookSourceUrl`` 精确匹配）。没有则返回 None。
 
     连不上会抛异常——「连不上」和「连上了但没有这个源」是两件事，别合并。
     """
     q = urllib.parse.urlencode({"url": source_url or ""})
     d = _app_http(host, "/getBookSource?" + q, ws_port, timeout=timeout)
-    return bool(d.get("isSuccess"))
+    if not d.get("isSuccess"):
+        return None
+    data = d.get("data")
+    return data if isinstance(data, dict) else None
 
 
-def preflight(host: str, source_url: str, ws_port: Optional[int] = None,
+def app_has_source(host: str, source_url: str, ws_port: Optional[int] = None,
+                   timeout: int = HTTP_TIMEOUT) -> bool:
+    """问 App 里有没有这个源。"""
+    return app_get_source(host, source_url, ws_port, timeout=timeout) is not None
+
+
+#: 比对 App 那份与本地这份时看哪些字段。
+#:
+#: **故意不用 ``loader.fingerprint()``**：它把整个 ``ruleSearch`` / ``ruleToc`` /
+#: ``ruleContent`` 字典都算进哈希，而 App 存的是它自己的实体——Gson 会丢掉我们多给
+#: 的键、补上它自己的默认值，字段集合本就不同，拿指纹比必然每次都判成「不同」。
+#: 这里只比调试真正会跑到的、且双方都一定有的那几个字符串字段。
+_COMPARE_FIELDS = (
+    ("bookSourceName",),
+    ("searchUrl",),
+    ("exploreUrl",),
+    ("ruleSearch", "bookList"),
+    ("ruleSearch", "bookUrl"),
+    ("ruleToc", "chapterList"),
+    ("ruleToc", "chapterUrl"),
+    ("ruleContent", "content"),
+)
+
+
+def _field_of(source: Any, path: Sequence[str]) -> str:
+    """按路径取字段，统一成 ``strip`` 过的字符串。
+
+    缺字段、``None``、空串三者等价（App 那边没设过的字段可能直接不出现）。
+    非字符串要兜住：这些字段来自外部 JSON，脏值不能让它抛。
+    """
+    cur: Any = source
+    for key in path:
+        if not isinstance(cur, dict):
+            return ""
+        cur = cur.get(key)
+    return "" if cur is None else str(cur).strip()
+
+
+def _rules_equal(ours: Any, theirs: Any) -> bool:
+    """两边的规则字段是否一致。**误判方向偏保守**（见 preflight 的注释）。"""
+    if not isinstance(ours, dict) or not isinstance(theirs, dict):
+        return False
+    return all(_field_of(ours, p) == _field_of(theirs, p)
+               for p in _COMPARE_FIELDS)
+
+
+def preflight(host: str, source: Any, ws_port: Optional[int] = None,
               timeout: int = HTTP_TIMEOUT) -> Dict[str, Any]:
     """连 App 调试前的预检：把「静默无响应」拆成能对症下药的状态。
 
-    返回 ``{"state": ..., "error": ...}``，state 取值：
+    ``source`` 传**完整书源 dict**（不只是 URL）——要比对 App 里那份的规则，
+    好判断「App 里有，但是旧版本」这种情况。只传 URL 的话退化成 presence 检查。
+
+    返回 ``{"state": ..., "error": "", "pushed_needed": bool}``，state 取值：
 
       - ``unreachable``：HTTP 侧就连不上。App 的「Web 服务」没开、IP 不对、
         或手机不在同一局域网。
       - ``missing``：连上了，但 App 库里没有这个源（调试 WS 会静默不响应）。
-        最常见的原因是 tag 用了规范化过的 URL，而不是导入原文。
-      - ``ready``：连上了且源在库里，可以调试。
+      - ``stale``：App 里有，但规则与本地这份不一致——**这条最坑**：直接调试跑的
+        是 App 里的旧规则，结果看着正常、答的却不是你在改的东西。
+      - ``ready``：连上了且规则一致，直接调试即可。
+
+    ``error`` 为空串是常态（这三种都不是错误，是待处理的状态）；UI 只拿 state
+    去决定动作，不要去讲 ``error`` 里那些机制——那是开发者视角。
     """
     if not str(host or "").strip():
-        return {"state": "unreachable", "error": "没有填 App 的 IP"}
-    if not str(source_url or "").strip():
-        return {"state": "unreachable", "error": "源没有 bookSourceUrl，无法调试"}
+        return {"state": "unreachable", "error": "没有填 App 的 IP", "detail": ""}
+    source_url = str((source or {}).get("bookSourceUrl", "") or "").strip() \
+        if isinstance(source, dict) else ""
+    if not source_url:
+        return {"state": "unreachable", "error": "源没有 bookSourceUrl，无法调试",
+                "detail": ""}
     try:
-        has = app_has_source(host, source_url, ws_port, timeout=timeout)
+        theirs = app_get_source(host, source_url, ws_port, timeout=timeout)
     except Exception as e:
-        return {"state": "unreachable",
-                "error": "连不上 App（%s: %s）。请确认 App 里已打开「Web 服务」、"
-                         "手机与电脑在同一局域网、端口填的是 App 显示的 HTTP 端口。"
-                         % (type(e).__name__, e)}
-    if not has:
-        return {"state": "missing",
-                "error": "已连上 App，但它的书源里没有这个源——调试 WebSocket 对"
-                         "查不到的 tag 会静默不响应。可以用「推送到 App」把它发过去。"}
-    return {"state": "ready", "error": ""}
+        # error 是给用户看的动作指引，detail 是原始异常。**别把异常类名混进
+        # error**：那是开发者视角，前端只该展示「接下来做什么」。detail 留给
+        # 前端记 console，异常不能无声无息地过去（lessons §二）
+        return {"state": "unreachable", "detail": "%s: %s" % (type(e).__name__, e),
+                "error": "连不上 App。确认「Web 服务」已打开、手机与电脑在同一"
+                         "局域网、端口填的是 App 显示的 HTTP 端口。"}
+    if theirs is None:
+        return {"state": "missing", "error": "", "detail": ""}
+    if not _rules_equal(source, theirs):
+        return {"state": "stale", "error": "", "detail": ""}
+    return {"state": "ready", "error": "", "detail": ""}
 
 
 # ------------------------------------------------------------------ WS 客户端

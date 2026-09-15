@@ -75,17 +75,20 @@ async def app_debug(body: AppDebugRequest):
 async def app_preflight(body: AppHostRequest):
     """连 App 调试前的预检。
 
-    把以前那个「点完等 60 秒、什么都不发生」拆成三种能对症的状态：
-    连不上 / 连上了但 App 里没有这个源 / 可以调试。
+    把以前那个「点完等 60 秒、什么都不发生」拆成能对症的状态：
+    连不上 / App 里没有这个源 / App 里是旧版本 / 可以直接调试。
+
+    传**完整 source**（不是只传 URL）：要拿它和 App 里那份比对规则，
+    才能发现「App 里有，但是旧版本」——那种情况下直接调试跑的是旧规则，
+    结果看着正常、答的却不是你在改的东西。
     """
     from core.app_debug import preflight
 
     source = dict(body.source or {})
-    url = str(source.get("bookSourceUrl", "") or "").strip()
-    if not url:
+    if not str(source.get("bookSourceUrl", "") or "").strip():
         raise HTTPException(400, "缺少 bookSourceUrl")
     return await asyncio.to_thread(
-        preflight, str(body.host or "").strip(), url, body.port or None)
+        preflight, str(body.host or "").strip(), source, body.port or None)
 
 
 @router.post("/app-push")
