@@ -1,67 +1,42 @@
 <script setup>
 import { ref, onMounted } from "vue";
-import { useRoute } from "vue-router";
-import { getStats } from "../api/sources";
-import { useMobile } from "../composables/useMobile";
-import { Monitor, List, DataAnalysis, Refresh, Setting } from "@element-plus/icons-vue";
+import { Setting } from "@element-plus/icons-vue";
+import { api } from "../api/client";
 import LLMSettingsDrawer from "../components/LLMSettingsDrawer.vue";
 
-const route = useRoute();
-const isMobile = useMobile();
-const stats = ref(null);
+// 「任务」「诊断」两个页面已并入书源页，导航只剩一项、侧栏与底部 Tab 都撤掉了。
+// header 保留设置入口和后端连通性提示；源数/校验数改由书源页的统计条自己拉，
+// 这里不再重复请求。
+const online = ref(true);
 const settingsVisible = ref(false);
 
-const menus = [
-  { path: "/sources", label: "书源", icon: List },
-  { path: "/jobs", label: "任务", icon: Monitor },
-  { path: "/dashboard", label: "诊断", icon: DataAnalysis },
-];
-
-async function loadStats() {
-  try { stats.value = await getStats(); } catch (e) { stats.value = null; }
+async function checkBackend() {
+  try {
+    await api.get("/health");
+    online.value = true;
+  } catch (e) {
+    online.value = false;
+  }
 }
-onMounted(loadStats);
+
+onMounted(checkBackend);
 </script>
 
 <template>
   <div class="app-shell">
     <header class="app-header">
       <span class="title">Legado 书源管理</span>
-      <span class="muted desktop-only" v-if="stats">
-        源 <b>{{ stats.sources }}</b> · 校验 <b>{{ stats.checks }}</b>
-        <template v-if="stats.deleted"> · 回收站 <b>{{ stats.deleted }}</b></template>
-      </span>
-      <el-tag v-else-if="!isMobile" size="small" type="danger">后端未连接</el-tag>
+      <el-tag v-if="!online" size="small" type="danger">后端未连接</el-tag>
       <span class="spacer" />
       <el-button link :icon="Setting" @click="settingsVisible = true" />
-      <el-button link :icon="Refresh" @click="loadStats" />
     </header>
 
     <div class="app-body">
-      <!-- 桌面侧栏 -->
-      <aside class="app-aside desktop-only" v-if="!isMobile">
-        <el-menu :default-active="route.path" router>
-          <el-menu-item v-for="m in menus" :key="m.path" :index="m.path">
-            <el-icon><component :is="m.icon" /></el-icon>
-            <span>{{ m.label }}</span>
-          </el-menu-item>
-        </el-menu>
-      </aside>
-
       <main class="app-main">
         <router-view />
       </main>
     </div>
 
-    <!-- 移动端底部 Tab Bar（拇指可达） -->
-    <nav class="app-tabbar" v-if="isMobile">
-      <router-link v-for="m in menus" :key="m.path" :to="m.path" class="tab-item"
-                   :class="{ active: route.path === m.path }">
-        <el-icon :size="20"><component :is="m.icon" /></el-icon>
-        <span>{{ m.label }}</span>
-      </router-link>
-    </nav>
-
-    <LLMSettingsDrawer v-model="settingsVisible" @changed="loadStats" />
+    <LLMSettingsDrawer v-model="settingsVisible" />
   </div>
 </template>

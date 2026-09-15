@@ -21,6 +21,13 @@ async def create_job(body: JobCreate):
     return {"job_id": job_id, "kind": body.kind, "events": "/api/jobs/%s/events" % job_id}
 
 
+@router.get("")
+def list_jobs(st=Depends(get_store)):
+    # 历史任务列表（store.list_jobs 默认最近 50 条，按创建时间倒序）。
+    # 前端「任务」抽屉打开时拉一次，之后仍靠 SSE 订阅在跑的任务。
+    return st.list_jobs()
+
+
 @router.get("/kinds")
 def job_kinds():
     # 必须注册在 /{job_id} 之前，否则 kinds 会被当成 job_id 捕获

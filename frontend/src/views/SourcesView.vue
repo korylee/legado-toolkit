@@ -1,8 +1,8 @@
 <script setup>
 import { ref, reactive, computed, onMounted, onUnmounted } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { Search, Plus, Upload, Download, Delete, Filter, Refresh } from "@element-plus/icons-vue";
-import { listSources, listGroups, patchTags, deleteSources, listTags } from "../api/sources";
+import { Search, Plus, Upload, Download, Delete, Filter, Refresh, Monitor } from "@element-plus/icons-vue";
+import { listSources, listGroups, patchTags, deleteSources, listTags, getStats } from "../api/sources";
 import { api, subscribeJob } from "../api/client";
 import { splitTags } from "../utils/tags";
 import { useMobile } from "../composables/useMobile";
@@ -11,6 +11,7 @@ import TrashDrawer from "../components/TrashDrawer.vue";
 import ExportDrawer from "../components/ExportDrawer.vue";
 import ImportDialog from "../components/ImportDialog.vue";
 import GroupManagerDrawer from "../components/GroupManagerDrawer.vue";
+import JobsDrawer from "../components/JobsDrawer.vue";
 
 const isMobile = useMobile();
 const loading = ref(false);
@@ -32,6 +33,12 @@ const tagManagerVisible = ref(false);
 const checking = ref(false);
 let stopCheck = null;
 
+// 统计条（替代已删掉的「诊断」页）与「任务」抽屉
+const stats = ref(null);
+const jobsVisible = ref(false);
+const jobBadge = ref(0);
+const jobsRef = ref(null);
+
 const query = reactive({
   q: "", type: null, health: "", group: "", tag: "",
   order: "-stars", limit: 50, offset: 0,
@@ -47,6 +54,24 @@ const HEALTH = [
 ];
 const healthType = { ok: "success", dead: "danger", auth: "warning", gfw: "info" };
 const typeLabel = (v) => (TYPES.find((t) => t.value === v) || {}).label || ("类型" + v);
+
+// 统计条上可下钻的健康度 chip。value 即 query.health 的取值，点一下直接改筛选条件
+const HEALTH_CHIPS = [
+  { value: "ok", label: "✅可用" },
+  { value: "dead", label: "❌失效" },
+  { value: "auth", label: "🔒需验证" },
+  { value: "gfw", label: "🌐需翻墙" },
+];
+
+// stats.health 的键是 str(health)：没有校验记录时 health 为 NULL，键就是字符串 "None"
+const healthCount = (key) => {
+  const h = stats.value && stats.value.health;
+  return (h && h[key]) || 0;
+};
+
+async function loadStats() {
+  try { stats.value = await getStats(); } catch (e) { stats.value = null; }
+}
 
 const selectedUrls = computed(() => new Set(selected.value.map((r) => r.source_url)));
 const filterCount = computed(() => {
@@ -65,6 +90,14 @@ async function load() {
   } finally {
     loading.value = false;
   }
+  // 统计条和列表同屏，跟着一起刷，免得出现「条上说 12 条失效、列表却不是」的错位
+  loadStats();
+}
+
+// 点健康度 chip：再点一次同一个就取消筛选，切回全部
+function onHealthChip(value) {
+  query.health = query.health === value ? "" : value;
+  search();   // 换筛选条件必须回到第一页，否则会停在越界的 offset 上
 }
 
 function search() { query.offset = 0; load(); }
@@ -146,8 +179,12 @@ async function checkSources(urls = []) {
         } else {
           ElMessage.error("校验任务失败: " + (data.status || "unknown"));
         }
+        // 任务收尾后让抽屉那份列表/徽标跟上
+        jobsRef.value?.refresh();
       },
     );
+    // 新任务立刻反映到「任务」按钮的徽标上
+    jobsRef.value?.refresh();
   } catch (e) {
     checking.value = false;
     ElMessage.error("提交校验失败: " + e.message);
@@ -189,6 +226,29 @@ onUnmounted(() => {
 
 <template>
   <div class="page page-flex">
+    <!-- 统计条（替代已删掉的「诊断」页）：点 chip 直接下钻筛选，再点一次取消 -->
+    <div class="stats-bar">
+      <div class="chips">
+        <button type="button" class="chip" :class="{ active: !filterCount }" @click="reset">
+          源 <b>{{ stats ? stats.sources : "—" }}</b>
+        </button>
+        <button v-for="h in HEALTH_CHIPS" :key="h.value" type="button" class="chip"
+                :class="{ active: query.health === h.value }" @click="onHealthChip(h.value)">
+          {{ h.label }} <b>{{ healthCount(h.value) }}</b>
+        </button>
+        <!-- 「未校验」= 没有校验记录（health IS NULL）。后端 _where 只做 health 等值过滤，
+             空串表示「不筛」，现有接口表达不了 IS NULL 这个条件；因此只展示数量、不给点，
+             免得点出一份错的结果。要能筛需在 core.store._where 里加分支。 -->
+        <span class="chip readonly" title="后端接口暂不支持按「未校验」筛选">
+          未校验 <b>{{ healthCount("None") }}</b>
+        </span>
+      </div>
+      <span class="grow" />
+      <el-badge :value="jobBadge" :hidden="!jobBadge" type="primary">
+        <el-button size="small" :icon="Monitor" @click="jobsVisible = true">任务</el-button>
+      </el-badge>
+    </div>
+
     <!-- 桌面：完整筛选栏 -->
     <div class="bar page-toolbar desktop-only" v-if="!isMobile">
       <el-input class="w-search" v-model="query.q" placeholder="搜名称 / 域名" clearable
@@ -433,5 +493,50 @@ onUnmounted(() => {
     <ExportDrawer v-model="exportVisible" :selected="selected"
                   :filter="query" :filtered-total="total" />
     <ImportDialog v-model="importVisible" @imported="load" />
+    <JobsDrawer ref="jobsRef" v-model="jobsVisible" @running-change="jobBadge = $event" />
   </div>
 </template>
+
+<style scoped>
+/* 统计条：与工具栏同一套底色/描边，夹在页面顶部 */
+.stats-bar {
+  flex: 0 0 auto;
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 12px;
+  background: #fff;
+  border: 1px solid #e4e7ed;
+  border-radius: 6px;
+}
+.stats-bar .grow { flex: 1 1 auto; }
+.stats-bar .chips {
+  display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+  min-width: 0;
+}
+.stats-bar .chip {
+  flex: 0 0 auto;
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 3px 10px;
+  font: inherit; font-size: 12px; line-height: 20px;
+  color: #606266;
+  background: #f4f6f9;
+  border: 1px solid #e4e7ed;
+  border-radius: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.stats-bar .chip:hover { border-color: #409eff; color: #409eff; }
+/* 当前生效的 chip：与 query.health 同步高亮 */
+.stats-bar .chip.active {
+  background: #ecf5ff; border-color: #409eff; color: #409eff; font-weight: 600;
+}
+/* 不可点的 chip（未校验）：去掉手型与 hover 反馈，避免看着像能筛 */
+.stats-bar .chip.readonly { cursor: default; color: #909399; }
+.stats-bar .chip.readonly:hover { border-color: #e4e7ed; color: #909399; }
+
+@media (max-width: 900px) {
+  /* 移动端：chips 单行横滑，「任务」按钮钉在右侧不被挤出去 */
+  .stats-bar { gap: 6px; padding: 6px 10px; }
+  .stats-bar .chips { flex-wrap: nowrap; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .stats-bar .chip { min-height: 32px; }
+}
+</style>

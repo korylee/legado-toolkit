@@ -9,12 +9,11 @@ const routes = [
     redirect: "/sources",
     children: [
       { path: "sources", name: "sources", component: () => import("../views/SourcesView.vue") },
-      { path: "jobs", name: "jobs", component: () => import("../views/JobsView.vue"),
-        meta: { title: "任务中心" } },
-      { path: "dashboard", name: "dashboard", component: () => import("../views/DashboardView.vue"),
-        meta: { title: "诊断看板" } },
     ],
   },
+  // 任务/诊断两个页面已并入书源页，旧书签（#/jobs、#/dashboard）兜底回书源页，
+  // 否则 vue-router 匹配不到会渲染出一片空白
+  { path: "/:pathMatch(.*)*", redirect: "/sources" },
 ];
 
 export default createRouter({ history: createWebHashHistory(), routes });
