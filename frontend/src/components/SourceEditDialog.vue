@@ -4,6 +4,7 @@ import { ref, computed, watch, nextTick } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { api, subscribeJob } from "../api/client";
 import { getDetail, listTags, saveSource, sourceExists } from "../api/sources";
+import { appDebug } from "../api/rules";
 import { mergeGroup, splitSystemUser } from "../utils/tags";
 import { useMobile } from "../composables/useMobile";
 import RuleDebugDrawer from "./RuleDebugDrawer.vue";
@@ -28,6 +29,8 @@ const isDuplicate = ref(false);
 const isNew = computed(() => isDuplicate.value || !props.sourceUrl);
 const loading = ref(false);
 const testing = ref(false);
+const appHost = ref("");            // App 的 IP（连 App 调试用）
+const appDebugging = ref(false);
 const testKey = ref("我的");
 const testDetailUrl = ref("");
 const testResult = ref(null);
@@ -418,6 +421,32 @@ async function testRun() {
   expandTestFailures(testResult.value);
 }
 
+// 连 App 调试：跑不了 JS 规则的源只有 App 那边验得了（Rhino / cookie / webView
+// 全在 App 里）。结果**直接塞进 testResult**——后端返回的形状与 /rules/chain
+// 一致，所以卡片与调试抽屉零改动。
+async function appDebugRun() {
+  const host = appHost.value.trim();
+  if (!host) return ElMessage.warning("请先填 App 的 IP（App 通知栏里有）");
+  appDebugging.value = true;
+  testResult.value = null;
+  testStale.value = false;
+  try {
+    // 传 form.value（当前编辑中的源）：它的 bookSourceUrl 来自详情接口，是
+    // 导入原文——后端要拿它当 tag，规范化过的 URL 会让 App 静默无响应
+    const r = await appDebug(form.value, testKey.value || "我", host);
+    // 连不上时后端返回的是 {source:"app", error:"..."}，不是 HTTP 错误；
+    // 这里翻成卡片认得的形状（卡片读 testResult.error）
+    testResult.value = r && r.error ? { error: r.error } : r;
+  } catch (e) {
+    testResult.value = { error: String(e.message) };
+  } finally {
+    appDebugging.value = false;
+  }
+  expandTestFailures(testResult.value);
+  // 成功了才自动摊开证据；失败时卡片上那段错误信息本身就是要看的东西
+  if (testResult.value && !testResult.value.error) openDebug();
+}
+
 function openDebug(step) {
   debugStep.value = step || "";
   debugVisible.value = true;
@@ -774,6 +803,21 @@ async function doSave(s) {
           </div>
           <p class="muted" style="margin: 8px 0 0">
             搜索 → 取第一个结果 → 目录 → 第一章正文；仅发现模式可填详情页 URL。
+          </p>
+          <!-- 连 App 调试：我们离线回放不了 JS 规则（<js> / @js:），
+               而 App 内建的调试 WebSocket 能跑完整链路。IP 填 App 通知栏里
+               显示的那个（端口取 HTTP 端口 + 1，默认 1123）。 -->
+          <div class="toolbar" style="margin-top: 8px">
+            <el-input v-model="appHost" size="small" placeholder="App 的 IP，如 192.168.1.5"
+                      style="flex: 1 1 150px" />
+            <el-button type="warning" size="small" :loading="appDebugging"
+                       @click="appDebugRun">
+              连 App 调试
+            </el-button>
+          </div>
+          <p class="muted" style="margin: 8px 0 0">
+            需要 App 里打开「Web 服务」，且手机与电脑在同一局域网。
+            含 JS 规则的源只有这里验得了。
           </p>
 
           <div v-if="!testResult" class="muted" style="padding: 22px; text-align: center">

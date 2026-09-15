@@ -66,6 +66,21 @@ class RuleChainTest(BaseModel):
     pick: int = 1
 
 
+class AppDebugRequest(BaseModel):
+    """连 App 调试（借阅读 App 内建的调试 WebSocket 跑一次完整链路）。
+
+    `source` 里的 ``bookSourceUrl`` 会被后端**直接当调试 tag 用**——它必须是
+    导入原文（详情接口返回的源对象就是原文，前端不用做任何转换）；
+    换成列表里的 ``source_url``（规范化过）App 会查不到源而静默无响应。
+    """
+
+    source: Dict[str, Any]
+    key: str = "我"
+    host: str = ""
+    #: 0 = 用默认端口（App 的 HTTP 端口 1122 + 1 = 1123）
+    port: int = 0
+
+
 class LLMProfileIn(BaseModel):
     id: str = ""
     name: str = ""

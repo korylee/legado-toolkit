@@ -246,6 +246,41 @@ def build_evidence(values: Sequence[str], matched_html: str = "") -> Dict[str, A
     }
 
 
+# ------------------------------------------------------------------ 证据页面登记
+
+def new_page(pages: Dict[str, Dict[str, Any]], page_id: str, url: str, html: str,
+             status: int = 200, charset: str = "") -> str:
+    """把抓到的页面登记进 ``pages``（按 id 去重），返回实际可用的 page_id。
+
+    原先这是 ``core/verify.py`` 的私有函数 ``_new_page``。提到这里是因为
+    **「试跑」与「连 App 调试」两个调用方都要产出同形状的 ``pages[]``**，
+    而 ``html`` 的截断口径（``MAX_PAGE_HTML_CHARS``）本来就定义在本模块——
+    口径定义在这儿、实现却抄到第二个调用方去，正是本次改造反复在消灭的
+    「同一件事写两处」。
+
+    行为与原实现逐字一致，未做任何改动：
+      - ``html`` 为空 → 返回 ``""``（不登记空页；调用方据此知道这步没有页面）
+      - ``page_id`` 已存在 → 返回该 id，**保留先登记的那份**（搜索页与详情页
+        可能是同一个 URL 但语义不同，先到先得）
+      - ``truncated`` 按原始长度判定，``html`` 只存前 ``MAX_PAGE_HTML_CHARS`` 个字符
+    """
+    if not html:
+        return ""
+    if page_id in pages:
+        return page_id
+    truncated = len(html) > MAX_PAGE_HTML_CHARS
+    pages[page_id] = {
+        "id": page_id,
+        "url": url,
+        "status": status,
+        "charset": charset,
+        "html": html[:MAX_PAGE_HTML_CHARS],
+        "len": len(html),
+        "truncated": truncated,
+    }
+    return page_id
+
+
 def _shape_label(shape: str) -> str:
     return {
         SHAPE_TEXT: "文本", SHAPE_IMAGE: "图片", SHAPE_AUDIO: "音频",
@@ -444,7 +479,7 @@ __all__ = [
     "SHAPE_TEXT", "SHAPE_IMAGE", "SHAPE_AUDIO", "SHAPE_MIXED", "SHAPE_EMPTY",
     "STEP_SEARCH", "STEP_BOOK_URL", "STEP_TOC",
     "sniff_shape", "build_evidence", "judge_content", "judge_list_step",
-    "static_misconfig_notes",
+    "static_misconfig_notes", "new_page",
     "EXPECTED_SHAPE", "STRUCT_TAG_RE", "CONTENT_NOISE_MARKERS",
     "MAX_PAGE_HTML_CHARS", "MAX_MATCHED_HTML_CHARS", "MATCHED_NODES_LIMIT",
     "MAX_VALUE_CHARS", "VALUES_PREVIEW_LIMIT", "MAX_EVIDENCE_TOTAL_CHARS",

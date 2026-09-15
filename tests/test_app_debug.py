@@ -1,0 +1,554 @@
+# -*- coding: utf-8 -*-
+"""连 App 调试：事件流 → steps[] 的聚合，以及 WS 客户端。
+
+**不连真 App**：
+  - 聚合逻辑做成纯函数 ``build_steps``，直接喂事件文本（本文件大半用例）
+  - WS 客户端用一个**标准库手写的假服务端**（只做握手 + 推文本帧 + close），
+    钉住「请求体长什么样」「事件怎么收」「分帧/ping/close 怎么处理」
+
+样本取自实测抓下来的真实事件流（含 ``[mm:ss.SSS]`` 前缀）。
+"""
+
+import json
+import socket
+import struct
+import threading
+import unittest
+from unittest.mock import patch
+
+from core import quality as Q
+from core.app_debug import (
+    MAX_PAGES, build_steps, collect_debug_events, fetch_debug_pages, run_app_debug,
+)
+
+#: 实测样本：关键字模式，走完 搜索 → 详情 → 目录 → 正文
+SAMPLE = [
+    "[00:00.120]⇒开始搜索关键字:我",
+    "[00:00.180]︾开始解析搜索页",
+    "[00:00.640]≡获取成功:https://www.52shuku.net/so/search.php?q=我",
+    "[00:00.660]┌获取书籍列表",
+    "[00:00.700]└列表大小:20",
+    "[00:00.720]┌获取书名",
+    "[00:00.740]└孤悬_虞渊【完结+番外】",
+    "[00:00.760]◇书籍总数:20",
+    "[00:00.780]︽搜索页解析完成",
+    "[00:00.800]︾开始解析详情页",
+    "[00:01.100]≡获取成功:https://www.52shuku.net/bjUIK.html",
+    "[00:01.120]┌获取书名",
+    "[00:01.140]└孤悬_虞渊【完结+番外】",
+    "[00:01.160]︽详情页解析完成",
+    "[00:01.200]︾开始解析目录页",
+    "[00:01.900]└列表大小:108",
+    "[00:01.920]◇目录总数:108",
+    "[00:01.940]︽目录页解析完成",
+    "[00:02.000]︾开始解析正文页",
+    "[00:02.900]≡获取成功:https://www.52shuku.net/bjUIK_2.html",
+    "[00:02.920]┌获取正文下一页链接",
+    "[00:02.940]└https://www.52shuku.net/bjUIK_3.html",
+    "[00:02.960]◇本章总页数:1",
+    "[00:02.980]┌获取章节名称",
+    "[00:03.000]└第1页",
+    "[00:03.020]┌获取正文内容",
+    "[00:03.040]└\n　　《孤悬》作者：虞渊",
+    "[00:03.060]︽正文页解析完成",
+]
+
+#: 服务端推来的正文全文（断言 values 保留全文、不被截断）
+CONTENT_URL = "https://www.52shuku.net/bjUIK_2.html"
+TOC_URL = "https://www.52shuku.net/bjUIK.html"
+SEARCH_URL = "https://www.52shuku.net/so/search.php?q=我"
+
+PAGES = {
+    SEARCH_URL: "<html>搜索页</html>",
+    TOC_URL: "<html>详情页</html>",
+    CONTENT_URL: "<html>正文页</html>",
+}
+
+
+def fake_fetch(url, timeout=15, headers=None, charset="", proxy=""):
+    return PAGES.get(url, "")
+
+
+def step_of(steps, name):
+    return next(s for s in steps if s["name"] == name)
+
+
+# ------------------------------------------------------------------ 分段
+
+class TestSegmenting(unittest.TestCase):
+    def test_sample_splits_into_four_steps_in_order(self):
+        """实测样本 → 四段，顺序与阅读路径一致。"""
+        steps = build_steps(SAMPLE)
+        self.assertEqual([s["name"] for s in steps],
+                         ["search", "bookUrl", "toc", "content"])
+
+    def test_verdicts_follow_done_markers(self):
+        """有 ︽X页解析完成 → pass（样本里四段都跑完了）。"""
+        steps = build_steps(SAMPLE)
+        self.assertEqual([s["verdict"] for s in steps],
+                         ["pass", "pass", "pass", "pass"])
+        self.assertTrue(all(s["ok"] for s in steps))
+
+    def test_prefix_is_stripped_from_values(self):
+        """values 去掉 [mm:ss.SSS] 前缀，但保留 ┌/└ 成对结构与原文。"""
+        search = step_of(build_steps(SAMPLE), "search")
+        # values[0] 是入口事件（⇒开始搜索关键字），段起始行排在其后
+        self.assertEqual(search["values"][1], "︾开始解析搜索页")
+        self.assertIn("┌获取书籍列表", search["values"])
+        self.assertIn("└列表大小:20", search["values"])
+        self.assertIn("︽搜索页解析完成", search["values"])
+        self.assertFalse([v for v in search["values"] if v.startswith("[00:")])
+
+    def test_entry_event_before_first_segment_joins_first_step(self):
+        """首个 ︾ 之前的 ⇒开始搜索关键字 归入第一段（它描述的就是入口）。"""
+        search = step_of(build_steps(SAMPLE), "search")
+        self.assertEqual(search["values"][0], "⇒开始搜索关键字:我")
+
+    def test_url_comes_from_fetch_success_line(self):
+        steps = build_steps(SAMPLE)
+        self.assertEqual(step_of(steps, "search")["url"], SEARCH_URL)
+        self.assertEqual(step_of(steps, "bookUrl")["url"], TOC_URL)
+        self.assertEqual(step_of(steps, "content")["url"], CONTENT_URL)
+        # 目录段没有 ≡ 行 → 空串（不是 None）
+        self.assertEqual(step_of(steps, "toc")["url"], "")
+
+    def test_notes_carry_stat_lines(self):
+        steps = build_steps(SAMPLE)
+        self.assertEqual(step_of(steps, "search")["notes"], ["◇书籍总数:20"])
+        self.assertEqual(step_of(steps, "toc")["notes"], ["◇目录总数:108"])
+        self.assertEqual(step_of(steps, "content")["notes"], ["◇本章总页数:1"])
+        self.assertTrue(step_of(steps, "toc")["has_notes"])
+        # 没有 ◇ 的段 notes 为空，不该被塞进空串
+        self.assertEqual(step_of(steps, "bookUrl")["notes"], [])
+        self.assertFalse(step_of(steps, "bookUrl")["has_notes"])
+
+    def test_page_ids_match_drawer_pages(self):
+        """page_id 用段名映射出的页 id（search/detail/chapter），抽屉据此对页面。"""
+        steps = build_steps(SAMPLE)
+        self.assertEqual(step_of(steps, "search")["page_id"], "search")
+        self.assertEqual(step_of(steps, "bookUrl")["page_id"], "detail")
+        self.assertEqual(step_of(steps, "toc")["page_id"], "detail")   # 目录页即详情页
+        self.assertEqual(step_of(steps, "content")["page_id"], "chapter")
+
+    def test_matched_html_is_always_empty(self):
+        """App 只推文本，不给 HTML——这个字段恒为空串（抽屉据此显示空状态）。"""
+        for s in build_steps(SAMPLE):
+            self.assertEqual(s["matched_html"], "")
+
+    def test_segment_without_done_marker_is_unknown(self):
+        """段的解析没跑完（缺 ︽X页解析完成）→ unknown，不是 fail。"""
+        events = SAMPLE[:5]        # 切在搜索页中间
+        search = step_of(build_steps(events), "search")
+        self.assertEqual(search["verdict"], "unknown")
+        self.assertTrue(search["ok"])          # unknown 仍算 ok（verify 的旧语义）
+        self.assertEqual(search["reason"], "该段没有解析完成信号")
+
+
+# ------------------------------------------------------------------ 单段输入
+
+class TestSingleSegment(unittest.TestCase):
+    def test_only_content_segment(self):
+        """--URL 从正文页开始：只有一个正文段。"""
+        events = [
+            "[00:00.100]⇒开始访正文页:https://a.com/1.html",
+            "[00:00.200]︾开始解析正文页",
+            "[00:01.000]≡获取成功:https://a.com/1.html",
+            "[00:01.100]┌获取正文内容",
+            "[00:01.200]└正文全文",
+            "[00:01.300]︽正文页解析完成",
+        ]
+        steps = build_steps(events)
+        self.assertEqual(len(steps), 1)
+        self.assertEqual(steps[0]["name"], "content")
+        self.assertEqual(steps[0]["verdict"], "pass")
+        self.assertEqual(steps[0]["url"], "https://a.com/1.html")
+        self.assertEqual(steps[0]["page_id"], "chapter")
+        # 入口事件归入这一段
+        self.assertIn("⇒开始访正文页:https://a.com/1.html", steps[0]["values"])
+
+    def test_only_toc_segment(self):
+        """++URL 从目录页开始：只有一个目录段。"""
+        events = [
+            "[00:00.100]⇒开始访目录页:https://a.com/book/1/",
+            "[00:00.200]︾开始解析目录页",
+            "[00:01.000]≡获取成功:https://a.com/book/1/",
+            "[00:01.100]◇目录总数:2",
+            "[00:01.200]︽目录页解析完成",
+        ]
+        steps = build_steps(events)
+        self.assertEqual([s["name"] for s in steps], ["toc"])
+        self.assertEqual(steps[0]["page_id"], "detail")
+        self.assertEqual(steps[0]["notes"], ["◇目录总数:2"])
+
+    def test_no_segment_marker_falls_back_to_one_step(self):
+        """连 ︾/︽ 都没有时全部归一段，段名从入口事件推断。"""
+        events = ["⇒开始访目录页:https://a.com/book/1/", "└列表大小:9"]
+        steps = build_steps(events)
+        self.assertEqual(len(steps), 1)
+        self.assertEqual(steps[0]["name"], "toc")
+        self.assertEqual(steps[0]["verdict"], "unknown")
+        self.assertEqual(steps[0]["values"], events)
+
+    def test_no_marker_and_no_entry_defaults_to_content(self):
+        """什么都推断不出来时按 content 兜底，而不是丢弃事件。"""
+        steps = build_steps(["└不知道是什么", "另一行"])
+        self.assertEqual(len(steps), 1)
+        self.assertEqual(steps[0]["name"], "content")
+        self.assertEqual(steps[0]["page_id"], "chapter")
+
+
+# ------------------------------------------------------------------ 空 / 错误
+
+class TestEmptyAndError(unittest.TestCase):
+    def test_empty_events_produce_no_steps(self):
+        """空事件流不产段——不能凭空造一个空步（抽屉会显示假的正文步）。"""
+        self.assertEqual(build_steps([]), [])
+        self.assertEqual(build_steps(None), [])
+
+    def test_error_line_makes_verdict_fail(self):
+        """段内出现错误行 → fail，并把错误行当 reason。"""
+        events = [
+            "︾开始解析搜索页",
+            "java.lang.NullPointerException: Cannot invoke ...",
+        ]
+        search = build_steps(events)[0]
+        self.assertEqual(search["verdict"], "fail")
+        self.assertFalse(search["ok"])
+        self.assertIn("NullPointerException", search["reason"])
+        self.assertEqual(search["page_id"], "search")
+
+    def test_error_after_done_marker_still_fails(self):
+        """错误行与完成信号同时存在时，错的是错的（fail 优先）。"""
+        events = ["︾开始解析正文页", "︽正文页解析完成", "错误：内容为空"]
+        self.assertEqual(build_steps(events)[0]["verdict"], "fail")
+
+    def test_reason_is_truncated_to_200_chars(self):
+        """失败原因只取前 200 字符（完整错误行仍在 values 里）。"""
+        long_error = "错误：" + "x" * 500
+        step = build_steps(["︾开始解析正文页", long_error])[0]
+        self.assertEqual(len(step["reason"]), 200)
+
+    def test_failure_word_inside_content_is_not_an_error(self):
+        """正文里出现「失败」二字**不能**判 fail——正文以 └ 开头，不匹配行首。"""
+        events = [
+            "︾开始解析正文页",
+            "└他这一次的尝试失败了，但故事还长。",
+            "︽正文页解析完成",
+        ]
+        step = build_steps(events)[0]
+        self.assertEqual(step["verdict"], "pass")
+        self.assertEqual(step["reason"], "")
+
+    def test_short_content_is_kept_in_full(self):
+        """正文全文照收，不做任何长度截断（与 verify_chain 的正文口径一致）。"""
+        long_text = "正文" * 1500        # 3000 字符
+        step = build_steps(["︾开始解析正文页", "└" + long_text,
+                            "︽正文页解析完成"])[0]
+        self.assertIn("└" + long_text, step["values"])
+        self.assertEqual(step["evidence"]["chars"] > 3000, True)
+
+
+# ------------------------------------------------------------------ 形状
+
+class TestStepShape(unittest.TestCase):
+    def test_steps_have_same_keys_as_verify_chain(self):
+        """与 verify_chain 的 steps[] 同形——抽屉与卡片读的就是这些键。"""
+        step = build_steps(SAMPLE)[0]
+        for key in ("name", "ok", "detail", "verdict", "has_notes", "notes",
+                    "reason", "shape", "evidence", "rule_error", "url",
+                    "page_id", "values", "matched_html"):
+            self.assertIn(key, step)
+        # 抽屉无条件读 evidence.values_total / chars，缺了会直接报错
+        self.assertIn("values_total", step["evidence"])
+        self.assertIn("chars", step["evidence"])
+
+    def test_detail_prefers_stat_line_over_event_count(self):
+        """卡片上那行小字：有 ◇ 统计时用它（比「9 条事件」有信息量）。"""
+        self.assertEqual(step_of(build_steps(SAMPLE), "toc")["detail"], "◇目录总数:108")
+
+    def test_all_ok_only_false_on_fail(self):
+        """unknown 不是坏（工具测不了），不该让 all_ok 变 False。"""
+        ok_steps = build_steps(["︾开始解析正文页"])           # 没有完成信号
+        self.assertEqual(ok_steps[0]["verdict"], "unknown")
+        self.assertEqual(all(s["ok"] for s in ok_steps), True)
+
+
+# ------------------------------------------------------------------ 抓页面
+
+class TestFetchPages(unittest.TestCase):
+    def _steps(self):
+        return build_steps(SAMPLE)
+
+    def test_pages_have_verify_chain_shape(self):
+        steps = self._steps()
+        with patch("core.app_debug.fetch", side_effect=fake_fetch):
+            pages = fetch_debug_pages(steps)
+        self.assertEqual([p["id"] for p in pages], ["search", "detail", "chapter"])
+        self.assertEqual(len(pages), MAX_PAGES)
+        for p in pages:
+            for key in ("id", "url", "status", "charset", "html", "len", "truncated"):
+                self.assertIn(key, p)
+        self.assertEqual(pages[1]["url"], TOC_URL)
+        self.assertEqual(pages[2]["html"], "<html>正文页</html>")
+
+    def test_pages_use_source_header_and_charset(self):
+        """与 verify.py 一致：必须带书源自己的 header / charset 抓。"""
+        steps = self._steps()
+        seen = {}
+
+        def spy(url, timeout=15, headers=None, charset="", proxy=""):
+            seen["headers"] = headers
+            seen["charset"] = charset
+            return "<html>x</html>"
+
+        with patch("core.app_debug.fetch", side_effect=spy):
+            fetch_debug_pages(steps, {"header": '{"Referer":"https://a.com/"}',
+                                      "charset": "gbk"})
+        self.assertEqual(seen["headers"], {"Referer": "https://a.com/"})
+        self.assertEqual(seen["charset"], "gbk")
+
+    def test_fetch_failure_is_noted_not_raised(self):
+        """抓不到页面：该页不进 pages，在对应 step 的 notes 里说明，判定不受影响。"""
+        def boom(url, timeout=15, headers=None, charset="", proxy=""):
+            raise OSError("连接超时")
+
+        steps = self._steps()
+        with patch("core.app_debug.fetch", side_effect=boom):
+            pages = fetch_debug_pages(steps)
+        self.assertEqual(pages, [])
+        search = step_of(steps, "search")
+        self.assertTrue(search["has_notes"])
+        self.assertIn("页面抓取失败", search["notes"][-1])
+        self.assertIn("连接超时", search["notes"][-1])
+        self.assertEqual(search["verdict"], "pass")     # 判定没被牵连
+
+    def test_empty_html_is_not_registered(self):
+        """抓回空 HTML 不登记（new_page 的口径），但不报错。"""
+        with patch("core.app_debug.fetch", side_effect=lambda *a, **k: ""):
+            self.assertEqual(fetch_debug_pages(self._steps()), [])
+
+    def test_toc_page_shares_detail_id_so_content_is_not_dropped(self):
+        """目录页与详情页共用 detail id：3 页上限下正文页不会被挤掉。"""
+        steps = build_steps(SAMPLE + [])
+        for s in steps:
+            if s["name"] == "toc":
+                s["url"] = "https://www.52shuku.net/toc.html"
+        with patch("core.app_debug.fetch", side_effect=fake_fetch):
+            pages = fetch_debug_pages(steps)
+        self.assertEqual([p["id"] for p in pages], ["search", "detail", "chapter"])
+
+
+# ------------------------------------------------------------------ 假 WS 服务端
+
+def _server_frame(payload: bytes, opcode: int = 0x1) -> bytes:
+    """服务端发出的帧**不掩码**。"""
+    n = len(payload)
+    head = struct.pack("!BB", 0x80 | opcode, n) if n < 126 else \
+        struct.pack("!BBH", 0x80 | opcode, 126, n)
+    return head + payload
+
+
+def _read_frame(conn: socket.socket):
+    """读一帧客户端帧（必掩码），返回 (opcode, payload)。"""
+    def _exact(n):
+        buf = b""
+        while len(buf) < n:
+            chunk = conn.recv(n - len(buf))
+            if not chunk:
+                raise ConnectionError("closed")
+            buf += chunk
+        return buf
+
+    h = _exact(2)
+    opcode = h[0] & 0x0F
+    masked = h[1] & 0x80
+    n = h[1] & 0x7F
+    if n == 126:
+        n = struct.unpack("!H", _exact(2))[0]
+    mkey = _exact(4) if masked else b""
+    data = _exact(n) if n else b""
+    if masked:
+        data = bytes(b ^ mkey[i % 4] for i, b in enumerate(data))
+    return opcode, data
+
+
+class FakeDebugServer:
+    """最小 WS 服务端：握手 → 读请求 → 逐条推文本 → 发 ping → 发 close。
+
+    只实现到「够钉住客户端行为」的程度，不追求 RFC 完整性。
+    """
+
+    def __init__(self, messages, ping_first=False):
+        self.messages = messages
+        self.ping_first = ping_first
+        self.request = None                 # 客户端发来的 {"tag","key"}
+        self.sock = socket.socket()
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen(1)
+        self.sock.settimeout(10)
+        self.port = self.sock.getsockname()[1]
+        self.error = None
+        self._thread = threading.Thread(target=self._serve, daemon=True)
+        self._thread.start()
+
+    def _serve(self):
+        try:
+            conn, _ = self.sock.accept()
+            conn.settimeout(10)
+            with conn:
+                head = b""
+                while b"\r\n\r\n" not in head:
+                    head += conn.recv(1)
+                # 客户端只校验首行含 101，Accept 值不必真算
+                conn.sendall(b"HTTP/1.1 101 Switching Protocols\r\n"
+                             b"Upgrade: websocket\r\nConnection: Upgrade\r\n"
+                             b"Sec-WebSocket-Accept: dummy\r\n\r\n")
+                opcode, data = _read_frame(conn)
+                self.request = json.loads(data.decode("utf-8"))
+                if self.ping_first:
+                    conn.sendall(_server_frame(b"", opcode=0x9))
+                    _read_frame(conn)        # 等客户端回 pong
+                for msg in self.messages:
+                    conn.sendall(_server_frame(msg.encode("utf-8")))
+                conn.sendall(_server_frame(b"", opcode=0x8))   # close
+        except Exception as e:                 # pragma: no cover - 只在测试自身出错时
+            self.error = e
+
+    def close(self):
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+        self._thread.join(timeout=5)
+
+
+class TestWebSocketClient(unittest.TestCase):
+    def test_collects_events_and_sends_raw_tag(self):
+        """端到端：tag 原样发出（含尾部斜杠）、事件按序收回、t 用前缀的耗时。"""
+        raw_url = "https://www.52shuku.net/"      # 带尾部斜杠的导入原文
+        server = FakeDebugServer([
+            "[00:00.500]︾开始解析正文页",
+            "[00:01.250]└正文",
+            "[00:02.000]︽正文页解析完成",
+        ])
+        try:
+            events = collect_debug_events("127.0.0.1", raw_url, "我",
+                                          port=server.port, timeout=10)
+        finally:
+            server.close()
+        self.assertIsNone(server.error)
+        # tag 必须原样：规范化（去尾部斜杠）过的话 App 查不到源
+        self.assertEqual(server.request, {"tag": raw_url, "key": "我"})
+        self.assertEqual([e["text"] for e in events],
+                         ["[00:00.500]︾开始解析正文页",
+                          "[00:01.250]└正文",
+                          "[00:02.000]︽正文页解析完成"])
+        self.assertEqual([e["t"] for e in events], [0.5, 1.25, 2.0])
+
+    def test_answers_ping_and_stops_on_close(self):
+        """ping 必须回 pong（否则 App 判死）；收到 close 就停，不空等超时。"""
+        server = FakeDebugServer([
+            "[00:00.100]︾开始解析搜索页",
+            "[00:00.200]︽搜索页解析完成",
+        ], ping_first=True)
+        try:
+            events = collect_debug_events("127.0.0.1", "https://a.com", "我",
+                                          port=server.port, timeout=10)
+        finally:
+            server.close()
+        self.assertIsNone(server.error)
+        self.assertEqual(len(events), 2)
+
+    def test_empty_key_falls_back_to_default(self):
+        """key 为空时补默认值「我」，不让 App 收到空 key。"""
+        server = FakeDebugServer([])
+        try:
+            collect_debug_events("127.0.0.1", "https://a.com", "",
+                                 port=server.port, timeout=10)
+        finally:
+            server.close()
+        self.assertEqual(server.request["key"], "我")
+
+    def test_missing_host_raises_value_error(self):
+        with self.assertRaises(ValueError):
+            collect_debug_events("", "https://a.com", "我", timeout=1)
+
+
+class TestRunAppDebug(unittest.TestCase):
+    def test_success_shape_and_pages(self):
+        """run_app_debug 端到端：形状与 verify_chain 一致 + 抓到页面。"""
+        server = FakeDebugServer(SAMPLE)
+        try:
+            with patch("core.app_debug.fetch", side_effect=fake_fetch):
+                out = run_app_debug("127.0.0.1", "https://www.52shuku.net/", "我",
+                                    port=server.port, timeout=10,
+                                    source={"header": '{"Referer":"https://a.com/"}'})
+        finally:
+            server.close()
+        self.assertEqual(out["source"], "app")
+        self.assertEqual(out["error"], "")
+        self.assertTrue(out["all_ok"])
+        self.assertEqual(len(out["events"]), len(SAMPLE))
+        self.assertEqual([s["name"] for s in out["steps"]],
+                         ["search", "bookUrl", "toc", "content"])
+        self.assertEqual([p["id"] for p in out["pages"]],
+                         ["search", "detail", "chapter"])
+
+    def test_connect_failure_returns_readable_error_not_raise(self):
+        """连不上（端口没人听）→ 返回可读 error，不抛异常（接口就不会 500）。"""
+        # 先占一个端口再关掉，拿到一个几乎肯定没人监听的端口号
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+        s.close()
+        out = run_app_debug("127.0.0.1", "https://a.com", "我", port=port, timeout=2)
+        self.assertEqual(out["steps"], [])
+        self.assertEqual(out["pages"], [])
+        self.assertIn("连不上 App", out["error"])
+        self.assertIn("Web 服务", out["error"])
+
+    def test_zero_events_explains_tag_mismatch(self):
+        """零事件：把「tag 必须用导入原文」这条排查线索写进 error。"""
+        server = FakeDebugServer([])
+        try:
+            out = run_app_debug("127.0.0.1", "https://a.com", "我",
+                                port=server.port, timeout=10)
+        finally:
+            server.close()
+        self.assertIn("bookSourceUrl", out["error"])
+        self.assertEqual(out["steps"], [])
+
+
+class TestQualityNewPageShared(unittest.TestCase):
+    def test_verify_and_app_debug_share_one_implementation(self):
+        """页面登记只有一份实现：verify._new_page 就是 quality.new_page。"""
+        from core import verify
+        self.assertIs(verify._new_page, Q.new_page)
+
+    def test_new_page_keeps_first_and_flags_truncated(self):
+        pages = {}
+        big = "x" * (Q.MAX_PAGE_HTML_CHARS + 10)
+        self.assertEqual(Q.new_page(pages, "search", "https://a.com", big), "search")
+        self.assertTrue(pages["search"]["truncated"])
+        self.assertEqual(len(pages["search"]["html"]), Q.MAX_PAGE_HTML_CHARS)
+        self.assertEqual(pages["search"]["len"], Q.MAX_PAGE_HTML_CHARS + 10)
+        # 同 id 再来一份：保留先登记的那份
+        Q.new_page(pages, "search", "https://b.com", "<html>2</html>")
+        self.assertEqual(pages["search"]["url"], "https://a.com")
+        # 空 html 不登记
+        self.assertEqual(Q.new_page(pages, "chapter", "https://c.com", ""), "")
+        self.assertNotIn("chapter", pages)
+
+
+# ------------------------------------------------------------------ 变异测试表
+# 关键用例做过变异测试（改坏被它守的那行 → 必须变红；逐个单独验证过）：
+#   M1  _split_segments 的 ``_strip_prefix(raw)`` → ``str(raw)``
+#       → 16 条变红（前缀没剥掉，行首匹配全废）：test_prefix_is_stripped_from_values、
+#         test_url_comes_from_fetch_success_line、test_notes_carry_stat_lines …
+#   M2  PAGE_IDS 的 ``"toc": "detail"`` → ``"toc"``
+#       → test_page_ids_match_drawer_pages、test_only_toc_segment（2 条）
+#   M3  ``_is_error`` 的「行首匹配」 → 「正文里含『失败』也算」
+#       → test_failure_word_inside_content_is_not_an_error（1 条，正文被误判成 fail）
+
+if __name__ == "__main__":
+    unittest.main()

@@ -19,24 +19,10 @@ from core import quality as Q
 from core.rules.replayer import extract_all as apply_css_rule
 
 
-def _new_page(pages: dict, page_id: str, url: str, html: str,
-              status: int = 200, charset: str = "") -> str:
-    """把抓到的页面登记进 pages（按 id 去重），返回 page_id。"""
-    if not html:
-        return ""
-    if page_id in pages:
-        return page_id
-    truncated = len(html) > Q.MAX_PAGE_HTML_CHARS
-    pages[page_id] = {
-        "id": page_id,
-        "url": url,
-        "status": status,
-        "charset": charset,
-        "html": html[:Q.MAX_PAGE_HTML_CHARS],
-        "len": len(html),
-        "truncated": truncated,
-    }
-    return page_id
+#: 页面登记口径已提取到 ``quality.new_page``（「连 App 调试」共用同一份，见
+#: core/app_debug.py）。这里保留 ``_new_page`` 这个名字与调用点形状——本模块
+#: 只做提取，不改行为，也不动既有的三个调用点。
+_new_page = Q.new_page
 
 
 def _extract(html: str, rule: str):
