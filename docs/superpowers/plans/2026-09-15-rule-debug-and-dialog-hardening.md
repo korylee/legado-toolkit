@@ -2800,14 +2800,35 @@ function copyMatched() {
 </style>
 ```
 
-- [ ] **Step 3: 加圆点样式**
+- [ ] **Step 3: 加圆点样式（**基础规则也必须补，不能只加 `.dot.unknown`**）**
 
-在 `frontend/src/styles.css` 的 `.dot.ok / .dot.warn / .dot.err` 那一组后面追加：
+> ⚠️ **本步骤原先是错的**，实现时才暴露：它说「在 `frontend/src/styles.css` 的
+> `.dot.ok / .dot.warn / .dot.err` **那一组后面**追加 `.dot.unknown`」——
+> **但那一组根本不在 `styles.css` 里**，它住在 `SourceEditDialog.vue:616-619` 的
+> `<style scoped>` 中（已用 `git show <commit>~1:frontend/src/styles.css` 核实：
+> 该提交前 `styles.css` 里没有任何 `.dot` 规则）。
+>
+> **scoped 样式只加在它自己组件的元素上**，管不到抽屉内部的 `<i class="dot">`。
+> 只加 `.dot.unknown` 的话，抽屉的圆点会拿到灰色背景，却**拿不到
+> `width` / `height` / `border-radius` / `display: inline-block`**（那几条在 scoped 块里）
+> → 渲染成**没有尺寸、看不见的空 inline 元素**，三态指示完全失效。
+
+在 `frontend/src/styles.css` 末尾追加（**整组**，不只是 `.unknown`）：
 
 ```css
+/* 状态圆点：编辑弹窗页签与试跑调试抽屉共用同一套配色。
+   弹窗里那份在 SourceEditDialog.vue 的 scoped 样式里，**管不到抽屉内部**，
+   所以这里放一份全局的，抽屉的圆点才画得出来。两者配色保持一致。 */
+.dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; background: #c0c4cc; }
+.dot.ok { background: #67c23a; }
+.dot.warn { background: #e6a23c; }
+.dot.err { background: #f56c6c; }
 /* 试跑调试：unknown（无法判定）用灰色，与 fail 的红明确区分 */
 .dot.unknown { background: #909399; }
 ```
+
+> 不会影响编辑弹窗自己的圆点：那份走 `.dot[data-v-x]`（特异性 0,2,0），
+> 仍压过这里的全局 `.dot`（0,1,0），外观不变。
 
 - [ ] **Step 4: 手工验证**
 
@@ -3004,6 +3025,15 @@ function openDebug(step) {
 ```
 
 > Task 12 会在这行上加一个 `@goto="onDebugGoto"`（类型不符 note 的「去改类型」入口）。现在先不加。
+
+> ⚠️ **`initialStep` 只在 `modelValue` 由 `false → true` 时生效**——抽屉里的 `watch`
+> 没有 `immediate`。所以：
+> - 若用 `v-if` 挂载抽屉，或挂载那一刻 `modelValue` 已经是 `true`，**首帧会落到 `steps[0]`，
+>   `:initial-step` 被忽略**
+> - 上面这种写法（抽屉常驻、靠 `v-model` 控制显隐）没问题；**一旦改成 `v-if`，就要给
+>   抽屉里的 watch 加 `{ immediate: true }`**（一行）
+>
+> 这条是实现 Task 9 时发现的，此处记录以免接线时踩。
 
 - [ ] **Step 8: 手工验证**
 
