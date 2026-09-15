@@ -42,6 +42,9 @@ from core import quality as Q
 # 早先它定义在本模块，而 fetch 也要用时就只能反向依赖 checker——lessons §十记过
 # 这个坑（core 层不该反向依赖）。这里只是引用，不是第二份定义
 from core.quality import rate_interval_ms
+# 探测深度的合法取值只在 settings_store 定义一份（那边同时供设置接口的收敛用）。
+# 依赖方向：checker → settings_store，反过去会把 aiohttp 拖进配置模块
+from core.settings_store import PROBE_DEPTHS
 
 # 常见 User-Agent（规避简单 UA 拦截）
 DEFAULT_UA = (
@@ -197,11 +200,16 @@ def is_cache_item_valid(
     record: BookSourceRecord,
     item: Dict[str, Any],
     now: Optional[datetime] = None,
+    min_depth: int = 1,
 ) -> bool:
     """判断缓存是否仍可用于该书源。
 
-    复用必须满足：缓存版本正确、规则指纹一致、校验时间有效且不在未来。
-    可用源保留 14 天，其余健康状态均保留 7 天，避免待验证/需代理复检长期停留在旧结论。
+    复用必须满足：缓存版本正确、规则指纹一致、校验时间有效且不在未来；
+    若本次要跑深度验证，缓存还必须是**在同等或更深深度下**产出的。
+
+    ``min_depth`` 只有校验链路（``AsyncChecker.run``）需要传配置深度。其余调用方
+    ——CLI 的 organize/report、cache_parity 的两库比对——只是拿缓存算标签和报告，
+    重跑不了探测，保持默认 1 即「不因深度作废」。
     """
     if item.get("v") != CACHE_VERSION:
         return False
@@ -218,7 +226,19 @@ def is_cache_item_valid(
     if checked_time > current_time:
         return False
     ttl_days = CACHE_TTL_DAYS.get(str(item.get("health", "")), 7)
-    return current_time - checked_time <= timedelta(days=ttl_days)
+    if current_time - checked_time > timedelta(days=ttl_days):
+        return False
+    # 深度不够必须重验。缓存里的 probe_depth 是**实际执行到的深度**
+    # （_probe_toc/_probe_content 内部写的），不是配置深度。若只比版本/指纹/时间，
+    # 用户把深度从 1 调到 3 后浅缓存仍然命中，深度验证一条都不会跑，而界面上显示的
+    # 是「校验完成」——正是最该避免的「看起来跑了其实没跑」。
+    #
+    # 只对 OK 的源要求深度：非 OK 的源按 fail-fast 根本走不到深度验证
+    # （check_one 里要求 health == OK 才继续），强制重验只是白打请求。
+    if str(item.get("health", "")) == Health.OK:
+        if int(item.get("probe_depth", 1) or 1) < min_depth:
+            return False
+    return True
 
 
 def calc_stars(
@@ -356,7 +376,7 @@ class AsyncChecker:
         # 探测深度：1=浅探测（现状速度，静态规则判星级）
         #           2=命中后验证目录完整度（参考表比例比对）
         #           3=再抽样一章验证正文可用性（速度+内容）
-        self.probe_depth = probe_depth if probe_depth in (1, 2, 3) else 1
+        self.probe_depth = probe_depth if probe_depth in PROBE_DEPTHS else 1
         # 目录完整度参考表：{作品名: {"type": "novel|manga", "chapters": N}}，缺省内置 TEST_TITLES
         self.test_titles = test_titles or TEST_TITLES
         self._sem: Optional[asyncio.Semaphore] = None
@@ -911,7 +931,7 @@ class AsyncChecker:
         for r in records:
             # 键规范化后再查：缓存两侧的口径见 load_cache 的注释
             item = cache.get(_normalize_url(r.url))
-            if item and is_cache_item_valid(r, item):
+            if item and is_cache_item_valid(r, item, min_depth=self.probe_depth):
                 restore_from_cache(r, item)
             else:
                 pending.append(r)

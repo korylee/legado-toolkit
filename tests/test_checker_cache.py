@@ -69,6 +69,52 @@ class CacheValidityTests(unittest.TestCase):
 
         self.assertTrue(is_cache_item_valid(build_record(source, 0), item, now=NOW))
 
+    # ------------------------------------------------------ 探测深度（本轮新增）
+
+    def test_shallow_cache_is_not_reused_when_depth_raised(self) -> None:
+        """把深度从 1 调到 3 之后，浅缓存必须重验。
+
+        只比版本/指纹/有效期的话，浅缓存照样命中、深度验证一条都不跑，
+        而界面上显示的是「校验完成」——「看起来跑了其实没跑」。
+        """
+        source = make_source()
+        item = make_cache_item(source, Health.OK, "2026-08-21 10:00:00")
+        item["probe_depth"] = 1
+
+        self.assertFalse(is_cache_item_valid(build_record(source, 0), item,
+                                             now=NOW, min_depth=3))
+        self.assertFalse(is_cache_item_valid(build_record(source, 0), item,
+                                             now=NOW, min_depth=2))
+
+    def test_deep_enough_cache_is_reused(self) -> None:
+        source = make_source()
+        item = make_cache_item(source, Health.OK, "2026-08-21 10:00:00")
+        item["probe_depth"] = 3
+
+        self.assertTrue(is_cache_item_valid(build_record(source, 0), item,
+                                            now=NOW, min_depth=3))
+
+    def test_shallow_cache_of_failed_source_is_still_reused(self) -> None:
+        """非 OK 的源按 fail-fast 根本走不到深度验证，强制重验只是白打请求。
+
+        缓存里 probe_depth=1 不是因为「当初探得浅」，而是因为它在搜索阶段就失败了。
+        """
+        source = make_source()
+        item = make_cache_item(source, Health.AUTH, "2026-08-15 12:00:00")
+        item["probe_depth"] = 1
+
+        self.assertTrue(is_cache_item_valid(build_record(source, 0), item,
+                                            now=NOW, min_depth=3))
+
+    def test_legacy_item_without_probe_depth_is_reused_at_default_depth(self) -> None:
+        """v6 早期写下的缓存项没有 probe_depth 字段，按浅探测看待即可。"""
+        source = make_source()
+        item = make_cache_item(source, Health.OK, "2026-08-21 10:00:00")
+
+        self.assertTrue(is_cache_item_valid(build_record(source, 0), item, now=NOW))
+        self.assertFalse(is_cache_item_valid(build_record(source, 0), item,
+                                             now=NOW, min_depth=2))
+
 
 class CacheCliTests(unittest.TestCase):
     def test_no_cache_disables_read_and_write(self) -> None:
@@ -93,3 +139,12 @@ class CacheCliTests(unittest.TestCase):
         self.assertFalse(check.refresh_cache)
         self.assertFalse(run.no_cache)
         self.assertTrue(run.refresh_cache)
+
+
+# ---------------------------------------------------------------- 变异记录
+# 以下为实测（改坏 → `python -B -m unittest tests.test_checker_cache` → 确认变红 → 还原）。
+#
+#  M1  is_cache_item_valid 去掉 probe_depth 判定（直接 `return True`）
+#        → test_shallow_cache_is_not_reused_when_depth_raised 红
+#  M2  深度判定不设 health == OK 前提（对非 OK 的源也要求深度）
+#        → test_shallow_cache_of_failed_source_is_still_reused 红
