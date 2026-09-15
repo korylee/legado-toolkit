@@ -1246,12 +1246,106 @@ class ParseSourceHeaderTests(unittest.TestCase):
                 self.assertTrue(why, "必须说明为什么没用上：%s" % bad)
 
     def test_value_containing_colon_is_kept(self):
-        """换行写法里值本身含冒号（URL 带端口）不能被截断。"""
-        h, why = parse_source_header("Referer: https://a.com:8080/x")
-        self.assertEqual(h, {"Referer": "https://a.com:8080/x"})
+        """换行写法里值本身含冒号（URL 带端口）不能被截断，CRLF 也要支持。"""
+        h, why = parse_source_header("Referer: https://a.com:8080/x\r\nX-A: 1")
+        self.assertEqual(h, {"Referer": "https://a.com:8080/x", "X-A": "1"})
         self.assertEqual(why, "")
+```
 
+**再加一个行为测试类**（同一个文件，放在 `FetchSignatureTests` 之后）：
 
+> **为什么非加不可**：`FetchSignatureTests` 只用 `inspect.signature` 查名字在不在。
+> 把 headers 合并、charset 解码、proxy 三个分支**整段删空**，它依然全绿——
+> 而这三个分支正是这个任务的全部卖点。
+
+```python
+class FetchBehaviorTests(unittest.TestCase):
+    """三个卖点的行为覆盖。没有这些用例，整段实现删空也不会有人发现。"""
+
+    def _resp(self, body: bytes):
+        class FakeResp:
+            def read(self): return body
+
+            def __enter__(self): return self
+
+            def __exit__(self, *a): return False
+        return FakeResp()
+
+    def _capture_request(self, **kw):
+        """跑一次 fetch，返回实际构造出来的 Request 对象。"""
+        sent = {}
+
+        def fake_urlopen(req, timeout=None):
+            sent["req"] = req
+            return self._resp("正文".encode("utf-8"))
+
+        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            F.fetch("https://a.com/x", **kw)
+        return sent["req"]
+
+    def test_default_ua_present(self):
+        req = self._capture_request()
+        # 注意 key 是 "User-agent" 而不是 "User-Agent"：
+        # urllib 的 add_header 用 key.capitalize()，写成 "User-Agent" 断言恒为 False
+        self.assertEqual(req.headers["User-agent"], F.DEFAULT_UA)
+
+    def test_headers_are_merged(self):
+        req = self._capture_request(headers={"Referer": "https://a.com"})
+        self.assertEqual(req.headers["Referer"], "https://a.com")
+
+    def test_empty_header_value_does_not_wipe_default_ua(self):
+        """值为空（含纯空白、None）的键不能覆盖默认 UA。
+
+        urllib 发送前会 strip，所以 " " 会让服务端收到空 UA——用 if v 挡不住。
+        而 None 更隐蔽：str(None) 是 "None"（真值），会覆盖成字面量 "None"。
+        """
+        for empty in ("", "   ", None):
+            with self.subTest(empty=repr(empty)):
+                req = self._capture_request(headers={"User-Agent": empty})
+                self.assertEqual(req.headers["User-agent"], F.DEFAULT_UA)
+
+    def test_charset_gbk_decodes(self):
+        with patch("urllib.request.urlopen",
+                   return_value=self._resp("绍宋".encode("gbk"))):
+            html = F.fetch("https://a.com/x", charset="gbk")
+        self.assertIn("绍宋", html)
+
+    def test_dirty_charset_does_not_raise(self):
+        """charset 与 header 同源，都是书源 JSON 里的脏值。"""
+        for bad in (123, ["gbk"], {"a": 1}, "no-such-codec"):
+            with self.subTest(bad=repr(bad)):
+                with patch("urllib.request.urlopen",
+                           return_value=self._resp(b"x")):
+                    html = F.fetch("https://a.com/x", charset=bad)
+                self.assertEqual(html, "x")
+
+    def test_proxy_uses_opener(self):
+        """proxy 非空必须走 build_opener(ProxyHandler)，不能直连。"""
+        called = {}
+
+        class FakeOpener:
+            def open(self, req, timeout=None):
+                called["used"] = True
+                return self._resp(b"ok")
+
+        with patch("urllib.request.build_opener", return_value=FakeOpener()) as bo:
+            F.fetch("https://a.com/x", proxy="http://127.0.0.1:1")
+        self.assertTrue(called.get("used"), "proxy 非空却没走 opener")
+        self.assertTrue(bo.called, "没调用 build_opener")
+
+    def test_no_proxy_uses_urlopen_directly(self):
+        """proxy 留空必须直连。"""
+        with patch("urllib.request.urlopen",
+                   return_value=self._resp(b"ok")) as uo, \
+             patch("urllib.request.build_opener") as bo:
+            F.fetch("https://a.com/x")
+        self.assertTrue(uo.called, "没走直连")
+        self.assertFalse(bo.called, "不该建 opener")
+```
+
+同时把 `FetchSignatureTests` 补上默认值与顺序断言（原来的只查名字在不在，改成 `(url, headers, timeout=15, ...)` 也照样绿）：
+
+```python
 class FetchSignatureTests(unittest.TestCase):
     def test_accepts_new_kwargs(self):
         """只验证签名，不发真实请求。"""
@@ -1260,10 +1354,22 @@ class FetchSignatureTests(unittest.TestCase):
         for name in ("headers", "charset", "proxy"):
             self.assertIn(name, sig.parameters)
 
+    def test_signature_defaults_and_order(self):
+        """新参数必须都有默认值，且追加在原 timeout 之后——否则既有位置调用会错位。"""
+        sig = inspect.signature(F.fetch)
+        self.assertEqual(list(sig.parameters),
+                         ["url", "timeout", "headers", "charset", "proxy"])
+        self.assertEqual(sig.parameters["timeout"].default, 15)
+        for name in ("headers", "charset", "proxy"):
+            self.assertIsNot(sig.parameters[name].default,
+                             inspect.Parameter.empty)
+
 
 if __name__ == "__main__":
     unittest.main()
 ```
+
+> 顶部需要 `from unittest.mock import patch`。
 
 - [ ] **Step 2: 跑测试，确认失败**
 
@@ -1302,7 +1408,7 @@ def parse_source_header(raw: str) -> tuple:
     # BOM 必须先去：否则 `{"a":"b"}` 的 startswith("{") 为 False，会落到换行
     # 分隔分支被解析成 key='{"a"' / value='"b"}' —— 一个垃圾头真的发给服务器，
     # 比丢掉更糟（会被表现成「源坏了」）
-    text = raw.lstrip("﻿").strip()
+    text = raw.strip().lstrip("﻿").strip()
     if not text:
         return {}, ""
     if "<js" in text or "@js:" in text:
@@ -1354,7 +1460,10 @@ def fetch(url: str, timeout: int = 15,
     if headers:
         # 值为空（含纯空白）的键不覆盖默认值。用 if v 挡不住 " "，而 urllib 发送前
         # 会 strip，结果服务端收到空 UA —— 与换行写法（已 strip）行为不一致
-        h.update({str(k): str(v) for k, v in headers.items() if str(v).strip()})
+        # `v is not None` 不能省：str(None) 是字符串 "None"（真值），会把默认 UA
+        # 覆盖成字面量 "None" —— 比不判断更糟
+        h.update({str(k): str(v) for k, v in headers.items()
+                  if v is not None and str(v).strip()})
 
     req = urllib.request.Request(url, headers=h)
 
