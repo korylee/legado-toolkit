@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "legado-source-tools"
 version = "0.2.0"
@@ -9,11 +13,13 @@ dependencies = [
     "beautifulsoup4>=4.12",
     "fastapi>=0.110",
     "uvicorn>=0.27",
+    # --reload 用。uvicorn 装了它才走 WatchFilesReload（OS 文件事件）；
+    # 否则退回 StatReload —— 每 0.25 秒递归扫一遍 *.py 并逐个 stat，
+    # 实测持续占 ~4% 单核（未限定监视范围前是 125%，即忙循环）。
+    # 列在正式依赖而不是 optional extra：漏装时 uvicorn 会**静默**退回轮询，
+    # 而 uv sync 默认不装 extra —— 那种静默降级正是本项目一直在消灭的东西
+    "watchfiles>=0.21",
 ]
-
-[tool.uv]
-# uv run 会按上面的 dependencies 同步环境；
-# 依赖漏写会导致 uv run 把已装的包从 .venv 移除，务必与 requirements.txt 保持一致。
 
 [tool.setuptools]
 packages = ["core", "core.rules", "core.repair", "services", "cli", "backend", "backend.api", "backend.jobs", "tools"]

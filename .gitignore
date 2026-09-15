@@ -25,6 +25,7 @@ __pycache__/
 .omo/
 .vscode/
 .idea/
+.claude/
 *.log
 _probe*.txt
 _migrate*.py
