@@ -112,8 +112,12 @@ def run_content(rec, pages=None):
 
 class CacheVersionTests(unittest.TestCase):
     def test_version_bumped(self):
-        """判定逻辑变了，缓存必须整体作废，否则收拢等于没做。"""
-        self.assertEqual(checker.CACHE_VERSION, 6)
+        """判定逻辑变了，缓存必须整体作废，否则改了等于没改。
+
+        v7：反爬词表删掉裸 "cloudflare"——原来判 auth 的源现在判 ok，
+        不作废的话那条 auth 会在 TTL 内一直命中缓存，看起来像修复失效。
+        """
+        self.assertEqual(checker.CACHE_VERSION, 7)
 
     def test_old_cache_item_rejected(self):
         raw = {"bookSourceUrl": "https://a.com", "bookSourceName": "x",
@@ -405,6 +409,81 @@ class HitDowngradeTests(unittest.TestCase):
 #  - `_probe_toc` 里 bookUrl 规则仍走 apply_css_rule 老路（未收拢到 quality），
 #    计划只要求收拢 chapterList 的判定，这一条保持原样。
 
+# ------------------------------------------------------------ 反爬特征词
+
+#: Cloudflare 的邮箱保护脚本。站点把 Cloudflare 当 CDN 就会被注入到**每一个**
+#: 正常页面里，与反爬无关——但裸词 "cloudflare" 匹配的正是它。
+CF_EMAIL_DECODE = ('<html><body><div class="item">'
+                   '<a href="https://site/book/1">测试书</a></div>'
+                   '<script data-cfasync="false" '
+                   'src="/cdn-cgi/scripts/5c5dd728/cloudflare-static/email-decode.min.js">'
+                   '</script></body></html>')
+
+#: 真正的 Cloudflare 挑战页（__cf_chl_* 是挑战流程的 token）
+CF_CHALLENGE = ('<html><body><form id="challenge-form" '
+                'action="/cdn-cgi/l/chk_jschl?__cf_chl_tk=abc"></form></body></html>')
+
+
+class AntiBotMarkerTests(unittest.TestCase):
+    """一个裸词怎么把一个 5★ 正常源判成 auth——实测复盘，见 models.py 的注释。"""
+
+    def _classify(self, status, body):
+        ck = _StubChecker({})
+        return ck._classify(status, body.encode("utf-8"), make_record(make_raw()))
+
+    def test_cf_email_decode_script_is_not_anti_bot(self) -> None:
+        """Cloudflare 的邮箱保护脚本出现在正常页面里，不能被当成反爬。
+
+        真实后果：m.manhuahao.com 因此被判 auth、星级从 5★ 压到 3★。
+        """
+        self.assertEqual(self._classify(200, CF_EMAIL_DECODE), Health.OK)
+
+    def test_real_cf_challenge_is_still_anti_bot(self) -> None:
+        """收紧不能收过头：真正的挑战页仍须判为反爬。"""
+        self.assertEqual(self._classify(200, CF_CHALLENGE), Health.AUTH)
+
+    def test_cf_email_decode_does_not_block_search_hit_judgement(self) -> None:
+        """搜索响应带这个脚本时，必须继续走 bookList 命中判定。
+
+        原先 _probe_search 在反爬分支**直接 return**，连命中判定都不做——
+        所以 search_hit 为空并不是「搜索失败」，而是根本没测。
+        """
+        raw = make_raw()
+        raw["searchUrl"] = "https://site/search?q={{key}}"
+        # 必须经 build_record：search_url_template 是它填的，直接构造
+        # BookSourceRecord 会得到空模板，拼出的 URL 对不上预置的页面
+        rec = build_record(raw, 0)
+        # 关键词会被 parse_search_request **URL 编码**，桩的 key 得用同一个函数算，
+        # 手写 /search?q=测试书 是匹配不上的
+        search_url = checker.parse_search_request(rec.search_url_template, "测试书")[0]
+        stub = _StubChecker({search_url: CF_EMAIL_DECODE},
+                            testset={"novel": ["测试书"]})
+        # _probe_search 只会把健康度**改差**（失败时降级），置 OK 是 check_one
+        # 里域名探测的职责——所以按真实调用顺序先给 OK，再断言它没被降级
+        rec.health = Health.OK
+        body = asyncio.run(stub._probe_search(None, rec, "https://site"))
+        self.assertIsNotNone(body, "搜索应命中并返回响应体")
+        self.assertEqual(rec.search_hit, "测试书")
+        self.assertNotEqual(rec.health, Health.AUTH,
+                            "邮箱保护脚本不该触发反爬降级")
+
+
 if __name__ == "__main__":
     unittest.main()
+
+# ---------------------------------------------------------------- 本类变异记录
+# 实测（改坏 → `python -B -m unittest tests.test_checker_judge.AntiBotMarkerTests`
+#       → 确认变红 → 还原）：
+#
+#  M1  ANTI_BOT_MARKERS 里加回裸 "cloudflare"
+#        → test_cf_email_decode_script_is_not_anti_bot 红
+#        → test_cf_email_decode_does_not_block_search_hit_judgement 红
+#  M2  去掉 cf-challenge / __cf_chl（收紧过头）
+#        → test_real_cf_challenge_is_still_anti_bot 红
+#
+# **core/quality.py 的 CONTENT_NOISE_MARKERS 里同样有裸 "cloudflare"，但没动**：
+# 那一处作用在**提取出来的正文值**上（`_noise_hit(joined)`），而 Cloudflare 的
+# 邮箱脚本在页面 head 里，根本不会进正文值——机制不成立。而且它只写 notes、
+# 不改 verdict（见 `_content_notes` 的 docstring）。同形缺陷不等于已证实的缺陷，
+# 没有证据就不改。哪天有真实误判再来。
 

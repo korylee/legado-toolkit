@@ -55,10 +55,13 @@ DEFAULT_UA = (
 # 常见爬虫/安全拦截状态码
 BLOCKED_STATUS = {403, 429, 401, 503, 406}
 
-# 缓存版本 6：正文/目录判定收拢到 core.quality（底线改为「非空即通过」，
-# 删除了从未生效的 ruleContent.image 兜底）。判定口径变了，旧缓存的
-# toc_complete / content_ok 是旧逻辑的产物，必须整体作废。
-CACHE_VERSION = 6
+# 缓存版本 7：反爬特征词表删掉裸 "cloudflare"（它匹配的是 Cloudflare 的邮箱保护
+# 脚本，站点当 CDN 用就会被注入，与反爬无关）。判定口径变了——原来被判 auth 的源
+# 现在会判 ok，旧缓存里的 health 是旧逻辑的产物，必须整体作废。
+# 不作废的后果不是"结果旧一点"，而是**修了等于没修**：那条源的 auth 会在 7 天
+# TTL 内一直命中缓存，看起来像修复失效。（v6 是同一理由：正文/目录判定收拢到
+# core.quality，底线改为「非空即通过」。）
+CACHE_VERSION = 7
 CACHE_TTL_DAYS = {
     Health.OK: 14,
     Health.AUTH: 7,

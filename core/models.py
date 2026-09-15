@@ -65,10 +65,19 @@ AUTH_TAG_PATTERNS: List[str] = [
 
 #: 响应体中出现的"反爬/验证"特征
 ANTI_BOT_MARKERS: List[str] = [
-    "验证码", "人机验证", "安全验证", "滑动验证", "cloudflare",
+    "验证码", "人机验证", "安全验证", "滑动验证",
     "cf-challenge", "__cf_chl", "captcha", "verify you are human",
     "访问验证", "继续访问", "安全检测",
 ]
+
+#: **不要往上面的表里加裸 ``cloudflare``。** 它匹配的是 Cloudflare 的邮箱保护脚本
+#: （``/cdn-cgi/scripts/.../cloudflare-static/email-decode.min.js``）——站点只要拿
+#: Cloudflare 当 CDN 就会被注入，与反爬无关。实测：m.manhuahao.com 的首页与搜索
+#: 响应都带这个脚本，于是 _probe_search 走早退分支判 AUTH 并直接 return，连 bookList
+#: 命中判定都不做，health 由 ok 变 auth、星级由 5★ 压到 3★。去掉后同一条源命中
+#: 《海贼王》、目录 1197 章。真正的挑战标记 ``cf-challenge`` / ``__cf_chl``
+#: 以及 403/503 状态码已经够用。
+#: （回归护栏见 tests/test_checker_judge.py::TestAntiBotMarkers）
 
 #: 响应体中出现的"需要登录"特征
 LOGIN_MARKERS: List[str] = [
