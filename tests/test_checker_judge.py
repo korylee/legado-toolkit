@@ -409,6 +409,60 @@ class HitDowngradeTests(unittest.TestCase):
 #  - `_probe_toc` 里 bookUrl 规则仍走 apply_css_rule 老路（未收拢到 quality），
 #    计划只要求收拢 chapterList 的判定，这一条保持原样。
 
+# ------------------------------------------------------------ 域名 URL 构造
+
+class BuildDomainUrlTests(unittest.TestCase):
+    """书源 URL 常带 `#署名`，构造探测用的根 URL 时必须剥掉。
+
+    下面这些值取自真实库（40.9% 的源带这种后缀），不是编的。
+    """
+
+    def test_signature_without_slash_is_stripped(self) -> None:
+        """`#` 前没有 `/` 的形式——正则 [^/]+ 原本会把它一起吞进"域名"。"""
+        self.assertEqual(checker.build_domain_url("https://m.qidian.com##时间排序发现规则"),
+                         "https://m.qidian.com")
+
+    def test_signature_with_slash_is_stripped(self) -> None:
+        self.assertEqual(checker.build_domain_url("https://www.htmanga9.top/##旅途"),
+                         "https://www.htmanga9.top")
+
+    def test_signature_with_emoji_and_space_is_stripped(self) -> None:
+        self.assertEqual(checker.build_domain_url("http://www.yuedsk.com###ʕ ᵔᴥᵔ ʔ喜静"),
+                         "http://www.yuedsk.com")
+
+    def test_plain_fragment_is_stripped(self) -> None:
+        self.assertEqual(checker.build_domain_url("https://www.blquge99.cc/#pb1101"),
+                         "https://www.blquge99.cc")
+
+    def test_path_is_still_dropped(self) -> None:
+        self.assertEqual(checker.build_domain_url("https://a.com/search/x#frag"),
+                         "https://a.com")
+
+    def test_bare_trailing_hash(self) -> None:
+        self.assertEqual(checker.build_domain_url("http://www.wtzw.com#"),
+                         "http://www.wtzw.com")
+
+    def test_missing_scheme_gets_http(self) -> None:
+        self.assertEqual(checker.build_domain_url("book.sfacg.com"), "http://book.sfacg.com")
+
+    def test_empty_and_blank(self) -> None:
+        self.assertEqual(checker.build_domain_url(""), "")
+        self.assertEqual(checker.build_domain_url("   "), "")
+        self.assertEqual(checker.build_domain_url(None), "")
+
+    def test_normalize_url_keeps_the_signature(self) -> None:
+        """跟上面正好相反：**源身份 key 必须保留署名**。
+
+        署名不同即两个源，与 Legado 的 getSourceKey() 一致。两处用途不同，
+        别为了"统一"把它们改成一样。
+        """
+        from core.loader import _normalize_url
+        self.assertEqual(_normalize_url("https://a.com##签名"),
+                         "https://a.com##签名")
+        self.assertNotEqual(_normalize_url("https://a.com##甲"),
+                            _normalize_url("https://a.com##乙"))
+
+
 # ------------------------------------------------------------ 反爬特征词
 
 #: Cloudflare 的邮箱保护脚本。站点把 Cloudflare 当 CDN 就会被注入到**每一个**
@@ -480,6 +534,15 @@ if __name__ == "__main__":
 #        → test_cf_email_decode_does_not_block_search_hit_judgement 红
 #  M2  去掉 cf-challenge / __cf_chl（收紧过头）
 #        → test_real_cf_challenge_is_still_anti_bot 红
+#
+# BuildDomainUrlTests 的变异：
+#  M3  去掉 build_domain_url 里的 `url.split("#", 1)[0]`
+#        → test_signature_without_slash_is_stripped 红
+#        → test_signature_with_emoji_and_space_is_stripped 红
+#        → test_bare_trailing_hash 红
+#      **test_signature_with_slash_is_stripped 实测不会红**——`#` 前有 `/` 时
+#      正则本来就截对了。这正是这个坑容易漏的原因：只在部分数据上显形。
+#      （上面「实测」是按 M3 跑出来的 FAIL 清单，不是推的。）
 #
 # **core/quality.py 的 CONTENT_NOISE_MARKERS 里同样有裸 "cloudflare"，但没动**：
 # 那一处作用在**提取出来的正文值**上（`_noise_hit(joined)`），而 Cloudflare 的
