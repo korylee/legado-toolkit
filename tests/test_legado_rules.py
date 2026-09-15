@@ -126,7 +126,7 @@ class UnsupportedTests(unittest.TestCase):
     def test_js_in_middle_reports_js_reason(self):
         """`selector@js:code` 的 JS 体里出现 $1/&&/@get: 时，报的原因必须是 JS。
 
-        实测真实语料里 1139 条源规则属于这一类。结论（unknown）本来就对，
+        真实语料里这类错报确实存在且可复现（刻意不写具体条数——它随统计口径而变）。结论（unknown）本来就对，
         但如果 JS 检测排在新检测段后面，报出的原因会变成「$n 取列表第 n 项
         暂未支持」——把用户引向错误的方向，而这个工具的全部价值就是告诉他
         为什么。断言必须检查**原因内容**，否则这类错报不会被任何用例发现。
