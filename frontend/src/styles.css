@@ -153,6 +153,16 @@ body {
 .muted { color: #909399; font-size: 12px; }
 .mono { font-family: Consolas, Monaco, monospace; font-size: 12px; }
 .nowrap { white-space: nowrap; }
+
+/* 状态圆点：编辑弹窗页签与试跑调试抽屉共用同一套配色。
+   弹窗里那份在 SourceEditDialog.vue 的 scoped 样式里，**管不到抽屉内部**，
+   所以这里放一份全局的，抽屉的圆点才画得出来。两者配色保持一致。 */
+.dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; background: #c0c4cc; }
+.dot.ok { background: #67c23a; }
+.dot.warn { background: #e6a23c; }
+.dot.err { background: #f56c6c; }
+/* 试跑调试：unknown（无法判定）用灰色，与 fail 的红明确区分 */
+.dot.unknown { background: #909399; }
 .card-gap { margin-bottom: 12px; }
 .el-table .cell { word-break: break-all; }
 

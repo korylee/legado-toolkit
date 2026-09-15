@@ -1,0 +1,273 @@
+<script setup>
+// 试跑调试抽屉：把每一步的证据摊开。
+// 三个子页签：提取结果（全文）/ 命中源码 / 整页源码。
+//
+// 设计取舍：**不对 HTML 注入换行**。
+// 虽然注入后按行渲染更省事，但用户会把这段源码复制去改规则——
+// 改过字符的源码会与真实响应不一致。改为 pre-wrap 软换行 +
+// 按字符偏移分片渲染，保证「复制出来的就是原文」。
+import { ref, computed, watch, nextTick } from "vue";
+
+const props = defineProps({
+  modelValue: { type: Boolean, default: false },
+  result: { type: Object, default: null },
+  initialStep: { type: String, default: "" },
+});
+const emit = defineEmits(["update:modelValue", "goto"]);
+
+const visible = computed({
+  get: () => props.modelValue,
+  set: (v) => emit("update:modelValue", v),
+});
+
+const STEP_LABELS = { search: "搜索", bookUrl: "详情链接", toc: "目录", content: "正文" };
+//: 每次渲染的字符数。整页 HTML 可能 100 万字符，全量进 DOM 会卡
+const RENDER_CHUNK = 20000;
+
+const activeStep = ref("");
+const subTab = ref("values");
+const renderLimit = ref(RENDER_CHUNK);
+const searchKey = ref("");
+const activeHit = ref(0);
+
+const steps = computed(() => (props.result && props.result.steps) || []);
+const pages = computed(() => (props.result && props.result.pages) || []);
+const current = computed(
+  () => steps.value.find((s) => s.name === activeStep.value) || steps.value[0] || null,
+);
+const currentPage = computed(() => {
+  if (!current.value || !current.value.page_id) return null;
+  return pages.value.find((p) => p.id === current.value.page_id) || null;
+});
+
+// 三态圆点：fail 红 / unknown 灰 / pass 且有附注 黄 / 纯 pass 绿
+function dotClass(s) {
+  if (!s) return "";
+  if (s.verdict === "fail") return "err";
+  if (s.verdict === "unknown") return "unknown";
+  return s.has_notes ? "warn" : "ok";
+}
+function tagType(s) {
+  if (!s) return "info";
+  if (s.verdict === "fail") return "danger";
+  if (s.verdict === "unknown") return "info";
+  return s.has_notes ? "warning" : "success";
+}
+const VERDICT_TEXT = { pass: "通过", fail: "失败", unknown: "无法判定" };
+function verdictText(s) {
+  return (s && VERDICT_TEXT[s.verdict]) || "";
+}
+
+// 搜索在**完整原文**上做（纯字符串扫描，结果不进 DOM），最多记 200 处
+const hitOffsets = computed(() => {
+  const key = searchKey.value.trim();
+  const html = (currentPage.value && currentPage.value.html) || "";
+  if (!key || !html) return [];
+  const out = [];
+  let from = 0;
+  while (out.length < 200) {
+    const i = html.indexOf(key, from);
+    if (i < 0) break;
+    out.push(i);
+    from = i + Math.max(1, key.length);
+  }
+  return out;
+});
+
+// 只渲染前 renderLimit 个字符，避免百万字符全量进 DOM
+const headText = computed(() => {
+  const html = (currentPage.value && currentPage.value.html) || "";
+  return html.slice(0, renderLimit.value);
+});
+const hasMore = computed(() => {
+  const html = (currentPage.value && currentPage.value.html) || "";
+  return renderLimit.value < html.length;
+});
+
+// 把已渲染的片段按命中位置切成 [普通, 高亮, 普通, ...]
+const segments = computed(() => {
+  const head = headText.value;
+  const key = searchKey.value.trim();
+  if (!key) return [{ text: head, hit: false, index: -1 }];
+  const segs = [];
+  let cursor = 0;
+  let hitIndex = 0;
+  hitOffsets.value.forEach((off) => {
+    if (off >= head.length) return;
+    if (off > cursor) segs.push({ text: head.slice(cursor, off), hit: false, index: -1 });
+    segs.push({
+      text: head.slice(off, off + key.length),
+      hit: true,
+      index: hitIndex,
+    });
+    hitIndex += 1;
+    cursor = off + key.length;
+  });
+  if (cursor < head.length) segs.push({ text: head.slice(cursor), hit: false, index: -1 });
+  return segs;
+});
+
+watch(() => props.modelValue, (show) => {
+  if (!show) return;
+  activeStep.value = props.initialStep || (steps.value[0] && steps.value[0].name) || "";
+  subTab.value = "values";
+  renderLimit.value = RENDER_CHUNK;
+  searchKey.value = "";
+  activeHit.value = 0;
+});
+
+// 跳到第 i 处命中（i 为负则向前），必要时先扩大渲染范围
+function gotoHit(i) {
+  const total = hitOffsets.value.length;
+  if (!total) return;
+  activeHit.value = ((i % total) + total) % total;
+  const off = hitOffsets.value[activeHit.value];
+  if (off + RENDER_CHUNK > renderLimit.value) renderLimit.value = off + RENDER_CHUNK;
+  nextTick(() => {
+    const el = document.getElementById("debug-hit-" + activeHit.value);
+    if (el) el.scrollIntoView({ block: "center", behavior: "smooth" });
+  });
+}
+
+function selectStep(name) {
+  activeStep.value = name;
+  subTab.value = "values";
+  renderLimit.value = RENDER_CHUNK;
+  searchKey.value = "";
+  activeHit.value = 0;
+}
+
+function loadMore() {
+  renderLimit.value += RENDER_CHUNK;
+}
+
+function copyMatched() {
+  const text = (current.value && current.value.matched_html) || "";
+  navigator.clipboard.writeText(text);
+}
+</script>
+
+<template>
+  <el-drawer v-model="visible" title="试跑调试" size="72%" destroy-on-close>
+    <el-empty v-if="!steps.length" description="没有试跑结果" :image-size="80" />
+
+    <template v-else>
+      <div class="debug-step-tabs">
+        <span v-for="s in steps" :key="s.name" class="debug-step-tab"
+              :class="{ active: s.name === activeStep }" @click="selectStep(s.name)">
+          <i class="dot" :class="dotClass(s)"></i>{{ STEP_LABELS[s.name] || s.name }}
+        </span>
+      </div>
+
+      <div v-if="current" class="debug-head">
+        <el-tag size="small" :type="tagType(current)">{{ verdictText(current) }}</el-tag>
+        <span class="mono muted grow">{{ current.url }}</span>
+      </div>
+
+      <p v-if="current && current.reason" class="debug-reason">{{ current.reason }}</p>
+      <p v-if="current && current.rule_error" class="debug-reason">
+        规则无法离线回放：{{ current.rule_error }}
+      </p>
+      <ul v-if="current && current.notes && current.notes.length" class="debug-notes">
+        <li v-for="(n, i) in current.notes" :key="i">
+          {{ n }}
+          <el-button v-if="n.indexOf('bookSourceType') >= 0" size="small" link
+                     type="primary" @click="emit('goto', 'basic')">
+            去改类型
+          </el-button>
+        </li>
+      </ul>
+
+      <el-tabs v-model="subTab">
+        <el-tab-pane label="提取结果" name="values">
+          <div v-if="current" class="debug-evidence">
+            <span>条数 {{ current.evidence.values_total }}</span>
+            <span>字符 {{ current.evidence.chars }}</span>
+            <span>中文 {{ current.evidence.cjk_chars }}</span>
+            <span>块级分隔 {{ current.evidence.block_seps }}</span>
+            <span>标签占比 {{ current.evidence.tag_ratio }}</span>
+            <span v-if="current.evidence.noise_hit">噪声命中「{{ current.evidence.noise_hit }}」</span>
+          </div>
+          <p class="muted" style="margin: 6px 0">
+            这里是规则**实际取到的值**。正文规则通常只有 1 条、就是全文。
+          </p>
+          <div v-for="(v, i) in (current ? current.values : [])" :key="i" class="debug-value">
+            <div class="debug-value-idx">#{{ i + 1 }}（{{ v.length }} 字符）</div>
+            <pre class="debug-pre">{{ v }}</pre>
+          </div>
+          <el-empty v-if="current && !current.values.length"
+                    description="没有取到值" :image-size="60" />
+        </el-tab-pane>
+
+        <el-tab-pane label="命中源码" name="matched">
+          <p class="muted" style="margin: 6px 0">
+            规则**选中的那块 DOM** 的 outerHTML——改规则时看这个，
+            比在整页里猜要快得多。
+          </p>
+          <div class="toolbar">
+            <el-button size="small" @click="copyMatched">复制</el-button>
+          </div>
+          <pre v-if="current && current.matched_html"
+               class="debug-pre debug-pre-wrap">{{ current.matched_html }}</pre>
+          <el-empty v-else description="没有命中片段" :image-size="60" />
+        </el-tab-pane>
+
+        <el-tab-pane label="整页源码" name="page">
+          <template v-if="currentPage">
+            <div class="toolbar" style="margin-bottom: 8px">
+              <el-input v-model="searchKey" size="small" style="width: 200px"
+                        placeholder="搜索（如 content）" clearable />
+              <template v-if="hitOffsets.length">
+                <el-button size="small" @click="gotoHit(activeHit - 1)">上一处</el-button>
+                <el-button size="small" @click="gotoHit(activeHit + 1)">下一处</el-button>
+                <span class="muted">第 {{ activeHit + 1 }} / {{ hitOffsets.length }} 处</span>
+              </template>
+              <span v-else-if="searchKey" class="muted">未找到</span>
+            </div>
+            <el-alert v-if="currentPage.truncated" type="warning" :closable="false"
+                      show-icon style="margin-bottom: 8px"
+                      :title="'原文 ' + currentPage.len + ' 字符，已截断到前 '
+                              + currentPage.html.length + ' 字符'" />
+            <pre class="debug-pre debug-pre-wrap"><template
+              v-for="(seg, i) in segments" :key="i"><span
+              v-if="!seg.hit">{{ seg.text }}</span><mark
+              v-else :id="'debug-hit-' + seg.index"
+              :class="{ 'debug-hit-active': seg.index === activeHit }">{{ seg.text }}</mark></template></pre>
+            <div v-if="hasMore" class="toolbar" style="margin-top: 8px">
+              <el-button size="small" @click="loadMore">
+                加载更多（已渲染 {{ renderLimit }} / {{ currentPage.html.length }} 字符）
+              </el-button>
+            </div>
+          </template>
+          <el-empty v-else description="这一步没有抓到页面" :image-size="60" />
+        </el-tab-pane>
+      </el-tabs>
+    </template>
+  </el-drawer>
+</template>
+
+<style scoped>
+.debug-step-tabs { display: flex; gap: 4px; margin-bottom: 12px; flex-wrap: wrap; }
+.debug-step-tab {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 10px; border-radius: 4px; cursor: pointer;
+  border: 1px solid #dcdfe6; font-size: 13px;
+}
+.debug-step-tab.active { border-color: #409eff; color: #409eff; }
+.debug-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.debug-reason { color: #f56c6c; margin: 4px 0; }
+.debug-notes { color: #e6a23c; margin: 4px 0; padding-left: 18px; line-height: 1.7; }
+.debug-evidence {
+  display: flex; gap: 14px; flex-wrap: wrap;
+  color: #909399; font-size: 12px; margin-bottom: 8px;
+}
+.debug-value { margin-bottom: 10px; }
+.debug-value-idx { color: #909399; font-size: 12px; margin-bottom: 2px; }
+.debug-pre {
+  font-family: Consolas, Monaco, monospace; font-size: 12px;
+  background: #f5f7fa; padding: 8px; border-radius: 4px;
+  max-height: 52vh; overflow: auto; margin: 0;
+}
+.debug-pre-wrap { white-space: pre-wrap; word-break: break-all; }
+.debug-hit-active { outline: 2px solid #f56c6c; }
+</style>
