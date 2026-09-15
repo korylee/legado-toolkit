@@ -94,7 +94,7 @@ PAGES = {
 }
 
 
-def fake_fetch(url, timeout=15, headers=None, charset="", proxy=""):
+def fake_fetch(url, timeout=15, headers=None, charset="", proxy="", source=None):
     return PAGES.get(url, "")
 
 
@@ -382,20 +382,23 @@ class TestFetchPages(unittest.TestCase):
         steps = self._steps()
         seen = {}
 
-        def spy(url, timeout=15, headers=None, charset="", proxy=""):
+        def spy(url, timeout=15, headers=None, charset="", proxy="", source=None):
             seen["headers"] = headers
             seen["charset"] = charset
+            seen["source"] = source
             return "<html>x</html>"
 
+        src = {"header": '{"Referer":"https://a.com/"}', "charset": "gbk"}
         with patch("core.app_debug.fetch", side_effect=spy):
-            fetch_debug_pages(steps, {"header": '{"Referer":"https://a.com/"}',
-                                      "charset": "gbk"})
+            fetch_debug_pages(steps, src)
         self.assertEqual(seen["headers"], {"Referer": "https://a.com/"})
         self.assertEqual(seen["charset"], "gbk")
+        # source 也要透传：补抓最多 3 页，同样该遵守源声明的 concurrentRate
+        self.assertIs(seen["source"], src)
 
     def test_fetch_failure_is_noted_not_raised(self):
         """抓不到页面：该页不进 pages，在对应 step 的 notes 里说明，判定不受影响。"""
-        def boom(url, timeout=15, headers=None, charset="", proxy=""):
+        def boom(url, timeout=15, headers=None, charset="", proxy="", source=None):
             raise OSError("连接超时")
 
         steps = self._steps()

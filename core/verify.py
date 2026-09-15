@@ -81,6 +81,37 @@ def _cap_evidence(steps: list, pages: dict) -> list:
     return steps
 
 
+#: 走 judge_list_step 的步骤。前三个用 quality 的常量（拼错会把本该 unknown
+#: 的结果变成 fail，见 quality.STEP_TOC 的注释）；explore 没有常量，但它就是
+#: 一个列表步骤，judge_list_step 只对 "toc" 有特殊语义，传进去是对的。
+_LIST_STEPS = (Q.STEP_SEARCH, Q.STEP_BOOK_URL, Q.STEP_TOC, "explore")
+
+
+def replay_step(html: str, rule: str, step: str, source_type: int = 0) -> dict:
+    """用**已经抓到的 HTML** 重放一步规则——不发任何网络请求。
+
+    改完一条规则想知道「它在这份页面上现在取到什么」，重跑整条链（含联网搜索）
+    太慢；而试跑结果里本来就存着每页 HTML（``pages[].html``），拿它直接重放即可。
+    判定口径与 ``verify_chain`` 完全一致：同样走 ``quality.judge_*`` 与
+    ``Judgement.as_step_dict``，不存在第二份映射。
+
+    只对**本地试跑**有意义：App 调试的 pages 是我们自己补抓的（App 只推文本，
+    不给 HTML），不代表 App 所见。所以别拿它的结论去否定 App 的判定。
+    """
+    step_key = str(step or "").strip().lower()
+    source_type = Q.safe_int(source_type)
+    values, hits, rule_error = extract_all_nodes(
+        html or "", rule or "", Q.MATCHED_NODES_LIMIT, Q.MAX_MATCHED_HTML_CHARS)
+    joined = "".join(hits)
+    if step_key in _LIST_STEPS:
+        j = Q.judge_list_step(step_key, values, joined, rule_error,
+                              source_type, rule=rule)
+    else:
+        j = Q.judge_content(source_type, values, rule, joined, rule_error)
+    return j.as_step_dict(step_key, values=values, matched_html=joined,
+                          rule_error=rule_error)
+
+
 def verify_chain(source: dict, keyword: str, detail_url: str = "",
                  pick: int = 1, proxy: str = "") -> dict:
     """
@@ -102,7 +133,10 @@ def verify_chain(source: dict, keyword: str, detail_url: str = "",
     charset = str(src.get("charset", "") or "").strip()
 
     def _fetch(url: str) -> str:
-        return fetch(url, headers=headers, charset=charset, proxy=proxy)
+        # 传 source：本链路一步要发 3 个请求（搜索 → 详情/目录 → 章节），
+        # 而 repair_many 会按 4 并发批量跑它，不遵守 concurrentRate 就是连打
+        return fetch(url, headers=headers, charset=charset, proxy=proxy,
+                     source=src)
 
     # 静态错配（webJs 未生效 / bookSourceType==4）与 header 不可用的原因，
     # **在任何抓取之前**就能算出来。必须在每个 return 点都带上——失败链全都

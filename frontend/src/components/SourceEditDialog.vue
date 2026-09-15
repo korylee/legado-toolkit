@@ -4,8 +4,11 @@ import { ref, computed, watch, nextTick } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { api, subscribeJob } from "../api/client";
 import { getDetail, listTags, saveSource, sourceExists } from "../api/sources";
-import { appDebug } from "../api/rules";
-import { mergeGroup, splitSystemUser } from "../utils/tags";
+import { appDebug, appPreflight } from "../api/rules";
+import {
+  canonicalTag, ensureTagMeta, isQualityTag, isStatusTag,
+  mergeGroup, sourceTypes, splitSystemUser, statusTags, tagOfType,
+} from "../utils/tags";
 import { useMobile } from "../composables/useMobile";
 import RuleDebugDrawer from "./RuleDebugDrawer.vue";
 
@@ -38,6 +41,9 @@ function readAppHost() {
 const loading = ref(false);
 const appHost = ref(readAppHost());  // App 的 IP（连 App 调试用）
 const appDebugging = ref(false);
+// 预检结果：null=还没测过 / {state: ready|missing|unreachable, error}
+const appPreflightState = ref(null);
+const appChecking = ref(false);
 // 调试目标 → App 的 key 形态。分派依据是 Legado 的 `Debug.kt:236-279`
 // （那个 when 才是真正的规则），交互照 App 调试界面的 chip 行
 // （`BookSourceDebugScreen.kt:174-182`：一排 ToggleChip 选目标 + 一个输入框）。
@@ -79,6 +85,9 @@ const debugVisible = ref(false);   // 调试抽屉
 const debugStep = ref("");         // 抽屉打开时定位到哪一步
 const systemTags = ref([]);
 const manualStatus = ref("");
+// 健康状态是否锁定。锁定是开关语义，不该靠「select 的空值」表达——
+// 那样用户以为只是选了个状态，实际是把校验结果锁死了
+const statusLocked = ref(false);
 const userTags = ref([]);
 const userTagOptions = ref([]);
 const quickUrl = ref("");
@@ -102,12 +111,9 @@ watch(appHost, (value) => {
   }
 });
 
-// 类型键名对齐后端 TYPE_MAP：3 是「只提供下载服务的网站」（file），不是视频
+// 类型键名对齐后端 TYPE_MAP：3 是「只提供下载服务的网站」（file），不是视频。
+// 这是接口参数名，不是标签枚举——标签本身由后端下发（见 utils/tags.js）
 const TYPE_KEYS = { 0: "novel", 1: "audio", 2: "manga", 3: "file" };
-const TYPE_TAGS = { 0: "📖小说", 1: "🎧听书", 2: "🎨漫画", 3: "📥下载" };
-const TYPE_TAG_SET = new Set(Object.values(TYPE_TAGS));
-const STATUS_TAGS = ["可用", "待验证", "已失效", "需代理复检"];
-const STATUS_TAG_SET = new Set(STATUS_TAGS);
 
 const activeTab = ref("quick");
 const activeRuleTab = ref("search");
@@ -135,18 +141,43 @@ function blank() {
 }
 const form = ref(blank());
 
+/** 源当前的健康状态标签（未锁定时就是校验结果给的）。 */
+const currentStatus = computed(
+  () => systemTags.value.find((t) => isStatusTag(t)) || "",
+);
+
+/** 质量标签（如「规则完整」）：由校验判定，用户改不了，只能看。 */
+const qualityTags = computed(
+  () => systemTags.value.filter((t) => isQualityTag(t)),
+);
+
+// 保存时要写回 group 的完整系统标签：类型 + 健康状态 + 质量。
+// 界面上三者分散在各自的控件里，不再把这串整个渲染成 chips——那会让类型和
+// 健康状态各出现两遍。
 const displaySystemTags = computed(() => {
-  // 类型标签以当前表单类型为准；健康状态可手动覆盖；规则完整沿用详情数据。
   if (!systemTags.value.length && isNew.value) return [];
-  // 4 之类的脏值在 Legado 里没有对应类型名，留空并过滤，避免渲染出空标签
-  const typeTag = TYPE_TAGS[Number(form.value.bookSourceType)] || "";
-  const rest = systemTags.value.filter(
-    (t) => !TYPE_TAG_SET.has(t) && !STATUS_TAG_SET.has(t),
-  );
-  const status = manualStatus.value
-    || systemTags.value.find((t) => STATUS_TAG_SET.has(t))
-    || "";
-  return [typeTag, ...(status ? [status] : []), ...rest].filter(Boolean);
+  // 4 之类的脏值在 Legado 里没有对应类型名，留空并被 filter 丢掉
+  const typeTag = tagOfType(form.value.bookSourceType);
+  const status = manualStatus.value || currentStatus.value;
+  return [typeTag, status, ...qualityTags.value].filter(Boolean);
+});
+
+// 锁定时默认锁在当前状态上，省得再选一次；关掉即交回校验结果
+watch(statusLocked, (on) => {
+  manualStatus.value = on ? currentStatus.value : "";
+});
+
+// 输入别名立即归一（如「精品排版」→「精排」），别等保存后被后端改名——
+// 那时用户会以为标签被动了手脚。canonicalTag 幂等，第二遍不会再触发
+watch(userTags, (list) => {
+  const fixed = list.map((t) => canonicalTag(t));
+  const renamed = list.filter((t, i) => fixed[i] !== t);
+  const deduped = [...new Set(fixed.filter(Boolean))];
+  if (!renamed.length && deduped.length === list.length) return;
+  userTags.value = deduped;
+  if (renamed.length) {
+    ElMessage.info("标签已归一：" + renamed.map((t) => `${t} → ${canonicalTag(t)}`).join("，"));
+  }
 });
 
 function filled(name) {
@@ -200,6 +231,7 @@ function applyRawJson() {
       const parsed = splitSystemUser(form.value.bookSourceGroup || "");
       systemTags.value = parsed.system;
       manualStatus.value = "";
+      statusLocked.value = false;      // 原始 JSON 不说锁定与否，按「自动」处理
       userTags.value = parsed.user;
       rawJsonError.value = "";
       rawDirty = false;               // 已应用到表单，文本域与表单一致了
@@ -349,6 +381,7 @@ watch(() => [props.modelValue, props.sourceUrl], async ([show, url]) => {
   // 下次打开就会自己弹出来；而且挂载时 modelValue 已是 true，
   // 抽屉里那个没有 immediate 的 watch 不触发，:initial-step 会被忽略
   debugVisible.value = false;
+  appPreflightState.value = null;   // 预检结果是上一次会话的，别带到这次
   // 同理：本组件在 SourcesView 里是常驻挂载、从不卸载的，isDuplicate 会跨
   // 「关闭 → 再打开」残留。不复位的话下次打开编辑弹窗会直接是「另存」状态
   // （域名框解禁、标题错成「另存为新源」、跳过查重），而用户以为自己只是在编辑。
@@ -361,6 +394,7 @@ watch(() => [props.modelValue, props.sourceUrl], async ([show, url]) => {
     form.value = blank();
     systemTags.value = [];
     manualStatus.value = "";
+    statusLocked.value = false;
     userTags.value = [];
     quickVerify.value = null;
     quickProgress.value = "";
@@ -371,12 +405,16 @@ watch(() => [props.modelValue, props.sourceUrl], async ([show, url]) => {
   loading.value = true;
   try {
     const d = await getDetail(url);
+    // 拆系统/用户标签依赖枚举。没就绪就拆，系统标签会被当成用户标签存进
+    // userTags，之后再也不会纠正（拆的是快照）。已加载时这里是空操作。
+    try { await ensureTagMeta(); } catch (e) { /* 入口已提示，不重复打扰 */ }
     form.value = { ...blank(), ...d.source };
     const parsed = splitSystemUser(d.source.bookSourceGroup || "");
     systemTags.value = parsed.system;
     manualStatus.value = d.system_tags_locked
-      ? (parsed.system.find((t) => STATUS_TAG_SET.has(t)) || "")
+      ? (parsed.system.find((t) => isStatusTag(t)) || "")
       : "";
+    statusLocked.value = !!d.system_tags_locked;
     userTags.value = parsed.user;
     syncRawFromForm();
     savedSnapshot.value = JSON.stringify(form.value);   // 编辑：以加载到的源为基线
@@ -393,6 +431,7 @@ async function applyGenerated(result) {
   const parsed = splitSystemUser(src.bookSourceGroup || "");
   systemTags.value = parsed.system;
   manualStatus.value = "";
+  statusLocked.value = false;
   userTags.value = parsed.user;
   quickVerify.value = result.verify || null;
   activeTab.value = "rules";
@@ -466,7 +505,7 @@ async function quickGenerate() {
 // 跑不了 JS 规则的源更是只有 App 那边验得了（Rhino / cookie / webView 全在 App 里）。
 // 结果**直接塞进 testResult**——App 调试返回的形状与离线回放一致，
 // 所以卡片与调试抽屉零改动。
-async function appDebugRun() {
+async function appDebugRun({ push = false } = {}) {
   const host = appHost.value.trim();
   if (!host) return ElMessage.warning("请先填 App 的 IP（App 通知栏里有）");
   const key = buildDebugKey();
@@ -478,12 +517,22 @@ async function appDebugRun() {
   testResult.value = null;
   testStale.value = false;
   try {
-    // 传 form.value（当前编辑中的源）：它的 bookSourceUrl 来自详情接口，是
-    // 导入原文——后端要拿它当 tag，规范化过的 URL 会让 App 静默无响应
-    const r = await appDebug(form.value, key, host);
-    // 连不上时后端返回的是 {source:"app", error:"..."}，不是 HTTP 错误；
-    // 这里翻成卡片认得的形状（卡片读 testResult.error）
-    testResult.value = r && r.error ? { error: r.error } : r;
+    // **先预检**：调试 WS 对 App 库里查不到的 tag 什么都不做，只能干等到超时。
+    // 连不上 / 缺源这两种情况在这里就能判出来，不必让用户白等 60 秒
+    const pf = await runPreflight(host, { quiet: true });
+    if (pf.state === "unreachable" || (pf.state === "missing" && !push)) {
+      testResult.value = { error: pf.error };
+    } else {
+      // 传 form.value（当前编辑中的源）：它的 bookSourceUrl 来自详情接口，是
+      // 导入原文——后端要拿它当 tag，规范化过的 URL 会让 App 静默无响应
+      const r = await appDebug(form.value, key, host, 0, push);
+      // 连不上时后端返回的是 {source:"app", error:"..."}，不是 HTTP 错误；
+      // 这里翻成卡片认得的形状（卡片读 testResult.error）
+      testResult.value = r && r.error ? { error: r.error } : r;
+      if (push && !testResult.value.error) {
+        appPreflightState.value = { state: "ready", error: "" };
+      }
+    }
   } catch (e) {
     testResult.value = { error: String(e.message) };
   } finally {
@@ -494,18 +543,72 @@ async function appDebugRun() {
   if (testResult.value && !testResult.value.error) openDebug();
 }
 
+//: 预检状态 → 卡片上的短标签与颜色
+const PREFLIGHT_TEXT = { ready: "已连接", missing: "App 里没有这个源", unreachable: "连不上" };
+const PREFLIGHT_TYPE = { ready: "success", missing: "warning", unreachable: "danger" };
+const preflightText = computed(
+  () => PREFLIGHT_TEXT[(appPreflightState.value || {}).state] || "");
+const preflightType = computed(
+  () => PREFLIGHT_TYPE[(appPreflightState.value || {}).state] || "info");
+
+async function runPreflight(host, { quiet = false } = {}) {
+  appChecking.value = true;
+  try {
+    // 用 form.value：它的 bookSourceUrl 是导入原文，App 那边按精确字符串匹配
+    appPreflightState.value = await appPreflight(form.value, host, 0);
+  } catch (e) {
+    appPreflightState.value = { state: "unreachable", error: String(e.message) };
+  } finally {
+    appChecking.value = false;
+  }
+  const s = appPreflightState.value;
+  if (!quiet) {
+    if (s.state === "ready") ElMessage.success("已连上 App，可以调试");
+    else if (s.state === "missing") ElMessage.warning(s.error);
+    else ElMessage.error(s.error);
+  }
+  return s;
+}
+
+async function appPreflightRun() {
+  const host = appHost.value.trim();
+  if (!host) return ElMessage.warning("请先填 App 的 IP（App 通知栏里有）");
+  await runPreflight(host);
+}
+
 function openDebug(step) {
   debugStep.value = step || "";
   debugVisible.value = true;
 }
 
-// 抽屉请求跳到某个页签（目前只有类型不符的 note「去改类型」在用它）。
+// 抽屉请求跳到某个页签。两种形态：
+//   - 字符串：老的「去改类型」用法，只切主页签
+//   - 对象 {tab, ruleTab}：失败步骤跳转，可以一路定位到规则子页签
 // **这里绝不做任何写入**：改类型是写操作，必须走用户明确确认的保存流程，
-// 此处只把人送到「基本信息」页签。
-function onDebugGoto(tab) {
+// 此处只负责把人送过去。
+function onDebugGoto(target) {
   debugVisible.value = false;
-  activeTab.value = tab;
+  if (!target || typeof target === "string") {
+    activeTab.value = target || "basic";
+    return;
+  }
+  if (target.tab) activeTab.value = target.tab;
+  if (target.ruleTab) activeRuleTab.value = target.ruleTab;
 }
+
+//: 抽屉的「用本页重放」要按步骤取当前表单里的规则——所以改完规则不用保存、
+//: 不用重跑链路，直接重放就能看判定变没变
+const ruleByStep = computed(() => {
+  const rs = form.value.ruleSearch || {};
+  const rt = form.value.ruleToc || {};
+  const rc = form.value.ruleContent || {};
+  return {
+    search: rs.bookList || "",
+    bookUrl: rs.bookUrl || "",
+    toc: rt.chapterList || "",
+    content: rc.content || "",
+  };
+});
 
 // 「另存为新源」：编辑模式下域名不可改，原先只提示「请另存为新源」却没有这个入口。
 // 清空域名是刻意的——另存为必须换个域名（Legado 以域名为主键，域名相同就是覆盖原源）。
@@ -550,7 +653,7 @@ async function save() {
 async function doSave(s) {
   s.bookSourceGroup = mergeGroup(displaySystemTags.value, userTags.value);
   try {
-    await saveSource(s, userTags.value, !!manualStatus.value);
+    await saveSource(s, userTags.value, statusLocked.value && !!manualStatus.value);
     ElMessage.success("已保存");
     savedSnapshot.value = JSON.stringify(form.value);   // 保存成功后刷新快照
     emit("saved", s);
@@ -602,6 +705,16 @@ async function doSave(s) {
               </el-form-item>
             </el-form>
             <div v-if="quickVerify" class="quick-verify">
+              <!-- 这是**本地离线回放**的结果（verify_chain），不是 App 实测：
+                   只判「取到值 / 不报错」，且跑不了 JS 规则。必须标出来——
+                   它和右侧 App 调试的结果用的是同一套三态视觉，不标就分不清
+                   哪份可信 -->
+              <p class="muted" style="margin: 0 0 8px">
+                <el-tag size="small" type="info">本地回放 · 仅供参考</el-tag>
+                <span style="margin-left: 6px">
+                  只判「取到值 / 不报错」，跑不了 JS 规则；要确认请用右侧「连 App 调试」。
+                </span>
+              </p>
               <!-- 与试跑卡片同一套三态渲染：同一个 as_step_dict 产出的数据，
                    这里若还用 ok 两态，「pass + 附注」会显示成绿色，与试跑卡片矛盾 -->
               <div v-for="s in quickVerify.steps" :key="s.name" class="quick-step">
@@ -630,41 +743,43 @@ async function doSave(s) {
               </el-form-item>
               <el-form-item label="类型">
                 <el-radio-group v-model="form.bookSourceType">
-                  <el-radio-button :value="0">📖小说</el-radio-button>
-                  <el-radio-button :value="1">🎧听书</el-radio-button>
-                  <el-radio-button :value="2">🎨漫画</el-radio-button>
-                  <el-radio-button :value="3">📥下载</el-radio-button>
+                  <el-radio-button v-for="t in sourceTypes" :key="t.value" :value="t.value">
+                    {{ t.tag }}
+                  </el-radio-button>
                 </el-radio-group>
               </el-form-item>
               <el-form-item label="启用"><el-switch v-model="form.enabled" /></el-form-item>
-              <el-form-item label="发现"><el-switch v-model="form.enabledExplore" /></el-form-item>
               <el-form-item label="备注">
                 <el-input v-model="form.bookSourceComment" type="textarea" :rows="2" />
               </el-form-item>
-              <el-form-item label="系统标签">
-                <el-tag v-for="t in displaySystemTags" :key="t" size="small" style="margin-right: 6px">
-                  {{ t }}
-                </el-tag>
-                <el-tag v-if="manualStatus" size="small" type="warning"
-                        style="margin-left: 6px">手动</el-tag>
-                <span v-if="!displaySystemTags.length" class="muted">保存后自动生成</span>
-              </el-form-item>
               <el-form-item label="健康状态">
-                <el-select v-model="manualStatus" style="width: 100%">
-                  <el-option label="自动（跟随校验结果）" value="" />
-                  <el-option v-for="t in STATUS_TAGS" :key="t" :label="t" :value="t" />
+                <el-switch v-model="statusLocked" :disabled="!currentStatus"
+                           active-text="锁定" inactive-text="自动" inline-prompt />
+                <el-select v-if="statusLocked" v-model="manualStatus"
+                           style="width: 170px; margin-left: 10px">
+                  <el-option v-for="t in statusTags" :key="t" :label="t" :value="t" />
                 </el-select>
-                <span class="muted" style="margin-left: 8px">
-                  手动选择后不会被后续校验覆盖
+                <span v-else class="muted" style="margin-left: 10px">
+                  跟随校验结果{{ currentStatus ? "：" + currentStatus : "（尚无校验结果）" }}
                 </span>
               </el-form-item>
-              <el-form-item label="用户标签">
-                <el-select v-model="userTags" multiple filterable allow-create default-first-option
-                           :reserve-keyword="false" style="width: 100%"
-                           placeholder="选择或输入标签，如 原创、精排、R18">
-                  <el-option v-for="t in userTagOptions" :key="t.tag" :value="t.tag"
-                             :label="t.tag + ' (' + t.count + ')'" />
-                </el-select>
+              <el-form-item label="标签">
+                <div style="width: 100%">
+                  <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap">
+                    <span class="muted">自动维护</span>
+                    <el-tooltip v-for="t in qualityTags" :key="t" placement="top"
+                                content="由校验结果自动判定，不可手动修改">
+                      <el-tag size="small" type="info" effect="plain">{{ t }}</el-tag>
+                    </el-tooltip>
+                    <span v-if="!qualityTags.length" class="muted">（暂无）</span>
+                  </div>
+                  <el-select v-model="userTags" multiple filterable allow-create default-first-option
+                             :reserve-keyword="false" style="width: 100%; margin-top: 8px"
+                             placeholder="我的标签：选择或输入，如 原创、精排、R18">
+                    <el-option v-for="t in userTagOptions" :key="t.tag" :value="t.tag"
+                               :label="t.tag + ' (' + t.count + ')'" />
+                  </el-select>
+                </div>
               </el-form-item>
               <el-form-item label="编码">
                 <el-input v-model="form.charset" placeholder="如 gbk，留空默认 utf-8" />
@@ -789,11 +904,22 @@ async function doSave(s) {
                   </el-form-item>
                 </el-collapse-item>
                 <el-collapse-item name="discover" title="发现配置">
+                  <!-- 开关原本在「基本信息」页签，和它管的东西隔了两个页签，
+                       关系看不出来。挪进这里与 exploreUrl 同处 -->
+                  <el-form-item label="启用发现">
+                    <el-switch v-model="form.enabledExplore" />
+                    <span class="muted" style="margin-left: 8px">
+                      关闭后 App 不显示该源的发现页
+                    </span>
+                  </el-form-item>
                   <el-form-item label="exploreUrl">
                     <el-input v-model="form.exploreUrl" type="textarea" :rows="3"
                               placeholder='[{"title":"分类","url":"/list?page={{page}}"}]' />
                   </el-form-item>
                   <p class="muted" style="margin: 0 0 8px">
+                    <b v-if="!form.exploreUrl" style="color: #e6a23c">
+                      还没填 exploreUrl——开启发现也不会有发现页。
+                    </b>
                     ruleExplore 结构较复杂，可在「原始 JSON」里编辑。
                   </p>
                 </el-collapse-item>
@@ -850,7 +976,7 @@ async function doSave(s) {
           </el-radio-group>
           <div class="toolbar" style="margin-top: 8px">
             <el-input v-model="debugQuery" size="small" :placeholder="currentTarget.hint"
-                      style="flex: 1 1 150px" @keyup.enter="appDebugRun" />
+                      style="flex: 1 1 150px" @keyup.enter="appDebugRun()" />
           </div>
           <p class="muted" style="margin: 8px 0 0">
             目标决定<b>从哪一步开始跑</b>：<b>搜索</b>从关键词开始（取第一条 → 目录 → 正文），
@@ -862,14 +988,35 @@ async function doSave(s) {
           <div class="toolbar" style="margin-top: 8px">
             <el-input v-model="appHost" size="small" placeholder="App 的 IP，如 192.168.1.5"
                       style="flex: 1 1 150px" />
+            <el-button size="small" :loading="appChecking" @click="appPreflightRun">
+              测试连接
+            </el-button>
+          </div>
+          <!-- 预检结果就地显示。以前只有一个「连」按钮：连不上或缺源都要干等
+               60 秒超时，而且两者表现完全一样，没法对症下药 -->
+          <p v-if="appPreflightState" style="margin: 8px 0 0">
+            <el-tag size="small" :type="preflightType">{{ preflightText }}</el-tag>
+            <span class="muted" style="margin-left: 6px">{{ appPreflightState.error }}</span>
+          </p>
+          <div class="toolbar" style="margin-top: 8px">
             <el-button type="primary" size="small" :loading="appDebugging"
-                       @click="appDebugRun">
+                       @click="appDebugRun()">
               连 App 调试
+            </el-button>
+            <!-- App 的调试 WS 要求源已经在它的库里（按 bookSourceUrl 精确匹配），
+                 否则静默无响应。推送走 App 的 HTTP 接口，幂等覆盖 -->
+            <el-button size="small" :loading="appDebugging"
+                       @click="appDebugRun({ push: true })">
+              推送并调试
             </el-button>
           </div>
           <p class="muted" style="margin: 8px 0 0">
             需要 App 里打开「Web 服务」，且手机与电脑在同一局域网。
             含 JS 规则的源只有这里验得了。
+          </p>
+          <p class="muted" style="margin: 4px 0 0">
+            App 只能调试<b>它库里已有的源</b>。「推送并调试」会把当前表单
+            （含未保存的改动）发到 App 再调试——<b>会覆盖 App 里同 URL 的源</b>。
           </p>
 
           <div v-if="!testResult" class="muted" style="padding: 22px; text-align: center">
@@ -941,7 +1088,9 @@ async function doSave(s) {
          immediate，initialStep 只在 modelValue 由 false → true 时生效，用 v-if 会让
          首帧落到 steps[0] 而忽略 :initial-step -->
     <RuleDebugDrawer v-model="debugVisible" :result="testResult"
-                     :initial-step="debugStep" @goto="onDebugGoto" />
+                     :initial-step="debugStep" :rules="ruleByStep"
+                     :source-type="Number(form.bookSourceType) || 0"
+                     @goto="onDebugGoto" />
   </el-dialog>
 </template>
 

@@ -51,7 +51,7 @@ SOURCE = {
 }
 
 
-def fake_fetch(url, timeout=15, headers=None, charset="", proxy=""):
+def fake_fetch(url, timeout=15, headers=None, charset="", proxy="", source=None):
     return PAGES.get(url, "")
 
 
@@ -331,9 +331,9 @@ class FetchPassthroughTests(unittest.TestCase):
         next_url = [u for u in (SEARCH_URL, "https://site/book/1",
                                 "https://site/read/1.html")]
 
-        def spy(url, timeout=15, headers=None, charset="", proxy=""):
+        def spy(url, timeout=15, headers=None, charset="", proxy="", source=None):
             seen.append({"url": url, "headers": headers,
-                         "charset": charset, "proxy": proxy})
+                         "charset": charset, "proxy": proxy, "source": source})
             return PAGES.get(url, "")
 
         src = source_with(header='{"User-Agent":"UA/1.0"}', charset="gbk")
@@ -345,6 +345,9 @@ class FetchPassthroughTests(unittest.TestCase):
             self.assertEqual(call["headers"], {"User-Agent": "UA/1.0"})
             self.assertEqual(call["charset"], "gbk")
             self.assertEqual(call["proxy"], "http://127.0.0.1:7890")
+            # source 必须透传：fetch 靠它读 concurrentRate 限速。不传的话本链路
+            # 一步三发、repair 再按 4 并发批量跑，等于完全无视源声明的限速
+            self.assertIs(call["source"], src)
 
 
 class MisconfigNoteTests(unittest.TestCase):

@@ -9,10 +9,15 @@
 import { ref, computed, watch, nextTick } from "vue";
 import { ElMessage } from "element-plus";
 
+import { replayStep } from "../api/rules";
+
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
   result: { type: Object, default: null },
   initialStep: { type: String, default: "" },
+  //: 当前表单里每一步的规则（steps[].name → 规则字符串），用于「重放本步」
+  rules: { type: Object, default: () => ({}) },
+  sourceType: { type: Number, default: 0 },
 });
 const emit = defineEmits(["update:modelValue", "goto"]);
 
@@ -37,6 +42,23 @@ const activeHit = ref(0);
 
 const steps = computed(() => (props.result && props.result.steps) || []);
 const pages = computed(() => (props.result && props.result.pages) || []);
+
+//: 结果来源。App 实测（走 App 的调试 WS）与本地回放（我们的离线引擎）可信度
+//: 差很多——本地只判「非空/不报错」且跑不了 JS 规则。**必须显式标出来**：
+//: 两者的三态视觉完全一样，不标就分不清哪份该信
+const isAppResult = computed(() => (props.result || {}).source === "app");
+//: App 推来的原始事件流（带 ``t`` 秒）。steps[].values 去掉的耗时前缀在这里，
+//: 排查「哪一步慢」「App 到底推了什么」只能看它
+const events = computed(() => (props.result && props.result.events) || []);
+
+const replaying = ref(false);
+const replayResult = ref(null);
+
+//: 失败步骤 → 该去哪个规则子页签改。搜索与详情链接都在「搜索」页签里
+//: （ruleSearch.bookList / bookUrl 是同一个表单的两项）
+const STEP_RULE_TAB = {
+  search: "search", bookUrl: "search", toc: "toc", content: "content",
+};
 const current = computed(
   () => steps.value.find((s) => s.name === activeStep.value) || steps.value[0] || null,
 );
@@ -131,6 +153,7 @@ watch(() => props.modelValue, (show) => {
   renderLimit.value = RENDER_CHUNK;
   searchKey.value = "";
   activeHit.value = 0;
+  replayResult.value = null;
 });
 
 // 跳到第 i 处命中（i 为负则向前），必要时先扩大渲染范围
@@ -152,10 +175,49 @@ function selectStep(name) {
   renderLimit.value = RENDER_CHUNK;
   searchKey.value = "";
   activeHit.value = 0;
+  replayResult.value = null;   // 上一步的重放结论不适用于当前这步
+}
+
+//: 当前步骤的规则（取自表单，所以改完规则就能立刻重放看效果）
+const currentRule = computed(
+  () => (props.rules || {})[(current.value || {}).name] || "",
+);
+//: 重放要同时满足：这一步对应一个页面的 HTML、这一步有规则可回放、
+//: 且这一步确实是一条规则步骤（explore 的规则结构不同，不给重放）
+const canReplay = computed(
+  () => !!currentPage.value && !!currentRule.value
+    && !!STEP_RULE_TAB[(current.value || {}).name],
+);
+
+async function doReplay() {
+  if (!canReplay.value) return;
+  replaying.value = true;
+  try {
+    replayResult.value = await replayStep(
+      currentPage.value.html, currentRule.value,
+      current.value.name, props.sourceType);
+  } catch (e) {
+    ElMessage.error("重放失败: " + e.message);
+    replayResult.value = null;
+  } finally {
+    replaying.value = false;
+  }
+}
+
+// 从失败步骤直接送到对应的规则页签，省掉自己翻页签找字段
+function gotoRuleField(step) {
+  const ruleTab = STEP_RULE_TAB[(step || {}).name];
+  emit("goto", ruleTab ? { tab: "rules", ruleTab } : { tab: "basic" });
 }
 
 function loadMore() {
   renderLimit.value += RENDER_CHUNK;
+}
+
+//: 事件耗时。App 给的是相对秒数（浮点），没有就留空
+function fmtTime(t) {
+  const v = Number(t);
+  return Number.isFinite(v) ? "+" + v.toFixed(3) + "s" : "";
 }
 
 // 标签占比：后端给的是 0~1 的比值，展示成百分比才有单位
@@ -181,10 +243,23 @@ async function copyMatched() {
 </script>
 
 <template>
-  <el-drawer v-model="visible" title="试跑调试" size="72%" destroy-on-close>
+  <el-drawer v-model="visible" size="72%" destroy-on-close>
+    <!-- 来源必须写在标题旁：App 实测与本地回放的三态视觉完全一样，
+         不标就分不清手里这份结果该信到什么程度 -->
+    <template #header>
+      <span>试跑调试</span>
+      <el-tag size="small" :type="isAppResult ? 'success' : 'info'"
+              style="margin-left: 8px">
+        {{ isAppResult ? "App 实测" : "本地回放 · 仅供参考" }}
+      </el-tag>
+    </template>
+
     <el-empty v-if="!steps.length" description="没有试跑结果" :image-size="80" />
 
     <template v-else>
+      <el-alert v-if="!isAppResult" type="warning" :closable="false" show-icon
+                style="margin-bottom: 10px"
+                title="本地回放只判「取到值 / 不报错」，且跑不了 JS 规则——与 App 的真实行为可能有偏差。要确认请用「连 App 调试」。" />
       <div class="debug-step-tabs">
         <!-- 高亮要跟着「实际显示的那一步」（current 在 activeStep 失效时会回退到
              steps[0]），否则重跑后会出现「有内容、没有任何页签高亮」 -->
@@ -197,6 +272,22 @@ async function copyMatched() {
       <div v-if="current" class="debug-head">
         <el-tag size="small" :type="tagType(current)">{{ verdictText(current) }}</el-tag>
         <span class="mono muted grow">{{ current.url }}</span>
+        <!-- 失败就直接把人送到对应的规则页签，省掉自己翻页签找字段 -->
+        <el-button v-if="current.verdict === 'fail'" size="small" type="primary" plain
+                   @click="gotoRuleField(current)">去改规则</el-button>
+        <!-- 用已抓到的 HTML 重放，**不发网络请求**：改完规则立刻看判定变没变 -->
+        <el-button size="small" :loading="replaying" :disabled="!canReplay"
+                   @click="doReplay">用本页重放</el-button>
+      </div>
+
+      <div v-if="replayResult" class="replay-box">
+        <el-tag size="small" :type="tagType(replayResult)">{{ verdictText(replayResult) }}</el-tag>
+        <span class="muted">取到 {{ (replayResult.values || []).length }} 条</span>
+        <span v-if="replayResult.reason" class="muted">· {{ replayResult.reason }}</span>
+        <span v-if="isAppResult" class="muted">
+          · 这份重放跑在我们抓的 HTML 上，不是 App 所见
+        </span>
+        <el-button link size="small" @click="replayResult = null">关闭</el-button>
       </div>
 
       <p v-if="current && current.reason" class="debug-reason">{{ current.reason }}</p>
@@ -287,6 +378,21 @@ async function copyMatched() {
           </template>
           <el-empty v-else description="这一步没有抓到页面" :image-size="60" />
         </el-tab-pane>
+
+        <!-- 只有 App 实测才有事件流（App 把过程逐条推过来）。这是唯一带耗时
+             的地方——「哪一步慢」「App 到底推了什么」都只能看它。以前这份数据
+             后端返回了却没处显示，要查得去跑 tools/probe_app_debug.py -->
+        <el-tab-pane v-if="events.length" name="events">
+          <template #label>App 事件 ({{ events.length }})</template>
+          <p class="muted" style="margin: 6px 0">
+            App 推来的原始事件流。「提取结果」是去掉耗时前缀后的段内文本，
+            这里保留时间与完整原文。
+          </p>
+          <div v-for="(e, i) in events" :key="i" class="debug-event">
+            <span class="debug-event-t">{{ fmtTime(e.t) }}</span>
+            <span class="debug-event-x">{{ e.text }}</span>
+          </div>
+        </el-tab-pane>
       </el-tabs>
     </template>
   </el-drawer>
@@ -301,6 +407,20 @@ async function copyMatched() {
 }
 .debug-step-tab.active { border-color: #409eff; color: #409eff; }
 .debug-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.replay-box {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 6px 10px; margin: 4px 0 8px;
+  background: #f0f9eb; border: 1px solid #e1f3d8; border-radius: 4px;
+  font-size: 13px;
+}
+.debug-event {
+  display: flex; gap: 10px; padding: 2px 0;
+  font-family: Consolas, Monaco, monospace; font-size: 12px;
+  line-height: 1.6;
+}
+/* 时间列定宽右对齐，「哪一步慢」才能竖着扫出来 */
+.debug-event-t { flex: 0 0 76px; color: #909399; text-align: right; }
+.debug-event-x { white-space: pre-wrap; word-break: break-all; }
 .debug-reason { color: #f56c6c; margin: 4px 0; }
 .debug-notes { color: #e6a23c; margin: 4px 0; padding-left: 18px; line-height: 1.7; }
 .debug-evidence {

@@ -22,8 +22,12 @@ webView、正文分页全都在。我们只当客户端——**App 一行源码�
 - 响应是一串带 ``[mm:ss.SSS]`` 相对耗时前缀的文本消息，对端跑完主动关闭
   （``CloseReason`` "调试结束"）
 
-本模块只做三件事：收事件 → 聚合成 steps[] → 抓页面补 pages[]，
-产出与 ``core/verify.py:verify_chain`` 同形状的结果，供前端抽屉直接消费。
+本模块做两件事：
+
+1. **调试 WS**：收事件 → 聚合成 steps[] → 抓页面补 pages[]，产出与
+   ``core/verify.py:verify_chain`` 同形状的结果，供前端抽屉直接消费。
+2. **App 的 HTTP 接口**（见下方「HTTP 接口」一节）：问 App 有没有某个源、
+   把源推过去。用来把「调试 WS 对未知 tag 静默无响应」这个坑变成可判定的状态。
 
 **纯标准库实现**（不装 websockets）：项目不为这一个用途加依赖，
 WS 客户端代码在 tools/probe_app_debug.py 里已实测跑通，原样搬过来。
@@ -38,7 +42,10 @@ import re
 import socket
 import struct
 import time
-from typing import Any, Dict, List, Optional, Sequence
+import urllib.error
+import urllib.parse
+import urllib.request
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from core import quality as Q
 from core.fetch import fetch, parse_source_header
@@ -120,6 +127,114 @@ _ZERO_EVENT_HINT = (
     "tag 必须用导入原文 bookSourceUrl（规范化过的 URL 对不上时会静默无响应）；"
     "其次是 key 格式不合法。"
 )
+
+# ------------------------------------------------------------------ HTTP 接口
+# App 的 Web 服务（同一个 KtorServer）除了调试 WS，还开着一组 HTTP 接口，
+# 端口 = WS 端口 - 1（WebService.kt:166 起 WS 用的就是 webPort + 1）。
+#
+# 为什么需要它们：调试 WS 的 tag 是拿去 App 库里**精确匹配** bookSourceUrl
+# （BookSourceDao.kt:277），App 里没有这个源时 `getBookSource(tag)?.let{}`
+# 什么都不做——表现为静默无响应。有了 HTTP 侧，「App 里有没有这个源」就能
+# 明确问出来，也能把源直接推进去，省掉
+# 「保存 → 导出 → 扫码 → App 导入 → 才轮到调试」的整圈往返。
+#
+# 依据 legado-with-MD3：
+#   KtorServer.kt:57            POST /saveBookSource   body = 单个书源裸 JSON
+#   KtorServer.kt:121           GET  /getBookSource?url=<bookSourceUrl>
+#   BookSourceController.kt:33  @Insert(onConflict = REPLACE) → 推送是幂等的
+#   ReturnData.kt               {isSuccess, errorMsg, data}
+#: App 的 HTTP 端口（= 默认 WS 端口 1123 - 1）
+DEFAULT_HTTP_PORT = 1122
+#: HTTP 侧的等待上限（秒）。局域网内不通会很快拒连
+HTTP_TIMEOUT = 8
+
+
+def http_port_for(ws_port: Optional[int]) -> int:
+    """WS 端口 → HTTP 端口。传 0/None 时按默认值推。"""
+    port = int(ws_port or 0)
+    return (port - 1) if port > 1 else DEFAULT_HTTP_PORT
+
+
+def _app_http(host: str, path_and_query: str, ws_port: Optional[int],
+              data: Optional[bytes] = None, timeout: int = HTTP_TIMEOUT) -> dict:
+    """调一次 App 的 HTTP 接口，返回解析后的 ReturnData。
+
+    连不上/超时/返回不是 JSON 都会抛——调用方决定怎么翻译成给用户的话。
+    """
+    base = "http://%s:%d" % (str(host or "").strip(), http_port_for(ws_port))
+    req = urllib.request.Request(
+        base + path_and_query, data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST" if data is not None else "GET")
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        raw = resp.read().decode("utf-8", "replace")
+    parsed = json.loads(raw) if raw.strip() else {}
+    if not isinstance(parsed, dict):
+        raise ValueError("App 返回的不是预期结构: %s" % raw[:200])
+    return parsed
+
+
+def push_source(host: str, source: Dict[str, Any], ws_port: Optional[int] = None,
+                timeout: int = 15) -> Tuple[bool, str]:
+    """把书源推进 App 的库（幂等：App 侧 insert 是 REPLACE）。
+
+    返回 ``(是否成功, 错误信息)``。**这会改动用户 App 里的数据**——必须由
+    用户显式触发，不要在流程里自动调用。名字或 URL 为空时 App 会拒绝，
+    这里先拦一道，省得把"转换源失败"这种模糊报错丢给用户。
+    """
+    name = str((source or {}).get("bookSourceName", "") or "").strip()
+    url = str((source or {}).get("bookSourceUrl", "") or "").strip()
+    if not name or not url:
+        return False, "源名称和 URL 不能为空"
+    body = json.dumps(source, ensure_ascii=False).encode("utf-8")
+    try:
+        d = _app_http(host, "/saveBookSource", ws_port, data=body, timeout=timeout)
+    except Exception as e:
+        return False, "推送失败（%s: %s）" % (type(e).__name__, e)
+    ok = bool(d.get("isSuccess"))
+    return ok, "" if ok else str(d.get("errorMsg") or "App 未接受该源")
+
+
+def app_has_source(host: str, source_url: str, ws_port: Optional[int] = None,
+                   timeout: int = HTTP_TIMEOUT) -> bool:
+    """问 App 里有没有这个源（按 ``bookSourceUrl`` 精确匹配）。
+
+    连不上会抛异常——「连不上」和「连上了但没有这个源」是两件事，别合并。
+    """
+    q = urllib.parse.urlencode({"url": source_url or ""})
+    d = _app_http(host, "/getBookSource?" + q, ws_port, timeout=timeout)
+    return bool(d.get("isSuccess"))
+
+
+def preflight(host: str, source_url: str, ws_port: Optional[int] = None,
+              timeout: int = HTTP_TIMEOUT) -> Dict[str, Any]:
+    """连 App 调试前的预检：把「静默无响应」拆成能对症下药的状态。
+
+    返回 ``{"state": ..., "error": ...}``，state 取值：
+
+      - ``unreachable``：HTTP 侧就连不上。App 的「Web 服务」没开、IP 不对、
+        或手机不在同一局域网。
+      - ``missing``：连上了，但 App 库里没有这个源（调试 WS 会静默不响应）。
+        最常见的原因是 tag 用了规范化过的 URL，而不是导入原文。
+      - ``ready``：连上了且源在库里，可以调试。
+    """
+    if not str(host or "").strip():
+        return {"state": "unreachable", "error": "没有填 App 的 IP"}
+    if not str(source_url or "").strip():
+        return {"state": "unreachable", "error": "源没有 bookSourceUrl，无法调试"}
+    try:
+        has = app_has_source(host, source_url, ws_port, timeout=timeout)
+    except Exception as e:
+        return {"state": "unreachable",
+                "error": "连不上 App（%s: %s）。请确认 App 里已打开「Web 服务」、"
+                         "手机与电脑在同一局域网、端口填的是 App 显示的 HTTP 端口。"
+                         % (type(e).__name__, e)}
+    if not has:
+        return {"state": "missing",
+                "error": "已连上 App，但它的书源里没有这个源——调试 WebSocket 对"
+                         "查不到的 tag 会静默不响应。可以用「推送到 App」把它发过去。"}
+    return {"state": "ready", "error": ""}
+
 
 # ------------------------------------------------------------------ WS 客户端
 # 以下四个函数是从 tools/probe_app_debug.py 的实测版本**原样搬过来**的
@@ -429,7 +544,9 @@ def fetch_debug_pages(steps: Sequence[Dict[str, Any]], source: Optional[Dict[str
             continue
         tried.add(url)
         try:
-            html = fetch(url, headers=headers, charset=charset, proxy=proxy)
+            # 传 source：最多补抓 3 页，也该遵守源声明的 concurrentRate
+            html = fetch(url, headers=headers, charset=charset, proxy=proxy,
+                         source=source)
         except Exception as e:
             _note(step, "页面抓取失败（%s），本步判定不受影响" % e)
             continue
