@@ -533,13 +533,23 @@ def extract_all_ex(content: str, rule: str) -> Tuple[List[str], str]:
 def extract_all_nodes(
     content: str,
     rule: str,
-    limit: int = 3,
-    max_chars: int = 200_000,
+    limit: int,
+    max_chars: int,
 ) -> Tuple[List[str], List[str], str]:
     """按规则取值，并返回**命中节点的 outerHTML** 与失败原因。
 
     ``hits`` 是命中块的 HTML 序列（最多 ``limit`` 个，每个截断到 ``max_chars``）。
     调用方用它展示「规则现在选到了哪块 DOM」。
+
+    **``limit`` / ``max_chars`` 故意没有默认值**：这两个数字是「证据预算」政策，
+    归 ``core.quality`` 所有（``MATCHED_NODES_LIMIT`` / ``MAX_MATCHED_HTML_CHARS``）。
+    在回放引擎里再硬编码一份同值默认，就等于同一份口径写两处——改动 quality 的
+    常量不会有任何行为变化，将来必然分叉。调用方显式传，口径只有一处。
+
+    两条调用方需要注意的语义：
+      - **JSON 规则下 ``hits`` 可能与 ``values`` 完全相同**（字符串叶子经
+        ``_json_to_text`` 原样返回），UI 上会出现两份重复内容，需要自行去重
+      - **``max_chars`` 截断可能落在标签中间**，返回的片段不保证是合法 HTML
 
     返回 ``(values, hits, error)``；``error`` 非空表示规则不可回放。
     """

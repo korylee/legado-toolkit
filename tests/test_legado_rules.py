@@ -111,37 +111,74 @@ class ImageHeuristicTests(unittest.TestCase):
 class ExtractAllNodesTests(unittest.TestCase):
     """命中片段：规则选中的 DOM 块的 outerHTML。"""
 
+    #: 测试固定的证据预算。真实口径归 core.quality 所有
+    #: （MATCHED_NODES_LIMIT / MAX_MATCHED_HTML_CHARS），replayer 不设默认值
+    LIMIT = 3
+    MAX_CHARS = 200_000
+
+    def _nodes(self, content, rule, **kw):
+        """统一传参入口：replayer 故意不设默认值，这里补上测试口径。"""
+        kw.setdefault("limit", self.LIMIT)
+        kw.setdefault("max_chars", self.MAX_CHARS)
+        return R.extract_all_nodes(content, rule, **kw)
+
     def test_content_rule_returns_matched_block(self):
-        vals, hits, err = R.extract_all_nodes(HTML, "class.book-list@tag.li@tag.a@text")
+        vals, hits, err = self._nodes(HTML, "class.book-list@tag.li@tag.a@text")
         self.assertEqual(err, "")
         self.assertEqual(vals, ["测试书", "第二本"])
-        # 命中节点是属性取值前的那个 <a>，outerHTML 里应含 href
-        self.assertEqual(len(hits), 2)
-        self.assertIn("/book/1", hits[0])
+        # 必须**逐字**断言：命中的是属性取值动作**之前**的那个 <a>。
+        # 用 assertIn("/book/1", hits[0]) 是不够的——父节点 <li> 的 outerHTML
+        # 同样含 /book/1，实现若错选到祖先，那种弱断言照样通过，
+        # 而「选到哪一块」正是本次改动的全部价值。
+        self.assertEqual(hits[0], '<a href="/book/1">测试书</a>')
+        self.assertEqual(hits[1], '<a href="/book/2">第二本</a>')
 
     def test_hits_are_capped(self):
-        vals, hits, _err = R.extract_all_nodes(HTML, "class.book-list@tag.li", limit=1)
+        _vals, hits, _err = self._nodes(HTML, "class.book-list@tag.li", limit=1)
         self.assertEqual(len(hits), 1)
 
     def test_hits_truncated_by_max_chars(self):
-        _vals, hits, _err = R.extract_all_nodes(
-            HTML, "class.book-list@tag.li", max_chars=10)
+        _vals, hits, _err = self._nodes(HTML, "class.book-list@tag.li", max_chars=10)
+        # 先钉住条数：若实现返回空列表，下面的循环会变成空转的假覆盖
+        self.assertEqual(len(hits), 2)
         for h in hits:
-            self.assertLessEqual(len(h), 10)
+            self.assertEqual(len(h), 10)
+            self.assertTrue(h.startswith("<li class="))
+
+    def test_json_leaf_hits_equal_values(self):
+        """JSON 字符串叶子下 hits 与 values 相同——调用方需自行去重。
+
+        这是已知语义：字符串叶子经 _json_to_text 原样返回，UI 上会出现两份
+        一样的内容。补这条用例把该行为固定下来，避免日后被当成 bug 修。
+        """
+        vals, hits, err = self._nodes(JSONTEXT, "$.data.list[*].name")
+        self.assertEqual(err, "")
+        self.assertEqual(vals, ["A", "B"])
+        self.assertEqual(hits, vals)
+
+    def test_json_object_hit_is_serialized(self):
+        """选中 dict 节点时 hits 是该节点的 JSON 串，不是空。"""
+        _vals, hits, err = self._nodes(JSONTEXT, "$.data")
+        self.assertEqual(err, "")
+        self.assertEqual(len(hits), 1)
+        self.assertIn("list", hits[0])
 
     def test_unsupported_rule_returns_reason(self):
-        _vals, hits, err = R.extract_all_nodes(HTML, "@js:result")
+        _vals, hits, err = self._nodes(HTML, "@js:result")
         self.assertTrue(err)
         self.assertEqual(hits, [])
 
     def test_empty_rule(self):
-        _vals, hits, err = R.extract_all_nodes(HTML, "")
+        _vals, hits, err = self._nodes(HTML, "")
         self.assertTrue(err)
         self.assertEqual(hits, [])
 
     def test_html_rule_returns_raw_response(self):
-        """@html: 分支不做任何选择，整份响应体就是命中内容。"""
-        vals, hits, err = R.extract_all_nodes(HTML, "@html:")
+        """@html: 分支不做任何选择，整份响应体就是命中内容。
+
+        该分支此前无任何测试保护（变异测试证实：把它改成永假，原有测试全绿）。
+        """
+        vals, hits, err = self._nodes(HTML, "@html:")
         self.assertEqual(err, "")
         self.assertEqual(vals, [HTML])
         self.assertEqual(hits, [HTML])
