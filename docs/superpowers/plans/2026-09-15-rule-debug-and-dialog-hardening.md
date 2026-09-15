@@ -322,6 +322,13 @@ SHORT_CONTENT_CHARS = 500
 #: Legado 的 3 是「只提供下载服务的网站」（BookSourceType.kt:8-11），不是视频
 EXPECTED_SHAPE: Dict[int, str] = {0: SHAPE_TEXT, 1: SHAPE_AUDIO, 2: SHAPE_IMAGE}
 
+#: judge_list_step 的步骤名。导出成常量是为了让调用方无法拼错——
+#: 只有精确等于 "toc" 才启用 toc 语义（下载源豁免 / 章节数偏少附注），
+#: 而 "TOC" 这种大小写笔误会把本该 unknown 的结果变成 fail。
+STEP_SEARCH = "search"
+STEP_BOOK_URL = "bookUrl"
+STEP_TOC = "toc"
+
 #: 结构性 HTML 标签。命中说明多半捞到了容器而不是正文（高精度信号）
 STRUCT_TAG_RE = re.compile(
     r"<\s*(div|script|style|nav|header|footer|aside|table|ul|section|form)\b", re.I)
@@ -384,6 +391,42 @@ class Judgement:
         if self.verdict == VERDICT_FAIL:
             return False
         return None
+
+    def as_step_dict(
+        self,
+        name: str,
+        url: str = "",
+        page_id: str = "",
+        values: Sequence[str] = (),
+        matched_html: str = "",
+        rule_error: str = "",
+        detail: str = "",
+    ) -> Dict[str, Any]:
+        """摊平成 ``steps[]`` 的一项。
+
+        **两个调用方必须共用这一个序列化口径。** 若「试跑」和「批量校验」
+        各写一份摊平逻辑，一处忘记同步 verdict / notes 就会重新分叉——
+        那正是本次改造要消灭的「同源不同判」。所以它放在这里，不放在
+        verify.py 里。
+        """
+        return {
+            # ---- 兼容字段：旧前端 / 快速生成 / AI 修复循环都读这两个 ----
+            "name": name,
+            "ok": self.ok,
+            "detail": detail or self.reason or self.shape,
+            # ---- 新字段 ----
+            "verdict": self.verdict,
+            "has_notes": self.has_notes,
+            "notes": list(self.notes),
+            "reason": self.reason,
+            "shape": self.shape,
+            "evidence": dict(self.evidence),
+            "rule_error": rule_error,
+            "url": url,
+            "page_id": page_id,
+            "values": list(values),
+            "matched_html": matched_html,
+        }
 
 
 # ------------------------------------------------------------------ 形态嗅探
@@ -452,7 +495,10 @@ def build_evidence(values: Sequence[str], matched_html: str = "") -> Dict[str, A
     return {
         "values_total": len([v for v in clean if v.strip()]),
         "chars": len(joined),
-        "cjk_chars": len(_CJK_RE.findall(joined)),
+        # 用 finditer 计数而不是 findall：findall 会为每个中文字符实体化一个
+        # 字符串对象，150 万字符时实测 1.34s / 峰值 97MB；finditer 是 0.11s
+        # 且几乎无额外分配。正文全文不截断（MAX_VALUE_CHARS = 0），这个量级会真实出现
+        "cjk_chars": sum(1 for _ in _CJK_RE.finditer(joined)),
         # 段落信息只能从命中节点的 HTML 拿：replayer 的 text 动作会 re.sub(r"\s+", " ")
         # 把换行全抹掉，提取值里已经没有段落信息了
         "block_seps": len(_BLOCK_SEP_RE.findall(matched_html or "")),
@@ -467,6 +513,20 @@ def _shape_label(shape: str) -> str:
         SHAPE_TEXT: "文本", SHAPE_IMAGE: "图片", SHAPE_AUDIO: "音频",
         SHAPE_MIXED: "多种形态混合", SHAPE_EMPTY: "空",
     }.get(shape, shape)
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    """宽松取整。脏值（"" / [] / "abc" / None）一律降级为默认值。
+
+    书源的 bookSourceType 是从外部 JSON 来的，历史上就出现过 ''/[]/字符串数字
+    这类脏值（见 core/sanitize.py 的说明）。本模块是全部源的共用闸门：
+    抛异常会中断整批校验，而降级为 0 最坏只是判定口径偏保守——按「不误杀」的
+    立场，后者才对。
+    """
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
 # ------------------------------------------------------------------ 正文判定
@@ -504,7 +564,7 @@ def judge_content(
     rule_error: str = "",
 ) -> Judgement:
     """正文判定。前置分流顺序**不可调换**。"""
-    st = int(source_type or 0)
+    st = _safe_int(source_type)
     clean = [str(v or "") for v in (values or [])]
     shape, _counts = sniff_shape(clean)
     evidence = build_evidence(clean, matched_html)
@@ -556,12 +616,15 @@ def judge_list_step(
     source_type: int = 0,
 ) -> Judgement:
     """目录 / 搜索结果列表判定（search / bookUrl / toc 三步共用）。"""
+    # 入口归一化：只有精确等于 STEP_TOC 才启用 toc 语义，
+    # 而调用方一个大写笔误（"TOC"）就会把本该 unknown 的结果变成 fail
+    step_key = str(step or "").strip().lower()
     clean = [str(v or "") for v in (values or [])]
     shape, _counts = sniff_shape(clean)
     evidence = build_evidence(clean, matched_html)
 
     # 下载源不解析目录（Debug.kt:329-332）
-    if step == "toc" and int(source_type or 0) == 3:
+    if step_key == STEP_TOC and _safe_int(source_type) == 3:
         return Judgement(VERDICT_UNKNOWN, "文件类书源不解析目录", shape, [], evidence)
 
     if str(rule_error or "").strip():
@@ -572,7 +635,7 @@ def judge_list_step(
         return Judgement(VERDICT_FAIL, "解析结果为空", shape, [], evidence)
 
     notes: List[str] = []
-    if step == "toc" and evidence["values_total"] < 3:
+    if step_key == STEP_TOC and evidence["values_total"] < 3:
         notes.append("章节数偏少（%d），目录可能分页加载" % evidence["values_total"])
     return Judgement(VERDICT_PASS, "", shape, notes, evidence)
 
@@ -612,7 +675,7 @@ def static_misconfig_notes(source: Dict[str, Any]) -> List[str]:
         notes.append("ruleContent.webJs 已配置，但 URL 规则未开启 webView，"
                      "该段 JS 在 Legado 中不会生效（AnalyzeUrl.kt:441）")
 
-    if int(src.get("bookSourceType", 0) or 0) == 4:
+    if _safe_int(src.get("bookSourceType", 0)) == 4:
         notes.append("bookSourceType=4 是 Legado 不存在的取值，导出后行为未定义，"
                      "建议改为 0~3")
 
@@ -622,8 +685,10 @@ def static_misconfig_notes(source: Dict[str, Any]) -> List[str]:
 __all__ = [
     "Judgement", "VERDICT_PASS", "VERDICT_FAIL", "VERDICT_UNKNOWN",
     "SHAPE_TEXT", "SHAPE_IMAGE", "SHAPE_AUDIO", "SHAPE_MIXED", "SHAPE_EMPTY",
+    "STEP_SEARCH", "STEP_BOOK_URL", "STEP_TOC",
     "sniff_shape", "build_evidence", "judge_content", "judge_list_step",
     "static_misconfig_notes",
+    "EXPECTED_SHAPE", "STRUCT_TAG_RE", "CONTENT_NOISE_MARKERS",
     "MAX_PAGE_HTML_CHARS", "MAX_MATCHED_HTML_CHARS", "MATCHED_NODES_LIMIT",
     "MAX_VALUE_CHARS", "VALUES_PREVIEW_LIMIT", "MAX_EVIDENCE_TOTAL_CHARS",
     "SHORT_CONTENT_CHARS",
@@ -1337,25 +1402,16 @@ def _new_page(pages: dict, page_id: str, url: str, html: str,
 
 def _step(name: str, judgement, url: str = "", page_id: str = "",
           values=None, matched_html: str = "") -> dict:
-    """把 Judgement 摊平成 steps[] 的一项，并补齐兼容字段。"""
-    return {
-        # ---- 兼容字段（旧前端/快速生成/AI 修复循环都读这两个）----
-        "name": name,
-        "ok": judgement.ok,
-        "detail": judgement.reason or judgement.shape,
-        # ---- 新字段 ----
-        "verdict": judgement.verdict,
-        "has_notes": judgement.has_notes,
-        "notes": list(judgement.notes),
-        "reason": judgement.reason,
-        "shape": judgement.shape,
-        "evidence": dict(judgement.evidence),
-        "rule_error": "",
-        "url": url,
-        "page_id": page_id,
-        "values": list(values or []),
-        "matched_html": matched_html,
-    }
+    """把 Judgement 摊平成 steps[] 的一项。
+
+    **摊平口径只有一处**：``quality.Judgement.as_step_dict()``。这里只是个短名字，
+    绝不要把字典字面量抄回来——「试跑」和「批量校验」各写一份映射，一处忘记
+    同步 verdict / notes 就会重新分叉，那正是本次改造要消灭的「同源不同判」。
+    """
+    return judgement.as_step_dict(
+        name, url=url, page_id=page_id,
+        values=values or [], matched_html=matched_html,
+    )
 
 
 def _cap_evidence(steps: list, pages: dict) -> list:
