@@ -159,13 +159,37 @@ async function applyBatchTags(mode) {
   }
 }
 
-async function checkSources(urls = []) {
+// 校验结果提示。**必须报出「复用了几条」**：有效期内的缓存不会重新请求，
+// 所以要是不说，「点校验 → 完成」和「一条请求都没发」在界面上长得一模一样
+function reportCheckResult(resultJson) {
+  let r = null;
+  try { r = resultJson ? JSON.parse(resultJson) : null; } catch (e) { return false; }
+  if (!r || typeof r.checked !== "number") return false;
+  const cached = r.cached || 0;
+  const fetched = typeof r.fetched === "number" ? r.fetched : r.checked - cached;
+  if (fetched) {
+    ElMessage.success("校验完成：新校验 " + fetched + " 条"
+                      + (cached ? "，复用缓存 " + cached + " 条" : ""));
+  } else if (cached) {
+    ElMessage.success("校验完成：全部 " + cached + " 条命中缓存，未发起请求");
+  } else {
+    ElMessage.success("校验完成");
+  }
+  // 写库失败要单独报：结果没落库时列表状态不会变，而列表上完全看不出来
+  if (r.save_failures) {
+    ElMessage.error(r.save_failures + " 条结果没能写入管理库，列表状态不会更新");
+  }
+  return true;
+}
+
+async function checkSources(urls = [], { refresh = false } = {}) {
   if (checking.value) return ElMessage.warning("已有校验任务在运行");
   checking.value = true;
   try {
     const r = await api.post("/jobs", {
       kind: "check",
-      payload: { urls, probe_depth: 1 },
+      // refresh_cache：忽略有效期内的缓存，全部重新请求
+      payload: { urls, probe_depth: 1, refresh_cache: refresh },
     });
     ElMessage.success("已提交校验任务 " + r.job_id);
     if (stopCheck) stopCheck();
@@ -176,7 +200,7 @@ async function checkSources(urls = []) {
         checking.value = false;
         stopCheck = null;
         if (data.status === "done") {
-          ElMessage.success("校验完成");
+          if (!reportCheckResult(data.result_json)) ElMessage.success("校验完成");
           await load();
           try { tags.value = await listTags(); } catch (e) { /* 忽略 */ }
         } else {
@@ -194,13 +218,17 @@ async function checkSources(urls = []) {
   }
 }
 
-async function checkAll() {
+async function checkAll(refresh = false) {
   try {
+    // 确认文案里写清楚这次会不会用缓存——不然用户点完只看到「完成」，
+    // 不知道是刚查了一遍还是全走了缓存
     await ElMessageBox.confirm(
-      "将校验全部未删除书源，可能耗时数分钟，确认继续？",
-      "全量校验", { type: "warning" });
+      refresh
+        ? "忽略缓存，对全部未删除书源重新发起校验。可能耗时数分钟，确认继续？"
+        : "校验全部未删除书源；有效期内的缓存会直接复用、不重新请求。确认继续？",
+      refresh ? "全量重校" : "全量校验", { type: "warning" });
   } catch (e) { return; }
-  checkSources([]);
+  checkSources([], { refresh });
 }
 
 async function onTagsChanged() {
@@ -286,7 +314,17 @@ onUnmounted(() => {
       <el-button size="small" @click="reset">重置</el-button>
       <span class="grow" />
       <el-button size="small" :icon="Plus" @click="openNew">新建源</el-button>
-      <el-button size="small" :icon="Refresh" :loading="checking" @click="checkAll">全量校验</el-button>
+      <!-- 分割按钮：主按钮按默认走（复用有效期内的缓存），下拉里给「忽略缓存」。
+           只有全量校验给这个选项——缓存值不值得复用，就这一个动作上值得计较 -->
+      <el-dropdown split-button size="small" :disabled="checking"
+                   @click="checkAll(false)" @command="(cmd) => checkAll(cmd === 'refresh')">
+        <el-icon style="margin-right: 4px; vertical-align: -2px"><Refresh /></el-icon>全量校验
+        <template #dropdown>
+          <el-dropdown-menu>
+            <el-dropdown-item command="refresh">忽略缓存，全部重校</el-dropdown-item>
+          </el-dropdown-menu>
+        </template>
+      </el-dropdown>
       <el-button size="small" :icon="Upload" @click="exportVisible = true">导出/订阅</el-button>
       <el-button size="small" :icon="Download" @click="importVisible = true">导入</el-button>
       <el-button size="small" :icon="Delete" @click="trashVisible = true">回收站</el-button>
