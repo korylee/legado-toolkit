@@ -2,6 +2,7 @@
 # 耗时操作的任务入口：把 CLI 的能力暴露成 job。
 from typing import Any, Dict
 
+from core import settings_store
 from core.store import Store
 
 from backend.jobs import runner
@@ -12,7 +13,11 @@ async def run_check_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict
     # 校验一批源。payload:
     #   urls: [书源URL]  为空则全量
     #   limit: 限制条数
-    #   concurrency / probe_depth / timeout 等透传给 AsyncChecker
+    #   refresh_cache: 忽略有效期内的缓存。它是**每次动作**而非默认值，所以不进
+    #                  设置，由前端直接传
+    #   check: {concurrency/timeout/probe_depth/probe_search/verify_ssl/proxy}
+    #          本次临时覆盖，只作用于这一个 job，**不写回全局设置**
+    #          （单独一层是为了不和 urls/limit/refresh_cache/total 挤在一个命名空间）
     from core.checker import AsyncChecker
     from core.models import build_record
 
@@ -27,13 +32,22 @@ async def run_check_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict
     st.update_job(job_id, total=len(srcs))
 
     records = [build_record(s, i) for i, s in enumerate(srcs)]
+    # 取值顺序：本次覆盖 > 全局设置 > 内置默认。三级都在 resolve_check 里完成，
+    # 这里**不要**再出现 payload.get("concurrency", 20) 这类写法——默认值散落在
+    # 调用点是漂移的源头（ops.py 曾写 20、CLI 写 50、AsyncChecker 写 50）
+    cfg = settings_store.resolve_check(payload.get("check"))
     checker = AsyncChecker(
-        concurrency=int(payload.get("concurrency", 20) or 20),
-        timeout=float(payload.get("timeout", 8.0) or 8.0),
-        probe_search=bool(payload.get("probe_search", True)),
+        concurrency=cfg["concurrency"],
+        timeout=cfg["timeout"],
+        probe_search=cfg["probe_search"],
+        # 以前根本没读 payload 的 verify_ssl，前端给了也不生效
+        verify_ssl=cfg["verify_ssl"],
+        probe_depth=cfg["probe_depth"],
+        # keyword 不在全局设置里（那是「测哪个书名」，不是随环境变的参数），保持原样
         keyword=str(payload.get("keyword") or "我"),
-        proxy=payload.get("proxy") or None,
-        probe_depth=int(payload.get("probe_depth", 1) or 1),
+        # 设置里空串 = 直连；AsyncChecker 认的是 None，"" 会被原样递给 aiohttp。
+        # 转换只在这一处，别在存储层也存成 None（那样「空串=直连」就没法显式表达了）
+        proxy=cfg["proxy"] or None,
         use_store=True,
     )
     checker.refresh_cache = bool(payload.get("refresh_cache"))
@@ -51,6 +65,9 @@ async def run_check_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict
     } for r in results]
     return {
         "checked": len(items),
+        # 本次实际用的参数。和下面三项同一动机：把看不见的事实报出来——
+        # 否则「为什么这次慢得多」「设置改了到底生效没有」在界面上无从回答
+        "params": cfg,
         # 缓存命中多少、真发了多少：不分出来的话，「点校验 → 一条请求都没发」
         # 和「真跑了一遍」在界面上长得一模一样
         "cached": checker.cached_count,

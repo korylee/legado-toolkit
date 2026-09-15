@@ -216,7 +216,11 @@ python main.py report -i out/organized.json -r check_cache -o out/final_report.m
 1. **新增源先进 `auto_added.json` 或外部批次**，通过 `import-sources` 进入待校验；不要再用 `merge --mode replace` 直接覆盖候选库。
 2. **规则冲突必须审阅**：确认外部规则更可靠后才执行 `--approve`，批准后该源会在下次校验时因指纹变化强制复检。
 3. **缓存会自动过期**：可用源 14 天后复检；待验证、需代理复检及其他状态 7 天后复检；旧版本缓存也会自动复检。
-4. **被墙源**（🌐）可加 `--proxy` 复检：`python main.py check -i x.json --proxy socks5://127.0.0.1:1080`
+4. **被墙源**（🌐）可加 `--proxy` 复检：`python main.py check -i x.json --proxy http://127.0.0.1:7890`
+   （原先这里写的 `socks5://` 是失实示例——urllib 与 aiohttp 都不认，会直接连接失败。
+   代理只支持 `http://` / `https://`。）
+   Web 端不必敲命令：**设置 → 校验 → 代理** 里配一次，或在校验前用工具栏的
+   「校验参数」只对本次生效。注意 CLI 与 Web 的参数**各自独立**，不共享。
 5. 候选主库与 `imports/raw/` 建议一同备份；台账 `book_sources.sqlite3` 保存了来源与审批历史。
 
 ---

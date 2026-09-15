@@ -1,5 +1,8 @@
 <script setup>
-import { ref, computed, watch } from "vue";
+// 「设置」抽屉的「模型」页签。原 LLMSettingsDrawer.vue 的内容原样搬过来，
+// 只去掉外层 el-drawer 与 modelValue 桥接——挂载时机交给 SettingsDrawer 的
+// 页签 lazy 控制，不再需要 watch(modelValue)。
+import { ref, onMounted } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import {
   activateLLMProfile,
@@ -11,14 +14,6 @@ import {
   testLLMProfile,
   updateLLMProfile,
 } from "../api/llm";
-
-const props = defineProps({ modelValue: { type: Boolean, default: false } });
-const emit = defineEmits(["update:modelValue", "changed"]);
-
-const visible = computed({
-  get: () => props.modelValue,
-  set: (v) => emit("update:modelValue", v),
-});
 
 const profiles = ref([]);
 const presets = ref([]);
@@ -56,7 +51,7 @@ async function load() {
   }
 }
 
-watch(() => props.modelValue, (v) => { if (v) load(); });
+onMounted(load);
 
 function openNew() {
   editingId.value = "";
@@ -95,7 +90,6 @@ async function save() {
     ElMessage.success("已保存");
     editVisible.value = false;
     await load();
-    emit("changed");
   } catch (e) {
     ElMessage.error("保存失败: " + e.message);
   } finally {
@@ -108,7 +102,6 @@ async function activate(row) {
     await activateLLMProfile(row.id);
     ElMessage.success("已设为默认: " + row.name);
     await load();
-    emit("changed");
   } catch (e) {
     ElMessage.error(e.message);
   }
@@ -136,13 +129,12 @@ async function remove(row) {
     await deleteLLMProfile(row.id);
     ElMessage.success("已删除");
     await load();
-    emit("changed");
   } catch (e) { /* 取消 */ }
 }
 </script>
 
 <template>
-  <el-drawer v-model="visible" title="模型设置" direction="rtl" size="640px" destroy-on-close>
+  <div>
     <div class="toolbar">
       <el-button size="small" :loading="loading" @click="load">刷新</el-button>
       <el-button size="small" type="primary" @click="openNew">新增配置</el-button>
@@ -191,6 +183,8 @@ async function remove(row) {
 
     <el-empty v-if="!loading && !profiles.length" description="还没有模型配置" :image-size="70" />
 
+    <!-- append-to-body 必须保留：这个弹窗嵌在 el-drawer > el-tabs 里，
+         靠它脱离抽屉的层级与 overflow 上下文 -->
     <el-dialog v-model="editVisible" :title="editingId ? '编辑模型配置' : '新增模型配置'"
                width="520px" append-to-body>
       <el-form label-width="96px" size="small">
@@ -228,10 +222,5 @@ async function remove(row) {
         <el-button type="primary" :loading="saving" @click="save">保存</el-button>
       </template>
     </el-dialog>
-  </el-drawer>
+  </div>
 </template>
-
-<style scoped>
-.toolbar { display: flex; align-items: center; gap: 8px; }
-.grow { flex: 1 1 auto; }
-</style>

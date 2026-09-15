@@ -290,7 +290,24 @@ python cli/main.py merge -i a.json -i b.json -o merged.json --mode replace
 | POST /api/rules/app-push | 把源推送到 App（幂等，会改动 App 数据，需显式触发） |
 | POST /api/rules/replay-step | 用已抓到的 HTML 重放一步规则（不联网） |
 | GET /api/llm/profiles | LLM 模型配置 |
+| GET /api/settings | 全局设置（校验参数的默认值），同时下发 defaults 与 limits |
+| PATCH /api/settings | 修改全局设置（只改传了的键，未传的保持原值） |
+| POST /api/settings/reset | 恢复默认设置 |
 | GET /docs | Swagger API 文档 |
+
+### 校验参数的取值优先级
+
+并发数、超时、探测深度、搜索探测、校验 SSL、代理这 6 项，按三层取值：
+
+    本次覆盖（书源页工具栏「校验参数」按钮） > 全局设置（设置 → 校验） > 内置默认
+
+- **本次覆盖只作用于提交的那一次校验，不写回全局设置**。与全局相同的项不会进覆盖。
+- 覆盖对**所有**校验入口生效（全量 / 校验选中 / 按行校验），生效时按钮上有计数徽标。
+- 「忽略缓存，全部重校」不是设置项——它是每次动作，仍在全量校验的下拉里。
+- 代理**只支持 `http://` 与 `https://`**：填了就是所有校验请求都走它（直连能通的源也会绕一圈）。
+  `socks5` 需要额外依赖 `aiohttp_socks`，本项目未安装，接口会直接返回 400 而不是静默降级。
+- CLI 的 `check` 命令**不读**全局设置，仍用自己的命令行参数（`--concurrency` 等），
+  两边默认值各自独立、没有同步关系。
 
 ---
 
@@ -306,6 +323,7 @@ python cli/main.py merge -i a.json -i b.json -o merged.json --mode replace
 | data/backups/ | 软删除快照 / 手动备份 |
 | data/imports/raw/ | 外部源原始文件 |
 | data/config/llm_profiles.json | LLM 模型配置（含 API Key，勿提交） |
+| data/config/settings.json | 全局设置：校验参数默认值（并发/超时/探测深度/代理等） |
 | data/candidates*.json | 候选源/导出产物 |
 
 注意：candidates.json 通常是唯一候选主库，请单独备份。
@@ -328,6 +346,7 @@ $env:LEGADO_DATA_DIR = "D:\legado-data"
 | LEGADO_RELOAD | 空 | 1/true/yes/on 开启热重载（`--reload` / `--no-reload` 优先）|
 | LEGADO_DATA_DIR | data/ | 运行时数据目录 |
 | LEGADO_LLM_CONFIG | data/config/llm_profiles.json | LLM 配置路径 |
+| LEGADO_SETTINGS | data/config/settings.json | 全局设置路径（测试靠它隔离） |
 | LEGADO_LLM_API_KEY | 空 | LLM API Key（未配置 profile 时使用） |
 | LEGADO_LLM_BASE_URL | https://api.openai.com/v1 | LLM Base URL |
 | LEGADO_LLM_MODEL | gpt-4o-mini | LLM 模型名 |

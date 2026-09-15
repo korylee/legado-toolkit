@@ -10,7 +10,8 @@ import socket
 
 from fastapi import FastAPI
 
-from backend.api import export, feed, imports, jobs, llm, ops, rules, sources
+from backend.api import (export, feed, imports, jobs, llm, ops, rules,
+                         settings, sources)
 from core.store import Store
 
 app = FastAPI(title="Legado 书源管理", version="0.1.0",
@@ -23,6 +24,7 @@ app.include_router(feed.router, prefix="/api/feed", tags=["feed"])
 app.include_router(imports.router, prefix="/api/import", tags=["import"])
 app.include_router(rules.router, prefix="/api/rules", tags=["rules"])
 app.include_router(llm.router, prefix="/api/llm", tags=["llm"])
+app.include_router(settings.router, prefix="/api/settings", tags=["settings"])
 
 # 导入即注册 ops 里的 job handler
 _ = ops

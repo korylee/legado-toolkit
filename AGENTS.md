@@ -31,6 +31,12 @@
    两边各存一份必然漂移——历史上书源类型就曾把 3 当成视频、还编出过
    Legado 不存在的 4。调 `splitSystemUser()` **之前必须先 `await ensureTagMeta()`**：
    拆分结果是存下来的快照，枚举没到位就拆会把系统标签存成用户标签且不再纠正。
+8. **校验参数的默认值与取值范围只在 `core/settings_store.py` 定义**
+   （`DEFAULTS` / `LIMITS` / `PROBE_DEPTHS`）。前端经 `GET /api/settings` 拿值、
+   拿 `limits` 渲染上下界，不得再硬编码一份。历史上并发数曾在 `ops.py`(20)、
+   CLI(50)、`AsyncChecker`(50) 三处各写一遍，结果是界面上改不动、也没人知道该信哪个——
+   这种漂移靠「对齐数字」修不掉，只能靠**把数字从调用点删掉**。
+   `cli/main.py` 的 argparse 默认值是**独立的另一条链路**，不要试图统一。
 
 ## 上游 App 源码（查证用）
 

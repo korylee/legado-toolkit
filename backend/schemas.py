@@ -141,6 +141,29 @@ class LLMProfilePatch(BaseModel):
     sort_order: Optional[int] = None
 
 
+class CheckSettingsPatch(BaseModel):
+    """校验参数（core.settings_store.DEFAULTS["check"]）的局部更新。
+
+    全部 Optional 且默认 None：只提交显式给出的键，其余保持原值。
+    字段名必须与 settings_store 的键一致——**这里不做任何校验或收敛**，
+    区间 clamp／类型／非法回落一律由 ``settings_store.coerce`` 负责。
+    在本模型上再写一份 rules 就是同一口径的第二个出处，必然漂移。
+    """
+
+    concurrency: Optional[int] = None
+    timeout: Optional[float] = None
+    probe_depth: Optional[int] = None
+    probe_search: Optional[bool] = None
+    verify_ssl: Optional[bool] = None
+    proxy: Optional[str] = None
+
+
+class SettingsPatch(BaseModel):
+    """按 section 分组，与 settings_store 的文件结构一一对应（不做映射层）。"""
+
+    check: Optional[CheckSettingsPatch] = None
+
+
 class JobCreate(BaseModel):
     kind: str = Field(description="check / diagnose / repair")
     payload: Dict[str, Any] = Field(default_factory=dict)

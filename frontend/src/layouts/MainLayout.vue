@@ -2,7 +2,7 @@
 import { ref, onMounted } from "vue";
 import { Setting } from "@element-plus/icons-vue";
 import { api } from "../api/client";
-import LLMSettingsDrawer from "../components/LLMSettingsDrawer.vue";
+import SettingsDrawer from "../components/SettingsDrawer.vue";
 
 // 「任务」「诊断」两个页面已并入书源页，导航只剩一项、侧栏与底部 Tab 都撤掉了。
 // header 保留设置入口和后端连通性提示；源数/校验数改由书源页的统计条自己拉，
@@ -37,6 +37,6 @@ onMounted(checkBackend);
       </main>
     </div>
 
-    <LLMSettingsDrawer v-model="settingsVisible" />
+    <SettingsDrawer v-model="settingsVisible" />
   </div>
 </template>
