@@ -3,19 +3,97 @@
 
 from core.constants import *
 
-def fetch(url: str, timeout: int = 15) -> str:
-    """抓取页面 HTML。"""
-    req = urllib.request.Request(url, headers={
-        "User-Agent": DEFAULT_UA,
-        "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
-        "Accept-Language": "zh-CN,zh;q=0.9",
-    })
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+def parse_source_header(raw: str) -> tuple:
+    """解析 Legado 书源的 ``header`` 字段，返回 ``(请求头, 不可用原因)``。
+
+    Legado 支持两种写法：
+      - JSON：``{"User-Agent":"...","Referer":"..."}``
+      - 换行分隔：``User-Agent: xxx\\nReferer: yyy``
+
+    含 JS（``<js`` / ``@js:``）时返回空头 + 原因。Legado 在 App 里有 Rhino 引擎
+    可以执行（BaseSource.kt:102-124），我们离线做不到，所以只能标注为附注，
+    **不因此判源失败**。
+
+    本函数对脏值必须绝对宽容：``header`` 字段来自外部 JSON，任何输入都不得抛异常
+    （该字段会被整批书源共用，抛异常会中断整批任务）。
+    """
+    # 脏值防御：``header`` 来自外部 JSON，可能是 None / 数字 / 列表 / 对象等非字符串。
+    # 统一在此拦下，绝不让 .strip() 抛出 AttributeError / TypeError
+    # （该字段被整批书源共用，抛异常会中断整批任务）。
+    if raw is None:
+        return {}, ""
+    if not isinstance(raw, str):
+        return {}, "header 不是字符串，已忽略"
+
+    text = raw.strip()
+    if not text:
+        return {}, ""
+    if "<js" in text or "@js:" in text:
+        return {}, "header 含 JS 规则，需要 Legado 引擎，离线无法应用"
+
+    # JSON 写法
+    if text.startswith("{"):
+        try:
+            obj = json.loads(text)
+            if isinstance(obj, dict):
+                return {str(k): str(v) for k, v in obj.items() if v is not None}, ""
+            return {}, "header 的 JSON 不是对象"
+        except Exception:
+            return {}, "header 的 JSON 解析失败"
+
+    # 换行分隔写法
+    headers = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or ":" not in line:
+            continue
+        key, _sep, value = line.partition(":")
+        key, value = key.strip(), value.strip()
+        if key and value:
+            headers[key] = value
+    return headers, ""
+
+
+def fetch(url: str, timeout: int = 15,
+          headers: dict = None, charset: str = "", proxy: str = "") -> str:
+    """抓取页面 HTML。
+
+    与 Legado 的 ``AnalyzeUrl`` 对齐的部分：
+      - ``headers``：书源自身的 header；缺 User-Agent 时补默认 UA
+        （对齐 BaseSource.kt 缺 UA 补 UA 的行为）
+      - ``charset``：优先用它解码，失败按常见编码回退
+      - ``proxy``：形如 ``http://host:port`` / ``socks5://host:port``；
+        留空走直连
+    """
+    h = {"User-Agent": DEFAULT_UA,
+         "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
+         "Accept-Language": "zh-CN,zh;q=0.9"}
+    # 书源 header 覆盖默认值；值为空的键不参与覆盖，避免把默认 UA 抹成空串
+    if headers:
+        h.update({str(k): str(v) for k, v in headers.items() if v})
+
+    req = urllib.request.Request(url, headers=h)
+
+    # 代理：checker 一直支持 proxy，verify 之前不支持——这会让需要代理的源
+    # 在试跑里表现为「连接失败」，被用户误判成源坏了
+    opener = None
+    if proxy:
+        handler = urllib.request.ProxyHandler({"http": proxy, "https": proxy})
+        opener = urllib.request.build_opener(handler)
+
+    open_fn = opener.open if opener is not None else urllib.request.urlopen
+    with open_fn(req, timeout=timeout) as resp:
         raw = resp.read()
-    for enc in ("utf-8", "gbk", "gb2312", "big5"):
+
+    # charset 优先，其次按常见编码回退
+    order = []
+    if charset:
+        order.append(charset.strip().lower())
+    order += ["utf-8", "gbk", "gb2312", "big5"]
+    for enc in order:
         try:
             return raw.decode(enc)
-        except UnicodeDecodeError:
+        except (UnicodeDecodeError, LookupError):
             continue
     return raw.decode("utf-8", errors="replace")
 def extract_keyword(url: str) -> str:
