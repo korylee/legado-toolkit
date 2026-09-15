@@ -522,13 +522,21 @@ def safe_int(value: Any, default: int = 0) -> int:
     """宽松取整。脏值（"" / [] / "abc" / None）一律降级为默认值。
 
     书源的 bookSourceType 是从外部 JSON 来的，历史上就出现过 ''/[]/字符串数字
-    这类脏值（见 core/sanitize.py 的说明）。本模块是全部源的共用闸门：
-    抛异常会中断整批校验，而降级为 0 最坏只是判定口径偏保守——按「不误杀」的
-    立场，后者才对。
+    这类脏值。core/sanitize.py 的 int 字段清单只覆盖 concurrentRate /
+    customOrder / respondTime / weight / lastUpdateTime，**不含 bookSourceType**，
+    所以本函数是该字段的唯一防线。本模块是全部源的共用闸门：抛异常会中断整批
+    校验，而降级为 0 最坏只是判定口径偏保守——按「不误杀」的立场，后者才对。
+
+    OverflowError 也要接住：json.loads('{"bookSourceType": 1e400}') 会解析出
+    inf，int(inf) 抛的正是 OverflowError，不接就会穿透这道闸门。
+
+    > 调用方注意：**不要用裸 `int()` 去读 bookSourceType**。`verify.py` 里
+    > 曾这么写过，后果是 rules.py 变 HTTP 400、ops.py 的任务整体失败——
+    > 而不是按 unknown 判定。
     """
     try:
         return int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return default
 
 

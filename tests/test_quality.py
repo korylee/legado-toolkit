@@ -257,7 +257,7 @@ class DirtySourceTypeTests(unittest.TestCase):
     def test_static_misconfig_survives_dirty_type(self):
         # 必须用 "abc" 这类 int() 真会抛的脏值："" / [] / None / {} 经
         # `v or 0` 短路后都变成 0，裸 int() 也不抛，退化成假覆盖
-        # （把 _safe_int 换回裸 int 后这些用例照样全绿）
+        # （把 safe_int 换回裸 int 后这些用例照样全绿）
         self.assertEqual(Q.static_misconfig_notes({"bookSourceType": "abc"}), [])
 
 
