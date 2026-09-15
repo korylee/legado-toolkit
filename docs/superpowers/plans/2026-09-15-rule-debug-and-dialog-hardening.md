@@ -3124,10 +3124,18 @@ function isDirty() {
              :close-on-click-modal="false" :before-close="handleBeforeClose">
 ```
 
+> **这两个属性的组合是有意为之，不是漏了：**
+> `:close-on-click-modal="false"` 让**遮罩点击彻底不触发关闭**——不关闭，也不弹确认。
+> 实际走确认的是 X / ESC / 页脚「取消」三条路径（Element Plus 2.14.5 的
+> `handleClose()` 是它们的共同汇点，已核源码）。
+>
+> 之所以选「无动作」而不是「遮罩也弹确认」：用户抱怨的是**误点**空白处就全丢。
+> 误点后毫无反应，比让用户为一次误点做一次决策更贴合诉求，也更不容易再点错。
+
 ```javascript
 import { ElMessage, ElMessageBox } from "element-plus";
 
-// 点遮罩/取消/ESC 都走这里。改了几十条规则误点空白处就全丢，
+// X / ESC / 页脚取消都走这里。改了几十条规则误点一下就全丢，
 // 这个代价太大，必须拦一道
 function handleBeforeClose(done) {
   if (!isDirty()) return done();
@@ -3199,8 +3207,19 @@ async function doSave(s) {
 
 **只有两个状态**，不做字符串 diff：
 
-- `rawDirty`：用户在文本域里手改过（`@input` 置真，`applyRawJson` 成功后清零）
+- `rawDirty`：用户在文本域里手改过（`@input` 置真）
 - 表单变更时若 `rawDirty` 为假 → 自动重新生成快照
+
+> ⚠️ **`rawDirty` 必须在 `syncRawFromForm()` 里也复位一次**（原先只写在 `applyRawJson` 里，是漏的）：
+>
+> `SourceEditDialog` 在 `SourcesView.vue:431` 是**常驻挂载**的（只切 `v-model`），
+> **从不卸载**，所以模块级的 `let rawDirty` 会**跨「关闭 → 再打开」残留**。
+> 不复位的话：用户手改过一次 JSON 之后，即使「丢弃修改」关闭，下次打开时
+> ① 黄色提示条无故出现 ② **`watch(form)` 会一直拒绝刷新快照 → P0-③ 的修复从第二次会话起直接失效**。
+>
+> `syncRawFromForm()` 的语义就是「文本域 := 表单」，它的三个调用点（打开-新建、
+> 打开-编辑、`applyGenerated`）恰好都是文本域被整份重写的时刻，所以在那儿复位
+> 语义闭合、无副作用，也顺带让「从表单生成」按钮能正确清掉提示条。
 
 `applyRawJson()` 末尾加 `rawDirty = false;`：
 
