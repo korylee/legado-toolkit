@@ -32,8 +32,12 @@ from core.models import (
 )
 from core.urls import abs_url as _abs_url
 from core.rules.replayer import (extract_all as apply_css_rule, extract_all_ex,
-                          rule_kind, parse_list, parse_field, rule_supported)
+                          extract_all_nodes, rule_kind, parse_list, parse_field,
+                          rule_supported)
 from core.loader import fingerprint
+# 判定口径的唯一来源（与「全链路试跑」共用，避免同源两判）。
+# 依赖方向：checker → quality，quality 不依赖 replayer，这是刻意的。
+from core import quality as Q
 
 # 常见 User-Agent（规避简单 UA 拦截）
 DEFAULT_UA = (
@@ -44,8 +48,10 @@ DEFAULT_UA = (
 # 常见爬虫/安全拦截状态码
 BLOCKED_STATUS = {403, 429, 401, 503, 406}
 
-# 缓存版本 5：加入规则指纹和状态有效期，规则变化或结果过期均需重新校验。
-CACHE_VERSION = 5
+# 缓存版本 6：正文/目录判定收拢到 core.quality（底线改为「非空即通过」，
+# 删除了从未生效的 ruleContent.image 兜底）。判定口径变了，旧缓存的
+# toc_complete / content_ok 是旧逻辑的产物，必须整体作废。
+CACHE_VERSION = 6
 CACHE_TTL_DAYS = {
     Health.OK: 14,
     Health.AUTH: 7,
@@ -678,11 +684,12 @@ class AsyncChecker:
         解析 ruleToc.chapterList 数章节 → 与参考表比对（小说 ≥80% / 漫画 ≥60%）。
         返回详情页响应体（bytes，供深度3 复用解析章节 URL），失败返回 None。
 
-        三分类失败归因（保守策略：无法验证不给分、不误判）：
+        三分类失败归因（判定口径已收拢到 core.quality，与「全链路试跑」一致）：
           - 规则缺失 / 含 JS 规则 → toc_complete=None（无法验证，不给分）
           - 详情页请求失败（网络/超时/4xx/5xx） → toc_complete=None（网络失败不判不完整）
-          - 解析为空（CSS 规则跑不出东西） → toc_complete=None（规则解析失败，无法验证）
-        仅当真的解析出章节数并与参考表比对后，才给出 True/False 判定。
+          - 解析为空（规则跑不出东西） → toc_complete=False（源的规则确实失效了，
+            配置错误与我们的能力边界在这里已经分开）
+        解析出章节数后再与参考表比对（小说 ≥80% / 漫画 ≥60%），比不过才判 False。
         """
         record.probe_depth = 2
         raw = record.raw or {}
@@ -714,12 +721,22 @@ class AsyncChecker:
                 record.toc_fail_reason = f"详情页请求失败(status={d_status})"
                 return None
             d_html = _decode_body(d_body)
-            chapters = apply_css_rule(d_html, _strip_rule_prefix(chapter_list_rule))
+            # 基础判定交 core.quality（非空即通过）；比例比对留在下面由 checker 叠加，
+            # 因为那依赖 TEST_TITLES 参考数据，是 checker 独有的信息
+            chapters, hits, rule_error = extract_all_nodes(
+                d_html, _strip_rule_prefix(chapter_list_rule),
+                Q.MATCHED_NODES_LIMIT, Q.MAX_MATCHED_HTML_CHARS)
             chapters = [str(c).strip() for c in chapters if str(c or "").strip()]
             record.chapter_count = len(chapters)
-            if not chapters:
-                record.toc_complete = None
-                record.toc_fail_reason = "chapterList 解析为空（规则跑不了或目录分页加载）"
+            # rule= 是必须的：空规则是**源的配置错误**（fail），不是我们的能力边界
+            # （unknown）。不传的话这层信息就丢了，正是刚修掉的那个回归。
+            toc_verdict = Q.judge_list_step("toc", chapters, "".join(hits), rule_error,
+                                            Q.safe_int(record.source_type),
+                                            rule=chapter_list_rule)
+            if toc_verdict.verdict != Q.VERDICT_PASS:
+                record.toc_complete = toc_verdict.checker_state   # False 或 None
+                record.toc_fail_reason = (toc_verdict.reason
+                                          or "；".join(toc_verdict.notes))
                 return None
             ref = self.test_titles.get(record.search_hit)
             if not ref:
@@ -749,8 +766,8 @@ class AsyncChecker:
         """深度 3：抽样一章验证正文可用性（速度 + 内容）。
 
         解析 ruleToc.chapterUrl 取章节 URL 列表 → 取**中位章节**（防首章特判/防盗链） →
-        请求正文并计时 → ruleContent.content 提取文本（>100 字符）判定；
-        文本不达标或 content 规则缺失时，回退 ruleContent.image（图片 URL >= 3 张）。
+        请求正文并计时 → ruleContent.content 提取后交 core.quality 判定
+        （底线是「非空 / 不报错」，与「全链路试跑」同口径）。
         """
         record.probe_depth = 3
         raw = record.raw or {}
@@ -758,7 +775,6 @@ class AsyncChecker:
         content = raw.get("ruleContent") or {}
         chapter_url_rule = str(toc.get("chapterUrl", "") or "").strip()
         content_rule = str(content.get("content", "") or "").strip()
-        image_rule = str(content.get("image", "") or "").strip()
         if not chapter_url_rule:
             record.content_ok = None
             record.content_fail_reason = "chapterUrl 规则缺失"
@@ -784,22 +800,25 @@ class AsyncChecker:
                 record.content_ok = None
                 record.content_fail_reason = f"正文请求失败(status={c_status})"
                 return
-            ok = False
-            if content_rule and "<js" not in content_rule:
-                c_html = _decode_body(c_body)
-                parts = apply_css_rule(c_html, _strip_rule_prefix(content_rule))
-                text = "".join(str(p or "") for p in parts).strip()
-                ok = len(text) > 100  # 正文长度阈值：防空壳页/验证码页/错误页
-            if not ok and image_rule and "<js" not in image_rule:
-                c_html = _decode_body(c_body)
-                imgs = apply_css_rule(c_html, _strip_rule_prefix(image_rule))
-                imgs = [str(u).strip() for u in imgs if str(u or "").strip()]
-                ok = len(imgs) >= 3  # 图片正文判定：漫画图源至少 3 张图
-            record.content_ok = ok
-            if not ok:
-                record.content_fail_reason = (
-                    "正文提取为空或长度不足（疑似反爬/需登录/图片源）" if content_rule else "无正文规则且图片不足"
-                )
+            # 判定收拢到 core.quality：与「全链路试跑」共用同一套口径，
+            # 避免同一个源在两个入口得到相反结论（详见设计文档 1.2）
+            c_html = _decode_body(c_body)
+            if content_rule:
+                # 截断上限必须显式传：extract_all_nodes 故意没有默认值，
+                # 好让「证据预算」只在 core.quality 里定义一处
+                parts, hits, rule_error = extract_all_nodes(
+                    c_html, _strip_rule_prefix(content_rule),
+                    Q.MATCHED_NODES_LIMIT, Q.MAX_MATCHED_HTML_CHARS)
+                verdict = Q.judge_content(Q.safe_int(record.source_type), parts,
+                                          content_rule, "".join(hits), rule_error)
+            else:
+                # 空规则：quality 会按类型分派（文本源 fail / 音图源 pass）
+                verdict = Q.judge_content(Q.safe_int(record.source_type), [], "")
+            record.content_ok = verdict.checker_state      # True / False / None
+            record.content_fail_reason = (
+                "" if verdict.verdict == Q.VERDICT_PASS
+                else (verdict.reason or "；".join(verdict.notes))
+            )
         except Exception as e:
             record.content_ok = None
             record.content_fail_reason = f"验证异常：{type(e).__name__}"

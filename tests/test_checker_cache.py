@@ -12,6 +12,7 @@ from argparse import Namespace
 # 本测试只覆盖纯缓存策略，不依赖网络客户端；隔离未安装的可选运行时依赖。
 sys.modules.setdefault("aiohttp", types.ModuleType("aiohttp"))
 
+from core import checker
 from core.checker import classify_transport_error, is_cache_item_valid, should_cache_result
 from core.loader import fingerprint
 from core.models import Health, build_record
@@ -31,8 +32,10 @@ def make_source(search_url: str = "https://example.com/search?q={{key}}") -> dic
 
 
 def make_cache_item(source: dict, health: str, checked_at: str) -> dict:
+    # 版本号取当前值，而不是写死 5：写死会让版本一升，本文件的用例就集体走
+    # 「版本不符」这条捷径——指纹比对和有效期这两条真实断言会被恒定短路。
     return {
-        "v": 5,
+        "v": checker.CACHE_VERSION,
         "url": source["bookSourceUrl"],
         "fingerprint": fingerprint(source),
         "health": health,
