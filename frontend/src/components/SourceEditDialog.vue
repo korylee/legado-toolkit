@@ -1,7 +1,7 @@
 <script setup>
 // 新建 / 编辑书源：对话框形态。跳独立页面会丢掉列表的筛选和分页状态。
 import { ref, computed, watch, nextTick } from "vue";
-import { ElMessage } from "element-plus";
+import { ElMessage, ElMessageBox } from "element-plus";
 import { api, subscribeJob } from "../api/client";
 import { getDetail, listTags, saveSource, sourceExists } from "../api/sources";
 import { mergeGroup, splitSystemUser } from "../utils/tags";
@@ -52,6 +52,8 @@ const activeRuleTab = ref("search");
 const extActive = ref(["request"]);
 const rawJsonText = ref("");
 const rawJsonError = ref("");
+const savedSnapshot = ref("");     // 打开弹窗 / 保存成功时的表单快照，用于脏检查
+let rawDirty = false;              // 用户是否手改过「原始 JSON」文本域
 
 function blank() {
   return {
@@ -101,6 +103,27 @@ function filled(name) {
 function syncRawFromForm() {
   rawJsonText.value = JSON.stringify(form.value, null, 2);
   rawJsonError.value = "";
+  // 文本域已被整份重写成表单内容，不再算「手改过」。
+  // 不复位的话这份状态会跨「关闭→再打开」残留：下次打开时黄色提示条会无故出现，
+  // 且 watch(form) 会一直拒绝刷新快照，P0-③ 的修复在第二次会话里直接失效
+  rawDirty = false;
+}
+
+// 表单是否有未保存改动
+function isDirty() {
+  if (!savedSnapshot.value) return false;
+  return JSON.stringify(form.value) !== savedSnapshot.value;
+}
+
+// 点遮罩/取消/ESC 都走这里。改了几十条规则误点空白处就全丢，
+// 这个代价太大，必须拦一道
+function handleBeforeClose(done) {
+  if (!isDirty()) return done();
+  ElMessageBox.confirm("有未保存的修改，确定要关闭吗？", "未保存", {
+    confirmButtonText: "丢弃修改",
+    cancelButtonText: "继续编辑",
+    type: "warning",
+  }).then(() => done()).catch(() => {});
 }
 
 function applyRawJson() {
@@ -109,13 +132,24 @@ function applyRawJson() {
     if (!obj || typeof obj !== "object" || Array.isArray(obj)) {
       throw new Error("必须是 JSON 对象");
     }
-    form.value = { ...blank(), ...obj };
-    const parsed = splitSystemUser(form.value.bookSourceGroup || "");
-    systemTags.value = parsed.system;
-    manualStatus.value = "";
-    userTags.value = parsed.user;
-    rawJsonError.value = "";
-    ElMessage.success("已应用到表单");
+    const apply = () => {
+      form.value = { ...blank(), ...obj };
+      const parsed = splitSystemUser(form.value.bookSourceGroup || "");
+      systemTags.value = parsed.system;
+      manualStatus.value = "";
+      userTags.value = parsed.user;
+      rawJsonError.value = "";
+      rawDirty = false;               // 已应用到表单，文本域与表单一致了
+      ElMessage.success("已应用到表单");
+    };
+    // 手改过就确认一次：这一步会整份替换表单，不可撤销
+    if (rawDirty) {
+      ElMessageBox.confirm("将用这段 JSON 整份替换当前表单，确定吗？", "应用到表单", {
+        type: "warning", confirmButtonText: "替换", cancelButtonText: "取消",
+      }).then(apply).catch(() => {});
+      return;
+    }
+    apply();
   } catch (e) {
     rawJsonError.value = e.message;
     ElMessage.error("JSON 解析失败: " + e.message);
@@ -124,20 +158,25 @@ function applyRawJson() {
 
 function tabDot(name) {
   if (name === "quick") {
-    // 与试跑卡片同口径的三态：有 fail 红；无 fail 但有附注（通过了但有疑点）黄；
-    // 其余绿。**不能再读 all_ok**——all_ok 只看 fail，会把「pass + 附注」显示成绿
+    // 与试跑卡片同口径，四级优先（从最 alarming 往下）：fail 红；有附注（通过了但有疑点）黄；
+    // unknown 灰（我们的工具回放不了，无法判定——显示成绿色就是绿灯撒谎）；其余绿。
+    // **不能再读 all_ok**——all_ok 只看 fail，会把「pass + 附注」显示成绿
     const steps = (quickVerify.value && quickVerify.value.steps) || [];
     if (!steps.length) return "";
     if (steps.some((s) => s.verdict === "fail")) return "err";
     if (steps.some((s) => s.has_notes)) return "warn";
+    if (steps.some((s) => s.verdict === "unknown")) return "unknown";
     return "ok";
   }
   if (name === "basic") return "ok";
   if (name === "rules") {
-    // 三态：有 fail 红；无 fail 但有附注（通过了但有疑点）黄；都没有才看规则是否填全
+    // 四级优先：有 fail 红；无 fail 但有附注（通过了但有疑点）黄；
+    // unknown 灰（无法判定，与徽章 tagTypeOf 的灰色 info 对齐，不能落到绿色）；
+    // 都没有才看规则是否填全
     const steps = (testResult.value && testResult.value.steps) || [];
     if (steps.some((s) => s.verdict === "fail")) return "err";
     if (steps.some((s) => s.has_notes)) return "warn";
+    if (steps.some((s) => s.verdict === "unknown")) return "unknown";
     return ["search", "detail", "toc", "content"].every(filled) ? "ok" : "warn";
   }
   if (name === "ext") {
@@ -200,6 +239,8 @@ watch(() => props.modelValue, (show) => {
 // 还看到绿色的「全部通过」，会据此保存——这正是本次要消除的误导。
 watch(form, () => {
   if (testResult.value) testStale.value = true;
+  // 用户没动过文本域时保持快照新鲜——否则「应用到表单」会把表单改动全部回滚
+  if (!rawDirty) rawJsonText.value = JSON.stringify(form.value, null, 2);
 }, { deep: true });
 
 watch(() => [props.modelValue, props.sourceUrl], async ([show, url]) => {
@@ -221,6 +262,7 @@ watch(() => [props.modelValue, props.sourceUrl], async ([show, url]) => {
     quickVerify.value = null;
     quickProgress.value = "";
     syncRawFromForm();
+    savedSnapshot.value = JSON.stringify(form.value);   // 新建：记下初始快照
     return;
   }
   loading.value = true;
@@ -234,6 +276,7 @@ watch(() => [props.modelValue, props.sourceUrl], async ([show, url]) => {
       : "";
     userTags.value = parsed.user;
     syncRawFromForm();
+    savedSnapshot.value = JSON.stringify(form.value);   // 编辑：以加载到的源为基线
   } catch (e) {
     ElMessage.error("加载源失败: " + e.message);
   } finally {
@@ -342,10 +385,35 @@ async function save() {
   if (![0, 1, 2, 3, 4].includes(s.bookSourceType)) s.bookSourceType = 0;
   if (!String(s.bookSourceName || "").trim()) return ElMessage.warning("名称不能为空");
   if (!String(s.bookSourceUrl || "").trim()) return ElMessage.warning("域名不能为空");
+  // 新建书源时若填了已存在的域名，后端 upsert_sources 会按 URL 主键
+  // **静默覆盖原源的全部规则**——用户全程无感。保存前先探一下。
+  if (isNew.value) {
+    try {
+      const r = await sourceExists(s.bookSourceUrl);
+      if (r.exists) {
+        try {
+          await ElMessageBox.confirm(
+            `域名已存在（源名：${r.name || "(无名)"}），继续将覆盖其全部规则。`,
+            "确认覆盖", { type: "warning", confirmButtonText: "覆盖", cancelButtonText: "取消" },
+          );
+        } catch (e) {
+          return;   // 用户取消：必须中止保存，不能吞掉确认结果继续往下走
+        }
+      }
+    } catch (e) {
+      // 探测失败不阻塞保存，只在控制台留痕
+      console.warn("exists 探测失败", e);
+    }
+  }
+  await doSave(s);
+}
+
+async function doSave(s) {
   s.bookSourceGroup = mergeGroup(displaySystemTags.value, userTags.value);
   try {
     await saveSource(s, userTags.value, !!manualStatus.value);
     ElMessage.success("已保存");
+    savedSnapshot.value = JSON.stringify(form.value);   // 保存成功后刷新快照
     emit("saved", s);
   } catch (e) {
     ElMessage.error("保存失败: " + e.message);
@@ -356,7 +424,8 @@ async function save() {
 <template>
   <el-dialog v-model="visible" :title="isNew ? '新建书源' : '编辑书源'"
              width="1120px" top="4vh" destroy-on-close class="edit-dialog"
-             modal-class="edit-dialog-overlay">
+             modal-class="edit-dialog-overlay"
+             :close-on-click-modal="false" :before-close="handleBeforeClose">
     <el-row :gutter="16" v-loading="loading" class="main-rule-form">
       <el-col :xs="24" :sm="24" :md="15">
         <el-tabs v-model="activeTab" :tab-position="isMobile ? 'top' : 'left'"
@@ -606,7 +675,11 @@ async function save() {
             <p class="muted" style="margin: 0 0 8px">
               原始兜底：可直接编辑整条书源 JSON。建议先点「从表单生成」再修改。
             </p>
-            <el-input v-model="rawJsonText" type="textarea" :rows="18" class="raw-json" />
+            <el-alert v-if="rawDirty" type="warning" :closable="false" show-icon
+                      style="margin-bottom: 8px"
+                      title="你正在手改这段 JSON。点「从表单生成」会覆盖你的改动。" />
+            <el-input v-model="rawJsonText" type="textarea" :rows="18" class="raw-json"
+                      @input="rawDirty = true" />
             <p v-if="rawJsonError" style="color: #f56c6c; margin: 6px 0 0">{{ rawJsonError }}</p>
             <div class="toolbar" style="margin-top: 8px">
               <el-button size="small" @click="syncRawFromForm">从表单生成</el-button>
@@ -671,7 +744,7 @@ async function save() {
     </el-row>
 
     <template #footer>
-      <el-button @click="visible = false">取消</el-button>
+      <el-button @click="handleBeforeClose(() => (visible = false))">取消</el-button>
       <el-button type="primary" @click="save">保存</el-button>
     </template>
 
