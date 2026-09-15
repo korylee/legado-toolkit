@@ -85,9 +85,18 @@ if __name__ == "__main__":
 # 真实 `verify_chain` 的每一步都必然带这两个键（口径在 `quality.Judgement.as_step_dict`），
 # 所以两种写法在真实数据上等价，M8 这条只是在钉住这个选择别被改回去。
 #
-# 另对 `core/repair/loop.py` 的两处剥离点做了同样的变异（临时验证，未留成常驻用例）：
+# 另对 `core/repair/loop.py` 的两处剥离点做了同样的变异。⚠️ 这两行**曾经记的是临时
+# 脚本里的 ad-hoc 校验**（`AssertionError: before.pages 未清空`），那个断言从未落进
+# 仓库——实测把 `loop.py:150` 的 strip_evidence 去掉，214 条旧测试一条都不红，也就是
+# 说两个剥离点当时是**零覆盖**。现已补成常驻用例
+# `tests/test_repair.py::RepairLoopStripEvidenceTests`（其 `make_fat_verifier` 返回带
+# 真实体积证据的结果；旧的 `make_verifier` 连 `pages` 都没有，剥与不剥同形，抓不住），
+# 并重跑变异确认——下表是重跑的真实输出：
 #
-# | 变异 | 变红 |
+# | 变异 | 变红的测试 |
 # |---|---|
-# | 点 1 `before` 不剥 | `AssertionError: before.pages 未清空` |
-# | 点 2 轮内 `v` 不剥 | `AssertionError: after.pages 未清空` |
+# | 点 1 `before` 不剥（loop.py:150） | test_before_stripped_on_already_ok、test_after_and_history_stripped_on_fixed |
+# | 点 2 轮内 `v` 不剥（loop.py:192） | test_after_and_history_stripped_on_fixed、test_after_stripped_on_failure |
+#
+# 两次变异都**只**让 `RepairLoopStripEvidenceTests` 里的用例变红，其余 214 条维持全绿
+# ——剥离点原来没有任何测试守着，这正是补这条覆盖的原因。
