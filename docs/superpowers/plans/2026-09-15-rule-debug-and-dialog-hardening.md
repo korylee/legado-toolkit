@@ -496,8 +496,10 @@ def build_evidence(values: Sequence[str], matched_html: str = "") -> Dict[str, A
         "values_total": len([v for v in clean if v.strip()]),
         "chars": len(joined),
         # 用 finditer 计数而不是 findall：findall 会为每个中文字符实体化一个
-        # 字符串对象，150 万字符时实测 1.34s / 峰值 97MB；finditer 是 0.11s
-        # 且几乎无额外分配。正文全文不截断（MAX_VALUE_CHARS = 0），这个量级会真实出现
+        # 字符串对象。150 万字符实测——findall 峰值 102MB，finditer 约 0MB
+        # （耗时两者相当，CPython 3.14 上均约 0.115s；这是内存优化，不是速度优化）。
+        # 正文全文不截断（MAX_VALUE_CHARS = 0），这个量级会真实出现，
+        # 而这个字段只用于统计展示——不值得为它瞬时吃上百 MB
         "cjk_chars": sum(1 for _ in _CJK_RE.finditer(joined)),
         # 段落信息只能从命中节点的 HTML 拿：replayer 的 text 动作会 re.sub(r"\s+", " ")
         # 把换行全抹掉，提取值里已经没有段落信息了
