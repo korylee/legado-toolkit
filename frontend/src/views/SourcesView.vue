@@ -38,13 +38,20 @@ let stopCheck = null;
 // 对所有校验入口生效（全量 / 选中 / 单行）——设了代理就是为了能校验被墙源，
 // 而按行校验单个源恰恰是最常见的用法。生效时必须看得见，否则会变成
 // 「上次覆盖了忘了」的静默差异，所以按钮上有计数徽标。
+//: 「忽略缓存，全部重校」。**不是覆盖项**（没有全局对应值可比），是纯粹的本次
+//: 动作。放在同一个容器里是为了让「这次怎么测」只有一个入口——它原本挂在
+//: 全量校验的 split-button 下拉里，而那个下拉只有这一项，旁边又站着「校验参数」，
+//: 两个入口并列反而不知道该点哪个。
+const refreshThisRun = ref(false);
 const checkOverride = ref({});
 const overrideSummary = ref("");
 const overrideVisible = ref(false);
 const overrideDialog = ref(false);
 const overrideRef = ref(null);
 const overrideDialogRef = ref(null);
-const overrideCount = computed(() => Object.keys(checkOverride.value).length);
+//: 徽标显示"本次有 N 项不是全局默认"，覆盖项与忽略缓存都算
+const runOptionCount = computed(
+  () => Object.keys(checkOverride.value).length + (refreshThisRun.value ? 1 : 0));
 
 // 打开时才去拉全局设置（拿到的是最新全局值），所以必须等容器渲染完再调。
 //
@@ -207,14 +214,14 @@ function reportCheckResult(resultJson) {
   return true;
 }
 
-async function checkSources(urls = [], { refresh = false } = {}) {
+async function checkSources(urls = []) {
   if (checking.value) return ElMessage.warning("已有校验任务在运行");
   checking.value = true;
   try {
     // refresh_cache：忽略有效期内的缓存，全部重新请求。
     // 校验参数（并发/超时/深度/代理等）不再写死在这里——不传就由后端取全局设置，
     // 只有「本次覆盖」的那几项才进 payload
-    const payload = { urls, refresh_cache: refresh };
+    const payload = { urls, refresh_cache: refreshThisRun.value };
     if (Object.keys(checkOverride.value).length) payload.check = checkOverride.value;
     const r = await api.post("/jobs", { kind: "check", payload });
     ElMessage.success("已提交校验任务 " + r.job_id);
@@ -244,9 +251,10 @@ async function checkSources(urls = [], { refresh = false } = {}) {
   }
 }
 
-async function checkAll(refresh = false) {
+async function checkAll() {
+  const refresh = refreshThisRun.value;
   try {
-    // 确认文案里写清楚这次会不会用缓存、以及有没有覆盖参数——不然用户点完
+    // 确认文案里写清楚这次会不会用缓存、以及有没有别的本次设置——不然用户点完
     // 只看到「完成」，既不知道是刚查了一遍还是全走了缓存，也想不起上次改过什么
     await ElMessageBox.confirm(
       (refresh
@@ -256,7 +264,7 @@ async function checkAll(refresh = false) {
       + "可能耗时数分钟，确认继续？",
       refresh ? "全量重校" : "全量校验", { type: "warning" });
   } catch (e) { return; }
-  checkSources([], { refresh });
+  checkSources([]);
 }
 
 async function onTagsChanged() {
@@ -342,30 +350,25 @@ onUnmounted(() => {
       <el-button size="small" @click="reset">重置</el-button>
       <span class="grow" />
       <el-button size="small" :icon="Plus" @click="openNew">新建源</el-button>
-      <!-- 校验参数的本次覆盖，不写回全局设置。生效时按钮上有计数徽标——
-           覆盖只存在内存里，不显示出来就成了「看不见的生效参数」 -->
+      <!-- 「这次怎么测」的唯一入口：参数覆盖 + 忽略缓存。生效时按钮上有计数徽标——
+           这些只存在内存里，不显示出来就成了「看不见的生效参数」。
+           原来「忽略缓存」挂在全量校验的 split-button 下拉里，那下拉只有这一项，
+           旁边又站着这个按钮，两个入口并列反而不知道该点哪个 -->
       <el-popover v-model:visible="overrideVisible" trigger="click" :width="330"
                   placement="bottom-end">
         <template #reference>
-          <el-button size="small" :type="overrideCount ? 'primary' : ''">
+          <el-button size="small" :type="runOptionCount ? 'primary' : ''">
             <el-icon style="margin-right: 4px; vertical-align: -2px"><Setting /></el-icon>
-            校验参数<span v-if="overrideCount">（{{ overrideCount }}）</span>
+            校验参数<span v-if="runOptionCount">（{{ runOptionCount }}）</span>
           </el-button>
         </template>
         <CheckOverrideForm ref="overrideRef" v-model="checkOverride"
+                           v-model:refresh="refreshThisRun"
                            @summary="overrideSummary = $event" />
       </el-popover>
-      <!-- 分割按钮：主按钮按默认走（复用有效期内的缓存），下拉里给「忽略缓存」。
-           只有全量校验给这个选项——缓存值不值得复用，就这一个动作上值得计较 -->
-      <el-dropdown split-button size="small" :disabled="checking"
-                   @click="checkAll(false)" @command="(cmd) => checkAll(cmd === 'refresh')">
-        <el-icon style="margin-right: 4px; vertical-align: -2px"><Refresh /></el-icon>全量校验
-        <template #dropdown>
-          <el-dropdown-menu>
-            <el-dropdown-item command="refresh">忽略缓存，全部重校</el-dropdown-item>
-          </el-dropdown-menu>
-        </template>
-      </el-dropdown>
+      <el-button size="small" :icon="Refresh" :disabled="checking" @click="checkAll()">
+        全量校验
+      </el-button>
       <el-button size="small" :icon="Upload" @click="exportVisible = true">导出/订阅</el-button>
       <el-button size="small" :icon="Download" @click="importVisible = true">导入</el-button>
       <el-button size="small" :icon="Delete" @click="trashVisible = true">回收站</el-button>
@@ -569,10 +572,10 @@ onUnmounted(() => {
             导入书源
           </el-button>
           <el-button :icon="Refresh" :loading="checking" @click="checkAll(); filterVisible = false">
-            全量校验<span v-if="overrideCount">（{{ overrideCount }}）</span>
+            全量校验<span v-if="runOptionCount">（{{ runOptionCount }}）</span>
           </el-button>
           <el-button @click="overrideDialog = true">
-            校验参数<span v-if="overrideCount">（{{ overrideCount }}）</span>
+            校验参数<span v-if="runOptionCount">（{{ runOptionCount }}）</span>
           </el-button>
           <el-button :icon="Delete" @click="trashVisible = true; filterVisible = false">
             回收站
@@ -594,6 +597,7 @@ onUnmounted(() => {
          size="auto"，高度在打开时就定好了，往里插一块会伸缩的表单是个不必要的赌注 -->
     <el-dialog v-model="overrideDialog" title="校验参数（本次）" width="90%" append-to-body>
       <CheckOverrideForm ref="overrideDialogRef" v-model="checkOverride"
+                         v-model:refresh="refreshThisRun"
                          @summary="overrideSummary = $event" />
       <div class="muted" style="margin-top: 8px">仅对本次校验生效，不改全局设置</div>
       <template #footer>

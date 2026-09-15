@@ -12,8 +12,16 @@ import { getSettings } from "../api/settings";
 const props = defineProps({
   //: 当前的 diff（与全局设置不同的键）
   modelValue: { type: Object, default: () => ({}) },
+  //: 「忽略缓存，全部重校」。**它不是覆盖项**：没有全局对应值可比，
+  //: 纯粹是本次动作的开关，所以单独一条 v-model，不进 modelValue 的 diff。
+  refresh: { type: Boolean, default: false },
 });
-const emit = defineEmits(["update:modelValue", "summary"]);
+const emit = defineEmits(["update:modelValue", "update:refresh", "summary"]);
+
+const refreshOn = computed({
+  get: () => props.refresh,
+  set: (v) => emit("update:refresh", v),
+});
 
 const global = ref(null);   // 打开时拉到的全局值
 const form = ref(null);     // 编辑态（全局值打底 + 上次的 diff 叠上去）
@@ -62,7 +70,11 @@ function buildDiff() {
   return out;
 }
 
-watch(form, () => {
+const overrideCount = computed(() => Object.keys(buildDiff()).length);
+const activeCount = computed(() => overrideCount.value + (props.refresh ? 1 : 0));
+
+// 也盯着 refresh：只切「忽略缓存」而不动参数时，摘要同样要更新
+watch([form, () => props.refresh], () => {
   const diff = buildDiff();
   emit("update:modelValue", diff);
   const parts = Object.keys(diff).map((k) => {
@@ -70,10 +82,9 @@ watch(form, () => {
     const text = typeof v === "boolean" ? (v ? "开" : "关") : (v === "" ? "直连" : v);
     return (FIELD_LABELS[k] || k) + " " + text;
   });
-  emit("summary", parts.length ? "本次覆盖： " + parts.join("、") : "");
+  if (props.refresh) parts.unshift("忽略缓存全部重校");
+  emit("summary", parts.length ? "本次：" + parts.join("、") : "");
 }, { deep: true });
-
-const overrideCount = computed(() => Object.keys(buildDiff()).length);
 </script>
 
 <template>
@@ -112,9 +123,19 @@ const overrideCount = computed(() => Object.keys(buildDiff()).length);
       </el-form-item>
     </el-form>
 
+    <!-- 本次动作：没有全局对应值，所以不参与上面的 diff -->
+    <el-divider style="margin: 10px 0" />
+    <div class="muted" style="margin-bottom: 6px">本次动作</div>
+    <el-switch v-model="refreshOn" size="small" active-text="忽略缓存，全部重校"
+               inline-prompt style="--el-switch-on-color: var(--el-color-warning)" />
+    <div class="muted" style="margin-top: 4px">
+      有效期内的缓存本来会直接复用、不重新请求；打开就这次全部重来
+    </div>
+
+    <el-divider style="margin: 10px 0" />
     <div class="muted">
       与全局设置相同的项不会进本次覆盖
-      <template v-if="overrideCount"> · 当前覆盖 {{ overrideCount }} 项</template>
+      <template v-if="activeCount"> · 本次生效 {{ activeCount }} 项</template>
     </div>
   </div>
 </template>
