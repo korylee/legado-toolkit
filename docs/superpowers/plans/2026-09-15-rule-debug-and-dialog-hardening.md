@@ -2356,13 +2356,17 @@ def strip_evidence(verify_result):
     steps = []
     for s in verify_result.get("steps", []) or []:
         new_step = dict(s)
-        new_step["values"] = []
-        new_step["matched_html"] = ""
+        # **键存在才清**，不凭空添加。真实数据里 as_step_dict 必然产出这两个键，
+        # 所以两种写法等价；但「strip 只删不造」是更保守的契约，对残缺输入也安全
+        if "values" in new_step:
+            new_step["values"] = []
+        if "matched_html" in new_step:
+            new_step["matched_html"] = ""
         steps.append(new_step)
     return {**verify_result, "steps": steps, "pages": []}
 ```
 
-并加进 `core/verify.py` 的 `__all__`（若该文件没有 `__all__` 则跳过此步）。
+并加进 `core/verify.py` 的 `__all__`（若该文件没有 `__all__` 则跳过此步 —— 实际它确实没有）。
 
 - [ ] **Step 4: 接进 `backend/api/ops.py`**
 
@@ -2414,6 +2418,19 @@ Expected: 全过（基线 209 条 + 新增）。特别确认 `tests/test_repair.
 git add core/verify.py backend/api/ops.py core/repair/loop.py tests/test_strip_evidence.py
 git commit -m "feat(verify): 提取 strip_evidence 并接进 ops 与 repair 循环，避免证据撑爆 jobs 表与内存"
 ```
+
+### 本任务记录的范围外发现（**不在本任务修**）
+
+`core/repair/evidence.py:200` 的 `ev["chapter_sample"] = vals[:3]` 是**未截断的正文原文**，
+随 `out["evidence"]` 每条结果常驻，而 `repair_many` 又用 `asyncio.gather` 把全部结果留在内存里。
+
+**它和本任务修的是同一类问题**（repair 路径上的证据膨胀），只是量级低两个数量级：
+约 10–30KB/源，而 `pages[].html` 是 1MB/页。所以本任务**不并进来**——避免把一个
+"剥离三处字段"的小改动变成范围不定的大扫除。
+
+- 完善程度：高（取值时 `[:200]` 截断即可，与 `build_user_prompt` 里 `str(...)[:200]` 的用法对齐）
+- 执行难易度：极易（1 行）
+- 推荐意见：**可做，但单独立项**，不要塞进 Task 7
 
 ---
 
