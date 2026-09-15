@@ -293,9 +293,10 @@ def restore_from_cache(rec: BookSourceRecord, item: Dict[str, Any]) -> None:
         content_ok=rec.content_ok,
         raw=rec.raw,
     )
-    # 标签清洗与补齐：剔除「命中《》」、保留静态「原创」、按静态规则补齐「规则完整」
-    cached_tags = [t for t in (item.get("quality_tags", []) or []) if not t.startswith("命中")]
-    merged = list(dict.fromkeys(cached_tags + [t for t in rec.quality_tags if t == "原创"]))
+    # 标签清洗与补齐：剔除「命中《》」和旧缓存遗留的「原创」，按静态规则补齐「规则完整」
+    cached_tags = [t for t in (item.get("quality_tags", []) or [])
+                   if not t.startswith("命中") and t != "原创"]
+    merged = list(dict.fromkeys(cached_tags))
     if "规则完整" not in merged and static_rule_complete(rec.raw):
         merged.append("规则完整")
     rec.quality_tags = merged
@@ -812,7 +813,7 @@ class AsyncChecker:
         - 新增、规则变化或缓存过期的源执行校验并追加写入缓存
         """
         # 读取历史缓存，标记已校验的源
-        cache = self.load_cache() if self.cache_dir and not self.refresh_cache else {}
+        cache = {} if self.refresh_cache else self.load_cache()
         pending: List[BookSourceRecord] = []
         for r in records:
             item = cache.get(r.url)
@@ -823,7 +824,7 @@ class AsyncChecker:
 
         self._sem = asyncio.Semaphore(self.concurrency)
         # 缓存目录就绪
-        if self.use_store or self.cache_dir:
+        if self.cache_dir:
             os.makedirs(self.cache_dir, exist_ok=True)
         connector = aiohttp.TCPConnector(
             limit=self.concurrency,

@@ -63,8 +63,8 @@ def _page_has_search_results(html: str, keyword: str) -> bool:
         return False
     # 关键词锚点（精确书名出现在页面）
     try:
-        from bs4 import BeautifulSoup
-        soup = BeautifulSoup(html, "lxml")
+        from core.html import make_soup
+        soup = make_soup(html)
         for el in soup.find_all(True):
             txt = el.get_text(strip=True)
             if txt == keyword and not el.find_all(True):

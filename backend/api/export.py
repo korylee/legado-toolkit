@@ -47,6 +47,7 @@ def create_export(body: dict, st=Depends(get_store)):
             health=str(filt.get("health") or ""),
             q=str(filt.get("q") or ""),
             only_enabled=bool(filt.get("only_enabled")),
+            user_tag=str(filt.get("tag") or ""),
         )
     else:
         # 模式三：全量

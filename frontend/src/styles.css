@@ -96,7 +96,7 @@ body {
 .w-health { width: 124px; }
 .w-group  { width: 190px; }
 .w-order  { width: 126px; }
-.w-batch  { width: 170px; }
+.w-batch  { width: 240px; }
 
 /* 批量操作条：仅勾选时出现 */
 .batch-bar {
@@ -155,6 +155,27 @@ body {
 .nowrap { white-space: nowrap; }
 .card-gap { margin-bottom: 12px; }
 .el-table .cell { word-break: break-all; }
+
+/* 编辑书源弹窗：只允许 body 内部滚动，避免 el-overlay-dialog 出现外层滚动条 */
+.edit-dialog-overlay .el-overlay-dialog { overflow: hidden; }
+.edit-dialog {
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+  margin-bottom: 0;
+  overflow: hidden;
+}
+.edit-dialog .el-dialog__header,
+.edit-dialog .el-dialog__footer {
+  flex: 0 0 auto;
+}
+.edit-dialog .el-dialog__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
 
 /* ================= 移动端（<=900px） ================= */
 @media (max-width: 900px) {

@@ -36,7 +36,7 @@ const tabs = ref("");
 
 const hasFilter = computed(() => {
   const f = props.filter || {};
-  return !!(f.q || f.health || f.group || (f.type !== null && f.type !== undefined && f.type !== ""));
+  return !!(f.q || f.health || f.group || f.tag || (f.type !== null && f.type !== undefined && f.type !== ""));
 });
 const link = computed(() => {
   if (!generated.value) return "";
@@ -75,11 +75,11 @@ async function doExport(mode) {
     body.urls = props.selected.map((r) => r.source_url);
   } else if (mode === "filter") {
     const f = props.filter || {};
-    body.filter = { type: f.type, health: f.health, group: f.group, q: f.q };
+    body.filter = { type: f.type, health: f.health, group: f.group, tag: f.tag, q: f.q };
   }
   busy.value = true;
   try {
-    generated.value = await api.post("/export", body);
+    generated.value = { ...(await api.post("/export", body)), kind: "export" };
     await makeQr();
     loadHistory();
     ElMessage.success("已生成 " + generated.value.count + " 条的导入链接");
@@ -88,6 +88,15 @@ async function doExport(mode) {
   } finally {
     busy.value = false;
   }
+}
+
+function makeFeed(scope) {
+  const kind = scope === "all" ? "all" : "ok";
+  generated.value = {
+    kind: "feed",
+    label: scope === "all" ? "完整源订阅" : "可用源订阅",
+    url: "/api/feed/" + kind + ".json",
+  };
 }
 
 async function refreshHits() {
@@ -115,7 +124,7 @@ async function delHistory(uid) {
 </script>
 
 <template>
-  <el-drawer v-model="visible" title="导出到 App" direction="rtl" size="400px" destroy-on-close>
+  <el-drawer v-model="visible" title="导出 / 订阅" direction="rtl" size="400px" destroy-on-close>
     <div v-if="!generated" class="export-body">
       <p class="muted" style="margin: 0 0 12px">
         已勾选 <b>{{ selected.length }}</b> 条
@@ -135,10 +144,26 @@ async function delHistory(uid) {
       <div style="text-align: center; margin-top: 12px">
         <el-button link :loading="busy" @click="doExport('all')">导出全部（含未校验）</el-button>
       </div>
+
+      <el-divider style="margin: 16px 0 10px" />
+      <p class="muted" style="margin: 0 0 8px">
+        固定订阅（不过期，内容自动更新）
+      </p>
+      <el-button size="large" style="width: 100%" :disabled="!host"
+                 @click="makeFeed('ok')">
+        可用源订阅
+      </el-button>
+      <el-button size="large" style="width: 100%; margin: 10px 0 0"
+                 :disabled="!host" @click="makeFeed('all')">
+        完整源订阅
+      </el-button>
     </div>
 
     <div v-else class="export-body">
-      <p class="muted" style="margin: 0 0 10px">
+      <p v-if="generated.kind === 'feed'" class="muted" style="margin: 0 0 10px">
+        <b>{{ generated.label }}</b>　固定链接，不过期
+      </p>
+      <p v-else class="muted" style="margin: 0 0 10px">
         <span class="mono">{{ generated.uid }}</span>
         　{{ generated.count }} 条　{{ ttlDays }} 天后失效
       </p>
@@ -152,14 +177,18 @@ async function delHistory(uid) {
         在手机上打开
       </el-button>
 
-      <p class="muted" style="margin: 12px 0 0; text-align: center">
+      <p v-if="generated.kind === 'export'"
+         class="muted" style="margin: 12px 0 0; text-align: center">
         手机扫码后，拉取次数会变成 1
         <el-button link :icon="Refresh" @click="refreshHits" />
         <b style="color: #409eff">已拉取 {{ generated.hits ?? 0 }} 次</b>
       </p>
+      <p v-else class="muted" style="margin: 12px 0 0; text-align: center">
+        固定链接，源更新后手机重新拉取即可。
+      </p>
 
       <el-button link style="width: 100%; margin-top: 10px" @click="generated = null">
-        ← 重新选择导出范围
+        ← {{ generated.kind === 'feed' ? '返回订阅选择' : '重新选择导出范围' }}
       </el-button>
     </div>
 
@@ -184,11 +213,11 @@ async function delHistory(uid) {
                   style="margin-top: 8px"
                   title="localhost / 127.0.0.1 手机访问不到，要填电脑的局域网 IP" />
         <p class="muted" style="margin: 8px 0 0">
-          提示：拉取次数一直是 0，说明手机没连上（IP 或防火墙），不是 Legado 解析失败。
+          提示：手机连不上时先检查这里是否选了局域网 IP、端口是否放行。
         </p>
       </el-collapse-item>
 
-      <el-collapse-item name="opt" title="有效期">
+      <el-collapse-item v-if="!generated || generated.kind !== 'feed'" name="opt" title="有效期">
         <el-input-number v-model="ttlDays" :min="1" :max="365" controls-position="right"
                          style="width: 100%" />
         <p class="muted" style="margin: 8px 0 0">链接过期后重新导出即可，一次点击。</p>

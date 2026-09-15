@@ -1,13 +1,16 @@
 <script setup>
-import { ref, reactive, computed, onMounted } from "vue";
+import { ref, reactive, computed, onMounted, onUnmounted } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { Search, Plus, Upload, Download, Delete, Filter } from "@element-plus/icons-vue";
-import { listSources, listGroups, patchGroup, deleteSources } from "../api/sources";
+import { Search, Plus, Upload, Download, Delete, Filter, Refresh } from "@element-plus/icons-vue";
+import { listSources, listGroups, patchTags, deleteSources, listTags } from "../api/sources";
+import { api, subscribeJob } from "../api/client";
+import { splitTags } from "../utils/tags";
 import { useMobile } from "../composables/useMobile";
 import SourceEditDialog from "../components/SourceEditDialog.vue";
 import TrashDrawer from "../components/TrashDrawer.vue";
 import ExportDrawer from "../components/ExportDrawer.vue";
 import ImportDialog from "../components/ImportDialog.vue";
+import GroupManagerDrawer from "../components/GroupManagerDrawer.vue";
 
 const isMobile = useMobile();
 const loading = ref(false);
@@ -23,10 +26,14 @@ const trashVisible = ref(false);
 const exportVisible = ref(false);
 const importVisible = ref(false);
 const filterVisible = ref(false);
-const batchGroup = ref("");
+const batchTags = ref([]);
+const tags = ref([]);
+const tagManagerVisible = ref(false);
+const checking = ref(false);
+let stopCheck = null;
 
 const query = reactive({
-  q: "", type: null, health: "", group: "",
+  q: "", type: null, health: "", group: "", tag: "",
   order: "-stars", limit: 50, offset: 0,
 });
 
@@ -44,7 +51,7 @@ const typeLabel = (v) => (TYPES.find((t) => t.value === v) || {}).label || ("类
 const selectedUrls = computed(() => new Set(selected.value.map((r) => r.source_url)));
 const filterCount = computed(() => {
   const f = query;
-  return [f.q, f.type !== null && f.type !== "", f.health, f.group].filter(Boolean).length;
+  return [f.q, f.type !== null && f.type !== "", f.health, f.group, f.tag].filter(Boolean).length;
 });
 
 async function load() {
@@ -62,7 +69,7 @@ async function load() {
 
 function search() { query.offset = 0; load(); }
 function reset() {
-  Object.assign(query, { q: "", type: null, health: "", group: "", order: "-stars", offset: 0 });
+  Object.assign(query, { q: "", type: null, health: "", group: "", tag: "", order: "-stars", offset: 0 });
   load();
 }
 function onPage(p) { query.offset = (p - 1) * query.limit; load(); }
@@ -79,14 +86,8 @@ function toggleCard(row) {
     : [...selected.value, row];
 }
 
-async function changeGroup(row) {
-  try {
-    await patchGroup(row.source_url, row.group_name);
-    ElMessage.success("分组已更新");
-  } catch (e) {
-    ElMessage.error(e.message);
-    load();
-  }
+function userTagsOf(row) {
+  return splitTags(row.user_tags || "");
 }
 
 async function removeSelected() {
@@ -102,29 +103,87 @@ async function removeSelected() {
   } catch (e) { /* 取消 */ }
 }
 
-async function applyBatchGroup() {
+async function applyBatchTags(mode) {
   if (!selected.value.length) return ElMessage.warning("先勾选源");
-  if (!batchGroup.value) return ElMessage.warning("先填要设置的分组");
+  if (!batchTags.value.length) return ElMessage.warning("先选择或输入标签");
+  const urls = selected.value.map((r) => r.source_url);
   try {
-    const n = selected.value.length;
-    for (const r of selected.value) await patchGroup(r.source_url, batchGroup.value);
-    ElMessage.success("已更新 " + n + " 条分组");
-    batchGroup.value = "";
+    await patchTags(
+      urls,
+      mode === "add" ? batchTags.value : [],
+      mode === "remove" ? batchTags.value : [],
+    );
+    ElMessage.success((mode === "add" ? "已加标签 " : "已移除标签 ") + urls.length + " 条");
+    batchTags.value = [];
     clearSelection();
     load();
-    groups.value = await listGroups();
+    tags.value = await listTags();
   } catch (e) {
     ElMessage.error(e.message);
   }
 }
 
+async function checkSources(urls = []) {
+  if (checking.value) return ElMessage.warning("已有校验任务在运行");
+  checking.value = true;
+  try {
+    const r = await api.post("/jobs", {
+      kind: "check",
+      payload: { urls, probe_depth: 1 },
+    });
+    ElMessage.success("已提交校验任务 " + r.job_id);
+    if (stopCheck) stopCheck();
+    stopCheck = subscribeJob(
+      r.job_id,
+      () => {},
+      async (data) => {
+        checking.value = false;
+        stopCheck = null;
+        if (data.status === "done") {
+          ElMessage.success("校验完成");
+          await load();
+          try { tags.value = await listTags(); } catch (e) { /* 忽略 */ }
+        } else {
+          ElMessage.error("校验任务失败: " + (data.status || "unknown"));
+        }
+      },
+    );
+  } catch (e) {
+    checking.value = false;
+    ElMessage.error("提交校验失败: " + e.message);
+  }
+}
+
+async function checkAll() {
+  try {
+    await ElMessageBox.confirm(
+      "将校验全部未删除书源，可能耗时数分钟，确认继续？",
+      "全量校验", { type: "warning" });
+  } catch (e) { return; }
+  checkSources([]);
+}
+
+async function onTagsChanged() {
+  await load();
+  try { tags.value = await listTags(); } catch (e) { /* 忽略 */ }
+}
+
 function openNew() { dlgUrl.value = ""; dlgVisible.value = true; }
 function openEdit(row) { dlgUrl.value = row.source_url; dlgVisible.value = true; }
-function onSaved() { dlgVisible.value = false; load(); }
+async function onSaved() {
+  dlgVisible.value = false;
+  await load();
+  try { tags.value = await listTags(); } catch (e) { /* 忽略 */ }
+}
 
 onMounted(async () => {
   load();
   try { groups.value = await listGroups(); } catch (e) { /* 忽略 */ }
+  try { tags.value = await listTags(); } catch (e) { /* 忽略 */ }
+});
+
+onUnmounted(() => {
+  if (stopCheck) stopCheck();
 });
 </script>
 
@@ -145,6 +204,11 @@ onMounted(async () => {
         <el-option v-for="g in groups" :key="g.group" :value="g.group"
                    :label="g.group + ' (' + g.count + ')'" />
       </el-select>
+      <el-select class="w-group" v-model="query.tag" placeholder="用户标签" clearable filterable
+                 size="small">
+        <el-option v-for="t in tags.filter((x) => x.kind === 'user')" :key="t.tag" :value="t.tag"
+                   :label="t.tag + ' (' + t.count + ')'" />
+      </el-select>
       <el-select class="w-order" v-model="query.order" size="small">
         <el-option value="-stars" label="星级 ↓" />
         <el-option value="stars" label="星级 ↑" />
@@ -155,9 +219,11 @@ onMounted(async () => {
       <el-button size="small" @click="reset">重置</el-button>
       <span class="grow" />
       <el-button size="small" :icon="Plus" @click="openNew">新建源</el-button>
-      <el-button size="small" :icon="Upload" @click="exportVisible = true">导出</el-button>
+      <el-button size="small" :icon="Refresh" :loading="checking" @click="checkAll">全量校验</el-button>
+      <el-button size="small" :icon="Upload" @click="exportVisible = true">导出/订阅</el-button>
       <el-button size="small" :icon="Download" @click="importVisible = true">导入</el-button>
       <el-button size="small" :icon="Delete" @click="trashVisible = true">回收站</el-button>
+      <el-button size="small" @click="tagManagerVisible = true">标签管理</el-button>
     </div>
 
     <!-- 移动端：搜索 + 筛选 + 新建 -->
@@ -175,16 +241,29 @@ onMounted(async () => {
       <span class="batch-text">已选 <b>{{ selected.length }}</b> 条</span>
       <template v-if="!isMobile">
         <el-divider direction="vertical" />
-        <el-input class="w-batch" v-model="batchGroup" placeholder="输入分组，如 原创"
-                  size="small" @keyup.enter="applyBatchGroup" />
-        <el-button size="small" :disabled="!batchGroup" @click="applyBatchGroup">应用分组</el-button>
+        <el-select class="w-batch" v-model="batchTags" multiple filterable allow-create
+                   default-first-option :reserve-keyword="false" placeholder="选择或输入标签"
+                   size="small">
+          <el-option v-for="t in tags.filter((x) => x.kind === 'user')" :key="t.tag" :value="t.tag"
+                     :label="t.tag + ' (' + t.count + ')'" />
+        </el-select>
+        <el-button size="small" :disabled="!batchTags.length" @click="applyBatchTags('add')">
+          加标签
+        </el-button>
+        <el-button size="small" :disabled="!batchTags.length" @click="applyBatchTags('remove')">
+          去标签
+        </el-button>
       </template>
       <el-divider direction="vertical" />
+      <el-button size="small" :icon="Refresh" :loading="checking" :disabled="!selected.length"
+                 @click="checkSources(selected.map((r) => r.source_url))">
+        校验选中
+      </el-button>
       <el-button size="small" type="danger" plain @click="removeSelected">移入回收站</el-button>
       <el-button size="small" link @click="clearSelection">取消选择</el-button>
       <span v-if="isMobile" class="grow" />
       <el-button v-if="isMobile" size="small" type="primary" :icon="Upload"
-                 @click="exportVisible = true">导出</el-button>
+                 @click="exportVisible = true">导出/订阅</el-button>
     </div>
 
     <!-- 列表区：移动端卡片 / 桌面表格 -->
@@ -211,8 +290,17 @@ onMounted(async () => {
                 {{ row.content_ok === 1 ? " 正文✓" : row.content_ok === 0 ? " 正文✗" : "" }}
               </span>
             </div>
-            <div class="grp">{{ row.group_name || "(无分组)" }}</div>
+            <div class="grp">
+              <el-tag v-if="row.group_name" size="small" type="info">{{ row.group_name }}</el-tag>
+              <el-tag v-if="row.system_tags_locked" size="small" type="warning">手动</el-tag>
+              <el-tag v-for="t in userTagsOf(row)" :key="t" size="small" type="success">
+                {{ t }}
+              </el-tag>
+              <span v-if="!row.group_name && !userTagsOf(row).length" class="muted">(无标签)</span>
+            </div>
           </div>
+          <el-button link :icon="Refresh" :loading="checking"
+                     @click.stop="checkSources([row.source_url])" />
           <el-button link :icon="Filter" @click.stop="openEdit(row)" />
         </div>
         <el-empty v-if="!loading && !rows.length" description="没有匹配的书源" :image-size="80" />
@@ -246,15 +334,26 @@ onMounted(async () => {
             </span>
           </template>
         </el-table-column>
-        <el-table-column label="分组" min-width="170">
+        <el-table-column label="标签" min-width="210">
           <template #default="{ row }">
-            <el-input v-model="row.group_name" size="small" @change="changeGroup(row)" />
+            <el-tag v-if="row.group_name" size="small" type="info">{{ row.group_name }}</el-tag>
+            <el-tag v-if="row.system_tags_locked" size="small" type="warning">手动</el-tag>
+            <el-tag v-for="t in userTagsOf(row)" :key="t" size="small" type="success">
+              {{ t }}
+            </el-tag>
+            <span v-if="!row.group_name && !userTagsOf(row).length" class="muted">(无标签)</span>
           </template>
         </el-table-column>
         <el-table-column prop="source_url" label="域名" min-width="190" show-overflow-tooltip>
           <template #default="{ row }"><span class="mono">{{ row.source_url }}</span></template>
         </el-table-column>
         <el-table-column prop="checked_at" label="校验时间" width="146" />
+        <el-table-column label="操作" width="90" align="center">
+          <template #default="{ row }">
+            <el-button link size="small" :loading="checking"
+                       @click="checkSources([row.source_url])">校验</el-button>
+          </template>
+        </el-table-column>
       </el-table>
     </div>
 
@@ -293,6 +392,14 @@ onMounted(async () => {
           </el-select>
         </div>
         <div class="fld">
+          <label>用户标签</label>
+          <el-select v-model="query.tag" placeholder="全部" clearable filterable
+                     style="width: 100%">
+            <el-option v-for="t in tags.filter((x) => x.kind === 'user')" :key="t.tag" :value="t.tag"
+                       :label="t.tag + ' (' + t.count + ')'" />
+          </el-select>
+        </div>
+        <div class="fld">
           <label>排序</label>
           <el-select v-model="query.order" style="width: 100%">
             <el-option value="-stars" label="星级 ↓" />
@@ -309,13 +416,18 @@ onMounted(async () => {
           <el-button :icon="Download" @click="importVisible = true; filterVisible = false">
             导入书源
           </el-button>
+          <el-button :icon="Refresh" :loading="checking" @click="checkAll(); filterVisible = false">
+            全量校验
+          </el-button>
           <el-button :icon="Delete" @click="trashVisible = true; filterVisible = false">
             回收站
           </el-button>
+          <el-button @click="tagManagerVisible = true; filterVisible = false">标签管理</el-button>
         </div>
       </div>
     </el-drawer>
 
+    <GroupManagerDrawer v-model="tagManagerVisible" @changed="onTagsChanged" />
     <SourceEditDialog v-model="dlgVisible" :source-url="dlgUrl" @saved="onSaved" />
     <TrashDrawer v-model="trashVisible" @changed="load" />
     <ExportDrawer v-model="exportVisible" :selected="selected"

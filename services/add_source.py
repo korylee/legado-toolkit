@@ -389,8 +389,8 @@ def build_name_id_mapping(domain: str, locs: list, max_items: int = 500,
     mapping = {}
     # 书名提取：优先 <h1>，否则 <title> 去掉站点后缀
     def _extract_title(html: str) -> str:
-        from bs4 import BeautifulSoup
-        soup = BeautifulSoup(html, "lxml")
+        from core.html import make_soup
+        soup = make_soup(html)
         h1 = soup.find("h1")
         if h1:
             t = h1.get_text(strip=True)

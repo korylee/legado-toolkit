@@ -7,7 +7,7 @@ from core.fetch import fetch
 
 def _leaf_text_elems(soup, keyword: str):
     """找出文本恰好等于关键词的叶子元素（书名锚点）。"""
-    from bs4 import BeautifulSoup
+    from core.html import make_soup
     found = []
     for el in soup.find_all(True):
         txt = el.get_text(strip=True)
@@ -90,8 +90,8 @@ def _selector_from_elem(anchor, list_item, tag):
     return _path_selector(elems[0], list_item)
 def analyze_search_page(html: str, keyword: str) -> dict:
     """分析搜索页，返回自动推断的 Legado 规则。"""
-    from bs4 import BeautifulSoup
-    soup = BeautifulSoup(html, "lxml")
+    from core.html import make_soup
+    soup = make_soup(html)
     anchors = _leaf_text_elems(soup, keyword)
     result = {
         "results": len(anchors),
@@ -189,13 +189,13 @@ def analyze_detail_page(html: str, book_url: str) -> dict:
       3. 正文规则：抓第一章 URL，取文本量最大的 div → content
     返回 dict(toc={...}, content=rule, note=str)。
     """
-    from bs4 import BeautifulSoup
+    from core.html import make_soup
     toc: dict = {}
     content_rule = ""
     note = ""
 
     try:
-        soup = BeautifulSoup(html, "lxml")
+        soup = make_soup(html)
     except Exception as e:
         return {"toc": {}, "content": "", "note": f"解析详情页失败: {e}"}
 
@@ -339,7 +339,7 @@ def analyze_detail_page(html: str, book_url: str) -> dict:
     content_rule = ""
     try:
         ch_html = fetch(first_chapter_url)
-        ch_soup = BeautifulSoup(ch_html, "lxml")
+        ch_soup = make_soup(ch_html)
         best_len, best_el = 0, None
         for el in ch_soup.find_all(["div", "article", "section", "p"]):
             txt = el.get_text(" ", strip=True)

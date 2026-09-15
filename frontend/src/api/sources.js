@@ -11,7 +11,18 @@ export function listSources(params = {}) {
 export const getDetail = (url) => api.get("/sources/detail?url=" + encodeURIComponent(url));
 export const listGroups = () => api.get("/sources/groups");
 export const getStats = () => api.get("/sources/stats");
-export const patchGroup = (url, group) => api.patch("/sources/group", { url, group });
+export const saveSource = (source, userTags, lockSystemTags = false) =>
+  api.post("/sources/save", { source, user_tags: userTags, lock_system_tags: lockSystemTags });
+
+export const listTags = () => api.get("/sources/tags");
+export const patchTags = (urls, add = [], remove = []) =>
+  api.post("/sources/tags", { urls, add, remove });
+export const renameTag = (oldTag, newTag) =>
+  api.post("/sources/tags/rename", { old: oldTag, new: newTag });
+export const mergeTags = (sources, target) =>
+  api.post("/sources/tags/merge", { sources, target });
+export const deleteTag = (tag) => api.post("/sources/tags/delete", { tag });
+export const normalizeTags = () => api.post("/sources/tags/normalize");
 export const deleteSources = (urls) => api.del("/sources?urls=" + encodeURIComponent(urls.join(",")));
 
 export const listDeleted = (limit = 200, offset = 0) =>

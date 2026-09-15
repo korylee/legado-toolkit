@@ -3,11 +3,13 @@ import { ref, onMounted } from "vue";
 import { useRoute } from "vue-router";
 import { getStats } from "../api/sources";
 import { useMobile } from "../composables/useMobile";
-import { Monitor, List, DataAnalysis, Refresh } from "@element-plus/icons-vue";
+import { Monitor, List, DataAnalysis, Refresh, Setting } from "@element-plus/icons-vue";
+import LLMSettingsDrawer from "../components/LLMSettingsDrawer.vue";
 
 const route = useRoute();
 const isMobile = useMobile();
 const stats = ref(null);
+const settingsVisible = ref(false);
 
 const menus = [
   { path: "/sources", label: "书源", icon: List },
@@ -31,6 +33,7 @@ onMounted(loadStats);
       </span>
       <el-tag v-else-if="!isMobile" size="small" type="danger">后端未连接</el-tag>
       <span class="spacer" />
+      <el-button link :icon="Setting" @click="settingsVisible = true" />
       <el-button link :icon="Refresh" @click="loadStats" />
     </header>
 
@@ -58,5 +61,7 @@ onMounted(loadStats);
         <span>{{ m.label }}</span>
       </router-link>
     </nav>
+
+    <LLMSettingsDrawer v-model="settingsVisible" @changed="loadStats" />
   </div>
 </template>

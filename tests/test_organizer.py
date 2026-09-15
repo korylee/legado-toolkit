@@ -45,8 +45,8 @@ class OrganizerTests(unittest.TestCase):
         self.assertNotIn("[原分组]", result[0]["bookSourceComment"])
         self.assertNotIn("// Error:", result[0]["bookSourceComment"])
 
-    def test_stable_r18_tag_is_preserved(self) -> None:
-        raw = source("H漫")
+    def test_stable_user_tag_is_preserved(self) -> None:
+        raw = source("R18")
         record = build_record(raw, 0)
         record.health = Health.AUTH
 
@@ -60,12 +60,13 @@ class OrganizerTests(unittest.TestCase):
         self.assertEqual(infer_health_from_group("📖小说/🌐需翻墙"), Health.GFW)
         self.assertEqual(infer_health_from_group("自用"), Health.AUTH)
 
-    def test_unstable_quality_tag_is_not_written_to_group(self) -> None:
-        raw = source("📖小说/✅★★★★★,规则完整,番茄,正版")
+    def test_system_quality_and_user_tags_are_written(self) -> None:
+        raw = source("📖小说/✅★★★★★,规则完整,番茄,正版,原创")
         record = build_record(raw, 0)
         record.health = Health.OK
-        record.quality_tags = ["规则完整", "原创"]
+        record.quality_tags = ["规则完整"]
 
         result = organize_sources([record])
 
-        self.assertEqual(result[0]["bookSourceGroup"], "📖小说,可用,正版,原创")
+        self.assertEqual(result[0]["bookSourceGroup"],
+                         "📖小说,可用,规则完整,番茄,正版,原创")

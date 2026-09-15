@@ -18,7 +18,21 @@ import sqlite3
 import time
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence
 
-SCHEMA_VERSION = 2
+from core.tags import (
+    SYSTEM_QUALITY_TAGS as _SYSTEM_QUALITY_TAGS,
+    SYSTEM_STATUS_TAGS as _SYSTEM_STATUS_TAGS,
+    SYSTEM_TYPE_TAGS as _SYSTEM_TYPE_TAGS,
+    canonical_tag as _canonical_tag,
+    canonical_tags as _canonical_tags,
+    extract_user_tags_from_group as _extract_user_tags,
+    is_system_tag as _is_system_tag,
+    merge_group as _merge_group,
+    normalize_tags as _normalize_tags,
+    parse_group_tags as _parse_group,
+    split_system_user as _split_group,
+)
+
+SCHEMA_VERSION = 4
 DB_NAME = "sources.sqlite3"
 
 PRAGMAS = (
@@ -37,6 +51,8 @@ DDL = [
         name         TEXT NOT NULL DEFAULT '',
         source_type  INTEGER NOT NULL DEFAULT 0,
         group_name   TEXT NOT NULL DEFAULT '',
+        user_tags    TEXT NOT NULL DEFAULT '',
+        system_tags_locked INTEGER NOT NULL DEFAULT 0,
         enabled      INTEGER NOT NULL DEFAULT 1,
         raw_json     TEXT NOT NULL,
         fingerprint  TEXT NOT NULL DEFAULT '',
@@ -153,14 +169,18 @@ class Store:
 
     #: 需要幂等补加的新列 {表: [(列名, 定义)]}
     #: CREATE TABLE IF NOT EXISTS 不会给已存在的表加列，必须显式 ALTER
-    NEW_COLUMNS = {"sources": [("deleted_at", "TEXT NOT NULL DEFAULT ''")]}
+    NEW_COLUMNS = {"sources": [
+        ("deleted_at", "TEXT NOT NULL DEFAULT ''"),
+        ("user_tags", "TEXT NOT NULL DEFAULT ''"),
+        ("system_tags_locked", "INTEGER NOT NULL DEFAULT 0"),
+    ]}
 
     #: v_sources 视图每次重建：CREATE VIEW IF NOT EXISTS 不会更新已存在的视图定义
     VIEW_DDL = """CREATE VIEW v_sources AS
         SELECT s.id, s.source_url, s.name, s.source_type, s.group_name, s.enabled,
-               s.fingerprint, s.deleted_at, s.updated_at,
+               s.user_tags, s.system_tags_locked, s.fingerprint, s.deleted_at, s.updated_at,
                c.health, c.stars, c.checked_at, c.probe_depth,
-               c.toc_complete, c.content_ok, c.search_hit
+               c.toc_complete, c.content_ok, c.search_hit, c.quality_tags
         FROM sources s
         LEFT JOIN checks c ON c.id = (
             SELECT id FROM checks WHERE source_url = s.source_url
@@ -176,6 +196,8 @@ class Store:
                     self.conn.execute("ALTER TABLE %s ADD COLUMN %s %s" % (table, name, decl))
         self.conn.execute("DROP VIEW IF EXISTS v_sources")
         self.conn.execute(self.VIEW_DDL)
+        self.migrate_user_tags_once()
+        self.cleanup_system_tags_once()
         self.conn.execute(
             "INSERT OR IGNORE INTO meta(key, value) VALUES (?, ?)", ("schema_version", "1"))
         self.conn.execute("UPDATE meta SET value = ? WHERE key = ?",
@@ -206,23 +228,72 @@ class Store:
         self.conn.commit()
 
 # sources ------------------------------------------------------------
+    def _system_group_for(self, source_type: int, raw_group: str) -> str:
+        """按 source_type 重建类型标签，保留健康状态和规则完整标签。"""
+        from core.models import BOOK_SOURCE_TYPE_NAMES
+        from core.organizer import group_title, infer_health_from_group
+
+        system, _user = _split_group(raw_group)
+        type_tag = BOOK_SOURCE_TYPE_NAMES.get(int(source_type), "❓未知")
+        status_tags = [t for t in system if t in _SYSTEM_STATUS_TAGS]
+        quality_tags = [t for t in system if t in _SYSTEM_QUALITY_TAGS]
+        has_old_type = any(t in _SYSTEM_TYPE_TAGS for t in system)
+        if has_old_type or status_tags:
+            # 已有显式系统标签：以表单类型为准，保留状态/规则完整
+            base = [type_tag] + status_tags[:1]
+        else:
+            # 没有系统类型/状态时，按旧分组推断健康度
+            base = _parse_group(group_title(int(source_type),
+                                            infer_health_from_group(raw_group)))
+        return _merge_group(base, quality_tags)
+
+    def _source_view(self, raw_json: str, group_name: str, user_tags: str):
+        """把 raw_json、系统标签、用户标签合并成对外的书源对象。"""
+        try:
+            src = json.loads(raw_json)
+        except Exception:
+            return None
+        src["bookSourceGroup"] = _merge_group(_parse_group(group_name), _normalize_tags(user_tags))
+        return src
+
+    def _known_user_tags(self) -> set:
+        """当前库里已经存在的用户标签集合，用于过滤新源标签。"""
+        out = set()
+        for row in self.conn.execute(
+                "SELECT user_tags FROM sources WHERE deleted_at = ''"):
+            out.update(t for t in _normalize_tags(row["user_tags"]) if not _is_system_tag(t))
+        return out
+
     def upsert_sources(self, sources, with_fingerprint: bool = True) -> int:
-        """批量写入/更新书源。同一 source_url 覆盖，raw_json 全量替换。"""
+        """批量写入/更新书源。同 URL 更新规则和系统标签，用户标签永久保留。"""
         from core.loader import _normalize_url, fingerprint as fp_of
 
         ts = now()
         rows = []
+        known_tags = self._known_user_tags()
+        allow_unknown = self.count_sources(include_deleted=True) == 0
         for src in sources or []:
             if not isinstance(src, dict):
                 continue
             url = _normalize_url(str(src.get("bookSourceUrl", "") or ""))
             if not url:
                 continue
+            source_type = int(src.get("bookSourceType", 0) or 0)
+            raw_group = str(src.get("bookSourceGroup", "") or "")
+            system_group = self._system_group_for(source_type, raw_group)
+            incoming_tags = _extract_user_tags(raw_group)
+            if allow_unknown:
+                selected_tags = incoming_tags
+                known_tags.update(incoming_tags)
+            else:
+                selected_tags = [t for t in incoming_tags if t in known_tags]
+            user_tags = _merge_group([], selected_tags)
             rows.append((
                 url,
                 str(src.get("bookSourceName", "") or ""),
-                int(src.get("bookSourceType", 0) or 0),
-                str(src.get("bookSourceGroup", "") or ""),
+                source_type,
+                system_group,
+                user_tags,
                 1 if src.get("enabled", True) else 0,
                 json.dumps(src, ensure_ascii=False),
                 fp_of(src) if with_fingerprint else "",
@@ -231,10 +302,12 @@ class Store:
         if not rows:
             return 0
         sql = (
-            "INSERT INTO sources(source_url,name,source_type,group_name,enabled,"
-            "raw_json,fingerprint,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?) "
+            "INSERT INTO sources(source_url,name,source_type,group_name,user_tags,enabled,"
+            "raw_json,fingerprint,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?) "
             "ON CONFLICT(source_url) DO UPDATE SET name=excluded.name, "
-            "source_type=excluded.source_type, group_name=excluded.group_name, "
+            "source_type=excluded.source_type, "
+            "group_name=CASE WHEN system_tags_locked=1 THEN group_name "
+            "ELSE excluded.group_name END, "
             "enabled=excluded.enabled, raw_json=excluded.raw_json, "
             "fingerprint=excluded.fingerprint, updated_at=excluded.updated_at")
         with self.conn:
@@ -245,24 +318,21 @@ class Store:
         from core.loader import _normalize_url
 
         row = self.conn.execute(
-            "SELECT raw_json FROM sources WHERE source_url = ?",
+            "SELECT raw_json, group_name, user_tags FROM sources WHERE source_url = ?",
             (_normalize_url(url),)).fetchone()
         if not row:
             return None
-        try:
-            return json.loads(row["raw_json"])
-        except Exception:
-            return None
+        return self._source_view(row["raw_json"], row["group_name"], row["user_tags"])
 
     def export_sources(self) -> List[Dict[str, Any]]:
         """导出全部书源（保持入库顺序），用于重新生成给 Legado 的 JSON。"""
         out = []
         for row in self.conn.execute(
-                "SELECT raw_json FROM sources WHERE deleted_at = '' ORDER BY id"):
-            try:
-                out.append(json.loads(row["raw_json"]))
-            except Exception:
-                continue
+                "SELECT raw_json, group_name, user_tags "
+                "FROM sources WHERE deleted_at = '' ORDER BY id"):
+            src = self._source_view(row["raw_json"], row["group_name"], row["user_tags"])
+            if src:
+                out.append(src)
         return out
 
     def export_json(self, path: str) -> int:
@@ -280,11 +350,12 @@ class Store:
 
     def query(self, source_type: Optional[int] = None, group: str = "",
               health: str = "", q: str = "", only_enabled: bool = False,
+              user_tag: str = "",
               limit: int = 50, offset: int = 0, order: str = "id",
               include_deleted: bool = False) -> List[Dict[str, Any]]:
         """前端列表页用：服务端筛选 + 排序 + 分页（不要全量传给浏览器）。"""
         where, args = self._where(source_type, group, health, q, only_enabled,
-                                 include_deleted)
+                                 include_deleted, user_tag)
         allowed = ("id", "name", "source_type", "group_name", "stars",
                    "checked_at", "updated_at")
         key = (order or "id").lstrip("-")
@@ -297,14 +368,14 @@ class Store:
 
     def count_query(self, source_type: Optional[int] = None, group: str = "",
                     health: str = "", q: str = "", only_enabled: bool = False,
-                    include_deleted: bool = False) -> int:
+                    include_deleted: bool = False, user_tag: str = "") -> int:
         where, args = self._where(source_type, group, health, q, only_enabled,
-                                  include_deleted)
+                                  include_deleted, user_tag)
         sql = "SELECT COUNT(*) AS c FROM v_sources %s" % where
         return self.conn.execute(sql, args).fetchone()["c"]
 
     def _where(self, source_type, group, health, q, only_enabled,
-               include_deleted: bool = False):
+               include_deleted: bool = False, user_tag: str = ""):
         sql, args = ["WHERE 1=1"], []
         if not include_deleted:
             sql.append("AND deleted_at = ''")
@@ -314,6 +385,9 @@ class Store:
         if group:
             sql.append("AND group_name = ?")
             args.append(group)
+        if user_tag:
+            sql.append("AND (',' || user_tags || ',') LIKE ?")
+            args.append("%," + user_tag + ",%")
         if health:
             sql.append("AND health = ?")
             args.append(health)
@@ -358,6 +432,294 @@ class Store:
     def groups(self) -> List[tuple]:
         return [(r["group_name"], r["c"]) for r in self.conn.execute(
             "SELECT group_name, COUNT(*) AS c FROM sources GROUP BY group_name ORDER BY c DESC")]
+
+    # ------------------------------------------------------------ tags
+    def migrate_user_tags_once(self) -> bool:
+        """把旧 group_name / raw_json 分组拆成系统标签和用户标签。"""
+        if self.get_meta("user_tags_migrated_at"):
+            return False
+        rows = list(self.conn.execute(
+            "SELECT id, source_type, group_name, raw_json FROM sources"))
+        if not rows:
+            self.set_meta("user_tags_migrated_at", now())
+            return False
+        from core.organizer import group_title, infer_health_from_group
+        updates = []
+        for row in rows:
+            try:
+                raw_group = str(json.loads(row["raw_json"]).get("bookSourceGroup", "") or "")
+            except Exception:
+                raw_group = ""
+            old_group = str(row["group_name"] or "")
+            system, user = _split_group(_parse_group(raw_group) + _parse_group(old_group))
+            if system:
+                system_group = _merge_group(system, [])
+            else:
+                health_group = raw_group or old_group
+                system_group = group_title(row["source_type"], infer_health_from_group(health_group))
+            updates.append((system_group, _merge_group([], _canonical_tags(user)), row["id"]))
+        with self.conn:
+            self.conn.executemany(
+                "UPDATE sources SET group_name=?, user_tags=? WHERE id=?", updates)
+        self.set_meta("user_tags_migrated_at", now())
+        return True
+
+    def cleanup_system_tags_once(self) -> bool:
+        """Once-off cleanup: remove system tags that leaked into user_tags."""
+        if self.get_meta("system_tags_cleaned_at"):
+            return False
+        rows = list(self.conn.execute(
+            "SELECT source_url, user_tags FROM sources"))
+        updates = []
+        for row in rows:
+            old = row["user_tags"] or ""
+            new = _merge_group(
+                [], [t for t in _canonical_tags(old) if not _is_system_tag(t)])
+            if new != old:
+                updates.append((new, now(), row["source_url"]))
+        if updates:
+            with self.conn:
+                self.conn.executemany(
+                    "UPDATE sources SET user_tags=?, updated_at=? WHERE source_url=?",
+                    updates)
+        self.set_meta("system_tags_cleaned_at", now())
+        return bool(updates)
+
+    def is_system_tags_locked(self, url: str) -> bool:
+        from core.loader import _normalize_url
+        row = self.conn.execute(
+            "SELECT system_tags_locked FROM sources WHERE source_url = ?",
+            (_normalize_url(url),)).fetchone()
+        return bool(row and row["system_tags_locked"])
+
+    def set_system_tags_override(self, urls, tags) -> int:
+        """把系统标签设为人工校正结果，并锁定，后续 rebuild 不覆盖。"""
+        value = _merge_group(
+            [], [t for t in _canonical_tags(tags) if _is_system_tag(t)])
+        keys = self._tag_urls(urls)
+        if not value or not keys:
+            return 0
+        n = 0
+        with self.conn:
+            for key in keys:
+                cur = self.conn.execute(
+                    "UPDATE sources SET group_name=?, system_tags_locked=1, updated_at=? "
+                    "WHERE source_url=?", (value, now(), key))
+                n += cur.rowcount or 0
+        return n
+
+    def clear_system_tags_override(self, urls) -> int:
+        """解除人工锁定，并按最近校验结果重建系统标签。"""
+        keys = self._tag_urls(urls)
+        if not keys:
+            return 0
+        n = 0
+        with self.conn:
+            for key in keys:
+                cur = self.conn.execute(
+                    "UPDATE sources SET system_tags_locked=0 WHERE source_url=?", (key,))
+                n += cur.rowcount or 0
+        self.rebuild_system_tags(keys)
+        return n
+
+    def _tag_urls(self, urls):
+        from core.loader import _normalize_url
+        return [_normalize_url(u) for u in (urls or []) if u]
+
+    def add_user_tags(self, urls, tags) -> int:
+        """批量追加用户标签；系统标签会被忽略。"""
+        add = [t for t in _canonical_tags(tags) if not _is_system_tag(t)]
+        keys = self._tag_urls(urls)
+        if not add or not keys:
+            return 0
+        n = 0
+        with self.conn:
+            for key in keys:
+                row = self.conn.execute(
+                    "SELECT user_tags FROM sources WHERE source_url = ?", (key,)).fetchone()
+                if not row:
+                    continue
+                current = _normalize_tags(row["user_tags"])
+                merged = _merge_group(current, add)
+                if merged != (row["user_tags"] or ""):
+                    self.conn.execute(
+                        "UPDATE sources SET user_tags=?, updated_at=? WHERE source_url=?",
+                        (merged, now(), key))
+                    n += 1
+        return n
+
+    def set_user_tags(self, urls, tags) -> int:
+        """覆盖一组源的完整用户标签集合。"""
+        value = _merge_group([], [t for t in _canonical_tags(tags) if not _is_system_tag(t)])
+        keys = self._tag_urls(urls)
+        if not keys:
+            return 0
+        n = 0
+        with self.conn:
+            for key in keys:
+                cur = self.conn.execute(
+                    "UPDATE sources SET user_tags=?, updated_at=? WHERE source_url=?",
+                    (value, now(), key))
+                n += cur.rowcount or 0
+        return n
+
+    def remove_user_tags(self, urls, tags) -> int:
+        """批量移除用户标签。"""
+        remove = set(_canonical_tags(tags))
+        keys = self._tag_urls(urls)
+        if not remove or not keys:
+            return 0
+        n = 0
+        with self.conn:
+            for key in keys:
+                row = self.conn.execute(
+                    "SELECT user_tags FROM sources WHERE source_url = ?", (key,)).fetchone()
+                if not row:
+                    continue
+                current = _normalize_tags(row["user_tags"])
+                merged = _merge_group([], [t for t in current if t not in remove])
+                if merged != (row["user_tags"] or ""):
+                    self.conn.execute(
+                        "UPDATE sources SET user_tags=?, updated_at=? WHERE source_url=?",
+                        (merged, now(), key))
+                    n += 1
+        return n
+
+    def rename_user_tag(self, old: str, new: str) -> int:
+        """全局重命名一个用户标签。"""
+        old_tags = _canonical_tags(old)
+        new_tags = [t for t in _canonical_tags(new) if not _is_system_tag(t)]
+        if len(old_tags) != 1 or len(new_tags) != 1:
+            return 0
+        old_tag, new_tag = old_tags[0], new_tags[0]
+        if _is_system_tag(old_tag):
+            return 0
+        rows = list(self.conn.execute(
+            "SELECT source_url, user_tags FROM sources WHERE user_tags LIKE ?",
+            ("%" + old_tag + "%",)))
+        n = 0
+        with self.conn:
+            for row in rows:
+                current = _normalize_tags(row["user_tags"])
+                merged = _merge_group([], [new_tag if t == old_tag else t for t in current])
+                if merged != (row["user_tags"] or ""):
+                    self.conn.execute(
+                        "UPDATE sources SET user_tags=?, updated_at=? WHERE source_url=?",
+                        (merged, now(), row["source_url"]))
+                    n += 1
+        return n
+
+    def merge_user_tags(self, sources, target: str) -> int:
+        """把多个用户标签合并成 target。"""
+        src_tags = [t for t in _canonical_tags(sources) if not _is_system_tag(t)]
+        dst_tags = [t for t in _canonical_tags(target) if not _is_system_tag(t)]
+        if not src_tags or len(dst_tags) != 1:
+            return 0
+        target_tag = dst_tags[0]
+        rows = list(self.conn.execute("SELECT source_url, user_tags FROM sources"))
+        n = 0
+        with self.conn:
+            for row in rows:
+                current = _normalize_tags(row["user_tags"])
+                if not any(t in src_tags for t in current):
+                    continue
+                merged = _merge_group([], [target_tag if t in src_tags else t for t in current])
+                if merged != (row["user_tags"] or ""):
+                    self.conn.execute(
+                        "UPDATE sources SET user_tags=?, updated_at=? WHERE source_url=?",
+                        (merged, now(), row["source_url"]))
+                    n += 1
+        return n
+
+    def delete_user_tag(self, tag: str) -> int:
+        """从所有源移除一个用户标签。"""
+        tags = _canonical_tags(tag)
+        if len(tags) != 1 or _is_system_tag(tags[0]):
+            return 0
+        rows = list(self.conn.execute(
+            "SELECT source_url, user_tags FROM sources"))
+        n = 0
+        with self.conn:
+            for row in rows:
+                current = _normalize_tags(row["user_tags"])
+                if tags[0] not in current:
+                    continue
+                merged = _merge_group([], [t for t in current if t != tags[0]])
+                self.conn.execute(
+                    "UPDATE sources SET user_tags=?, updated_at=? WHERE source_url=?",
+                    (merged, now(), row["source_url"]))
+                n += 1
+        return n
+
+    def normalize_user_tags(self) -> int:
+        """全库用户标签规范化：trim、统一分隔、去重、保序。"""
+        rows = list(self.conn.execute(
+            "SELECT source_url, user_tags FROM sources"))
+        n = 0
+        with self.conn:
+            for row in rows:
+                old = row["user_tags"] or ""
+                new = _merge_group(
+                    [], [t for t in _canonical_tags(old) if not _is_system_tag(t)])
+                if new != old:
+                    self.conn.execute(
+                        "UPDATE sources SET user_tags=?, updated_at=? WHERE source_url=?",
+                        (new, now(), row["source_url"]))
+                    n += 1
+        return n
+
+    def tags_overview(self) -> List[Dict[str, Any]]:
+        """返回所有系统/用户标签及计数。"""
+        system_counts: Dict[str, int] = {}
+        user_counts: Dict[str, int] = {}
+        for row in self.conn.execute(
+                "SELECT group_name, user_tags FROM sources WHERE deleted_at = ''"):
+            for tag in _parse_group(row["group_name"]):
+                if _is_system_tag(tag):
+                    system_counts[tag] = system_counts.get(tag, 0) + 1
+            for tag in _normalize_tags(row["user_tags"]):
+                if _is_system_tag(tag):
+                    continue
+                user_counts[tag] = user_counts.get(tag, 0) + 1
+        out: List[Dict[str, Any]] = []
+        for tag, count in system_counts.items():
+            out.append({"tag": tag, "count": count, "kind": "system", "editable": False})
+        for tag, count in user_counts.items():
+            out.append({"tag": tag, "count": count, "kind": "user", "editable": True})
+        out.sort(key=lambda x: (0 if x["kind"] == "system" else 1, -x["count"], x["tag"]))
+        return out
+
+    def rebuild_system_tags(self, urls=None) -> int:
+        """按类型 + 最近校验结果 + 规则完整度重建系统标签；锁定行跳过。"""
+        from core.models import Health
+        from core.organizer import group_title
+        where, args = "", []
+        if urls is not None:
+            keys = self._tag_urls(urls)
+            if not keys:
+                return 0
+            where = " WHERE v.source_url IN (%s)" % ",".join("?" * len(keys))
+            args = keys
+        rows = list(self.conn.execute(
+            "SELECT v.id, v.source_type, v.group_name, v.health, v.stars, "
+            "v.quality_tags, v.system_tags_locked "
+            "FROM v_sources v" + where, args))
+        updates = []
+        for row in rows:
+            if row["system_tags_locked"]:
+                continue
+            health = row["health"] or Health.SKIPPED
+            base = group_title(int(row["source_type"] or 0), health, int(row["stars"] or 0))
+            quality = _normalize_tags(row["quality_tags"] or "")
+            if "规则完整" in quality:
+                base = _merge_group(_parse_group(base), ["规则完整"])
+            if base != (row["group_name"] or ""):
+                updates.append((base, row["id"]))
+        if not updates:
+            return 0
+        with self.conn:
+            self.conn.executemany("UPDATE sources SET group_name=? WHERE id=?", updates)
+        return len(updates)
 
     def stats(self) -> Dict[str, Any]:
         c = self.conn.execute
@@ -565,25 +927,24 @@ class Store:
 
 
     def export_by_filter(self, source_type=None, group: str = "", health: str = "",
-                         q: str = "", only_enabled: bool = False):
+                         q: str = "", only_enabled: bool = False, user_tag: str = ""):
         # 按筛选条件导出全部命中源（不分页）。
         # 走 v_sources 视图，这样 health 等只有视图才有的列也能筛。
-        where, args = self._where(source_type, group, health, q, only_enabled)
+        where, args = self._where(source_type, group, health, q, only_enabled,
+                                  user_tag=user_tag)
         # 不能 JOIN sources：两表都有 deleted_at/name/source_url 等列，
         # _where 生成的是不带表名的条件，SQLite 会报 ambiguous column name。
         # 用子查询取 raw_json，_where 里的列在 v_sources 里全都有。
-        sql = ("SELECT (SELECT raw_json FROM sources WHERE id = v.id) AS raw_json "
+        sql = ("SELECT (SELECT raw_json FROM sources WHERE id = v.id) AS raw_json, "
+               "v.group_name, v.user_tags "
                "FROM v_sources v %s ORDER BY v.id" % where)
         out, bad = [], 0
         for row in self.conn.execute(sql, args):
-            rj = row["raw_json"]
-            if not rj:
+            src = self._source_view(row["raw_json"], row["group_name"], row["user_tags"])
+            if not src:
                 bad += 1
                 continue
-            try:
-                out.append(json.loads(rj))
-            except Exception:
-                bad += 1
+            out.append(src)
         if bad:
             print("WARN export_by_filter: %d/%d 条 raw_json 缺失或无法解析，已跳过"
                   % (bad, bad + len(out)))

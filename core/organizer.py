@@ -13,6 +13,7 @@ import re
 from typing import Any, Dict, List
 
 from core.models import BookSourceRecord, Health, BOOK_SOURCE_TYPE_NAMES, HEALTH_NAMES
+from core.tags import extract_user_tags_from_group, merge_group, parse_group_tags
 
 # 分组排序：类型优先，健康次之，星级再之
 TYPE_ORDER = {0: 0, 2: 1, 1: 2, 3: 3, 4: 4}
@@ -77,49 +78,9 @@ def _clean_comment(comment: str) -> str:
 
 
 def quality_tags_str(rec: BookSourceRecord) -> str:
-    """把质量标签拼成可进 group 的短标签列表（不含星级）。"""
-    tags = [t for t in rec.quality_tags if t != "原创" or True]
+    """返回可进系统分组的质量标签；规则完整是系统标签。"""
+    tags = [t for t in rec.quality_tags if t in ("规则完整",)]
     return ",".join(tags) if tags else ""
-
-
-# 分组重建时保留的标签白名单（规范化规则：子串模式 -> 规范标签）。
-# 成人向（18禁/H漫/🔞/成人/涩）统一归一为 R18；其余按语义原样规范化。
-# 优先级：靠前的规则先匹配（如 r18 先于 18禁 等）。
-PRESERVED_TAG_RULES: List[tuple] = [
-    ("r18", "R18"), ("18禁", "R18"), ("18x", "R18"), ("成人", "R18"),
-    ("h漫画", "R18"), ("h漫", "R18"), ("涩图", "R18"), ("涩漫", "R18"),
-    ("🔞", "R18"),
-    ("正版", "正版"),
-    ("自制", "自制"), ("写源", "写源"),
-    ("番茄", "番茄"), ("七猫", "七猫"), ("起点", "起点"), ("懒人", "懒人"),
-    ("vpn", "VPN"), ("torrent", "Torrent"), ("精品", "精品"),
-    ("韩漫", "韩漫"), ("日漫", "日漫"), ("耽漫", "耽美"), ("耽美", "耽美"),
-    ("raw", "Raw"), ("pixiv", "Pixiv"), ("图源", "图源"),
-    # 仅发现：搜索接口不可用，源仅供发现/直达访问（add_source.py 自动标记）
-    ("仅发现", "仅发现"),
-]
-
-# 原分组标签的分隔符（逗号/分号/空格/竖线，全角半角）
-_TAG_SEPARATORS_RE = re.compile(r"[,，;；\s|+/&]+")
-
-
-def _preserved_group_tags(rec: BookSourceRecord) -> str:
-    """从原始分组提取需保留的标签（白名单规范化，成人向归一为 R18）。
-
-    原始分组按分隔符拆成片段，每个片段小写后逐一匹配 PRESERVED_TAG_RULES，
-    命中则追加规范化标签；去重保序后以逗号拼接返回。
-    """
-    orig = rec.group or ""
-    matched: List[str] = []
-    for seg in _TAG_SEPARATORS_RE.split(orig):
-        seg_lower = seg.lower()
-        for pattern, canonical in PRESERVED_TAG_RULES:
-            if pattern in seg_lower:
-                if canonical not in matched:
-                    matched.append(canonical)
-                break  # 一个片段只产出一个规范标签（优先靠前的规则）
-    return ",".join(matched)
-
 
 def sort_records(records: List[BookSourceRecord]) -> List[BookSourceRecord]:
     """按类型 + 健康状态 + 星级降序 + 名称排序。"""
@@ -162,19 +123,14 @@ def organize_sources(
     for rec in records:
         new_rec = dict(rec.raw)  # 浅拷贝，保留全部字段
         # 主分组：类型 + 生命周期状态；星级只在报告中展示
-        new_rec["bookSourceGroup"] = group_title(rec.source_type, rec.health, rec.quality_stars)
-        # 追加质量标签分组（逗号分隔实现对同一源的多个标签分组覆盖）
-        tags = quality_tags_str(rec)
-        # 保留原分组中的特殊标记（R18/18禁 等，防止整理后丢失）
-        preserved = ",".join(
-            tag for tag in _preserved_group_tags(rec).split(",")
-            if tag in ("R18", "正版", "原创", "仅发现")
-        )
-        # 质量标签不作为日常分组：规则完整、平台来源等可变证据只进报告。
-        tags = ",".join(t for t in tags.split(",") if t in ("原创",))
-        extra = [t for t in (preserved, tags) if t]
-        if extra:
-            new_rec["bookSourceGroup"] += "," + ",".join(extra)
+        # 系统标签 = 类型 + 健康状态 + 规则完整
+        system_group = group_title(rec.source_type, rec.health, rec.quality_stars)
+        system_quality = quality_tags_str(rec)
+        if system_quality:
+            system_group = merge_group(parse_group_tags(system_group), parse_group_tags(system_quality))
+        # 用户标签 = 原分组里所有非系统标签，永久保留，不再白名单过滤
+        user_tags = extract_user_tags_from_group(rec.group)
+        new_rec["bookSourceGroup"] = merge_group(parse_group_tags(system_group), user_tags)
         if keep_original_group:
             new_rec["bookSourceComment"] = _clean_comment(rec.raw.get("bookSourceComment", ""))
         result.append(new_rec)

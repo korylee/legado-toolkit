@@ -4,7 +4,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from backend.deps import get_store
-from backend.schemas import GroupPatch, SourcePage
+from backend.schemas import SourcePage, SourceSave, TagDelete, TagMerge, TagPatch, TagRename
 
 router = APIRouter()
 
@@ -14,6 +14,7 @@ def list_sources(
     type: Optional[int] = Query(None, description="0小说 1听书 2漫画 3视频"),
     health: str = Query("", description="ok/dead/auth/gfw"),
     group: str = "",
+    tag: str = "",
     q: str = "",
     only_enabled: bool = False,
     include_deleted: bool = False,
@@ -24,16 +25,22 @@ def list_sources(
 ):
     # 服务端筛选 + 排序 + 分页：不要把 3700 行全量传给浏览器
     total = st.count_query(source_type=type, group=group, health=health, q=q,
-                           only_enabled=only_enabled, include_deleted=include_deleted)
+                           only_enabled=only_enabled, include_deleted=include_deleted,
+                           user_tag=tag)
     items = st.query(source_type=type, group=group, health=health, q=q,
                      only_enabled=only_enabled, limit=limit, offset=offset, order=order,
-                     include_deleted=include_deleted)
+                     include_deleted=include_deleted, user_tag=tag)
     return {"total": total, "items": items}
 
 
 @router.get("/groups")
 def list_groups(st=Depends(get_store)):
     return [{"group": g, "count": n} for g, n in st.groups()]
+
+
+@router.get("/tags")
+def list_tags(st=Depends(get_store)):
+    return st.tags_overview()
 
 
 @router.get("/stats")
@@ -46,15 +53,64 @@ def get_detail(url: str, st=Depends(get_store)):
     src = st.get_source(url)
     if not src:
         raise HTTPException(404, "源不存在: %s" % url)
-    return {"source": src, "last_check": st.last_check(url)}
+    return {"source": src, "last_check": st.last_check(url),
+            "system_tags_locked": st.is_system_tags_locked(url)}
 
 
-@router.patch("/group")
-def patch_group(body: GroupPatch, st=Depends(get_store)):
-    # 同时更新列与 raw_json，保证 export 不失真
-    if not st.set_group(body.url, body.group):
-        raise HTTPException(404, "源不存在: %s" % body.url)
-    return {"ok": True}
+@router.post("/save")
+def save_source(body: SourceSave, st=Depends(get_store)):
+    from core.sanitize import clean_source
+
+    src = dict(body.source or {})
+    url = str(src.get("bookSourceUrl", "") or "").strip()
+    if not url:
+        raise HTTPException(400, "bookSourceUrl 不能为空")
+    clean_source(src)
+    was_locked = st.is_system_tags_locked(url)
+    st.upsert_sources([src])
+    if body.lock_system_tags:
+        st.set_system_tags_override([url], src.get("bookSourceGroup", "") or "")
+    elif was_locked:
+        st.clear_system_tags_override([url])
+    st.set_user_tags([url], body.user_tags or [])
+    return {"ok": True, "url": url}
+
+
+@router.post("/tags")
+def patch_tags(body: TagPatch, st=Depends(get_store)):
+    # 加标签 / 去标签，绝不覆盖其他标签。
+    added = st.add_user_tags(body.urls, body.add)
+    removed = st.remove_user_tags(body.urls, body.remove)
+    return {"added": added, "removed": removed}
+
+
+@router.post("/tags/rename")
+def rename_tag(body: TagRename, st=Depends(get_store)):
+    n = st.rename_user_tag(body.old, body.new)
+    if not n:
+        raise HTTPException(400, "标签不存在、为空或不是用户标签")
+    return {"updated": n}
+
+
+@router.post("/tags/merge")
+def merge_tags(body: TagMerge, st=Depends(get_store)):
+    n = st.merge_user_tags(body.sources, body.target)
+    if not n:
+        raise HTTPException(400, "没有可合并的用户标签")
+    return {"updated": n}
+
+
+@router.post("/tags/delete")
+def delete_tag(body: TagDelete, st=Depends(get_store)):
+    n = st.delete_user_tag(body.tag)
+    if not n:
+        raise HTTPException(400, "标签不存在或不是用户标签")
+    return {"updated": n}
+
+
+@router.post("/tags/normalize")
+def normalize_tags(st=Depends(get_store)):
+    return {"updated": st.normalize_user_tags()}
 
 
 @router.delete("")
