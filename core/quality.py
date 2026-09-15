@@ -231,8 +231,10 @@ def build_evidence(values: Sequence[str], matched_html: str = "") -> Dict[str, A
         "values_total": len([v for v in clean if v.strip()]),
         "chars": len(joined),
         # 用 finditer 计数而不是 findall：findall 会为每个中文字符实体化一个
-        # 字符串对象，150 万字符时实测峰值 97MB；finditer 几乎无额外分配。
-        # 正文全文不截断（MAX_VALUE_CHARS = 0），这个量级会真实出现
+        # 字符串对象。150 万字符实测——findall 峰值约 100MB，finditer 约 0MB
+        # （耗时两者相当，CPython 3.14 上均约 0.115s；**这是内存优化，不是速度优化**）。
+        # 正文全文不截断（MAX_VALUE_CHARS = 0），这个量级会真实出现，
+        # 而这个字段只用于统计展示——不值得为它瞬时吃上百 MB
         "cjk_chars": sum(1 for _ in _CJK_RE.finditer(joined)),
         # 段落信息只能从命中节点的 HTML 拿：replayer 的 text 动作会 re.sub(r"\s+", " ")
         # 把换行全抹掉，提取值里已经没有段落信息了
@@ -254,13 +256,17 @@ def _safe_int(value: Any, default: int = 0) -> int:
     """宽松取整。脏值（"" / [] / "abc" / None）一律降级为默认值。
 
     书源的 bookSourceType 是从外部 JSON 来的，历史上就出现过 ''/[]/字符串数字
-    这类脏值（见 core/sanitize.py 的说明）。本模块是全部源的共用闸门：
-    抛异常会中断整批校验，而降级为 0 最坏只是判定口径偏保守——按「不误杀」的
-    立场，后者才对。
+    这类脏值。core/sanitize.py 的 int 字段清单只覆盖 concurrentRate /
+    customOrder / respondTime / weight / lastUpdateTime，**不含 bookSourceType**，
+    所以本函数是该字段的唯一防线。本模块是全部源的共用闸门：抛异常会中断整批
+    校验，而降级为 0 最坏只是判定口径偏保守——按「不误杀」的立场，后者才对。
+
+    OverflowError 也要接住：json.loads('{"bookSourceType": 1e400}') 会解析出
+    inf，int(inf) 抛的正是 OverflowError，不接就会穿透这道闸门。
     """
     try:
         return int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return default
 
 

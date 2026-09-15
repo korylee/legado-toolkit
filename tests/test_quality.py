@@ -246,8 +246,19 @@ class DirtySourceTypeTests(unittest.TestCase):
         # "3" 是合法字符串数字，应识别为下载源而不是降级
         self.assertEqual(content_judge("3", ["x"]).verdict, Q.VERDICT_UNKNOWN)
 
+    def test_infinite_type_does_not_raise(self):
+        # json.loads('{"bookSourceType": 1e400}') → inf，int(inf) 抛 OverflowError，
+        # 必须同样降级为 0（文本源）：空规则 → fail
+        inf = float("inf")
+        self.assertEqual(content_judge(inf, [], rule="").verdict, Q.VERDICT_FAIL)
+        self.assertEqual(
+            Q.judge_list_step("toc", [], source_type=inf).verdict, Q.VERDICT_FAIL)
+
     def test_static_misconfig_survives_dirty_type(self):
-        self.assertEqual(Q.static_misconfig_notes({"bookSourceType": []}), [])
+        # 必须用 "abc" 这类 int() 真会抛的脏值："" / [] / None / {} 经
+        # `v or 0` 短路后都变成 0，裸 int() 也不抛，退化成假覆盖
+        # （把 _safe_int 换回裸 int 后这些用例照样全绿）
+        self.assertEqual(Q.static_misconfig_notes({"bookSourceType": "abc"}), [])
 
 
 class BuildEvidenceTests(unittest.TestCase):
