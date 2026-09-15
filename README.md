@@ -41,7 +41,7 @@ Legado（阅读）书源管理工具链：CLI + FastAPI + SQLite + Vue 3。
 - **Web 管理台**
   - 桌面 + 移动端适配
   - 书源列表、编辑、导入、导出、任务中心、诊断看板
-  - 规则试跑、快速新增源、标签管理、回收站
+  - 连 App 调试、快速新增源、标签管理、回收站
 
 ---
 
@@ -199,33 +199,15 @@ python cli/main.py
 ### 示例
 
 ```powershell
-# 联网校验
-python cli/main.py check -i candidates.json -o data/out/checked.json -c 50 -t 8
-
-# 整理分组
-python cli/main.py organize -i data/out/checked.json -r data/check_cache -o data/out/organized.json
-
-# 一条龙
-python cli/main.py run -i candidates.json -o data/out/checked.json -c 50
-
 # 合并两个源库
 python cli/main.py merge -i a.json -i b.json -o merged.json --mode replace
 
-# 清洗后导入 Legado
-python cli/main.py sanitize -i merged.json -o final.json
-
 # 新增源：URL 走 stdin，避免 shell 破坏百分号编码
 @('https://example.com/search?q=%E7%BB%8D%E5%AE%8B') | python cli/main.py add - --name "示例站" --type novel --no-ask
-
-# 安全导入外部源
-python cli/main.py import-sources --candidate candidates.json -i source_import.json --registry book_sources.sqlite3 --raw-dir data/imports/raw
-
-# 查看待审冲突 / 批准新源
-python cli/main.py review-imports --candidate candidates.json --registry book_sources.sqlite3 --list
-python cli/main.py review-imports --candidate candidates.json --registry book_sources.sqlite3 --approve-new "https://new.example"
 ```
 
-完整工作流见：[`WORKFLOW.md`](WORKFLOW.md)
+校验、整理、导入、审批、报告这些日常操作不在这里重复列举——按场景查命令比逐个记参数好用，
+见 [`WORKFLOW.md`](WORKFLOW.md) 的「标准操作速查」。
 
 ---
 
@@ -236,7 +218,7 @@ python cli/main.py review-imports --candidate candidates.json --registry book_so
 主要页面：
 
 - 书源列表：搜索、筛选、排序、分页、批量打标签、批量校验、导出
-- 编辑源：类型、系统标签、用户标签、规则编辑、全链路试跑、快速生成
+- 编辑源：类型、系统标签、用户标签、规则编辑、连 App 调试、快速生成
 - 分组/标签管理：标签总览、重命名、合并、删除、规范化
 - 导入/导出：外部导入、导出快照、固定订阅二维码
 - 任务中心：校验、诊断、AI 修复等后台任务进度
@@ -281,7 +263,8 @@ python cli/main.py review-imports --candidate candidates.json --registry book_so
 | GET /api/export/{uid}.json | 获取导出 JSON |
 | GET /api/feed/ok.json | 固定订阅：仅可用源 |
 | GET /api/feed/all.json | 固定订阅：全部启用源 |
-| POST /api/rules/chain | 规则全链路试跑 |
+| POST /api/rules/chain | 规则离线回放（本地粗略验证，跑不了 JS 规则） |
+| POST /api/rules/app-debug | 连 App 调试：借 App 的调试 WS 跑完整链路，含 JS 规则 |
 | GET /api/llm/profiles | LLM 模型配置 |
 | GET /docs | Swagger API 文档 |
 
@@ -382,20 +365,18 @@ pnpm build
 
 ## 开发约定
 
-- SQLite 是管理库，JSON 是交付格式，不要反过来把 JSON 当唯一事实来源。
-- 规则验证必须由规则回放器完成，AI 只负责提议。
-- 不支持的规则语法要显式返回原因，不能静默返回空。
-- URL 一律先规范化再作为 key，避免缓存/校验关联不上。
-- 前端改弹窗/抽屉的样式要写全局 `frontend/src/styles.css`——el-dialog 是 teleport 到 body 的，组件内的 scoped 样式够不到它内部。
+完整的约定清单以 [`AGENTS.md`](AGENTS.md) 为准，每条背后的「症状 → 根因 → 结论」见
+`skills/legado-source-lessons`。这里只留两条最容易被踩的：
+
 - 运行时数据全部放在 data/，不要提交数据库、缓存、导出和 API Key。
-- 改代码后建议运行：
+- 前端改弹窗/抽屉的样式要写全局 `frontend/src/styles.css`——el-dialog 是 teleport 到 body 的，组件内的 scoped 样式够不到它内部。
+
+改代码后建议运行：
 
 ```powershell
 .\.venv\Scripts\python.exe -c "import backend.app, core.store"
 .\.venv\Scripts\python.exe -m unittest discover -s tests -t . -v
 ```
-
-更多约定见 AGENTS.md。
 
 ---
 
