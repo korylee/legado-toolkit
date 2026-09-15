@@ -47,9 +47,13 @@ const pages = computed(() => (props.result && props.result.pages) || []);
 //: 差很多——本地只判「非空/不报错」且跑不了 JS 规则。**必须显式标出来**：
 //: 两者的三态视觉完全一样，不标就分不清哪份该信
 const isAppResult = computed(() => (props.result || {}).source === "app");
-//: App 推来的原始事件流（带 ``t`` 秒）。steps[].values 去掉的耗时前缀在这里，
-//: 排查「哪一步慢」「App 到底推了什么」只能看它
+//: App 推来的原始事件流。steps[].values 是它去掉耗时前缀后的段内文本，
+//: 排查「哪一步慢」「App 到底推了什么」只能看这里
 const events = computed(() => (props.result && props.result.events) || []);
+//: 默认子页签：App 结果看事件流，本地回放看提取结果（那两个 tab 各自只在
+//: 对应的结果下出现，选错会是一片空白）
+const defaultSubTab = computed(
+  () => (isAppResult.value && events.value.length ? "events" : "values"));
 
 const replaying = ref(false);
 const replayResult = ref(null);
@@ -149,7 +153,7 @@ const segments = computed(() => {
 watch(() => props.modelValue, (show) => {
   if (!show) return;
   activeStep.value = props.initialStep || (steps.value[0] && steps.value[0].name) || "";
-  subTab.value = "values";
+  subTab.value = defaultSubTab.value;
   renderLimit.value = RENDER_CHUNK;
   searchKey.value = "";
   activeHit.value = 0;
@@ -171,7 +175,7 @@ function gotoHit(i) {
 
 function selectStep(name) {
   activeStep.value = name;
-  subTab.value = "values";
+  subTab.value = defaultSubTab.value;
   renderLimit.value = RENDER_CHUNK;
   searchKey.value = "";
   activeHit.value = 0;
@@ -212,12 +216,6 @@ function gotoRuleField(step) {
 
 function loadMore() {
   renderLimit.value += RENDER_CHUNK;
-}
-
-//: 事件耗时。App 给的是相对秒数（浮点），没有就留空
-function fmtTime(t) {
-  const v = Number(t);
-  return Number.isFinite(v) ? "+" + v.toFixed(3) + "s" : "";
 }
 
 // 标签占比：后端给的是 0~1 的比值，展示成百分比才有单位
@@ -305,7 +303,20 @@ async function copyMatched() {
       </ul>
 
       <el-tabs v-model="subTab">
-        <el-tab-pane label="提取结果" name="values">
+        <!-- App 事件排第一，且 App 结果下不显示「提取结果」：
+             App 实测的 values 就是事件原文去掉耗时前缀，两个 tab 说的是同一件事；
+             而且那份 evidence 统计（标签占比之类）是对**事件文本**算的，
+             在 App 结果下没有意义。只有本地回放的 values 才是真正取到的值 -->
+        <el-tab-pane v-if="events.length" name="events">
+          <template #label>App 事件 ({{ events.length }})</template>
+          <p class="muted" style="margin: 6px 0">
+            App 推来的原始事件流，行首的 <span class="mono">[mm:ss.SSS]</span>
+            是 App 自己记的相对耗时。
+          </p>
+          <div v-for="(e, i) in events" :key="i" class="debug-event">{{ e.text }}</div>
+        </el-tab-pane>
+
+        <el-tab-pane v-if="!isAppResult" label="提取结果" name="values">
           <div v-if="current" class="debug-evidence">
             <span>条数 {{ current.evidence.values_total }}</span>
             <span>字符 {{ current.evidence.chars }}</span>
@@ -379,20 +390,6 @@ async function copyMatched() {
           <el-empty v-else description="这一步没有抓到页面" :image-size="60" />
         </el-tab-pane>
 
-        <!-- 只有 App 实测才有事件流（App 把过程逐条推过来）。这是唯一带耗时
-             的地方——「哪一步慢」「App 到底推了什么」都只能看它。以前这份数据
-             后端返回了却没处显示，要查得去跑 tools/probe_app_debug.py -->
-        <el-tab-pane v-if="events.length" name="events">
-          <template #label>App 事件 ({{ events.length }})</template>
-          <p class="muted" style="margin: 6px 0">
-            App 推来的原始事件流。「提取结果」是去掉耗时前缀后的段内文本，
-            这里保留时间与完整原文。
-          </p>
-          <div v-for="(e, i) in events" :key="i" class="debug-event">
-            <span class="debug-event-t">{{ fmtTime(e.t) }}</span>
-            <span class="debug-event-x">{{ e.text }}</span>
-          </div>
-        </el-tab-pane>
       </el-tabs>
     </template>
   </el-drawer>
@@ -413,14 +410,14 @@ async function copyMatched() {
   background: #f0f9eb; border: 1px solid #e1f3d8; border-radius: 4px;
   font-size: 13px;
 }
+/* 原样渲染：App 给的行首已带对齐的 [mm:ss.SSS]，再叠一层我们自己量的耗时
+   就是两套时间戳，反而更难读。pre-wrap 保住行内空格 */
 .debug-event {
-  display: flex; gap: 10px; padding: 2px 0;
+  padding: 1px 0;
   font-family: Consolas, Monaco, monospace; font-size: 12px;
   line-height: 1.6;
+  white-space: pre-wrap; word-break: break-all;
 }
-/* 时间列定宽右对齐，「哪一步慢」才能竖着扫出来 */
-.debug-event-t { flex: 0 0 76px; color: #909399; text-align: right; }
-.debug-event-x { white-space: pre-wrap; word-break: break-all; }
 .debug-reason { color: #f56c6c; margin: 4px 0; }
 .debug-notes { color: #e6a23c; margin: 4px 0; padding-left: 18px; line-height: 1.7; }
 .debug-evidence {
