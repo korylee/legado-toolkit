@@ -1020,7 +1020,7 @@ git commit -m "feat(replayer): 新增 extract_all_nodes 返回命中节点的 HT
     def test_template_reported_before_fourth_segment(self):
         """多个 {{...}} 里的 ## 会被跨串计数误判成四段式，必须先报模板。
 
-        `raw.count("##")` 是跨整串计数的：这条规则里有 5 个 `##`，全部落在
+        `raw.count("##")` 是跨整串计数的：这条规则看起来有三对 `##`，但它们全部落在
         两个 `{{...}}` 内部，根本没有四段式——但只有把 `{{` 检测排在前面，
         报出的原因才是对的。
         """
