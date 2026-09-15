@@ -2154,11 +2154,11 @@ from core.rules.replayer import extract_all_nodes
                 parts, hits, rule_error = extract_all_nodes(
                     c_html, _strip_rule_prefix(content_rule),
                     Q.MATCHED_NODES_LIMIT, Q.MAX_MATCHED_HTML_CHARS)
-                verdict = judge_content(int(record.source_type or 0), parts,
+                verdict = judge_content(Q.safe_int(record.source_type), parts,
                                         content_rule, "".join(hits), rule_error)
             else:
                 # 空规则：quality 会按类型分派（文本源 fail / 音图源 pass）
-                verdict = judge_content(int(record.source_type or 0), [], "")
+                verdict = judge_content(Q.safe_int(record.source_type), [], "")
             record.content_ok = verdict.checker_state      # True / False / None
             record.content_fail_reason = (
                 "" if verdict.verdict == "pass"
@@ -2190,8 +2190,11 @@ from core.rules.replayer import extract_all_nodes
                 Q.MATCHED_NODES_LIMIT, Q.MAX_MATCHED_HTML_CHARS)
             chapters = [str(c).strip() for c in chapters if str(c or "").strip()]
             record.chapter_count = len(chapters)
+            # rule= 是必须的：空规则是**源的配置错误**（fail），不是我们的能力边界
+            # （unknown）。不传的话这层信息就丢了，正是刚修掉的那个回归。
             toc_verdict = judge_list_step("toc", chapters, "".join(hits), rule_error,
-                                          int(record.source_type or 0))
+                                          Q.safe_int(record.source_type),
+                                          rule=chapter_list_rule)
             if toc_verdict.verdict != "pass":
                 record.toc_complete = toc_verdict.checker_state   # False 或 None
                 record.toc_fail_reason = (toc_verdict.reason
