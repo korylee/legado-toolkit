@@ -390,8 +390,14 @@ class Store:
             sql.append("AND (',' || user_tags || ',') LIKE ?")
             args.append("%," + user_tag + ",%")
         if health:
-            sql.append("AND health = ?")
-            args.append(health)
+            if health == "none":
+                # 「未校验」= checks 表里没有对应行，LEFT JOIN 出来是 NULL。
+                # 等值过滤（health = ?）表达不出这个条件——传 "none" 会变成
+                # `health = 'none'`，一个恒空的查询。
+                sql.append("AND health IS NULL")
+            else:
+                sql.append("AND health = ?")
+                args.append(health)
         if only_enabled:
             sql.append("AND enabled = 1")
         if q:
@@ -727,12 +733,17 @@ class Store:
         out: Dict[str, Any] = {"sources": self.count_sources(),
                                 "deleted": self.count_deleted()}
         out["checks"] = c("SELECT COUNT(*) AS c FROM checks").fetchone()["c"]
+        # 分布统计必须与 count_sources() 同口径（都只看未删除的源）。
+        # 不过滤的话 chip 相加会比「源总数」多出回收站里那些——用户一眼就会看到对不上。
         out["types"] = {str(r["source_type"]): r["c"] for r in c(
-            "SELECT source_type, COUNT(*) AS c FROM sources GROUP BY source_type")}
+            "SELECT source_type, COUNT(*) AS c FROM sources "
+            "WHERE deleted_at = '' GROUP BY source_type")}
         out["health"] = {str(r["health"]): r["c"] for r in c(
-            "SELECT health, COUNT(*) AS c FROM v_sources GROUP BY health")}
+            "SELECT health, COUNT(*) AS c FROM v_sources "
+            "WHERE deleted_at = '' GROUP BY health")}
         out["stars"] = {str(r["stars"]): r["c"] for r in c(
-            "SELECT stars, COUNT(*) AS c FROM v_sources GROUP BY stars")}
+            "SELECT stars, COUNT(*) AS c FROM v_sources "
+            "WHERE deleted_at = '' GROUP BY stars")}
         return out
 
     def backup(self, path: str) -> str:

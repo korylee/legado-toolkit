@@ -61,6 +61,7 @@ const HEALTH_CHIPS = [
   { value: "dead", label: "❌失效" },
   { value: "auth", label: "🔒需验证" },
   { value: "gfw", label: "🌐需翻墙" },
+  { value: "none", label: "未校验" },      // 后端 _where 认这个值 → health IS NULL
 ];
 
 // stats.health 的键是 str(health)：没有校验记录时 health 为 NULL，键就是字符串 "None"
@@ -236,12 +237,11 @@ onUnmounted(() => {
                 :class="{ active: query.health === h.value }" @click="onHealthChip(h.value)">
           {{ h.label }} <b>{{ healthCount(h.value) }}</b>
         </button>
-        <!-- 「未校验」= 没有校验记录（health IS NULL）。后端 _where 只做 health 等值过滤，
-             空串表示「不筛」，现有接口表达不了 IS NULL 这个条件；因此只展示数量、不给点，
-             免得点出一份错的结果。要能筛需在 core.store._where 里加分支。 -->
-        <span class="chip readonly" title="后端接口暂不支持按「未校验」筛选">
+        <!-- 「未校验」= 没有校验记录（health IS NULL），后端 _where 已支持值 "none" -->
+        <button type="button" class="chip" :class="{ active: query.health === 'none' }"
+                @click="onHealthChip('none')">
           未校验 <b>{{ healthCount("None") }}</b>
-        </span>
+        </button>
       </div>
       <span class="grow" />
       <el-badge :value="jobBadge" :hidden="!jobBadge" type="primary">
