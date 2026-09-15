@@ -123,7 +123,15 @@ function applyRawJson() {
 }
 
 function tabDot(name) {
-  if (name === "quick") return quickVerify.value ? (quickVerify.value.all_ok ? "ok" : "warn") : "";
+  if (name === "quick") {
+    // 与试跑卡片同口径的三态：有 fail 红；无 fail 但有附注（通过了但有疑点）黄；
+    // 其余绿。**不能再读 all_ok**——all_ok 只看 fail，会把「pass + 附注」显示成绿
+    const steps = (quickVerify.value && quickVerify.value.steps) || [];
+    if (!steps.length) return "";
+    if (steps.some((s) => s.verdict === "fail")) return "err";
+    if (steps.some((s) => s.has_notes)) return "warn";
+    return "ok";
+  }
   if (name === "basic") return "ok";
   if (name === "rules") {
     // 三态：有 fail 红；无 fail 但有附注（通过了但有疑点）黄；都没有才看规则是否填全
@@ -139,13 +147,11 @@ function tabDot(name) {
   return "";
 }
 
-// 三态圆点与徽章：fail 红 / unknown 灰 / pass 且有附注 黄 / 纯 pass 绿
-function dotClass(step) {
-  if (step.verdict === "fail") return "err";
-  if (step.verdict === "unknown") return "unknown";
-  return step.has_notes ? "warn" : "ok";
-}
+// 三态徽章：fail 红 / unknown 灰 / pass 且有附注 黄 / 纯 pass 绿
 function tagTypeOf(step) {
+  // 兜底：快速生成的结果存在 SQLite 里，可能是改动前产生的旧结果（无 verdict）。
+  // 不给兜底的话 `undefined === "fail"` 全不成立，旧结果的 fail 步会渲染成绿色
+  if (!step.verdict) return step.ok ? "success" : "danger";
   if (step.verdict === "fail") return "danger";
   if (step.verdict === "unknown") return "info";
   return step.has_notes ? "warning" : "success";
@@ -153,9 +159,10 @@ function tagTypeOf(step) {
 const STEP_LABELS = { search: "搜索", bookUrl: "详情链接", toc: "目录", content: "正文" };
 
 // 「全部通过」按 verdict 算，不再用 all_ok。**有附注的 pass 仍算通过**
-function allPassed() {
-  const steps = (testResult.value && testResult.value.steps) || [];
-  return steps.length > 0 && steps.every((s) => s.verdict === "pass");
+// 试跑与快速生成两份结果共用这一个判定，避免同一件事写两处
+function allPassed(steps) {
+  const list = steps || [];
+  return list.length > 0 && list.every((s) => s.verdict === "pass");
 }
 
 function expandTestFailures(res) {
@@ -198,6 +205,10 @@ watch(form, () => {
 watch(() => [props.modelValue, props.sourceUrl], async ([show, url]) => {
   if (!show) return;
   testResult.value = null;
+  // 关弹窗时抽屉会被 destroy-on-close 卸载，但 debugVisible 会留在 true，
+  // 下次打开就会自己弹出来；而且挂载时 modelValue 已是 true，
+  // 抽屉里那个没有 immediate 的 watch 不触发，:initial-step 会被忽略
+  debugVisible.value = false;
   loadTagOptions();
   activeTab.value = url ? "basic" : "quick";
   activeRuleTab.value = "search";
@@ -372,12 +383,17 @@ async function save() {
               </el-form-item>
             </el-form>
             <div v-if="quickVerify" class="quick-verify">
+              <!-- 与试跑卡片同一套三态渲染：同一个 as_step_dict 产出的数据，
+                   这里若还用 ok 两态，「pass + 附注」会显示成绿色，与试跑卡片矛盾 -->
               <div v-for="s in quickVerify.steps" :key="s.name" class="quick-step">
-                <el-tag size="small" :type="s.ok ? 'success' : 'danger'">{{ s.name }}</el-tag>
+                <el-tag size="small" :type="tagTypeOf(s)">{{ s.name }}</el-tag>
                 <span class="muted">{{ s.detail }}</span>
               </div>
-              <p v-if="quickVerify.all_ok === false" class="muted" style="margin: 6px 0 0">
-                验证未全部通过，可手动修改规则，或补充详情页 URL 后重试。
+              <p v-if="quickVerify.steps && quickVerify.steps.length"
+                 class="muted" style="margin: 6px 0 0">
+                <b>{{ allPassed(quickVerify.steps) ? "全部通过" : "未全部通过" }}</b>
+                <span v-if="quickVerify.steps.some((s) => s.has_notes)">（有疑点，见附注）</span>
+                <span v-if="!allPassed(quickVerify.steps)">，可手动修改规则，或补充详情页 URL 后重试。</span>
               </p>
             </div>
           </el-tab-pane>
@@ -628,7 +644,7 @@ async function save() {
                       style="margin-top: 10px"
                       title="规则已改动，结果已过期，请重跑" />
             <p v-else style="margin: 10px 0 0">
-              <b>{{ allPassed() ? "全部通过" : "未全部通过" }}</b>
+              <b>{{ allPassed(testResult.steps) ? "全部通过" : "未全部通过" }}</b>
               <span v-if="testResult.steps.some((s) => s.has_notes)"
                     class="muted">（有疑点，见附注）</span>
             </p>
