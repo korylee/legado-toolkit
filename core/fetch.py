@@ -25,21 +25,28 @@ def parse_source_header(raw: str) -> tuple:
     if not isinstance(raw, str):
         return {}, "header 不是字符串，已忽略"
 
-    text = raw.strip()
+    # BOM 必须先去：否则 `{"a":"b"}` 的 startswith("{") 为 False，会落到换行
+    # 分隔分支被解析成 key='{"a"' / value='"b"}' —— 一个垃圾头真的发给服务器，
+    # 比丢掉更糟（会被表现成「源坏了」）
+    text = raw.lstrip("﻿").strip()
     if not text:
         return {}, ""
     if "<js" in text or "@js:" in text:
         return {}, "header 含 JS 规则，需要 Legado 引擎，离线无法应用"
 
-    # JSON 写法
-    if text.startswith("{"):
+    # JSON 写法：看起来像 JSON（无论是否对象）就交给 json.loads 判，
+    # 解析失败要给原因，不能静默丢。
+    # 注意 `null` / `true` / `false` 是合法 JSON 字面量，但首字符既不特殊也不是
+    # 数字——漏掉它们，下面那条断言「必须给原因」的用例就会红。别删这个子条件。
+    if (text[:1] in ("{", "[", '"', "-") or text[:1].isdigit()
+            or text in ("null", "true", "false")):
         try:
             obj = json.loads(text)
-            if isinstance(obj, dict):
-                return {str(k): str(v) for k, v in obj.items() if v is not None}, ""
-            return {}, "header 的 JSON 不是对象"
         except Exception:
             return {}, "header 的 JSON 解析失败"
+        if isinstance(obj, dict):
+            return {str(k): str(v) for k, v in obj.items() if v is not None}, ""
+        return {}, "header 的 JSON 不是对象"
 
     # 换行分隔写法
     headers = {}

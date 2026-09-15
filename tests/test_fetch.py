@@ -71,6 +71,39 @@ class ParseSourceHeaderTests(unittest.TestCase):
         self.assertEqual(h, {})
         self.assertTrue(why)
 
+    def test_non_string_does_not_raise(self):
+        """非字符串是真实的脏值来源（书源 JSON 里的类型没人保证）。"""
+        for bad in (123, 1.5, True, [1, 2], {"a": 1}, b"User-Agent: X"):
+            with self.subTest(bad=repr(bad)):
+                h, why = parse_source_header(bad)
+                self.assertEqual(h, {})
+                self.assertTrue(why, "不能静默吞掉：%r" % (bad,))
+
+    def test_bom_json_is_parsed_not_shredded(self):
+        """BOM 开头的 JSON 必须先去 BOM。
+
+        不去的话 `startswith("{")` 为 False，会落到换行分隔分支，被解析成
+        key='\\ufeff{"a"' / value='"b"}' —— 一个**垃圾头会被真的发给服务器**，
+        比丢掉更糟（最终会表现成「源坏了」）。
+        """
+        h, why = parse_source_header('﻿{"User-Agent":"X"}')
+        self.assertEqual(h, {"User-Agent": "X"})
+        self.assertEqual(why, "")
+
+    def test_non_object_json_reports_reason(self):
+        """不是对象的 JSON 要给原因，不能静默返回空头。"""
+        for bad in ('[1, 2]', '"str"', '123', 'null'):
+            with self.subTest(bad=bad):
+                h, why = parse_source_header(bad)
+                self.assertEqual(h, {})
+                self.assertTrue(why, "必须说明为什么没用上：%s" % bad)
+
+    def test_value_containing_colon_is_kept(self):
+        """换行写法里值本身含冒号（URL 带端口）不能被截断。"""
+        h, why = parse_source_header("Referer: https://a.com:8080/x")
+        self.assertEqual(h, {"Referer": "https://a.com:8080/x"})
+        self.assertEqual(why, "")
+
 
 class FetchSignatureTests(unittest.TestCase):
     def test_accepts_new_kwargs(self):
