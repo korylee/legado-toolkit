@@ -2240,20 +2240,22 @@ git commit -m "refactor(checker): 判定收拢到 core.quality，删除 ruleCont
 > `:184` 只读 `all_ok`——剥离后这些都不受影响。
 
 **Files:**
+- Modify: `core/verify.py`（新增并导出 `strip_evidence`）
 - Modify: `backend/api/ops.py:117-119`
-- Test: `tests/test_ops_strip.py`（新建）
+- Modify: `core/repair/loop.py`（两处保留 verify 结果的地方）
+- Test: `tests/test_strip_evidence.py`（新建）
 
 - [ ] **Step 1: 写失败测试**
 
-创建 `tests/test_ops_strip.py`：
+创建 `tests/test_strip_evidence.py`：
 
 ```python
 # -*- coding: utf-8 -*-
-"""快速生成任务的结果必须剥掉大体积证据字段。"""
+"""剥离试跑证据字段。三处消费方共用同一个函数，所以它必须是一个纯函数。"""
 
 import unittest
 
-from backend.api.ops import strip_evidence
+from core.verify import strip_evidence
 
 
 class StripEvidenceTests(unittest.TestCase):
@@ -2277,19 +2279,38 @@ class StripEvidenceTests(unittest.TestCase):
         self.assertEqual(v["steps"][0]["matched_html"], "")
 
     def test_keeps_verdict_and_evidence(self):
+        """剥的只是证据原文；判定结论与附注必须原样保留。
+
+        消费方要靠 verdict / reason / notes 做决策，丢了它们等于把功能剥没了。
+        """
         v = strip_evidence(self._sample())
         s = v["steps"][0]
         self.assertEqual(s["verdict"], "pass")
         self.assertTrue(s["has_notes"])
         self.assertEqual(s["notes"], ["正文较短"])
         self.assertEqual(s["evidence"], {"chars": 5000})
-        self.assertEqual(v["all_ok"], True)
+        self.assertIs(v["all_ok"], True)
 
     def test_does_not_mutate_input(self):
+        """必须返回新对象。
+
+        `core/repair/loop.py` 会同时持有剥离前后的两份结果，
+        就地改写会把另一份也一起改掉。
+        """
         src = self._sample()
         strip_evidence(src)
-        self.assertEqual(len(src["pages"]), 1)      # 原对象未被改动
+        self.assertEqual(len(src["pages"]), 1)
         self.assertTrue(src["steps"][0]["values"])
+
+    def test_none_and_empty_are_passed_through(self):
+        """兜底：调用方可能传 None 或空 dict（如 ops.py 的 skipped 分支）。"""
+        self.assertIsNone(strip_evidence(None))
+        self.assertEqual(strip_evidence({}), {})
+
+    def test_step_without_evidence_fields_is_untouched(self):
+        """真实场景里并非每步都带 values / matched_html，缺键不能炸。"""
+        v = strip_evidence({"steps": [{"name": "search", "ok": False}], "all_ok": False})
+        self.assertEqual(v["steps"][0], {"name": "search", "ok": False})
 
 
 if __name__ == "__main__":
@@ -2299,24 +2320,36 @@ if __name__ == "__main__":
 - [ ] **Step 2: 跑测试，确认失败**
 
 ```bash
-.venv/Scripts/python.exe -m unittest tests.test_ops_strip -v
+.venv/Scripts/python.exe -m unittest tests.test_strip_evidence -v
 ```
 
 Expected: `ImportError: cannot import name 'strip_evidence'`
 
-- [ ] **Step 3: 实现**
+- [ ] **Step 3: 实现 —— 放在 `core/verify.py`**
 
-在 `backend/api/ops.py` 的模块级（import 之后、job handler 之前）新增：
+**为什么不在 `ops.py`**：证据的形状是在 `verify.py` 定义的，而且它有**三个**消费方
+（`ops.py` 的 jobs 表、`loop.py` 的内存常驻、将来可能还有别的）。放在某一条消费路径里，
+下一个人就得再抄一份——那正是本次改造反复在消灭的「同一件事写两处」。
+
+在 `core/verify.py` 的 `verify_chain` **之后**新增：
 
 ```python
-def strip_evidence(verify_result: dict) -> dict:
-    """剥掉试跑结果里的大体积证据字段，供「快速生成」任务使用。
+def strip_evidence(verify_result):
+    """剥掉试跑结果里的大体积证据字段，**只留判定结论**。
 
-    该结果会写进 SQLite 的 result_json 并经 SSE 推送（runner.py:51 /
-    jobs.py:47），整页 HTML 与正文全文会让它膨胀到几 MB。
-    判定结论（verdict / reason / notes / evidence）完整保留，只丢证据原文。
+    三处消费方都需要它，原因各不相同但都是「留不住」：
+      - ``backend/api/ops.py``：结果会写进 SQLite 的 ``result_json`` 并经 SSE 推送
+        （``jobs/runner.py:51`` / ``api/jobs.py:47``），几 MB 会撑爆 jobs 表与推送流
+      - ``core/repair/loop.py``：``before`` / ``out["after"]`` / ``history[]``（最多 3 轮）
+        各持一份完整结果，``repair_many`` 还用 ``asyncio.gather`` 把全部结果留在内存里
+        ——百源级修复就是数百 MB 常驻
+      - 将来任何把试跑结果落库/落历史的地方
 
-    返回**新对象**，不改动入参（测试会守住这一点）。
+    保留 ``verdict`` / ``reason`` / ``notes`` / ``has_notes`` / ``evidence`` / ``ok`` /
+    ``all_ok`` / 其余标量字段；只清空 ``pages[].html``、``steps[].values``、
+    ``steps[].matched_html`` 这三处原文。
+
+    **返回新对象，不改动入参**——``loop.py`` 会同时持有剥离前后两份。
     """
     if not verify_result:
         return verify_result
@@ -2329,30 +2362,57 @@ def strip_evidence(verify_result: dict) -> dict:
     return {**verify_result, "steps": steps, "pages": []}
 ```
 
-然后把 `backend/api/ops.py:117-119` 附近改为：
+并加进 `core/verify.py` 的 `__all__`（若该文件没有 `__all__` 则跳过此步）。
+
+- [ ] **Step 4: 接进 `backend/api/ops.py`**
+
+把 `backend/api/ops.py:117-119` 附近改为：
 
 ```python
         if verify:
             v = await asyncio.to_thread(verify_chain, source, keyword, detail_url, pick)
-            # 快速生成的结果会写库并走 SSE，剥掉体积大的证据字段；判定结论完整保留
+            # 快速生成的结果会写进 jobs 表并走 SSE，剥掉体积大的证据字段；判定结论完整保留
             v = strip_evidence(v)
         else:
             v = {"steps": [], "all_ok": None, "skipped": True}
 ```
 
-- [ ] **Step 4: 跑测试**
+（import 改为 `from core.verify import verify_chain, strip_evidence`。）
+
+- [ ] **Step 5: 接进 `core/repair/loop.py`**
+
+先**读一遍** `loop.py`，确认这三处只读 `name` / `ok` / `detail` / `all_ok`——
+剥离后它们都不受影响：
+- `:62-63` `verify.get("steps")` 里读 `s.get("name"|"ok"|"detail")`
+- `:184` `v.get("all_ok")`
+- `:269` `[s for s in (verify.get("steps") or []) if not s.get("ok")]`
+
+然后在**结果被留下之前**剥：
+- `:144` 的 `before = verify_fn(...)` 之后
+- `:200` 附近组装 `out["after"]` 之前
+
+即：凡是把 `verify_chain` 的返回值**存进变量并跨轮持有**的地方，都套一层
+`strip_evidence(...)`。**不要**剥完再传给 `build_user_prompt`——它本来就只读
+`name/ok/detail`，剥不剥都一样，但剥了更省。
+
+> ⚠️ **别剥了 `before` 之后又拿它跟 `after` 做「证据级」比对**——当前代码只比
+> `all_ok` 与失败项，不碰证据原文；改动时确认这一点仍然成立。
+
+- [ ] **Step 6: 跑测试**
 
 ```bash
-.venv/Scripts/python.exe -m unittest tests.test_ops_strip -v
+.venv/Scripts/python.exe -m unittest tests.test_strip_evidence -v
+.venv/Scripts/python.exe -m unittest discover -s tests -t .
 ```
 
-Expected: `OK`
+Expected: 全过（基线 209 条 + 新增）。特别确认 `tests/test_repair.py` 与
+`tests/test_feed.py` 不变红——它们覆盖 `loop.py` 的路径。
 
-- [ ] **Step 5: 提交**
+- [ ] **Step 7: 提交**
 
 ```bash
-git add backend/api/ops.py tests/test_ops_strip.py
-git commit -m "feat(ops): 快速生成任务剥离试跑证据字段，避免撑爆 jobs 表与 SSE"
+git add core/verify.py backend/api/ops.py core/repair/loop.py tests/test_strip_evidence.py
+git commit -m "feat(verify): 提取 strip_evidence 并接进 ops 与 repair 循环，避免证据撑爆 jobs 表与内存"
 ```
 
 ---
