@@ -27,12 +27,21 @@ const visible = computed({
 const isDuplicate = ref(false);
 // isNew 有两个真值来源：真正的新建（无 sourceUrl），以及从编辑态切过来的「另存」。
 const isNew = computed(() => isDuplicate.value || !props.sourceUrl);
+// App 的 IP 存 localStorage：它基本不变，每次打开弹窗重填一遍没有意义。
+// 键名带 legado 前缀，避免同域下与别的应用串味。
+const APP_HOST_STORAGE_KEY = "legado.appHost";
+// 读回上次填过的 IP。隐私模式等 localStorage 不可用的场景静默降级成空值
+function readAppHost() {
+  try { return localStorage.getItem(APP_HOST_STORAGE_KEY) || ""; } catch (e) { return ""; }
+}
+
 const loading = ref(false);
-const testing = ref(false);
-const appHost = ref("");            // App 的 IP（连 App 调试用）
+const appHost = ref(readAppHost());  // App 的 IP（连 App 调试用）
 const appDebugging = ref(false);
 const testKey = ref("我的");
-const testDetailUrl = ref("");
+// 发现页 URL：填了走发现链路，留空走搜索链路。**一个输入框决定，不加开关**——
+// 快速生成页签那个「仅发现模式」开关不在这张卡片上，多一个开关只会让人对不上号
+const testExploreUrl = ref("");
 const testResult = ref(null);
 const testStale = ref(false);      // 规则已改动，结果过期
 const debugVisible = ref(false);   // 调试抽屉
@@ -49,6 +58,18 @@ const quickLoading = ref(false);
 const quickProgress = ref("");
 const quickVerify = ref(null);
 let quickStop = null;
+
+// App IP 输入后立刻回写 localStorage（存 trim 后的值）。清空则删掉键——
+// 下次打开就是干净的空值，点「连 App 调试」会正常给出「请先填 App 的 IP」。
+watch(appHost, (value) => {
+  const host = String(value || "").trim();
+  try {
+    if (host) localStorage.setItem(APP_HOST_STORAGE_KEY, host);
+    else localStorage.removeItem(APP_HOST_STORAGE_KEY);
+  } catch (e) {
+    // 写不进去不影响本次调试，只是下次要重填
+  }
+});
 
 // 类型键名对齐后端 TYPE_MAP：3 是「只提供下载服务的网站」（file），不是视频
 const TYPE_KEYS = { 0: "novel", 1: "audio", 2: "manga", 3: "file" };
@@ -225,7 +246,8 @@ function tagTypeOf(step) {
   if (step.verdict === "unknown") return "info";
   return step.has_notes ? "warning" : "success";
 }
-const STEP_LABELS = { search: "搜索", bookUrl: "详情链接", toc: "目录", content: "正文" };
+// explore 是发现链路的产出步（key 带 `发现::` 时后端才产出它）
+const STEP_LABELS = { search: "搜索", explore: "发现", bookUrl: "详情链接", toc: "目录", content: "正文" };
 
 // 整体汇总。**三态，不是二态**——原来只有「全部通过 / 未全部通过」，
 // 而 `unknown`（我们的工具回放不了）被算进「未通过」会误报：
@@ -404,38 +426,32 @@ async function quickGenerate() {
   }
 }
 
-async function testRun() {
-  testing.value = true;
-  testResult.value = null;
-  testStale.value = false;          // 新一轮开始，先清过期标记
-  try {
-    testResult.value = await api.post("/rules/chain", {
-      source: form.value,
-      keyword: testKey.value || "我",
-      detail_url: testDetailUrl.value || quickDetailUrl.value || "",
-      pick: 1,
-    });
-  } catch (e) {
-    testResult.value = { error: String(e.message) };
-  } finally {
-    testing.value = false;
-  }
-  expandTestFailures(testResult.value);
-}
-
-// 连 App 调试：跑不了 JS 规则的源只有 App 那边验得了（Rhino / cookie / webView
-// 全在 App 里）。结果**直接塞进 testResult**——后端返回的形状与 /rules/chain
-// 一致，所以卡片与调试抽屉零改动。
+// 连 App 调试：**唯一的调试入口**。
+//
+// 为什么撤掉那条本地离线试跑入口：我们对 Legado 语义的理解有偏差
+// （`{{}}` 是 JS 求值不是字符串替换、`ruleContent.image` 字段不存在、
+// `webView` 是 URL 规则选项、类型 3 是下载站……），而**本地跑出与 App 不同的
+// 结果时它不报错，只是安静地给出另一个答案**——那比没有结果更糟。
+// 跑不了 JS 规则的源更是只有 App 那边验得了（Rhino / cookie / webView 全在 App 里）。
+// 结果**直接塞进 testResult**——App 调试返回的形状与离线回放一致，
+// 所以卡片与调试抽屉零改动。
 async function appDebugRun() {
   const host = appHost.value.trim();
   if (!host) return ElMessage.warning("请先填 App 的 IP（App 通知栏里有）");
+  // 两个入口互斥，用「发现页 URL 是否为空」来分流：
+  // 填了 → 发现链路；留空 → 搜索链路（关键词参与，空则用默认「我」）。
+  // 发现链路的约定是 key 拼成 `发现::<发现页URL>`：Legado 的 Debug.kt
+  // 见 key 里含 "::" 就取 :: 之后的部分当发现页 URL（Debug.kt:246-250）。
+  // URL 里的 "://" 只有一个冒号，不会被误当成那个分隔符。
+  const exploreUrl = testExploreUrl.value.trim();
+  const key = exploreUrl ? `发现::${exploreUrl}` : (testKey.value.trim() || "我");
   appDebugging.value = true;
   testResult.value = null;
   testStale.value = false;
   try {
     // 传 form.value（当前编辑中的源）：它的 bookSourceUrl 来自详情接口，是
     // 导入原文——后端要拿它当 tag，规范化过的 URL 会让 App 静默无响应
-    const r = await appDebug(form.value, testKey.value || "我", host);
+    const r = await appDebug(form.value, key, host);
     // 连不上时后端返回的是 {source:"app", error:"..."}，不是 HTTP 错误；
     // 这里翻成卡片认得的形状（卡片读 testResult.error）
     testResult.value = r && r.error ? { error: r.error } : r;
@@ -794,25 +810,24 @@ async function doSave(s) {
       </el-col>
 
       <el-col :xs="24" :sm="24" :md="9">
-        <el-card shadow="never" header="全链路试跑" class="sticky-test">
+        <el-card shadow="never" header="连 App 调试" class="sticky-test">
           <div class="toolbar">
             <el-input v-model="testKey" size="small" placeholder="关键词" style="width: 110px" />
-            <el-input v-model="testDetailUrl" size="small" placeholder="详情页 URL（可选）"
+            <el-input v-model="testExploreUrl" size="small"
+                      placeholder="发现页 URL（留空 = 从搜索开始）"
                       style="flex: 1 1 150px" />
-            <el-button type="success" size="small" :loading="testing" @click="testRun">
-              全链路试跑
-            </el-button>
           </div>
           <p class="muted" style="margin: 8px 0 0">
-            搜索 → 取第一个结果 → 目录 → 第一章正文；仅发现模式可填详情页 URL。
+            两个入口二选一：<b>填了「发现页 URL」就走发现链路</b>，此时关键词不参与；
+            <b>留空则走搜索链路</b>（关键词 → 取第一个结果 → 目录 → 第一章正文）。
           </p>
           <!-- 连 App 调试：我们离线回放不了 JS 规则（<js> / @js:），
                而 App 内建的调试 WebSocket 能跑完整链路。IP 填 App 通知栏里
-               显示的那个（端口取 HTTP 端口 + 1，默认 1123）。 -->
+               显示的那个（端口取 HTTP 端口 + 1，默认 1123），填过就记住了。 -->
           <div class="toolbar" style="margin-top: 8px">
             <el-input v-model="appHost" size="small" placeholder="App 的 IP，如 192.168.1.5"
                       style="flex: 1 1 150px" />
-            <el-button type="warning" size="small" :loading="appDebugging"
+            <el-button type="primary" size="small" :loading="appDebugging"
                        @click="appDebugRun">
               连 App 调试
             </el-button>
@@ -823,7 +838,7 @@ async function doSave(s) {
           </p>
 
           <div v-if="!testResult" class="muted" style="padding: 22px; text-align: center">
-            改完规则点「全链路试跑」，按真实阅读路径验证。
+            改完规则点「连 App 调试」，让 App 按真实阅读路径跑一遍。
           </div>
           <template v-else-if="!testResult.error">
             <div v-for="s in testResult.steps" :key="s.name" class="quick-step">
