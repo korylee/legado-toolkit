@@ -1218,6 +1218,39 @@ class ParseSourceHeaderTests(unittest.TestCase):
         h, why = parse_source_header("这不是 header")
         self.assertEqual(h, {})
 
+    def test_non_string_does_not_raise(self):
+        """非字符串是真实的脏值来源（书源 JSON 里的类型没人保证）。"""
+        for bad in (123, 1.5, True, [1, 2], {"a": 1}, b"User-Agent: X"):
+            with self.subTest(bad=repr(bad)):
+                h, why = parse_source_header(bad)
+                self.assertEqual(h, {})
+                self.assertTrue(why, "不能静默吞掉：%r" % (bad,))
+
+    def test_bom_json_is_parsed_not_shredded(self):
+        """BOM 开头的 JSON 必须先去 BOM。
+
+        不去的话 `startswith("{")` 为 False，会落到换行分隔分支，被解析成
+        key='\\ufeff{"a"' / value='"b"}' —— 一个**垃圾头会被真的发给服务器**，
+        比丢掉更糟（最终会表现成「源坏了」）。
+        """
+        h, why = parse_source_header('﻿{"User-Agent":"X"}')
+        self.assertEqual(h, {"User-Agent": "X"})
+        self.assertEqual(why, "")
+
+    def test_non_object_json_reports_reason(self):
+        """不是对象的 JSON 要给原因，不能静默返回空头。"""
+        for bad in ('[1, 2]', '"str"', '123', 'null'):
+            with self.subTest(bad=bad):
+                h, why = parse_source_header(bad)
+                self.assertEqual(h, {})
+                self.assertTrue(why, "必须说明为什么没用上：%s" % bad)
+
+    def test_value_containing_colon_is_kept(self):
+        """换行写法里值本身含冒号（URL 带端口）不能被截断。"""
+        h, why = parse_source_header("Referer: https://a.com:8080/x")
+        self.assertEqual(h, {"Referer": "https://a.com:8080/x"})
+        self.assertEqual(why, "")
+
 
 class FetchSignatureTests(unittest.TestCase):
     def test_accepts_new_kwargs(self):
@@ -1255,22 +1288,35 @@ def parse_source_header(raw: str) -> tuple:
     含 JS（``<js`` / ``@js:``）时返回空头 + 原因。Legado 在 App 里有 Rhino 引擎
     可以执行（BaseSource.kt:102-124），我们离线做不到，所以只能标注为附注，
     **不因此判源失败**。
+
+    **本函数对任何输入都不抛异常。** 这个字段将来会被全部源共用，抛异常会中断
+    整批任务——所以非字符串（``123`` / ``[1,2]`` / ``{"a":1}`` / ``True`` / ``bytes``）
+    要挡在门口，而不是让它冒到 `str.strip()` 上炸掉。
     """
-    text = (raw or "").strip()
+    # 脏值防御：bookSourceUrl 之外的字段同样来自外部 JSON，什么类型都可能有
+    if raw is None:
+        return {}, ""
+    if not isinstance(raw, str):
+        return {}, "header 不是字符串，已忽略"
+
+    # BOM 必须先去：否则 `{"a":"b"}` 的 startswith("{") 为 False，会落到换行
+    # 分隔分支被解析成 key='{"a"' / value='"b"}' —— 一个垃圾头真的发给服务器，
+    # 比丢掉更糟（会被表现成「源坏了」）
+    text = raw.lstrip("﻿").strip()
     if not text:
         return {}, ""
     if "<js" in text or "@js:" in text:
         return {}, "header 含 JS 规则，需要 Legado 引擎，离线无法应用"
 
-    # JSON 写法
-    if text.startswith("{"):
+    # 看起来像 JSON（无论是否对象）：解析失败要给原因，不能静默丢
+    if text[:1] in ("{", "[", '"') or text[:1].isdigit():
         try:
             obj = json.loads(text)
-            if isinstance(obj, dict):
-                return {str(k): str(v) for k, v in obj.items() if v is not None}, ""
-            return {}, "header 的 JSON 不是对象"
         except Exception:
             return {}, "header 的 JSON 解析失败"
+        if isinstance(obj, dict):
+            return {str(k): str(v) for k, v in obj.items() if v is not None}, ""
+        return {}, "header 的 JSON 不是对象"
 
     # 换行分隔写法
     headers = {}
