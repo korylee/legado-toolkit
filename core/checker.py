@@ -44,6 +44,7 @@ from core import quality as Q
 from core.quality import rate_interval_ms
 # 探测深度的合法取值只在 settings_store 定义一份（那边同时供设置接口的收敛用）。
 # 依赖方向：checker → settings_store，反过去会把 aiohttp 拖进配置模块
+from core.settings_store import DEFAULTS as _SETTINGS_DEFAULTS
 from core.settings_store import PROBE_DEPTHS
 
 # 常见 User-Agent（规避简单 UA 拦截）
@@ -62,11 +63,15 @@ BLOCKED_STATUS = {403, 429, 401, 503, 406}
 # TTL 内一直命中缓存，看起来像修复失效。（v6 是同一理由：正文/目录判定收拢到
 # core.quality，底线改为「非空即通过」。）
 CACHE_VERSION = 7
-CACHE_TTL_DAYS = {
-    Health.OK: 14,
-    Health.AUTH: 7,
-    Health.GFW: 7,
-}
+
+#: 缓存有效期（天）：可用源留久一点，其余状态一律短 TTL——「待验证」「需代理复检」
+#: 长期停在旧结论上，比多校验几次更糟。
+#:
+#: **默认值只从 settings_store 取**（AGENTS.md 硬性约定 #8），Web 端可在设置里
+#: 覆盖并透传到 AsyncChecker；CLI 的 organize/report 与 cache_parity 不读设置，
+#: 走这里的默认值。
+DEFAULT_TTL_OK = _SETTINGS_DEFAULTS["check"]["cache_ttl_ok"]
+DEFAULT_TTL_OTHER = _SETTINGS_DEFAULTS["check"]["cache_ttl_other"]
 
 
 def classify_transport_error(error: str) -> str:
@@ -220,6 +225,8 @@ def is_cache_item_valid(
     item: Dict[str, Any],
     now: Optional[datetime] = None,
     min_depth: int = 1,
+    ttl_ok: int = DEFAULT_TTL_OK,
+    ttl_other: int = DEFAULT_TTL_OTHER,
 ) -> bool:
     """判断缓存是否仍可用于该书源。
 
@@ -244,7 +251,8 @@ def is_cache_item_valid(
     current_time = now or datetime.now()
     if checked_time > current_time:
         return False
-    ttl_days = CACHE_TTL_DAYS.get(str(item.get("health", "")), 7)
+    health = str(item.get("health", ""))
+    ttl_days = ttl_ok if health == Health.OK else ttl_other
     if current_time - checked_time > timedelta(days=ttl_days):
         return False
     # 深度不够必须重验。缓存里的 probe_depth 是**实际执行到的深度**
@@ -254,7 +262,7 @@ def is_cache_item_valid(
     #
     # 只对 OK 的源要求深度：非 OK 的源按 fail-fast 根本走不到深度验证
     # （check_one 里要求 health == OK 才继续），强制重验只是白打请求。
-    if str(item.get("health", "")) == Health.OK:
+    if health == Health.OK:
         if int(item.get("probe_depth", 1) or 1) < min_depth:
             return False
     return True
@@ -379,6 +387,8 @@ class AsyncChecker:
         test_titles: Optional[Dict[str, Dict[str, Any]]] = None,
         use_store: Optional[bool] = None,
         store_path: Optional[str] = None,
+        cache_ttl_ok: int = DEFAULT_TTL_OK,
+        cache_ttl_other: int = DEFAULT_TTL_OTHER,
     ):
         self.concurrency = concurrency
         self.timeout = timeout
@@ -396,6 +406,10 @@ class AsyncChecker:
         #           2=命中后验证目录完整度（参考表比例比对）
         #           3=再抽样一章验证正文可用性（速度+内容）
         self.probe_depth = probe_depth if probe_depth in PROBE_DEPTHS else 1
+        # 缓存有效期（天）。取值由调用方决定（Web 端从全局设置来），
+        # 这里不再自己读设置——checker 不该隐式依赖用户配置
+        self.cache_ttl_ok = cache_ttl_ok
+        self.cache_ttl_other = cache_ttl_other
         # 目录完整度参考表：{作品名: {"type": "novel|manga", "chapters": N}}，缺省内置 TEST_TITLES
         self.test_titles = test_titles or TEST_TITLES
         self._sem: Optional[asyncio.Semaphore] = None
@@ -950,7 +964,9 @@ class AsyncChecker:
         for r in records:
             # 键规范化后再查：缓存两侧的口径见 load_cache 的注释
             item = cache.get(_normalize_url(r.url))
-            if item and is_cache_item_valid(r, item, min_depth=self.probe_depth):
+            if item and is_cache_item_valid(r, item, min_depth=self.probe_depth,
+                                            ttl_ok=self.cache_ttl_ok,
+                                            ttl_other=self.cache_ttl_other):
                 restore_from_cache(r, item)
             else:
                 pending.append(r)

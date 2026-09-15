@@ -156,6 +156,8 @@ class CheckSettingsPatch(BaseModel):
     probe_search: Optional[bool] = None
     verify_ssl: Optional[bool] = None
     proxy: Optional[str] = None
+    cache_ttl_ok: Optional[int] = None
+    cache_ttl_other: Optional[int] = None
 
 
 class SettingsPatch(BaseModel):

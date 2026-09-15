@@ -68,14 +68,14 @@ async function restore() {
     <el-form v-if="form && limits" label-width="110px" size="small">
       <el-form-item label="并发数">
         <el-input-number v-model="form.concurrency" controls-position="right"
-                         :min="limits.concurrency[0]" :max="limits.concurrency[1]"
+                         :min="limits.concurrency?.[0]" :max="limits.concurrency?.[1]"
                          style="width: 160px" />
         <span class="muted" style="margin-left: 8px">同时发出的请求数</span>
       </el-form-item>
 
       <el-form-item label="单请求超时">
         <el-input-number v-model="form.timeout" controls-position="right"
-                         :min="limits.timeout[0]" :max="limits.timeout[1]"
+                         :min="limits.timeout?.[0]" :max="limits.timeout?.[1]"
                          style="width: 160px" />
         <span class="muted" style="margin-left: 8px">秒</span>
       </el-form-item>
@@ -105,6 +105,22 @@ async function restore() {
         <div class="muted">
           留空直连。只支持 http:// 与 https://（socks5 需要额外依赖，本项目未装）。
           <b>填了就是所有校验请求都走它</b>，直连能通的源也会绕一圈。
+        </div>
+      </el-form-item>
+
+      <el-form-item label="缓存有效期">
+        <el-input-number v-model="form.cache_ttl_ok" controls-position="right"
+                         :min="limits.cache_ttl_ok?.[0]" :max="limits.cache_ttl_ok?.[1]"
+                         style="width: 140px" />
+        <span class="muted">天（可用源）</span>
+        <el-input-number v-model="form.cache_ttl_other" controls-position="right"
+                         :min="limits.cache_ttl_other?.[0]" :max="limits.cache_ttl_other?.[1]"
+                         style="width: 140px; margin-left: 16px" />
+        <span class="muted">天（其他状态）</span>
+        <div class="muted">
+          有效期内直接复用校验结果、不重新请求。可用源留久一点；
+          其他状态（待验证/需验证/需代理复检）留短一点，免得旧结论一直挂着。
+          要这一次全部重测，用工具栏「校验参数 → 忽略缓存」。
         </div>
       </el-form-item>
     </el-form>

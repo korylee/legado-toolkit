@@ -38,6 +38,11 @@ DEFAULTS: Dict[str, Dict[str, Any]] = {
         "probe_search": True,
         "verify_ssl": True,
         "proxy": "",
+        #: 缓存有效期（天）。可用源留久一点；其余状态一律短 TTL——「待验证」
+        #: 「需代理复检」长期停在旧结论上，比多校验几次更糟。
+        #: 这两个数是**唯一权威**，core/checker.py 从这里引用默认值。
+        "cache_ttl_ok": 14,
+        "cache_ttl_other": 7,
     },
 }
 
@@ -52,6 +57,8 @@ LIMITS: Dict[str, tuple] = {
     "concurrency": (1, 200),
     "timeout": (1.0, 120.0),
     "probe_depth": PROBE_DEPTHS,
+    "cache_ttl_ok": (1, 365),
+    "cache_ttl_other": (1, 365),
 }
 
 #: 代理只认 http/https。**故意不含 socks5**：aiohttp 原生不支持（要 ``aiohttp_socks``，
@@ -146,6 +153,10 @@ _SPECS: Dict[tuple, Any] = {
     ("check", "verify_ssl"): lambda v: _to_bool(
         v, DEFAULTS["check"]["verify_ssl"]),
     ("check", "proxy"): _to_proxy,
+    ("check", "cache_ttl_ok"): lambda v: _to_int(
+        v, DEFAULTS["check"]["cache_ttl_ok"], *LIMITS["cache_ttl_ok"]),
+    ("check", "cache_ttl_other"): lambda v: _to_int(
+        v, DEFAULTS["check"]["cache_ttl_other"], *LIMITS["cache_ttl_other"]),
 }
 
 

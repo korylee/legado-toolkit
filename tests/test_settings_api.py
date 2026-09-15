@@ -92,7 +92,8 @@ class PatchSemanticsTests(SettingsApiTestCase):
         self.assertEqual(got["defaults"], S.DEFAULTS)
         # 只有「有区间/有枚举」的键需要下发约束；布尔与代理文本框没有上下界
         self.assertEqual(set(got["limits"]),
-                         {"concurrency", "timeout", "probe_depth"})
+                         {"concurrency", "timeout", "probe_depth",
+                          "cache_ttl_ok", "cache_ttl_other"})
         self.assertEqual(got["limits"]["probe_depth"], (1, 2, 3))
 
     def test_reset_endpoint_restores_defaults(self) -> None:

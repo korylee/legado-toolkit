@@ -48,6 +48,8 @@ async def run_check_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict
         # 设置里空串 = 直连；AsyncChecker 认的是 None，"" 会被原样递给 aiohttp。
         # 转换只在这一处，别在存储层也存成 None（那样「空串=直连」就没法显式表达了）
         proxy=cfg["proxy"] or None,
+        cache_ttl_ok=cfg["cache_ttl_ok"],
+        cache_ttl_other=cfg["cache_ttl_other"],
         use_store=True,
     )
     checker.refresh_cache = bool(payload.get("refresh_cache"))

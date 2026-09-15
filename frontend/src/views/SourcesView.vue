@@ -379,59 +379,64 @@ onUnmounted(() => {
       </el-badge>
     </div>
 
-    <!-- 桌面：完整筛选栏 -->
-    <div class="bar page-toolbar desktop-only" v-if="!isMobile">
-      <el-input class="w-search" v-model="query.q" placeholder="搜名称 / 域名" clearable
-                size="small" :prefix-icon="Search" @keyup.enter="search" />
-      <el-select class="w-type" v-model="query.type" placeholder="类型" clearable size="small">
-        <el-option v-for="t in sourceTypes" :key="t.value" :value="t.value" :label="t.tag" />
-      </el-select>
-      <el-select class="w-health" v-model="query.health" placeholder="健康度" clearable size="small">
-        <el-option v-for="h in HEALTH" :key="h.value" :value="h.value" :label="h.label" />
-      </el-select>
-      <el-select class="w-group" v-model="query.group" placeholder="分组" clearable filterable
-                 size="small">
-        <el-option v-for="g in groups" :key="g.group" :value="g.group"
-                   :label="g.group + ' (' + g.count + ')'" />
-      </el-select>
-      <el-select class="w-group" v-model="query.tag" placeholder="用户标签" clearable filterable
-                 size="small">
-        <el-option v-for="t in tags.filter((x) => x.kind === 'user')" :key="t.tag" :value="t.tag"
-                   :label="t.tag + ' (' + t.count + ')'" />
-      </el-select>
-      <el-select class="w-order" v-model="query.order" size="small">
-        <el-option value="-stars" label="星级 ↓" />
-        <el-option value="stars" label="星级 ↑" />
-        <el-option value="-checked_at" label="校验时间 ↓" />
-        <el-option value="name" label="名称 ↑" />
-      </el-select>
-      <el-button type="primary" size="small" @click="search">查询</el-button>
-      <el-button size="small" @click="reset">重置</el-button>
-      <span class="grow" />
-      <el-button size="small" :icon="Plus" @click="openNew">新建源</el-button>
-      <!-- 「这次怎么测」的唯一入口：参数覆盖 + 忽略缓存。生效时按钮上有计数徽标——
-           这些只存在内存里，不显示出来就成了「看不见的生效参数」。
-           原来「忽略缓存」挂在全量校验的 split-button 下拉里，那下拉只有这一项，
-           旁边又站着这个按钮，两个入口并列反而不知道该点哪个 -->
-      <el-popover v-model:visible="overrideVisible" trigger="click" :width="330"
-                  placement="bottom-end">
-        <template #reference>
-          <el-button size="small" :type="runOptionCount ? 'primary' : ''">
-            <el-icon style="margin-right: 4px; vertical-align: -2px"><Setting /></el-icon>
-            校验参数<span v-if="runOptionCount">（{{ runOptionCount }}）</span>
-          </el-button>
-        </template>
-        <CheckOverrideForm ref="overrideRef" v-model="checkOverride"
-                           v-model:refresh="refreshThisRun"
-                           @summary="overrideSummary = $event" />
-      </el-popover>
-      <el-button size="small" :icon="Refresh" :disabled="checking" @click="checkAll()">
-        全量校验
-      </el-button>
-      <el-button size="small" :icon="Upload" @click="exportVisible = true">导出/订阅</el-button>
-      <el-button size="small" :icon="Download" @click="importVisible = true">导入</el-button>
-      <el-button size="small" :icon="Delete" @click="trashVisible = true">回收站</el-button>
-      <el-button size="small" @click="tagManagerVisible = true">标签管理</el-button>
+    <!-- 桌面：筛选一行、操作一行。显式分行，不靠 flex-wrap 决定断点 -->
+    <div class="bar bar-rows page-toolbar desktop-only" v-if="!isMobile">
+      <div class="bar-row">
+        <el-input class="w-search" v-model="query.q" placeholder="搜名称 / 域名" clearable
+                  size="small" :prefix-icon="Search" @keyup.enter="search" />
+        <el-select class="w-type" v-model="query.type" placeholder="类型" clearable size="small">
+          <el-option v-for="t in sourceTypes" :key="t.value" :value="t.value" :label="t.tag" />
+        </el-select>
+        <el-select class="w-health" v-model="query.health" placeholder="健康度" clearable size="small">
+          <el-option v-for="h in HEALTH" :key="h.value" :value="h.value" :label="h.label" />
+        </el-select>
+        <el-select class="w-group" v-model="query.group" placeholder="分组" clearable filterable
+                   size="small">
+          <el-option v-for="g in groups" :key="g.group" :value="g.group"
+                     :label="g.group + ' (' + g.count + ')'" />
+        </el-select>
+        <el-select class="w-group" v-model="query.tag" placeholder="用户标签" clearable filterable
+                   size="small">
+          <el-option v-for="t in tags.filter((x) => x.kind === 'user')" :key="t.tag" :value="t.tag"
+                     :label="t.tag + ' (' + t.count + ')'" />
+        </el-select>
+        <el-select class="w-order" v-model="query.order" size="small">
+          <el-option value="-stars" label="星级 ↓" />
+          <el-option value="stars" label="星级 ↑" />
+          <el-option value="-checked_at" label="校验时间 ↓" />
+          <el-option value="name" label="名称 ↑" />
+        </el-select>
+        <el-button type="primary" size="small" @click="search">查询</el-button>
+        <el-button size="small" @click="reset">重置</el-button>
+      </div>
+
+      <div class="bar-row">
+        <el-button size="small" :icon="Plus" @click="openNew">新建源</el-button>
+        <!-- 「这次怎么测」的唯一入口：参数覆盖 + 忽略缓存。生效时按钮上有计数徽标——
+             这些只存在内存里，不显示出来就成了「看不见的生效参数」。
+             原来「忽略缓存」挂在全量校验的 split-button 下拉里，那下拉只有这一项，
+             旁边又站着这个按钮，两个入口并列反而不知道该点哪个 -->
+        <el-popover v-model:visible="overrideVisible" trigger="click" :width="330"
+                    placement="bottom-end">
+          <template #reference>
+            <el-button size="small" :type="runOptionCount ? 'primary' : ''">
+              <el-icon style="margin-right: 4px; vertical-align: -2px"><Setting /></el-icon>
+              校验参数<span v-if="runOptionCount">（{{ runOptionCount }}）</span>
+            </el-button>
+          </template>
+          <CheckOverrideForm ref="overrideRef" v-model="checkOverride"
+                             v-model:refresh="refreshThisRun"
+                             @summary="overrideSummary = $event" />
+        </el-popover>
+        <el-button size="small" :icon="Refresh" :disabled="checking" @click="checkAll()">
+          全量校验
+        </el-button>
+        <span class="grow" />
+        <el-button size="small" :icon="Upload" @click="exportVisible = true">导出/订阅</el-button>
+        <el-button size="small" :icon="Download" @click="importVisible = true">导入</el-button>
+        <el-button size="small" :icon="Delete" @click="trashVisible = true">回收站</el-button>
+        <el-button size="small" @click="tagManagerVisible = true">标签管理</el-button>
+      </div>
     </div>
 
     <!-- 移动端：搜索 + 筛选 + 新建 -->

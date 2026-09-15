@@ -91,6 +91,16 @@ body {
 }
 .bar .grow { flex: 1 1 auto; }
 
+/* 工具栏显式分两行：筛选 / 操作。
+   **不靠 flex-wrap 偶然决定断点**：1440px 下它本来就会换行，而 .grow 撑开的空档
+   会自己占掉一行，把操作按钮挤到第三行——「校验参数」和「全量校验」因此分处
+   第一行和第三行，等于白挨着。分行是结构，不该是布局的副产物。 */
+.bar-rows { flex-direction: column; align-items: stretch; }
+.bar-row {
+  display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+  width: 100%;
+}
+
 .w-search { width: 210px; }
 .w-type   { width: 116px; }
 .w-health { width: 124px; }
