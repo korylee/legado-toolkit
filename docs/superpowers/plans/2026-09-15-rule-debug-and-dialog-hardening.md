@@ -496,8 +496,8 @@ def build_evidence(values: Sequence[str], matched_html: str = "") -> Dict[str, A
         "values_total": len([v for v in clean if v.strip()]),
         "chars": len(joined),
         # 用 finditer 计数而不是 findall：findall 会为每个中文字符实体化一个
-        # 字符串对象。150 万字符实测——findall 峰值 102MB，finditer 约 0MB
-        # （耗时两者相当，CPython 3.14 上均约 0.115s；这是内存优化，不是速度优化）。
+        # 字符串对象。150 万字符实测——findall 峰值约 100MB，finditer 约 0MB
+        # （耗时两者相当，CPython 3.14 上均约 0.115s；**这是内存优化，不是速度优化**）。
         # 正文全文不截断（MAX_VALUE_CHARS = 0），这个量级会真实出现，
         # 而这个字段只用于统计展示——不值得为它瞬时吃上百 MB
         "cjk_chars": sum(1 for _ in _CJK_RE.finditer(joined)),
@@ -1403,16 +1403,19 @@ def _new_page(pages: dict, page_id: str, url: str, html: str,
 
 
 def _step(name: str, judgement, url: str = "", page_id: str = "",
-          values=None, matched_html: str = "") -> dict:
+          values=None, matched_html: str = "", rule_error: str = "") -> dict:
     """把 Judgement 摊平成 steps[] 的一项。
 
     **摊平口径只有一处**：``quality.Judgement.as_step_dict()``。这里只是个短名字，
     绝不要把字典字面量抄回来——「试跑」和「批量校验」各写一份映射，一处忘记
     同步 verdict / notes 就会重新分叉，那正是本次改造要消灭的「同源不同判」。
+
+    ``rule_error`` 必须从这里**透传**进去，不要走「先建字典、再事后赋值」——
+    那会让 `as_step_dict` 的入参形同虚设，两个口径又并存了。
     """
     return judgement.as_step_dict(
         name, url=url, page_id=page_id,
-        values=values or [], matched_html=matched_html,
+        values=values or [], matched_html=matched_html, rule_error=rule_error,
     )
 
 
@@ -1480,8 +1483,7 @@ def verify_chain(source: dict, keyword: str, detail_url: str = "",
             vals, hits, rule_error = extract_all_nodes(s_html, book_list_rule)
             j = Q.judge_list_step("search", vals, "".join(hits), rule_error, source_type)
             page_id = _new_page(pages, "search", search_url, s_html, charset=charset)
-            st = _step("search", j, search_url, page_id, vals, "".join(hits))
-            st["rule_error"] = rule_error
+            st = _step("search", j, search_url, page_id, vals, "".join(hits), rule_error)
             st["detail"] = j.reason or ("%d 条结果" % len(vals))
             steps.append(st)
             if not j.ok:
@@ -1524,8 +1526,7 @@ def verify_chain(source: dict, keyword: str, detail_url: str = "",
         chapters, hits, rule_error = extract_all_nodes(t_html, chapter_list_rule)
         j = Q.judge_list_step("toc", chapters, "".join(hits), rule_error, source_type)
         page_id = _new_page(pages, "detail", book_url, t_html, charset=charset)
-        st = _step("toc", j, book_url, page_id, chapters, "".join(hits))
-        st["rule_error"] = rule_error
+        st = _step("toc", j, book_url, page_id, chapters, "".join(hits), rule_error)
         st["detail"] = j.reason or ("%d 章" % len(chapters))
         steps.append(st)
         if not j.ok:
@@ -1553,8 +1554,7 @@ def verify_chain(source: dict, keyword: str, detail_url: str = "",
         texts, hits, rule_error = extract_all_nodes(c_html, content_rule)
         j = Q.judge_content(source_type, texts, content_rule, "".join(hits), rule_error)
         page_id = _new_page(pages, "chapter", ch_url, c_html, charset=charset)
-        st = _step("content", j, ch_url, page_id, texts, "".join(hits))
-        st["rule_error"] = rule_error
+        st = _step("content", j, ch_url, page_id, texts, "".join(hits), rule_error)
         st["detail"] = j.reason or ("%d 字符" % j.evidence.get("chars", 0))
         steps.append(st)
     except Exception as e:
