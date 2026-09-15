@@ -29,17 +29,35 @@ HEALTH_ORDER = {
 }
 
 
+#: ``Health`` -> 系统状态标签。
+#:
+#: **AUTH 单独一个「需验证」，不并进「待验证」。** 两者含义相反：AUTH 是**有结论**
+#: （站点拒绝了我们的请求：403/401/429/503、验证码页、登录墙），待验证是**没结论**
+#: （没校验过、超时、异常、无搜索规则）。合并过一阵子，后果是一个真在用的源被误判
+#: 成 AUTH 后，在编辑弹窗里和 3500 条从没校验过的源显示同一个标签，看不出区别。
+#:
+#: 这个往返现在是对称的：``infer_health_from_group`` 认得「需验证」→ AUTH，
+#: 这里 AUTH → 「需验证」。之前反向写回给的是「待验证」，读回来就丢了。
 STATUS_GROUP_NAMES = {
-    Health.OK: "可用", Health.AUTH: "待验证", Health.GFW: "需代理复检",
+    Health.OK: "可用", Health.AUTH: "需验证", Health.GFW: "需代理复检",
     Health.DEAD: "已失效", Health.NO_SEARCH: "待验证", Health.TIMEOUT: "待验证",
     Health.ERROR: "待验证", Health.SKIPPED: "待验证",
 }
 
 
 def infer_health_from_group(group: str) -> str:
-    """从旧分组迁移可确认的健康状态；无法确认时保守归为待验证。"""
+    """从旧分组迁移可确认的健康状态；**无法确认时归为 SKIPPED（→「待验证」）**。
+
+    兜底必须是「待验证」那一档，不能是 AUTH：AUTH 现在会显示成「需验证」，
+    是个肯定的断言。分组认不出来只说明**我们不知道**，把它说成"站点要验证"
+    是凭空造结论——那正是本模块先前把 AUTH 和「待验证」合并时埋下的坑。
+    """
     value = str(group or "")
-    if "需翻墙" in value or "被墙" in value or "🌐" in value:
+    # 「需代理复检」是 STATUS_GROUP_NAMES 里 GFW 的写法（group_title 就写这个），
+    # 少了它往返接不上：写出去是「需代理复检」，读回来落到兜底 → 被当成没结论。
+    # 旧分组里另有「需翻墙 / 被墙 / 🌐」的写法，一并认。
+    if ("需翻墙" in value or "被墙" in value or "🌐" in value
+            or "需代理复检" in value or "代理复检" in value):
         return Health.GFW
     if "失效" in value or "❌" in value:
         return Health.DEAD
@@ -47,7 +65,7 @@ def infer_health_from_group(group: str) -> str:
         return Health.AUTH
     if "✅" in value or "可用" in value:
         return Health.OK
-    return Health.AUTH
+    return Health.SKIPPED
 
 
 def group_title(source_type: int, health: str, stars: int = 0, style: str = "status") -> str:

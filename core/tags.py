@@ -10,7 +10,10 @@ from typing import Iterable, List, Sequence, Tuple
 SYSTEM_TYPE_TAGS = {"📖小说", "🎧听书", "🎨漫画", "📥下载"}
 # 有序定义：下发给 Web 前端与界面渲染都按这个顺序（set 无序，不能直接下发）。
 # set 由元组派生，保证判定与展示用的是同一份定义。
-SYSTEM_STATUS_TAG_ORDER: Tuple[str, ...] = ("可用", "待验证", "已失效", "需代理复检")
+#: 状态标签的顺序。**「需验证」是 AUTH 的标签**：站点拒绝了我们的请求
+#: （403/401/429/503、验证码页、登录墙），它有结论，与「待验证」（我们没结论）
+#: 是两回事。故意排在「需代理复检」旁边，两个都是「有结论、要人工处理」。
+SYSTEM_STATUS_TAG_ORDER: Tuple[str, ...] = ("可用", "待验证", "已失效", "需验证", "需代理复检")
 SYSTEM_QUALITY_TAG_ORDER: Tuple[str, ...] = ("规则完整",)
 SYSTEM_STATUS_TAGS = set(SYSTEM_STATUS_TAG_ORDER)
 SYSTEM_QUALITY_TAGS = set(SYSTEM_QUALITY_TAG_ORDER)
