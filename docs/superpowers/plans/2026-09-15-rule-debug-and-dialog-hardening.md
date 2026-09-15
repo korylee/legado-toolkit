@@ -1308,8 +1308,11 @@ def parse_source_header(raw: str) -> tuple:
     if "<js" in text or "@js:" in text:
         return {}, "header 含 JS 规则，需要 Legado 引擎，离线无法应用"
 
-    # 看起来像 JSON（无论是否对象）：解析失败要给原因，不能静默丢
-    if text[:1] in ("{", "[", '"') or text[:1].isdigit():
+    # 看起来像 JSON（无论是否对象）：解析失败要给原因，不能静默丢。
+    # 注意 `null` / `true` / `false` 是合法 JSON 字面量，但首字符既不特殊也不是
+    # 数字——漏掉它们，下面那条断言「必须给原因」的用例就会红。别删这个子条件。
+    if (text[:1] in ("{", "[", '"', "-") or text[:1].isdigit()
+            or text in ("null", "true", "false")):
         try:
             obj = json.loads(text)
         except Exception:
