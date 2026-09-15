@@ -446,7 +446,7 @@ class DirtySourceTypeTests(unittest.TestCase):
 # 方法：改坏源码的一行 → 跑**全量**用例 → 记录哪些用例变红。
 # 全绿 = 该变异存活 = 没有用例守这件事。全部 28 条都已被抓住。
 #
-#  变异（改坏了什么）                                        | 抓到的用例
+#  变异（改坏了什么）                                        | 专门守住它的用例
 #  ----------------------------------------------------------|------------------
 #  M1  Judgement.ok → `verdict == VERDICT_PASS`               | test_ok_only_false_on_fail；
 #                                                             | test_quality.test_ok_only_fail_is_false

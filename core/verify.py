@@ -131,7 +131,10 @@ def verify_chain(source: dict, keyword: str, detail_url: str = "",
         if misconfigs:
             for s in steps:
                 if s["name"] == "search":
-                    # 浅拷贝后再拼，避免同一列表被重复追加
+                    # 浅拷贝后再拼，避免就地改写调用方持有的同一个列表。
+                    # 注意：这**不能**防止「_done() 被调两次导致附注追加两份」——
+                    # 那只由「所有出口都是 return _done()」这条纪律保证
+                    # （对比 _cap_evidence 是显式去重的）。改出口时别破坏它。
                     s["notes"] = list(s["notes"]) + misconfigs
                     s["has_notes"] = True
                     break
