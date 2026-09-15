@@ -22,6 +22,8 @@ Legado（阅读）书源管理工具链：CLI + FastAPI + SQLite + Vue 3。
   - 异步批量校验书源可用性、搜索命中、目录/正文完整度
   - 支持代理复检、SSL 跳过、自定义测试集
   - 校验缓存可复用、可刷新、可禁用
+  - 严格遵守书源自己声明的 `concurrentRate` 限速；校验 / 试跑 / 连 App 调试 /
+    快速新增源四条抓取链路都遵守（声明了限速的源会慢一些）
 
 - **分组与标签**
   - 系统标签：类型、健康状态、规则完整度，自动重建
@@ -86,8 +88,7 @@ Legado（阅读）书源管理工具链：CLI + FastAPI + SQLite + Vue 3。
 ├─ data/                   运行时数据（已 gitignore）
 ├─ AGENTS.md               开发约定
 ├─ WORKFLOW.md             完整工作流
-├─ pyproject.toml
-└─ requirements.txt
+└─ pyproject.toml
 ```
 
 ---
@@ -119,7 +120,7 @@ uv run python -m backend
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
+pip install .
 .\.venv\Scripts\python.exe -m backend
 ```
 
@@ -132,8 +133,23 @@ pip install -r requirements.txt
 开发热重载：
 
 ```powershell
-$env:LEGADO_RELOAD = "1"
-uv run python -m backend
+uv run python -m backend --reload
+```
+
+热重载走 uvicorn 的 WatchFiles（基于 OS 文件事件，空闲不耗 CPU），且只监视代码目录
+（`backend/ core/ services/ cli/ tools/`），不碰 `data/`、`.venv/`、
+`frontend/node_modules/`——不限范围的话这一千多个目录都要被注册监视。
+
+`watchfiles` 列在正式依赖而不是可选 extra，是因为漏装时 uvicorn 会**静默**退回
+StatReload 轮询：每 0.25 秒把每个监视目录递归扫一遍 `*.py` 并逐个 stat，实测持续占
+约 4% 单核。启动时会打印警告提示这种情况。
+
+注意：重载会**中断进行中的后台任务**（校验/修复），别在做全量校验时开着。
+
+`--host` / `--port` 也可用命令行给，优先于环境变量：
+
+```powershell
+uv run python -m backend --host 127.0.0.1 --port 9000
 ```
 
 ### 3. 启动前端
@@ -218,7 +234,7 @@ python cli/main.py merge -i a.json -i b.json -o merged.json --mode replace
 主要页面：
 
 - 书源列表：搜索、筛选、排序、分页、批量打标签、批量校验、导出
-- 编辑源：类型、系统标签、用户标签、规则编辑、连 App 调试、快速生成
+- 编辑源：类型、健康状态（自动跟随/锁定）、标签、规则编辑、连 App 调试（含推送）、快速生成
 - 分组/标签管理：标签总览、重命名、合并、删除、规范化
 - 导入/导出：外部导入、导出快照、固定订阅二维码
 - 任务中心：校验、诊断、AI 修复等后台任务进度
@@ -236,9 +252,10 @@ python cli/main.py merge -i a.json -i b.json -o merged.json --mode replace
 其中：
 
 - 类型由 bookSourceType 决定，编辑类型后保存会自动重建类型标签
-- 健康状态可人工选择并锁定，校验任务不会覆盖
-- 选择自动后，会解除锁定并按最近校验结果重建
+- 健康状态默认自动跟随校验结果；可锁定，锁定后校验任务不再覆盖
+- 关掉锁定即交回校验结果，按最近一次校验重建
 - 用户标签独立存储，永远不会被系统标签重建覆盖
+- 用户标签按别名表归一（如「精品排版」→「精排」），编辑时即时提示
 
 ---
 
@@ -251,7 +268,9 @@ python cli/main.py merge -i a.json -i b.json -o merged.json --mode replace
 | GET /api/sources | 书源列表、筛选、分页 |
 | GET /api/sources/detail | 书源详情 |
 | POST /api/sources/save | 保存书源与标签 |
+| POST /api/import | 安全导入外部书源（新 URL 待校验 / 冲突留存 / 重复跳过） |
 | GET /api/sources/tags | 系统/用户标签总览 |
+| GET /api/sources/tags/meta | 系统标签枚举（类型/状态/质量）与用户标签别名表，前端不硬编码 |
 | POST /api/sources/tags | 批量加/去用户标签 |
 | POST /api/sources/tags/rename | 重命名用户标签 |
 | POST /api/sources/tags/merge | 合并用户标签 |
@@ -265,6 +284,9 @@ python cli/main.py merge -i a.json -i b.json -o merged.json --mode replace
 | GET /api/feed/all.json | 固定订阅：全部启用源 |
 | POST /api/rules/chain | 规则离线回放（本地粗略验证，跑不了 JS 规则） |
 | POST /api/rules/app-debug | 连 App 调试：借 App 的调试 WS 跑完整链路，含 JS 规则 |
+| POST /api/rules/app-preflight | 调试前预检：连不上 / App 里没有这个源 / 可以调试 |
+| POST /api/rules/app-push | 把源推送到 App（幂等，会改动 App 数据，需显式触发） |
+| POST /api/rules/replay-step | 用已抓到的 HTML 重放一步规则（不联网） |
 | GET /api/llm/profiles | LLM 模型配置 |
 | GET /docs | Swagger API 文档 |
 
@@ -299,9 +321,9 @@ $env:LEGADO_DATA_DIR = "D:\legado-data"
 
 | 环境变量 | 默认值 | 说明 |
 | :--- | :--- | :--- |
-| LEGADO_HOST | 0.0.0.0 | 后端监听地址 |
-| LEGADO_PORT | 8787 | 后端端口 |
-| LEGADO_RELOAD | 空 | 1 开启 Uvicorn 热重载 |
+| LEGADO_HOST | 0.0.0.0 | 后端监听地址（`--host` 优先）|
+| LEGADO_PORT | 8787 | 后端端口（`--port` 优先）|
+| LEGADO_RELOAD | 空 | 1/true/yes/on 开启热重载（`--reload` / `--no-reload` 优先）|
 | LEGADO_DATA_DIR | data/ | 运行时数据目录 |
 | LEGADO_LLM_CONFIG | data/config/llm_profiles.json | LLM 配置路径 |
 | LEGADO_LLM_API_KEY | 空 | LLM API Key（未配置 profile 时使用） |
@@ -383,7 +405,6 @@ pnpm build
 ## 相关文档
 
 - WORKFLOW.md：书源新增/导入 → 校验 → 整理 → 报告完整链路
-- CLEANUP.md：清理与迁移说明
 - AGENTS.md：Agent/开发约定
 - docs/：设计文档与实施计划
 - skills/：书源规则、工具链、安全写入技能

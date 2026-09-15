@@ -53,6 +53,7 @@ description: 在受限 agent 沙箱里安全写文件、改代码的传输通道
 | 反缩进方向搞反 | 类方法掉到模块级，hasattr(Class, m) 为假 | 包装函数内嵌 def 的层级等于类体层级，不要 dedent |
 | 三引号嵌套 | 外层字符串提前闭合，生成无效占位代码 | 拼接的 Python 里用 # 注释代替 docstring |
 | 换行写成字面量 | 文件里出现反斜杠-n 文本 | 用 chr(10) |
+| read_text/write_text 往返改已有文件 | **静默**把整个文件的行尾转成 CRLF（Windows 上 write_text 把 \n 写成 \r\n，read_text 又照常读回来，全程不报错） | 改已有文件用 `read_bytes`/`write_bytes`；非要用文本模式就显式 `newline=""`。改完对比一下兄弟文件的行尾习惯 |
 | 目标目录不存在 | Could not find a part of the path | 先 os.makedirs(d, exist_ok=True) |
 | commit message 含反引号或美元符 | fatal: Invalid path | 提交信息里不写反引号和美元符 |
 | 命令过长 | 随机解析失败，无任何输出 | 拆成多次调用 |

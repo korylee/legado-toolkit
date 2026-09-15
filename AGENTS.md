@@ -26,6 +26,31 @@
    这是迁移时踩过的真 bug：571 个源因为存了原始 URL 而关联不上校验记录。
 6. **改代码前确保 `git status` 干净**，改完立刻跑
    `python -c "import 模块"` 与 `python -m unittest discover -s tests -t .`。
+7. **系统标签枚举只在后端定义**（`core/tags.py`、`core/models.py`），
+   前端经 `GET /api/sources/tags/meta` 获取，不得再硬编码一份。
+   两边各存一份必然漂移——历史上书源类型就曾把 3 当成视频、还编出过
+   Legado 不存在的 4。调 `splitSystemUser()` **之前必须先 `await ensureTagMeta()`**：
+   拆分结果是存下来的快照，枚举没到位就拆会把系统标签存成用户标签且不再纠正。
+
+## 上游 App 源码（查证用）
+
+代码注释里大量 `Xxx.kt:行号` 指向「阅读」App 的源码。本地在
+`E:\Documents\GitHub\legado-with-MD3`——**不是本仓库的依赖**，只在查证时读它。
+
+查的时候**认符号不认行号**：行号会随上游改动漂移，注释里通常同时给了函数名 /
+异常名 / 注解 / 代码原文，用那个搜更可靠。引用前先确认该仓库当前版本。
+
+| 要查什么 | 去哪（前缀 `app/src/main/java/io/legado/app/`）|
+| :--- | :--- |
+| 调试链路分派、`key` 形态 | `model/Debug.kt` |
+| 规则解析（CSS / JSON / JS） | `model/analyzeRule/AnalyzeRule.kt` |
+| URL 与 webView 处理 | `model/analyzeRule/AnalyzeUrl.kt` |
+| 书源类型定义 | `constant/BookSourceType.kt` |
+| 正文抓取与分页 | `help/book/BookContent.kt` |
+| 校验口径 | `data/repository/BookSourceCheckRepository.kt` |
+| 书源表结构 | `data/dao/BookSourceDao.kt` |
+| Web 服务 HTTP 接口 | `web/KtorServer.kt`、`api/controller/BookSourceController.kt` |
+| 调试 WebSocket | `web/socket/BookSourceDebugWebSocket.kt` |
 
 ## 改文件的正确姿势
 

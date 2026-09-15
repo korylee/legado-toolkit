@@ -308,6 +308,6 @@ python main.py diagnose -i out/checked.json -o out/diagnose.md --only-dead -c 20
 **明确不支持的语法会返回原因（而不是静默返回空）**，调用方据此判为「无法验证」
 而非「规则失效」，避免误杀：`@js:`、`<js>`、`@xpath:`、`||` 备选规则、JSONPath `..`。
 
-> 注意：`beautifulsoup4` 是必需依赖（`requirements.txt` 已加）。此前缺失导致所有规则
+> 注意：`beautifulsoup4` 是必需依赖（`pyproject.toml` 已加）。此前缺失导致所有规则
 > 解析静默失败、深度验证（`--probe-depth 2/3`）实际未生效。
 
