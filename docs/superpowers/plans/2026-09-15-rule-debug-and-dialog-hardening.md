@@ -496,8 +496,9 @@ def build_evidence(values: Sequence[str], matched_html: str = "") -> Dict[str, A
         "values_total": len([v for v in clean if v.strip()]),
         "chars": len(joined),
         # 用 finditer 计数而不是 findall：findall 会为每个中文字符实体化一个
-        # 字符串对象。150 万字符实测——findall 峰值约 100MB，finditer 约 0MB
-        # （耗时两者相当，CPython 3.14 上均约 0.115s；**这是内存优化，不是速度优化**）。
+        # 字符串对象。150 万字符实测：峰值内存 findall 约 100MB、finditer 约 0MB。
+        # 本改动针对的是**内存**，不是速度——耗时差异随机器与测法浮动
+        # （同一段代码在不同机器上实测到过 1.0x 与 1.5x 两种结果），不要把它当性能优化引用。
         # 正文全文不截断（MAX_VALUE_CHARS = 0），这个量级会真实出现，
         # 而这个字段只用于统计展示——不值得为它瞬时吃上百 MB
         "cjk_chars": sum(1 for _ in _CJK_RE.finditer(joined)),
