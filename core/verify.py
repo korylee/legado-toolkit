@@ -7,6 +7,9 @@
 - 判定底线对齐 Legado 的调试（只判「非空 / 不报错」），见 core/quality.py
 - 证据含**提取值全文**，对齐 BookContent.kt:194-205 的「正文长度或全文」
 - steps[].ok 与 all_ok 保持旧语义（仅 fail → False），三个消费方零改动
+- 返回体带 ``local_approx: True``：本引擎是**离线回放**，结果只是粗略参考，
+  与 App 的真实行为可能有偏差——只有「连 App 调试」（core/app_debug.py）
+  才等同于 App 的结果。详见 ``verify_chain._done`` 里的注释
 """
 
 from core.constants import *
@@ -127,7 +130,19 @@ def verify_chain(source: dict, keyword: str, detail_url: str = "",
         steps[:] = _cap_evidence(steps, pages)
         return {"steps": steps,
                 "pages": list(pages.values()),
-                "all_ok": all(s["ok"] for s in steps)}
+                "all_ok": all(s["ok"] for s in steps),
+                # **本地粗略验证**的标记（恒为 True）。为什么要有它：
+                # 本函数是我们自己的**离线回放引擎**，与 Legado 的语义已经反复
+                # 对不上（{{}} 是 JS 求值不是字符串替换、webView 是 URL 规则的
+                # 选项、类型 3 是下载站……），而且它回放不了 ``<js>`` / ``@js:``
+                # 规则（那是 replayer 的能力边界）。所以这个结果只能当粗略参考，
+                # 与 App 的真实行为可能有偏差——**只有「连 App 调试」
+                # （core/app_debug.py:run_app_debug）才等同于 App 的结果**。
+                # 加在这里而不是各个消费方：三个离线消费方（services/add_source.py
+                # 生成候选源时的验证、core/repair/loop.py 判「修好没有」、
+                # backend/api/ops.py 的快速生成）没有 App 可替代，但都必须能一眼
+                # 看出这是本地结果。既有字段与语义一个都没动，纯新增。
+                "local_approx": True}
 
     search_tpl = src.get("searchUrl", "") or ""
     s_html = ""

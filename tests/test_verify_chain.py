@@ -259,7 +259,10 @@ class EarlyExitShapeTests(unittest.TestCase):
     def test_search_extract_fail_early_exit(self):
         src = source_with(ruleSearch={"bookList": ""})
         r = run_chain(src)
-        self.assertEqual(sorted(r.keys()), ["all_ok", "pages", "steps"])
+        # 四个键：前三个是消费方读的判定字段，local_approx 是**纯新增**的标记
+        # （「这是本地离线回放的结果」，见 LocalApproxFlagTests）
+        self.assertEqual(sorted(r.keys()),
+                         ["all_ok", "local_approx", "pages", "steps"])
         self.assertIsInstance(r["pages"], list)
         self.assertIs(r["all_ok"], False)
 
@@ -282,6 +285,38 @@ class EarlyExitShapeTests(unittest.TestCase):
         self.assertEqual(step_of(r, "search")["verdict"], Q.VERDICT_UNKNOWN)
         self.assertIs(step_of(r, "bookUrl")["ok"], False)
         self.assertIs(r["all_ok"], False)
+
+
+class LocalApproxFlagTests(unittest.TestCase):
+    """``local_approx`` 恒为 True——它标的是「这是本地离线回放出来的结果」。
+
+    为什么值得用例：这个字段是消费方**唯一**能分辨「本地粗略验证」与「连 App
+    调试」的标记（后者才等同于 App 的真实行为）。写死成 False、或只挂在 happy
+    path 上而漏了早退分支，都会让本地结果被当成真机结论——那正是这次改造要
+    消灭的误信。既有字段与语义一个都没动，这里守的是新增的那一个。
+    """
+
+    def test_local_approx_is_true_on_happy_path(self):
+        self.assertIs(run_chain()["local_approx"], True)
+
+    def test_local_approx_survives_every_early_exit(self):
+        """6 处早退都走 ``_done()``，标记不能只在走完全链时才有。"""
+        def boom(url, timeout=15, headers=None, charset="", proxy=""):
+            raise OSError("连接被拒绝")
+
+        with patch("core.verify.fetch", side_effect=boom):
+            r_fetch_fail = verify_chain(dict(SOURCE), "我")      # 抓取异常早退
+        self.assertIs(r_fetch_fail["local_approx"], True)
+        # 仅发现模式且没给 detail_url：bookUrl 步直接判失败后早退
+        r_no_detail = run_chain(source_with(searchUrl=""))
+        self.assertIs(r_no_detail["local_approx"], True)
+        self.assertIs(r_no_detail["all_ok"], False)              # 确实是早退那条链
+
+    def test_flag_survives_strip_evidence(self):
+        """``loop.py`` / ``ops.py`` 消费的是剥离后的结果，标记不能被剥掉。"""
+        from core.verify import strip_evidence
+
+        self.assertIs(strip_evidence(run_chain())["local_approx"], True)
 
 
 class FetchPassthroughTests(unittest.TestCase):

@@ -277,6 +277,12 @@ def run_add(url, name="", source_type="novel", group="📖新增源",
         print(f"\n🔍 全链路验证（{v_title}）...")
         try:
             v = verify_chain(source, keyword, detail_url=detail_for_toc, pick=pick)
+            # 只说清「这个结果是什么」，**不动任何既有输出行**——可能有脚本在解析它们。
+            # 之所以要提示：本结果是离线回放出来的（回放不了 <js>/@js: 规则），
+            # 与 App 的真实行为可能有偏差，别拿它当真机结论。
+            if v.get("local_approx"):
+                print("   ℹ️ 本地粗略验证（离线回放）：回放不了 <js>/@js: 的源，"
+                      "结论与 App 的真实行为可能有偏差，真机行为请以 App 里的调试为准。")
             for s in v["steps"]:
                 mark = "✅" if s["ok"] else "❌"
                 print(f"   {mark} {s['name']:<9} {s['detail']}")
