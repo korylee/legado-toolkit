@@ -161,7 +161,10 @@ class ExtractAllNodesTests(unittest.TestCase):
         _vals, hits, err = self._nodes(JSONTEXT, "$.data")
         self.assertEqual(err, "")
         self.assertEqual(len(hits), 1)
-        self.assertIn("list", hits[0])
+        # 整串断言，不用 assertIn：错选到根节点时整份 JSON 串同样含 "list"，
+        # 弱断言会照样通过
+        self.assertEqual(hits[0], '{"list": [{"name": "A", "url": "/a"}, '
+                                  '{"name": "B", "url": "/b"}]}')
 
     def test_unsupported_rule_returns_reason(self):
         _vals, hits, err = self._nodes(HTML, "@js:result")
@@ -176,7 +179,9 @@ class ExtractAllNodesTests(unittest.TestCase):
     def test_html_rule_returns_raw_response(self):
         """@html: 分支不做任何选择，整份响应体就是命中内容。
 
-        该分支此前无任何测试保护（变异测试证实：把它改成永假，原有测试全绿）。
+        该分支此前无任何测试保护——但它保护的具体是「整份响应体」这一语义：
+        把分支条件改成永假会让 err 变成「未知步骤：raw」从而报错，真正无覆盖的是
+        分支内那行 `hits = list(nodes)`（它被函数末尾的兜底掩盖，删掉测试仍全绿）。
         """
         vals, hits, err = self._nodes(HTML, "@html:")
         self.assertEqual(err, "")
