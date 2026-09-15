@@ -1342,14 +1342,19 @@ def fetch(url: str, timeout: int = 15,
       - ``headers``：书源自身的 header；缺 User-Agent 时补默认 UA
         （对齐 BaseSource.kt 缺 UA 补 UA 的行为）
       - ``charset``：优先用它解码，失败按常见编码回退
-      - ``proxy``：形如 ``http://host:port`` / ``socks5://host:port``；
-        留空走直连
+      - ``proxy``：形如 ``http://host:port``；留空走直连。
+        **只支持 http 代理**——urllib 的 ProxyHandler 不认 ``socks5://``
+        （会抛 ``unknown url type: socks5``）。项目别处（cli/main.py --proxy 帮助、
+        WORKFLOW.md、checker.py 注释）宣传的 socks5 同样不成立，是既有的文档失实，
+        不属本模块要修的范围，但这里**不要**再写 socks5 以免加深误导。
     """
     h = {"User-Agent": DEFAULT_UA,
          "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
          "Accept-Language": "zh-CN,zh;q=0.9"}
     if headers:
-        h.update({str(k): str(v) for k, v in headers.items() if v})
+        # 值为空（含纯空白）的键不覆盖默认值。用 if v 挡不住 " "，而 urllib 发送前
+        # 会 strip，结果服务端收到空 UA —— 与换行写法（已 strip）行为不一致
+        h.update({str(k): str(v) for k, v in headers.items() if str(v).strip()})
 
     req = urllib.request.Request(url, headers=h)
 
@@ -1366,7 +1371,10 @@ def fetch(url: str, timeout: int = 15,
 
     # charset 优先，其次按常见编码回退
     order = []
-    if charset:
+    # charset 与 header 同源（都取自书源 JSON），同样可能是脏值：
+    # 直接 .strip() 会让 charset=123 抛 AttributeError。试跑接线后会直接从
+    # source.get("charset") 传进来，所以这里必须挡
+    if isinstance(charset, str) and charset.strip():
         order.append(charset.strip().lower())
     order += ["utf-8", "gbk", "gb2312", "big5"]
     for enc in order:
