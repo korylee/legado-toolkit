@@ -90,6 +90,14 @@ def fetch(url: str, timeout: int = 15,
         h.update({str(k): str(v) for k, v in headers.items()
                   if v is not None and str(v).strip()})
 
+    # URL 里可能是**未编码的非 ASCII**（实测：连 App 调试时它给的搜索 URL 就是
+    # `...?q=我` 这种原样形态），而 urllib 发送前会按 ascii 编码 → 抛
+    # `'ascii' codec can't encode character`。必须在这里补一次编码。
+    #
+    # safe 保留全部 URL 结构字符**以及 `%`**：这样已经编码好的 `%E6%88%91`
+    # 不会被二次编码成 `%25E6...`，对纯 ASCII 的 URL 完全幂等。
+    url = urllib.parse.quote(url, safe=":/?#[]@!$&'()*+,;=%~")
+
     req = urllib.request.Request(url, headers=h)
 
     # 代理：checker 一直支持 proxy，verify 之前不支持——这会让需要代理的源

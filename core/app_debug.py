@@ -389,6 +389,10 @@ def fetch_debug_pages(steps: Sequence[Dict[str, Any]], source: Optional[Dict[str
         step["notes"] = list(step.get("notes", [])) + [text]
         step["has_notes"] = True
 
+    # 去重看**已尝试过的 URL**，不是「已登记的 page_id」。
+    # 只看 page_id 的话，第一次抓超时（没登记）会让后面共用同一 URL 的步
+    # **再抓一次**——实测详情页就是这样被抓了两遍，白等一个超时。
+    tried: set = set()
     for step in steps:
         if len(pages) >= MAX_PAGES:
             break
@@ -396,6 +400,14 @@ def fetch_debug_pages(steps: Sequence[Dict[str, Any]], source: Optional[Dict[str
         page_id = str(step.get("page_id", "") or "")
         if not url or not page_id or page_id in pages:
             continue            # 没抓到 URL / 该页已登记（如目录页与详情页同 id）
+        if url in tried:
+            # 同一个页面已经抓过（成功或失败），别重复抓——把结果共享给它
+            for sid, p in pages.items():
+                if p.get("url") == url:
+                    step["page_id"] = sid
+                    break
+            continue
+        tried.add(url)
         try:
             html = fetch(url, headers=headers, charset=charset, proxy=proxy)
         except Exception as e:

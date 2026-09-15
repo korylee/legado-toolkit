@@ -146,6 +146,55 @@ class FetchBehaviorTests(unittest.TestCase):
         self.assertIn("User-agent", req.headers)
         self.assertEqual(req.headers["User-agent"], F.DEFAULT_UA)
 
+    def test_non_ascii_url_is_percent_encoded(self):
+        """URL 里的中文要编码，否则 urllib 发送时按 ascii 编码直接抛。
+
+        实测来源：连 App 调试时 App 给的搜索 URL 就是 `...?q=我` 这种**未编码**
+        原样形态，不补这一步的话 search 页永远抓不到（报 'ascii' codec can't
+        encode character）。
+        """
+        sent = {}
+
+        class FakeResp:
+            def read(self): return b"x"
+
+            def __enter__(self): return self
+
+            def __exit__(self, *a): return False
+
+        def fake_urlopen(req, timeout=None):
+            sent["req"] = req
+            return FakeResp()
+
+        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            F.fetch("https://a.com/so/search.php?q=我")
+        self.assertIn("%E6%88%91", sent["req"].full_url)
+        self.assertNotIn("我", sent["req"].full_url)
+
+    def test_already_encoded_url_is_not_double_encoded(self):
+        """已经编码好的 %XX 不能再编一遍（否则变成 %25XX，URL 就错了）。
+
+        这条与上一条是一对：编码必须**幂等**。
+        """
+        sent = {}
+
+        class FakeResp:
+            def read(self): return b"x"
+
+            def __enter__(self): return self
+
+            def __exit__(self, *a): return False
+
+        def fake_urlopen(req, timeout=None):
+            sent["req"] = req
+            return FakeResp()
+
+        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            F.fetch("https://a.com/so/search.php?q=%E6%88%91&p=2#frag")
+        self.assertEqual(
+            sent["req"].full_url,
+            "https://a.com/so/search.php?q=%E6%88%91&p=2#frag")
+
     def test_headers_are_merged(self):
         req = self._capture(headers={"Referer": "https://a.com"})
         self.assertEqual(req.headers["Referer"], "https://a.com")
