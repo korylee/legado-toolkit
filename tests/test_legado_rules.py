@@ -108,5 +108,44 @@ class ImageHeuristicTests(unittest.TestCase):
         self.assertFalse(R.looks_like_image_rule("id.content@text"))
 
 
+class ExtractAllNodesTests(unittest.TestCase):
+    """命中片段：规则选中的 DOM 块的 outerHTML。"""
+
+    def test_content_rule_returns_matched_block(self):
+        vals, hits, err = R.extract_all_nodes(HTML, "class.book-list@tag.li@tag.a@text")
+        self.assertEqual(err, "")
+        self.assertEqual(vals, ["测试书", "第二本"])
+        # 命中节点是属性取值前的那个 <a>，outerHTML 里应含 href
+        self.assertEqual(len(hits), 2)
+        self.assertIn("/book/1", hits[0])
+
+    def test_hits_are_capped(self):
+        vals, hits, _err = R.extract_all_nodes(HTML, "class.book-list@tag.li", limit=1)
+        self.assertEqual(len(hits), 1)
+
+    def test_hits_truncated_by_max_chars(self):
+        _vals, hits, _err = R.extract_all_nodes(
+            HTML, "class.book-list@tag.li", max_chars=10)
+        for h in hits:
+            self.assertLessEqual(len(h), 10)
+
+    def test_unsupported_rule_returns_reason(self):
+        _vals, hits, err = R.extract_all_nodes(HTML, "@js:result")
+        self.assertTrue(err)
+        self.assertEqual(hits, [])
+
+    def test_empty_rule(self):
+        _vals, hits, err = R.extract_all_nodes(HTML, "")
+        self.assertTrue(err)
+        self.assertEqual(hits, [])
+
+    def test_html_rule_returns_raw_response(self):
+        """@html: 分支不做任何选择，整份响应体就是命中内容。"""
+        vals, hits, err = R.extract_all_nodes(HTML, "@html:")
+        self.assertEqual(err, "")
+        self.assertEqual(vals, [HTML])
+        self.assertEqual(hits, [HTML])
+
+
 if __name__ == "__main__":
     unittest.main()

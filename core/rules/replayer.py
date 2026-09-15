@@ -417,21 +417,29 @@ def _json_walk(nodes: Sequence[Any], st: str, val: str) -> List[Any]:
     return out
 
 
-def _walk(start_nodes: Sequence[Any], steps: Sequence[Tuple[str, str]], kind: str):
-    """执行步骤链。
+def _walk_hits(
+    start_nodes: Sequence[Any],
+    steps: Sequence[Tuple[str, str]],
+    kind: str,
+):
+    """执行步骤链，并额外返回「命中节点」。
 
-    返回 ``(nodes, values, error)``：
-    - 正常结束：values 为 None，结果在 nodes
-    - 遇到 @属性：values 为字符串列表，nodes 为空
+    返回值 ``(nodes, values, error, hits)``。``hits`` 是**执行到 attr 取值动作
+    之前**那一刻的节点列表——那正是「规则选中的 DOM 块」。若规则没有属性取值
+    步骤，``hits`` 等于最终 ``nodes``。
     """
     nodes: List[Any] = list(start_nodes)
+    hits: List[Any] = []
     for st, val in steps:
         if st == "raw":
+            # @html: 规则：不做任何选择，整份响应体就是命中内容
+            hits = list(nodes)
             break
         if st == "select":
             nodes = _css_select(nodes, val)
         elif st == "attr":
-            return [], [_extract_value(n, val, kind) for n in nodes], ""
+            # 取值动作发生前，当前 nodes 就是命中块
+            return [], [_extract_value(n, val, kind) for n in nodes], "", list(nodes)
         elif st == "index":
             i = int(val)
             if -len(nodes) <= i < len(nodes):
@@ -441,8 +449,20 @@ def _walk(start_nodes: Sequence[Any], steps: Sequence[Tuple[str, str]], kind: st
         elif st in ("key", "wild"):
             nodes = _json_walk(nodes, st, val)
         else:
-            return [], [], "未知步骤：%s" % st
-    return nodes, None, ""
+            return [], [], "未知步骤：%s" % st, []
+    if not hits:
+        hits = list(nodes)
+    return nodes, None, "", hits
+
+
+def _walk(
+    start_nodes: Sequence[Any],
+    steps: Sequence[Tuple[str, str]],
+    kind: str,
+):
+    """执行步骤链。返回 ``(nodes, values, error)``。见 ``_walk_hits``。"""
+    nodes, values, err, _hits = _walk_hits(start_nodes, steps, kind)
+    return nodes, values, err
 
 
 def _convert_replacement(repl: str) -> str:
@@ -508,6 +528,46 @@ def extract_all_ex(content: str, rule: str) -> Tuple[List[str], str]:
         else:
             values = [_extract_value(n, "text", pr.kind) for n in nodes]
     return _apply_regex(values, pr.regex, pr.replacement), ""
+
+
+def extract_all_nodes(
+    content: str,
+    rule: str,
+    limit: int = 3,
+    max_chars: int = 200_000,
+) -> Tuple[List[str], List[str], str]:
+    """按规则取值，并返回**命中节点的 outerHTML** 与失败原因。
+
+    ``hits`` 是命中块的 HTML 序列（最多 ``limit`` 个，每个截断到 ``max_chars``）。
+    调用方用它展示「规则现在选到了哪块 DOM」。
+
+    返回 ``(values, hits, error)``；``error`` 非空表示规则不可回放。
+    """
+    pr = parse_rule(rule)
+    if pr.unsupported:
+        return [], [], pr.unsupported
+    if not pr.steps:
+        return [], [], "空规则"
+    try:
+        root = _root_of(content, pr.kind)
+    except Exception as e:
+        return [], [], "内容解析失败：%s" % type(e).__name__
+    nodes, values, err, hit_nodes = _walk_hits([root], pr.steps, pr.kind)
+    if err:
+        return [], [], err
+    if values is None:
+        if pr.kind == "json":
+            values = [_json_to_text(n) for n in nodes]
+        else:
+            values = [_extract_value(n, "text", pr.kind) for n in nodes]
+    values = _apply_regex(values, pr.regex, pr.replacement)
+
+    # 命中节点 -> HTML 片段：DOM 节点取 outerHTML，JSON 节点退化为文本
+    hits: List[str] = []
+    for node in hit_nodes[:max(0, limit)]:
+        html = str(node) if _is_tag(node) else _json_to_text(node)
+        hits.append(html[:max_chars] if max_chars > 0 else html)
+    return values, hits, ""
 
 
 def extract_first(content: str, rule: str) -> str:
@@ -610,7 +670,7 @@ def image_ratio(values: Sequence[str]) -> float:
 
 __all__ = [
     "ParsedRule", "parse_rule", "rule_supported", "rule_kind",
-    "extract_all", "extract_all_ex", "extract_first",
+    "extract_all", "extract_all_ex", "extract_all_nodes", "extract_first",
     "parse_list", "parse_field", "parse_field_first",
     "apply_css_rule", "looks_like_image_rule", "image_ratio",
 ]
