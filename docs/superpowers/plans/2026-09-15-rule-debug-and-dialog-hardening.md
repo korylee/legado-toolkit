@@ -625,8 +625,18 @@ def judge_list_step(
     matched_html: str = "",
     rule_error: str = "",
     source_type: int = 0,
+    rule: str = "",
 ) -> Judgement:
-    """目录 / 搜索结果列表判定（search / bookUrl / toc 三步共用）。"""
+    """目录 / 搜索结果列表判定（search / bookUrl / toc 三步共用）。
+
+    ``rule`` 用来区分「规则为空」与「规则回放不了」——这两件事性质完全不同：
+      - **规则为空**是**源的配置错误**（Legado 也解析不出东西）→ `fail`
+      - **规则回放不了**是**我们的能力边界**（JS / 模板 / XPath）→ `unknown`
+
+    压进同一个通道过（`_extract` 曾对空规则返回 ``"空规则"`` 哨兵），后果是
+    `bookList` 为空的源被判成 unknown → `all_ok=True` → `core/repair/loop.py`
+    把它当成「已经修好了」，AI 修复循环永远不会碰它。
+    """
     # 入口归一化：只有精确等于 STEP_TOC 才启用 toc 语义，
     # 而调用方一个大写笔误（"TOC"）就会把本该 unknown 的结果变成 fail
     step_key = str(step or "").strip().lower()
@@ -634,10 +644,15 @@ def judge_list_step(
     shape, _counts = sniff_shape(clean)
     evidence = build_evidence(clean, matched_html)
 
-    # 下载源不解析目录（Debug.kt:329-332）
+    # 下载源不解析目录（Debug.kt:329-332）——豁免排在空规则判定之前
     if step_key == STEP_TOC and safe_int(source_type) == 3:
         return Judgement(VERDICT_UNKNOWN, "文件类书源不解析目录", shape, [], evidence)
 
+    # 规则为空：与 judge_content 的空规则分支对称，同样是**源的配置错误**
+    if not str(rule or "").strip():
+        return Judgement(VERDICT_FAIL, "列表规则为空，Legado 无法解析", shape, [], evidence)
+
+    # 规则回放不了：是工具的能力边界，不是源坏了
     if str(rule_error or "").strip():
         return Judgement(VERDICT_UNKNOWN, str(rule_error), shape, [], evidence)
 
@@ -1729,7 +1744,10 @@ def _extract(html: str, rule: str):
     对接点，别绕过它直接调 replayer。
     """
     if not str(rule or "").strip():
-        return [], [], "空规则"
+        # **不要在这里塞 "空规则" 哨兵**：空规则是源的配置错误，规则回放不了
+        # 才是我们的能力边界，两者的 verdict 不同。判定交给 judge_list_step /
+        # judge_content，它们各自有显式的空规则分支；这里只负责返回空值。
+        return [], [], ""
     return extract_all_nodes(
         html, rule, Q.MATCHED_NODES_LIMIT, Q.MAX_MATCHED_HTML_CHARS)
 
@@ -1794,6 +1812,31 @@ def verify_chain(source: dict, keyword: str, detail_url: str = "",
     def _fetch(url: str) -> str:
         return fetch(url, headers=headers, charset=charset, proxy=proxy)
 
+    # 静态错配（webJs 未生效 / bookSourceType==4）与 header 不可用的原因，
+    # **在任何抓取之前**就能算出来。必须在每个 return 点都带上——失败链全都
+    # 早退，而失败链恰恰是最需要这些提示的场景。只在末尾追加等于「出问题时看不到」。
+    misconfigs = Q.static_misconfig_notes(src)
+    if header_why:
+        misconfigs = [header_why] + misconfigs
+
+    def _done() -> dict:
+        """**唯一的出口**：追加附注 → 封顶证据 → 组装返回体。
+
+        所有 return 都走它。附注逻辑放在这里而不是 ``_step`` 里——`_step` 一旦
+        有逻辑，每个调用点都得先知道附注内容，摊平口径就重新分叉了。
+        """
+        if misconfigs:
+            for s in steps:
+                if s["name"] == "search":
+                    # 浅拷贝后再拼，避免同一列表被重复追加
+                    s["notes"] = list(s["notes"]) + misconfigs
+                    s["has_notes"] = True
+                    break
+        steps[:] = _cap_evidence(steps, pages)
+        return {"steps": steps,
+                "pages": list(pages.values()),
+                "all_ok": all(s["ok"] for s in steps)}
+
     search_tpl = src.get("searchUrl", "") or ""
     s_html = ""
     book_url = ""
@@ -1816,7 +1859,8 @@ def verify_chain(source: dict, keyword: str, detail_url: str = "",
             s_html = _fetch(search_url)
             book_list_rule = (src.get("ruleSearch") or {}).get("bookList", "")
             vals, hits, rule_error = _extract(s_html, book_list_rule)
-            j = Q.judge_list_step("search", vals, "".join(hits), rule_error, source_type)
+            j = Q.judge_list_step("search", vals, "".join(hits), rule_error,
+                                  source_type, rule=book_list_rule)
             page_id = _new_page(pages, "search", search_url, s_html, charset=charset)
             st = _step("search", j, search_url, page_id, vals, "".join(hits), rule_error)
             st["detail"] = j.reason or ("%d 条结果" % len(vals))
@@ -1859,7 +1903,8 @@ def verify_chain(source: dict, keyword: str, detail_url: str = "",
         toc = src.get("ruleToc") or {}
         chapter_list_rule = toc.get("chapterList", "")
         chapters, hits, rule_error = _extract(t_html, chapter_list_rule)
-        j = Q.judge_list_step("toc", chapters, "".join(hits), rule_error, source_type)
+        j = Q.judge_list_step("toc", chapters, "".join(hits), rule_error,
+                              source_type, rule=chapter_list_rule)
         page_id = _new_page(pages, "detail", book_url, t_html, charset=charset)
         st = _step("toc", j, book_url, page_id, chapters, "".join(hits), rule_error)
         st["detail"] = j.reason or ("%d 章" % len(chapters))
@@ -1895,24 +1940,25 @@ def verify_chain(source: dict, keyword: str, detail_url: str = "",
     except Exception as e:
         steps.append(_step("content", Q.Judgement("fail", "抓取失败 %s" % e), "", ""))
 
-    # 静态错配检查（只有读 Legado 源码才知道的坑）
-    misconfigs = Q.static_misconfig_notes(src)
-    if header_why:
-        misconfigs = [header_why] + misconfigs
-    if misconfigs:
-        for s in steps:
-            if s["name"] in ("search", "content"):
-                s["notes"] = list(s["notes"]) + misconfigs
-                s["has_notes"] = True
-                break
-
-    steps = _cap_evidence(steps, pages)
-    return {
-        "steps": steps,
-        "pages": list(pages.values()),
-        "all_ok": all(s["ok"] for s in steps),
-    }
+    # 静态错配附注已在函数开头算好，由 _done() 统一追加——这里不再重复
+    return _done()
 ```
+
+> **收口时还需做三件事**（都是为了让「附注在任何路径都带得上」真正成立）：
+>
+> 1. 把函数体内**所有** `return {"steps": steps, "pages": list(pages.values()), "all_ok": ...}`
+>    替换为 `return _done()`（共约 8 处）。
+> 2. 删掉发现模式分支里的 `skip_notes.append(header_why)`——附注现在统一由 `_done()`
+>    追加，留着会写出**两份** `header_why`（实测过）。
+> 3. 删掉旧函数末尾那段 `misconfigs = Q.static_misconfig_notes(src)` + 追加循环 +
+>    `steps = _cap_evidence(...)`（已上移进 `_done()`）。
+
+### 本任务已知的两处 spec 偏差（**记录在案，不在本任务修**）
+
+| 偏差 | 说明 | 处置 |
+|---|---|---|
+| `steps[].elapsed_ms` 缺失 | spec §9 第 1 条与 §16.1 对齐表第 3 条要求「每一步记录 URL 与相对耗时」（依据 `Debug.kt:35,62-70` 的 `[mm:ss.SSS]` / `+%.3fs`），本计划漏了。`fetch()` 只返回字符串，补它要让它返回耗时或改 `_step`/`as_step_dict` 的签名 | **推迟到 Task 9**（调试抽屉）——它是纯粹的展示字段，不参与任何判定；在真正要显示它的地方补，改动面最小 |
+| `pages[].status` 恒为 200 | `fetch()` 不返回状态码。实际**不会撒谎**：urllib 对 4xx/5xx 抛 `HTTPError` → 走 fail 分支，页面根本不登记 | 保留字段，但 Task 9 展示时按「仅表示成功响应」措辞，不要写成「HTTP 状态码」 |
 
 - [ ] **Step 4: 跑测试**
 
@@ -2174,9 +2220,21 @@ git commit -m "refactor(checker): 判定收拢到 core.quality，删除 ruleCont
 
 ---
 
-## Task 7: `backend/api/ops.py` —— 剥离证据字段
+## Task 7: 剥离证据字段 —— `backend/api/ops.py` **与 `core/repair/loop.py`**
 
 「快速生成」任务的结果会被 `backend/jobs/runner.py:51` **写进 SQLite 的 `result_json`**，并经 `backend/api/jobs.py:47` 走 SSE 推送。若带上整页 HTML 与正文全文，等于把几 MB 塞进 jobs 表和推送流。
+
+> **本任务的范围在审查后扩大了**：原来只剥 `ops.py`，但 `core/repair/loop.py` 同样会
+> 长期持有整份证据——`loop.py:144` 的 `before`、`:200` 的 `out["after"]`、`:196` 的
+> `history[]`（最多 3 轮）各持一份完整 `verify_chain` 结果，每份现在都带
+> `pages[].html`（单页上限 100 万字符）、`matched_html`、`values` 正文全文。
+> 而 `repair_many:203-231` 用 `asyncio.gather` 把**全部**结果留在 `results` 里，
+> `cmd_repair:314` 默认 `limit=0`（全量）—— 百源级修复运行就是数百 MB 常驻内存。
+>
+> **`strip_evidence` 因此挪到 `core/verify.py`**（证据的形状是在那里定义的），
+> 由 `ops.py` 与 `loop.py` 共用。`loop.py` **不再属于「不动」清单**。
+> 注意修完要复核 `core/repair/loop.py:62-63` 与 `:269` 只读 `name/ok/detail`，
+> `:184` 只读 `all_ok`——剥离后这些都不受影响。
 
 **Files:**
 - Modify: `backend/api/ops.py:117-119`
