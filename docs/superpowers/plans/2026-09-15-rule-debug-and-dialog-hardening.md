@@ -733,34 +733,79 @@ git commit -m "feat(quality): 新增三态判定模块，底线对齐 Legado 调
 class ExtractAllNodesTests(unittest.TestCase):
     """命中片段：规则选中的 DOM 块的 outerHTML。"""
 
+    #: 测试固定的证据预算。真实口径归 core.quality 所有
+    #: （MATCHED_NODES_LIMIT / MAX_MATCHED_HTML_CHARS），replayer 不设默认值
+    LIMIT = 3
+    MAX_CHARS = 200_000
+
+    def _nodes(self, content, rule, **kw):
+        kw.setdefault("limit", self.LIMIT)
+        kw.setdefault("max_chars", self.MAX_CHARS)
+        return R.extract_all_nodes(content, rule, **kw)
+
     def test_content_rule_returns_matched_block(self):
-        vals, hits, err = R.extract_all_nodes(HTML, "class.book-list@tag.li@tag.a@text")
+        vals, hits, err = self._nodes(HTML, "class.book-list@tag.li@tag.a@text")
         self.assertEqual(err, "")
         self.assertEqual(vals, ["测试书", "第二本"])
-        # 命中节点是属性取值前的那个 <a>，outerHTML 里应含 href
-        self.assertEqual(len(hits), 2)
-        self.assertIn("/book/1", hits[0])
+        # 必须**逐字**断言：命中的是属性取值动作**之前**的那个 <a>。
+        # 用 assertIn("/book/1", hits[0]) 是不够的——父节点 <li> 的 outerHTML
+        # 同样含 /book/1，实现若错选到祖先，那种弱断言照样通过，
+        # 而「选到哪一块」正是本次改动的全部价值。
+        self.assertEqual(hits[0], '<a href="/book/1">测试书</a>')
+        self.assertEqual(hits[1], '<a href="/book/2">第二本</a>')
 
     def test_hits_are_capped(self):
-        vals, hits, _err = R.extract_all_nodes(HTML, "class.book-list@tag.li", limit=1)
+        _vals, hits, _err = self._nodes(HTML, "class.book-list@tag.li", limit=1)
         self.assertEqual(len(hits), 1)
 
     def test_hits_truncated_by_max_chars(self):
-        _vals, hits, _err = R.extract_all_nodes(
-            HTML, "class.book-list@tag.li", max_chars=10)
+        _vals, hits, _err = self._nodes(HTML, "class.book-list@tag.li", max_chars=10)
+        # 先钉住条数：若实现返回空列表，下面的循环会变成空转的假覆盖
+        self.assertEqual(len(hits), 2)
         for h in hits:
-            self.assertLessEqual(len(h), 10)
+            self.assertEqual(len(h), 10)
+            self.assertTrue(h.startswith("<li class="))
+
+    def test_json_leaf_hits_equal_values(self):
+        """JSON 字符串叶子下 hits 与 values 相同——调用方需自行去重。
+
+        这是已知语义：字符串叶子经 _json_to_text 原样返回，UI 上会出现两份
+        一样的内容。补这条用例把该行为固定下来，避免日后被当成 bug 修。
+        """
+        vals, hits, err = self._nodes(JSONTEXT, "$.data.list[*].name")
+        self.assertEqual(err, "")
+        self.assertEqual(vals, ["A", "B"])
+        self.assertEqual(hits, vals)
+
+    def test_json_object_hit_is_serialized(self):
+        """选中 dict 节点时 hits 是该节点的 JSON 串，不是空。"""
+        _vals, hits, err = self._nodes(JSONTEXT, "$.data")
+        self.assertEqual(err, "")
+        self.assertEqual(len(hits), 1)
+        self.assertIn("list", hits[0])
 
     def test_unsupported_rule_returns_reason(self):
-        _vals, hits, err = R.extract_all_nodes(HTML, "@js:result")
+        _vals, hits, err = self._nodes(HTML, "@js:result")
         self.assertTrue(err)
         self.assertEqual(hits, [])
 
     def test_empty_rule(self):
-        _vals, hits, err = R.extract_all_nodes(HTML, "")
+        _vals, hits, err = self._nodes(HTML, "")
         self.assertTrue(err)
         self.assertEqual(hits, [])
+
+    def test_html_rule_returns_raw_response(self):
+        """@html: 分支不做任何选择，整份响应体就是命中内容。
+
+        该分支此前无任何测试保护（变异测试证实：把它改成永假，原有测试全绿）。
+        """
+        vals, hits, err = self._nodes(HTML, "@html:")
+        self.assertEqual(err, "")
+        self.assertEqual(vals, [HTML])
+        self.assertEqual(hits, [HTML])
 ```
+
+> ⚠️ `test_content_rule_returns_matched_block` 里的两条**逐字**断言（`'<a href="/book/1">测试书</a>'`）是照 BeautifulSoup 的序列化结果写的。**执行时请先打印一次实际值确认**，若序列化细节（属性顺序、引号、空白）与预期不符，以真实输出为准调整断言——但**必须保持逐字断言这种强度**，不要退回 `assertIn`。
 
 - [ ] **Step 2: 跑测试，确认失败**
 
@@ -833,13 +878,23 @@ def _walk(
 def extract_all_nodes(
     content: str,
     rule: str,
-    limit: int = 3,
-    max_chars: int = 200_000,
+    limit: int,
+    max_chars: int,
 ) -> Tuple[List[str], List[str], str]:
     """按规则取值，并返回**命中节点的 outerHTML** 与失败原因。
 
     ``hits`` 是命中块的 HTML 序列（最多 ``limit`` 个，每个截断到 ``max_chars``）。
     调用方用它展示「规则现在选到了哪块 DOM」。
+
+    **``limit`` / ``max_chars`` 故意没有默认值**：这两个数字是「证据预算」政策，
+    归 ``core.quality`` 所有（``MATCHED_NODES_LIMIT`` / ``MAX_MATCHED_HTML_CHARS``）。
+    在回放引擎里再硬编码一份同值默认，就等于同一份口径写两处——改动 quality 的
+    常量不会有任何行为变化，将来必然分叉。调用方显式传，口径只有一处。
+
+    两条调用方需要注意的语义：
+      - **JSON 规则下 ``hits`` 可能与 ``values`` 完全相同**（字符串叶子经
+        ``_json_to_text`` 原样返回），UI 上会出现两份重复内容，需要自行去重
+      - **``max_chars`` 截断可能落在标签中间**，返回的片段不保证是合法 HTML
 
     返回 ``(values, hits, error)``；``error`` 非空表示规则不可回放。
     """
@@ -1403,6 +1458,19 @@ def _new_page(pages: dict, page_id: str, url: str, html: str,
     return page_id
 
 
+def _extract(html: str, rule: str):
+    """按规则取值 + 命中片段。
+
+    **证据预算从 quality 取，这里必须显式传**——`replayer.extract_all_nodes` 故意
+    不设默认值，就是为了让截断口径全仓库只有一处定义。这个 helper 是唯一的
+    对接点，别绕过它直接调 replayer。
+    """
+    if not str(rule or "").strip():
+        return [], [], "空规则"
+    return extract_all_nodes(
+        html, rule, Q.MATCHED_NODES_LIMIT, Q.MAX_MATCHED_HTML_CHARS)
+
+
 def _step(name: str, judgement, url: str = "", page_id: str = "",
           values=None, matched_html: str = "", rule_error: str = "") -> dict:
     """把 Judgement 摊平成 steps[] 的一项。
@@ -1481,7 +1549,7 @@ def verify_chain(source: dict, keyword: str, detail_url: str = "",
         try:
             s_html = _fetch(search_url)
             book_list_rule = (src.get("ruleSearch") or {}).get("bookList", "")
-            vals, hits, rule_error = extract_all_nodes(s_html, book_list_rule)
+            vals, hits, rule_error = _extract(s_html, book_list_rule)
             j = Q.judge_list_step("search", vals, "".join(hits), rule_error, source_type)
             page_id = _new_page(pages, "search", search_url, s_html, charset=charset)
             st = _step("search", j, search_url, page_id, vals, "".join(hits), rule_error)
@@ -1496,7 +1564,7 @@ def verify_chain(source: dict, keyword: str, detail_url: str = "",
 
         # ---- Step 2: 详情链接（取第 pick 条） ----
         book_url_rule = (src.get("ruleSearch") or {}).get("bookUrl", "")
-        hrefs, _hits, _err = extract_all_nodes(s_html, book_url_rule) if book_url_rule else ([], [], "")
+        hrefs, _hits, _err = _extract(s_html, book_url_rule)
         hrefs = [str(h).strip() for h in hrefs if str(h or "").strip()]
         if not hrefs or pick > len(hrefs):
             j = Q.Judgement("fail", "取不到详情链接")
@@ -1524,7 +1592,7 @@ def verify_chain(source: dict, keyword: str, detail_url: str = "",
         t_html = _fetch(book_url)
         toc = src.get("ruleToc") or {}
         chapter_list_rule = toc.get("chapterList", "")
-        chapters, hits, rule_error = extract_all_nodes(t_html, chapter_list_rule)
+        chapters, hits, rule_error = _extract(t_html, chapter_list_rule)
         j = Q.judge_list_step("toc", chapters, "".join(hits), rule_error, source_type)
         page_id = _new_page(pages, "detail", book_url, t_html, charset=charset)
         st = _step("toc", j, book_url, page_id, chapters, "".join(hits), rule_error)
@@ -1540,7 +1608,7 @@ def verify_chain(source: dict, keyword: str, detail_url: str = "",
     try:
         toc = src.get("ruleToc") or {}
         ch_url_rule = toc.get("chapterUrl", "")
-        ch_urls, _hits, _err = extract_all_nodes(t_html, ch_url_rule) if ch_url_rule else ([], [], "")
+        ch_urls, _hits, _err = _extract(t_html, ch_url_rule)
         # 过滤伪链接（javascript:/# 等），避免抓取报错
         ch_urls = [u for u in ch_urls
                    if u.strip() and not u.strip().lower().startswith(
@@ -1552,7 +1620,7 @@ def verify_chain(source: dict, keyword: str, detail_url: str = "",
         ch_url = _abs_url(book_url, first_ch) if not first_ch.startswith("http") else first_ch
         c_html = _fetch(ch_url)
         content_rule = (src.get("ruleContent") or {}).get("content", "")
-        texts, hits, rule_error = extract_all_nodes(c_html, content_rule)
+        texts, hits, rule_error = _extract(c_html, content_rule)
         j = Q.judge_content(source_type, texts, content_rule, "".join(hits), rule_error)
         page_id = _new_page(pages, "chapter", ch_url, c_html, charset=charset)
         st = _step("content", j, ch_url, page_id, texts, "".join(hits), rule_error)
@@ -1725,9 +1793,15 @@ Expected: `OK`
 在 `core/checker.py` 顶部 import 区加上：
 
 ```python
-from core.quality import judge_content, judge_list_step
+from core.quality import (judge_content, judge_list_step,
+                         MATCHED_NODES_LIMIT, MAX_MATCHED_HTML_CHARS)
 from core.rules.replayer import extract_all_nodes
 ```
+
+> `MATCHED_NODES_LIMIT` / `MAX_MATCHED_HTML_CHARS` 必须显式传给 `extract_all_nodes`
+> ——它故意不设默认值，好让截断口径全仓库只有一处定义（在 `core/quality.py`）。
+> 注意依赖方向：**checker 依赖 quality，quality 不依赖 replayer**，这是刻意的，
+> 别为了图省事让 replayer 反向 import quality。
 
 把 `_probe_content` 里这段（约 `:761` 与 `:787-802`）：
 
@@ -1766,7 +1840,8 @@ from core.rules.replayer import extract_all_nodes
             c_html = _decode_body(c_body)
             if content_rule:
                 parts, hits, rule_error = extract_all_nodes(
-                    c_html, _strip_rule_prefix(content_rule))
+                    c_html, _strip_rule_prefix(content_rule),
+                    Q.MATCHED_NODES_LIMIT, Q.MAX_MATCHED_HTML_CHARS)
                 verdict = judge_content(int(record.source_type or 0), parts,
                                         content_rule, "".join(hits), rule_error)
             else:
@@ -1799,7 +1874,8 @@ from core.rules.replayer import extract_all_nodes
             # 基础判定交 core.quality（非空即通过）；比例比对留在下面由 checker 叠加，
             # 因为那依赖 TEST_TITLES 参考数据，是 checker 独有的信息
             chapters, hits, rule_error = extract_all_nodes(
-                d_html, _strip_rule_prefix(chapter_list_rule))
+                d_html, _strip_rule_prefix(chapter_list_rule),
+                Q.MATCHED_NODES_LIMIT, Q.MAX_MATCHED_HTML_CHARS)
             chapters = [str(c).strip() for c in chapters if str(c or "").strip()]
             record.chapter_count = len(chapters)
             toc_verdict = judge_list_step("toc", chapters, "".join(hits), rule_error,
