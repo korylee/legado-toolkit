@@ -4,13 +4,8 @@
 from __future__ import annotations
 
 from datetime import datetime
-import sys
-import types
 import unittest
 from argparse import Namespace
-
-# 本测试只覆盖纯缓存策略，不依赖网络客户端；隔离未安装的可选运行时依赖。
-sys.modules.setdefault("aiohttp", types.ModuleType("aiohttp"))
 
 from core import checker
 from core.checker import classify_transport_error, is_cache_item_valid, should_cache_result

@@ -109,11 +109,10 @@ class ThrottleTests(unittest.TestCase):
 class RequestWiringTests(unittest.TestCase):
     """限速必须真的接在请求路径上——只测 _throttle 本身是不够的。
 
-    **本类只断言「_throttle 被调用了」**，不关心请求成不成功。原因是
-    `test_checker_judge.py` 会把 aiohttp 换成空壳模块（`sys.modules` 全局生效），
-    全量 discover 跑到这里时 `_request` 里 `except aiohttp.XxxError` 的求值会抛
-    AttributeError——那是环境造成的，不是被测行为。限速发生在发请求**之前**，
-    所以不管后面怎么炸，只要接上了就一定看得见。
+    **本类只断言「_throttle 被调用了」**，不关心请求成不成功——限速发生在发请求
+    **之前**，所以不管后面怎么炸，只要接上了就一定看得见。用这种断言方式还有个
+    历史原因：`test_checker_judge.py` 曾把空壳 aiohttp 塞进 `sys.modules`（全局
+    副作用，现已删除），全量 discover 时 `_request` 会因此抛 AttributeError。
     """
 
     def test_request_calls_throttle_with_the_record(self):

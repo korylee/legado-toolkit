@@ -49,7 +49,17 @@ async def run_check_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict
         "stars": r.quality_stars, "error": r.error,
         "toc_complete": r.toc_complete, "content_ok": r.content_ok,
     } for r in results]
-    return {"checked": len(items), "items": items[:500]}
+    return {
+        "checked": len(items),
+        # 缓存命中多少、真发了多少：不分出来的话，「点校验 → 一条请求都没发」
+        # 和「真跑了一遍」在界面上长得一模一样
+        "cached": checker.cached_count,
+        "fetched": len(items) - checker.cached_count,
+        # 写库失败多少：>0 说明状态不会变，必须让用户看见（不是我们抛错，是写不进去）
+        "save_failures": checker.save_failures,
+        "hit_downgrades": len(checker.hit_downgrades),
+        "items": items[:500],
+    }
 
 
 @runner.register("add")

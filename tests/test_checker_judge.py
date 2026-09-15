@@ -14,19 +14,17 @@
 
 import asyncio
 from datetime import datetime, timedelta
-import sys
-import types
 import unittest
 from unittest import mock
 
-# 本文件用假的 _request 替掉网络层，不依赖真实客户端（与 test_checker_cache 同约定）
+# 本文件用假的 _request 替掉网络层，不依赖真实客户端。
 #
-# **这行是全局副作用**：它把空壳 aiohttp 塞进 sys.modules，全量 discover 时后面的
-# 测试文件也会拿到它。后果是任何真的要跑 AsyncChecker._request 的用例，走到
-# `except aiohttp.XxxError` 求值就会抛 AttributeError——而单独跑那个文件时又是好的。
-# 新加涉及 aiohttp 的测试时，要么别真调 _request，要么别依赖它的返回值。
-sys.modules.setdefault("aiohttp", types.ModuleType("aiohttp"))
-
+# 这里曾经用 `sys.modules.setdefault("aiohttp", types.ModuleType("aiohttp"))` 把
+# aiohttp 换成空壳，理由是「隔离未安装的可选运行时依赖」。但 aiohttp 是
+# pyproject.toml 里的**硬依赖**，那个理由不成立；而 `sys.modules` 是全局的，
+# 全量 discover 时后面的测试文件也会拿到空壳——踩过两次：真的要跑
+# `AsyncChecker.run()` / `_request()` 的用例单独跑没事、一起跑就报
+# `module 'aiohttp' has no attribute 'ClientSession'`。已删。
 from core import checker
 from core.checker import AsyncChecker
 from core.loader import fingerprint

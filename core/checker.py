@@ -34,7 +34,7 @@ from core.urls import abs_url as _abs_url
 from core.rules.replayer import (extract_all as apply_css_rule, extract_all_ex,
                           extract_all_nodes, rule_kind, parse_list, parse_field,
                           rule_supported)
-from core.loader import fingerprint
+from core.loader import _normalize_url, fingerprint
 # 判定口径的唯一来源（与「全链路试跑」共用，避免同源两判）。
 # 依赖方向：checker → quality，quality 不依赖 replayer，这是刻意的。
 from core import quality as Q
@@ -366,6 +366,12 @@ class AsyncChecker:
         # bs4 缺失事故是同一个形状——当时就是这样让命中判定悄悄退化成
         # 「响应体里出现关键词就算命中」的。这里只收集，由 run() 收尾汇总
         self.hit_downgrades: List[str] = []
+        #: 写缓存失败的条数。**必须能报出来**：写不进去的表现是「校验跑了但状态
+        #: 不变」，而这个表现和「源本来就没变」在界面上无法区分
+        self.save_failures = 0
+        #: 本次有多少条直接复用了缓存（没发请求）。run() 里填，供任务结果展示——
+        #: 不然用户点完校验只看到「完成」，却不知道一条请求都没发
+        self.cached_count = 0
         # 每个源上一次发请求的时刻（monotonic 毫秒），用于遵守该书源自己声明的
         # concurrentRate。见 _throttle
         self._rate_last: Dict[str, float] = {}
@@ -401,7 +407,17 @@ class AsyncChecker:
         return os.path.join(self.cache_dir, f"check_{url_key}.ndjson") if self.cache_dir else ""
 
     def load_cache(self) -> Dict[str, Dict[str, Any]]:
-        """读取历史校验结果缓存 {url: result}。"""
+        """读取历史校验结果缓存 ``{规范化url: result}``。
+
+        **键一律规范化，两个后端都归一**。store 后端存的 ``checks.source_url``
+        本来就是规范化的（``Store.save_checks`` 里做的），而 ndjson 后端存的是
+        抓取时的原文 URL。两边键不一致的后果不是「少命中一点」，而是 store 那条
+        **永远命不中**——列表里的 URL 常带尾斜杠、规范化后不带（这个差异本项目
+        实测是 20.7%）。查漏了缓存就一直不复用，而界面上看不出来。
+
+        这正是 lessons §五 记的那类「跨表/跨库关联的 URL 两侧必须用同一套规范化」，
+        只是方向反过来：那次是写侧没归一，这次是读侧。
+        """
         if self.use_store:
             try:
                 return self._store().checks_map()
@@ -422,7 +438,7 @@ class AsyncChecker:
                             continue
                         try:
                             item = json.loads(line)
-                            cache[item.get("url", "")] = item
+                            cache[_normalize_url(item.get("url", ""))] = item
                         except Exception:
                             continue
             except Exception:
@@ -430,12 +446,17 @@ class AsyncChecker:
         return cache
 
     def save_cache_append(self, record: BookSourceRecord) -> None:
-        """追加一条校验结果到缓存。"""
+        """把一条校验结果写进缓存后端：store（SQLite 管理库）优先，否则 ndjson 目录。
+
+        **两个后端都要能单独工作**。以前的写法是「先 ``os.makedirs(self.cache_dir)``，
+        再判 use_store」——cache_dir 为 None 时第一步就抛 TypeError，而 Web 那条
+        链路（``backend/api/ops.py``）正好只传 ``use_store=True``、不传 cache_dir。
+        配上 ``run()`` 里那道 ``if self.cache_dir:`` 的门，结果是**校验算完从不落库**：
+        界面上请求成功、状态不变。见 run() 里保存那一段。
+        """
         if not should_cache_result(record.health):
             return
-        os.makedirs(self.cache_dir, exist_ok=True)
         url_key = re.sub(r"[^\w\-.]", "_", record.url or f"idx{record.index}")[:80]
-        path = self._cache_path(url_key)
         item = {
             "v": CACHE_VERSION,
             "url": record.url,
@@ -462,12 +483,18 @@ class AsyncChecker:
         if self.use_store:
             try:
                 self._store().save_checks([item])
-            except Exception:
-                pass
+            except Exception as e:
+                # **不能静默**：写不进去 = 校验跑了但状态不变，界面上完全看不出来。
+                # 以前这里是 `except Exception: pass`，正好把这次的故障盖住了
+                self.save_failures += 1
+                if self.save_failures == 1:
+                    print("警告: 校验结果写管理库失败（后续同类错误不再逐条打印）: "
+                          "%s: %s" % (type(e).__name__, e))
             return
         if not self.cache_dir:
-            return
-        with open(path, "a", encoding="utf-8") as f:
+            return      # 两个后端都没配：跳过就好，别去 makedirs(None)
+        os.makedirs(self.cache_dir, exist_ok=True)
+        with open(self._cache_path(url_key), "a", encoding="utf-8") as f:
             f.write(json.dumps(item, ensure_ascii=False) + "\n")
 
     # ------------------------------------------------------------ 单源探测
@@ -882,11 +909,14 @@ class AsyncChecker:
         cache = {} if self.refresh_cache else self.load_cache()
         pending: List[BookSourceRecord] = []
         for r in records:
-            item = cache.get(r.url)
+            # 键规范化后再查：缓存两侧的口径见 load_cache 的注释
+            item = cache.get(_normalize_url(r.url))
             if item and is_cache_item_valid(r, item):
                 restore_from_cache(r, item)
             else:
                 pending.append(r)
+        # 复用了几条要说出来：不然「点校验 → 完成」和「一条请求都没发」长得一样
+        self.cached_count = len(records) - len(pending)
 
         self._sem = asyncio.Semaphore(self.concurrency)
         # 缓存目录就绪
@@ -914,10 +944,17 @@ class AsyncChecker:
                 results.extend(chunk_results)
                 done = i + len(chunk)
                 print(f"  进度: {done}/{len(pending)}")
-        if self.cache_dir:
+        # **保存条件是「有任一后端」，不是「有 cache_dir」。** 以前只判 cache_dir，
+        # 而 Web 那条链路传的是 use_store=True、cache_dir=None，于是校验结果一条都
+        # 不写——界面上请求成功、状态不变。这条门和 save_cache_append 里那句
+        # makedirs 是同一个故障的两半
+        if self.use_store or self.cache_dir:
             for r in results:
                 self.save_cache_append(r)
         self.close()
+        if self.save_failures:
+            print("警告: %d 条校验结果没能写进缓存（状态不会更新）"
+                  % self.save_failures)
         if self.hit_downgrades:
             # 降级 = 「规则回放不了」被当成了「命中」，星级会偏高。零星几次是页面
             # 结构异常；成片出现说明是工具本身坏了（依赖缺失之类），这时必须看见。
