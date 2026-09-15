@@ -3310,10 +3310,26 @@ print('已导出', len(out), '条到 data/baseline_stars.json')
 **主动安排时间窗**：3700 源，耗时长且对源站有请求量。
 
 ```bash
-.venv/Scripts/python.exe -m cli.main check --refresh-cache
+.venv/Scripts/python.exe -m cli.main check --refresh-cache --probe-depth 3
 ```
 
-（具体子命令以 `cli/main.py` 的 `--refresh-cache` 所在的那个子命令为准，先跑 `--help` 确认。）
+> ⚠️ **`--probe-depth 3` 不是可选项，缺了这次验收就没有意义。**
+>
+> `core/checker.py:585` 有深度门控：
+> ```python
+> if record.health == Health.OK and record.search_hit and self.probe_depth >= 2 and s_body:
+>     toc_body = await self._probe_toc(...)
+> ```
+> 也就是说 **`_probe_toc` / `_probe_content`（Task 6 改的全部内容）在 `--probe-depth 1`（CLI 默认值，见 `cli/main.py:672/769`）下一次都不会执行**。
+> 用默认深度跑全量，只能验证「没有意外崩溃」，**验证不了收拢本身**——被改的代码根本没跑。
+>
+> **顺带记录一个既有缺陷**（本次不修，但它就是为什么必须显式加 `--probe-depth`）：
+> `is_cache_item_valid` 只比 `v` / `fingerprint` / `checked_at` / TTL，**不比 `probe_depth`**。
+> 所以**浅探测的缓存会永久拦住深探测**——跑 `--probe-depth 3` 时，已有效的浅缓存会被复用，
+> 深度验证一次都不跑，而你以为跑了。要升级只能 `--refresh-cache` 或等 TTL 过期。
+> 建议后续把 `probe_depth` 纳入缓存有效性判定（独立任务）。
+>
+> （具体子命令以 `cli/main.py` 的 `--refresh-cache` 所在的那个子命令为准，先跑 `--help` 确认。）
 
 - [ ] **Step 3: diff 两份快照**
 
