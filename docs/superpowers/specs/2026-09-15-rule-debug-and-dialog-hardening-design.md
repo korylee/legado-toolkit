@@ -225,7 +225,7 @@ class Judgement:
         return None
 
 def sniff_shape(values: Sequence[str]) -> Tuple[str, Dict[str, int]]
-    """实测形态嗅探。逐条分类后取占比最高者；最高占比 < 0.5 → mixed；全空 → empty。"""
+    """实测形态嗅探。逐条分类后取占比最高者；最高占比未过半（<= 0.5）→ mixed；全空 → empty。"""
 
 def judge_content(source_type: int, source: Dict[str, Any],
                   values: Sequence[str], rule: str,

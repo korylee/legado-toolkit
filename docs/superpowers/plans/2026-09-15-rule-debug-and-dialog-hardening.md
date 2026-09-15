@@ -403,7 +403,10 @@ def _classify_value(text: str) -> str:
 def sniff_shape(values: Sequence[str]) -> Tuple[str, Dict[str, int]]:
     """实测形态嗅探。
 
-    逐条分类后取占比最高者；最高占比 < 0.5 → mixed；全空 → empty。
+    逐条分类后取占比最高者；最高占比未过半（<= 0.5）→ mixed；全空 → empty。
+
+    注意是 ``<=`` 而不是 ``<``：1:1 平局（如一张图 + 一段文字）占比正好 0.5，
+    此时没有主导形态，应当算 mixed。语义即「占多数才算单一形态」。
     返回 (形态, 各形态计数)。
     """
     counts = {SHAPE_TEXT: 0, SHAPE_IMAGE: 0, SHAPE_AUDIO: 0}
@@ -419,7 +422,7 @@ def sniff_shape(values: Sequence[str]) -> Tuple[str, Dict[str, int]]:
     shape, hit = max(counts.items(), key=lambda kv: kv[1])
     if hit == 0:
         return SHAPE_EMPTY, counts
-    if hit / total < 0.5:
+    if hit / total <= 0.5:
         return SHAPE_MIXED, counts
     return shape, counts
 
