@@ -34,6 +34,29 @@ const tagManagerVisible = ref(false);
 const checking = ref(false);
 let stopCheck = null;
 
+// 「哪些源正在校验」。**不能用一个布尔代替**：点了第 7 行的校验，工具栏、批量条
+// 和所有行的按钮一起转圈，用户会以为"选中的那些正在校验"，实际只有第 7 行在跑——
+// 反馈没有指向性。checking 仍然要有（不能并发提交是真的），但它只管"有没有任务"，
+// "测的是哪些"由这两个状态回答。
+const checkingUrls = ref(new Set());
+const checkingAll = ref(false);
+const checkJobId = ref("");
+const checkTotal = ref(0);
+
+//: 某一行是否正在校验。全量时所有行都在测，逐行订阅时只有命中的那些
+function isRowChecking(url) {
+  if (!checking.value) return false;
+  if (checkingAll.value) return true;
+  return checkingUrls.value.has(url);
+}
+
+//: 总数优先用后端报的（提交列表与"全量"的实际条数可能不同，比如回收站/禁用的源）
+const checkStatusText = computed(() => {
+  const n = checkTotal.value || (checkingAll.value ? 0 : checkingUrls.value.size);
+  if (checkingAll.value) return n ? "正在校验全部 " + n + " 条" : "正在校验全部源";
+  return "正在校验 " + n + " 条";
+});
+
 // 校验参数的「本次覆盖」：只含与全局设置不同的键，空对象 = 全走全局设置。
 // 对所有校验入口生效（全量 / 选中 / 单行）——设了代理就是为了能校验被墙源，
 // 而按行校验单个源恰恰是最常见的用法。生效时必须看得见，否则会变成
@@ -217,6 +240,12 @@ function reportCheckResult(resultJson) {
 async function checkSources(urls = []) {
   if (checking.value) return ElMessage.warning("已有校验任务在运行");
   checking.value = true;
+  // 提交时就要把"测哪些"记下来：等 SSE 回来才更新的话，点完到第一次事件之间
+  // 界面上什么都不会变
+  checkingAll.value = !urls.length;
+  checkingUrls.value = new Set(urls);
+  checkJobId.value = "";
+  checkTotal.value = 0;
   try {
     // refresh_cache：忽略有效期内的缓存，全部重新请求。
     // 校验参数（并发/超时/深度/代理等）不再写死在这里——不传就由后端取全局设置，
@@ -224,18 +253,22 @@ async function checkSources(urls = []) {
     const payload = { urls, refresh_cache: refreshThisRun.value };
     if (Object.keys(checkOverride.value).length) payload.check = checkOverride.value;
     const r = await api.post("/jobs", { kind: "check", payload });
+    checkJobId.value = r.job_id;
     ElMessage.success("已提交校验任务 " + r.job_id);
     if (stopCheck) stopCheck();
     stopCheck = subscribeJob(
       r.job_id,
-      () => {},
+      // 每帧带整个 job（status/total/progress）。注意后端只在开头写 total、
+      // 结束后写 progress，中间没有增量，所以这里只能显示总数
+      (data) => { if (data && data.total) checkTotal.value = data.total; },
       async (data) => {
-        checking.value = false;
-        stopCheck = null;
+        resetCheckState();
         if (data.status === "done") {
           if (!reportCheckResult(data.result_json)) ElMessage.success("校验完成");
           await load();
           try { tags.value = await listTags(); } catch (e) { /* 忽略 */ }
+        } else if (data.status === "cancelled") {
+          ElMessage.info("校验已取消");
         } else {
           ElMessage.error("校验任务失败: " + (data.status || "unknown"));
         }
@@ -246,8 +279,28 @@ async function checkSources(urls = []) {
     // 新任务立刻反映到「任务」按钮的徽标上
     jobsRef.value?.refresh();
   } catch (e) {
-    checking.value = false;
+    resetCheckState();
     ElMessage.error("提交校验失败: " + e.message);
+  }
+}
+
+function resetCheckState() {
+  checking.value = false;
+  checkingAll.value = false;
+  checkingUrls.value = new Set();
+  checkJobId.value = "";
+  checkTotal.value = 0;
+  stopCheck = null;
+}
+
+//: 取消正在跑的校验。后端 runner.cancel 会 cancel 掉 asyncio task，
+//: 任务状态转 cancelled 后由上面的 SSE 收尾回调统一复位
+async function cancelCheck() {
+  if (!checkJobId.value) return;
+  try {
+    await api.post("/jobs/" + checkJobId.value + "/cancel", {});
+  } catch (e) {
+    ElMessage.error("取消失败: " + e.message);
   }
 }
 
@@ -315,6 +368,12 @@ onUnmounted(() => {
         </button>
       </div>
       <span class="grow" />
+      <!-- 校验中的状态放在统计条：工具栏那行已经会换行，再加控制项只会更挤。
+           这里本来就有一块撑开的空档 -->
+      <template v-if="checking">
+        <span class="muted">{{ checkStatusText }}</span>
+        <el-button link size="small" type="warning" @click="cancelCheck">取消</el-button>
+      </template>
       <el-badge :value="jobBadge" :hidden="!jobBadge" type="primary">
         <el-button size="small" :icon="Monitor" @click="jobsVisible = true">任务</el-button>
       </el-badge>
@@ -451,7 +510,7 @@ onUnmounted(() => {
                     class="muted">(无标签)</span>
             </div>
           </div>
-          <el-button link :icon="Refresh" :loading="checking"
+          <el-button link :icon="Refresh" :loading="isRowChecking(row.source_url)"
                      @click.stop="checkSources([row.source_url])" />
           <el-button link :icon="Filter" @click.stop="openEdit(row)" />
         </div>
@@ -505,7 +564,7 @@ onUnmounted(() => {
         <el-table-column prop="checked_at" label="校验时间" width="146" />
         <el-table-column label="操作" width="90" align="center">
           <template #default="{ row }">
-            <el-button link size="small" :loading="checking"
+            <el-button link size="small" :loading="isRowChecking(row.source_url)"
                        @click="checkSources([row.source_url])">校验</el-button>
           </template>
         </el-table-column>
