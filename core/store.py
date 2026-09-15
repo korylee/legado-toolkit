@@ -265,14 +265,14 @@ class Store:
             out.update(t for t in _normalize_tags(row["user_tags"]) if not _is_system_tag(t))
         return out
 
-    def upsert_sources(self, sources, with_fingerprint: bool = True) -> int:
+    def upsert_sources(self, sources, with_fingerprint: bool = True, allow_new_tags: bool = False) -> int:
         """批量写入/更新书源。同 URL 更新规则和系统标签，用户标签永久保留。"""
         from core.loader import _normalize_url, fingerprint as fp_of
 
         ts = now()
         rows = []
         known_tags = self._known_user_tags()
-        allow_unknown = self.count_sources(include_deleted=True) == 0
+        allow_unknown = allow_new_tags or self.count_sources(include_deleted=True) == 0
         for src in sources or []:
             if not isinstance(src, dict):
                 continue
@@ -324,6 +324,21 @@ class Store:
         if not row:
             return None
         return self._source_view(row["raw_json"], row["group_name"], row["user_tags"])
+
+    def get_source_fingerprint(self, url: str):
+        """返回 (fingerprint, is_deleted)，供导入比对。
+
+        fingerprint 为 None 表示 URL 不存在；is_deleted 表示该 URL 是否在回收站。
+        """
+        from core.loader import _normalize_url
+
+        row = self.conn.execute(
+            "SELECT fingerprint, deleted_at FROM sources WHERE source_url = ?",
+            (_normalize_url(url),)).fetchone()
+        if not row:
+            return None, False
+        fp = str(row["fingerprint"] or "").strip()
+        return (fp or None), bool(row["deleted_at"])
 
     def export_sources(self) -> List[Dict[str, Any]]:
         """导出全部书源（保持入库顺序），用于重新生成给 Legado 的 JSON。"""

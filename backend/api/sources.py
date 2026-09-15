@@ -43,6 +43,31 @@ def list_tags(st=Depends(get_store)):
     return st.tags_overview()
 
 
+@router.get("/tags/meta")
+def tags_meta():
+    """系统标签枚举的定义（唯一定义源是 core/tags.py 与 core/models.py）。
+
+    前端不再自行维护这些枚举——两边各存一份必然漂移，历史上已经对不上过
+    （书源类型一度把 3 当成视频、还编出了 Legado 不存在的 4）。
+    """
+    from core.models import BOOK_SOURCE_TYPE_NAMES
+    from core.tags import (
+        SYSTEM_QUALITY_TAG_ORDER,
+        SYSTEM_STATUS_TAG_ORDER,
+        USER_TAG_ALIASES,
+    )
+
+    return {
+        "source_types": [{"value": v, "tag": t}
+                         for v, t in sorted(BOOK_SOURCE_TYPE_NAMES.items())],
+        "status_tags": list(SYSTEM_STATUS_TAG_ORDER),
+        "quality_tags": list(SYSTEM_QUALITY_TAG_ORDER),
+        # 用户标签别名表。不下发的话，用户手输「精品排版」时界面显示原文，
+        # 保存后被后端归一成「精排」，下次打开标签就"变了"——静默不一致
+        "user_tag_aliases": dict(USER_TAG_ALIASES),
+    }
+
+
 @router.get("/stats")
 def stats(st=Depends(get_store)):
     return st.stats()

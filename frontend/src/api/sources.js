@@ -15,6 +15,9 @@ export const saveSource = (source, userTags, lockSystemTags = false) =>
   api.post("/sources/save", { source, user_tags: userTags, lock_system_tags: lockSystemTags });
 
 export const listTags = () => api.get("/sources/tags");
+
+// 系统标签枚举（类型/状态/质量）的定义，唯一来源是后端 core/tags.py。前端不硬编码。
+export const getTagsMeta = () => api.get("/sources/tags/meta");
 export const patchTags = (urls, add = [], remove = []) =>
   api.post("/sources/tags", { urls, add, remove });
 export const renameTag = (oldTag, newTag) =>

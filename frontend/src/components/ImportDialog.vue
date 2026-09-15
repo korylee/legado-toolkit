@@ -66,7 +66,7 @@ async function doImport() {
                       + " / 冲突 " + r.conflict_count);
     emit("imported");
   } catch (e) {
-    ElMessage.warning("导入接口尚未实现（后端待补 /api/import）");
+    ElMessage.error("导入失败: " + e.message);
     result.value = { error: String(e.message) };
   } finally {
     loading.value = false;

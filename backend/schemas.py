@@ -59,6 +59,11 @@ class SourceSave(BaseModel):
     lock_system_tags: bool = False
 
 
+class ImportBody(BaseModel):
+    content: str = ""
+    source: str = ""
+
+
 class RuleChainTest(BaseModel):
     source: Dict[str, Any]
     keyword: str = "我"
@@ -79,6 +84,26 @@ class AppDebugRequest(BaseModel):
     host: str = ""
     #: 0 = 用默认端口（App 的 HTTP 端口 1122 + 1 = 1123）
     port: int = 0
+    #: 调试前先把源推送到 App。**会改动用户 App 里的书源数据**（新增或覆盖），
+    #: 所以必须由用户显式触发，不要在流程里默认打开
+    push: bool = False
+
+
+class AppHostRequest(BaseModel):
+    """只需要 host 的 App 侧操作（预检 / 推送）。"""
+
+    source: Dict[str, Any]
+    host: str = ""
+    port: int = 0
+
+
+class ReplayStepRequest(BaseModel):
+    """用已抓到的 HTML 重放一步规则。"""
+
+    html: str = ""
+    rule: str = ""
+    step: str = ""
+    source_type: int = 0
 
 
 class LLMProfileIn(BaseModel):

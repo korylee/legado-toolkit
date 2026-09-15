@@ -4,7 +4,7 @@ import { ElMessage, ElMessageBox } from "element-plus";
 import { Search, Plus, Upload, Download, Delete, Filter, Refresh, Monitor } from "@element-plus/icons-vue";
 import { listSources, listGroups, patchTags, deleteSources, listTags, getStats } from "../api/sources";
 import { api, subscribeJob } from "../api/client";
-import { splitTags } from "../utils/tags";
+import { ensureTagMeta, isQualityTag, splitTags, tagOfType, sourceTypes } from "../utils/tags";
 import { useMobile } from "../composables/useMobile";
 import SourceEditDialog from "../components/SourceEditDialog.vue";
 import TrashDrawer from "../components/TrashDrawer.vue";
@@ -44,16 +44,12 @@ const query = reactive({
   order: "-stars", limit: 50, offset: 0,
 });
 
-const TYPES = [
-  { value: 0, label: "📖小说" }, { value: 1, label: "🎧听书" },
-  { value: 2, label: "🎨漫画" }, { value: 3, label: "📥下载" },
-];
 const HEALTH = [
   { value: "ok", label: "✅可用" }, { value: "dead", label: "❌失效" },
   { value: "auth", label: "🔒需验证" }, { value: "gfw", label: "🌐需翻墙" },
 ];
 const healthType = { ok: "success", dead: "danger", auth: "warning", gfw: "info" };
-const typeLabel = (v) => (TYPES.find((t) => t.value === v) || {}).label || ("类型" + v);
+const typeLabel = (v) => tagOfType(v) || ("类型" + v);
 
 // 统计条上可下钻的健康度 chip。value 即 query.health 的取值，点一下直接改筛选条件
 const HEALTH_CHIPS = [
@@ -122,6 +118,12 @@ function toggleCard(row) {
 
 function userTagsOf(row) {
   return splitTags(row.user_tags || "");
+}
+
+// group_name 是系统标签的逗号拼接串。类型和健康状态表格里已各自单独成列展示，
+// 这里只取不重复的质量标签（规则完整），避免同一信息渲染两遍。
+function qualityTagsOf(row) {
+  return splitTags(row.group_name || "").filter((t) => isQualityTag(t));
 }
 
 async function removeSelected() {
@@ -215,6 +217,11 @@ async function onSaved() {
 }
 
 onMounted(async () => {
+  // 列表要按系统标签拆分组内容（qualityTagsOf），必须等枚举到位再拉数据，
+  // 否则首屏会把系统标签当成用户标签渲染
+  try { await ensureTagMeta(); } catch (e) {
+    ElMessage.warning("系统标签枚举加载失败，标签归类可能不准: " + e.message);
+  }
   load();
   try { groups.value = await listGroups(); } catch (e) { /* 忽略 */ }
   try { tags.value = await listTags(); } catch (e) { /* 忽略 */ }
@@ -254,7 +261,7 @@ onUnmounted(() => {
       <el-input class="w-search" v-model="query.q" placeholder="搜名称 / 域名" clearable
                 size="small" :prefix-icon="Search" @keyup.enter="search" />
       <el-select class="w-type" v-model="query.type" placeholder="类型" clearable size="small">
-        <el-option v-for="t in TYPES" :key="t.value" :value="t.value" :label="t.label" />
+        <el-option v-for="t in sourceTypes" :key="t.value" :value="t.value" :label="t.tag" />
       </el-select>
       <el-select class="w-health" v-model="query.health" placeholder="健康度" clearable size="small">
         <el-option v-for="h in HEALTH" :key="h.value" :value="h.value" :label="h.label" />
@@ -351,12 +358,15 @@ onUnmounted(() => {
               </span>
             </div>
             <div class="grp">
-              <el-tag v-if="row.group_name" size="small" type="info">{{ row.group_name }}</el-tag>
+              <el-tag v-for="t in qualityTagsOf(row)" :key="t" size="small" type="info">
+                {{ t }}
+              </el-tag>
               <el-tag v-if="row.system_tags_locked" size="small" type="warning">手动</el-tag>
               <el-tag v-for="t in userTagsOf(row)" :key="t" size="small" type="success">
                 {{ t }}
               </el-tag>
-              <span v-if="!row.group_name && !userTagsOf(row).length" class="muted">(无标签)</span>
+              <span v-if="!qualityTagsOf(row).length && !userTagsOf(row).length"
+                    class="muted">(无标签)</span>
             </div>
           </div>
           <el-button link :icon="Refresh" :loading="checking"
@@ -396,12 +406,15 @@ onUnmounted(() => {
         </el-table-column>
         <el-table-column label="标签" min-width="210">
           <template #default="{ row }">
-            <el-tag v-if="row.group_name" size="small" type="info">{{ row.group_name }}</el-tag>
+            <el-tag v-for="t in qualityTagsOf(row)" :key="t" size="small" type="info">
+              {{ t }}
+            </el-tag>
             <el-tag v-if="row.system_tags_locked" size="small" type="warning">手动</el-tag>
             <el-tag v-for="t in userTagsOf(row)" :key="t" size="small" type="success">
               {{ t }}
             </el-tag>
-            <span v-if="!row.group_name && !userTagsOf(row).length" class="muted">(无标签)</span>
+            <span v-if="!qualityTagsOf(row).length && !userTagsOf(row).length"
+                  class="muted">(无标签)</span>
           </template>
         </el-table-column>
         <el-table-column prop="source_url" label="域名" min-width="190" show-overflow-tooltip>
@@ -434,7 +447,7 @@ onUnmounted(() => {
         <div class="fld">
           <label>类型</label>
           <el-select v-model="query.type" placeholder="全部" clearable style="width: 100%">
-            <el-option v-for="t in TYPES" :key="t.value" :value="t.value" :label="t.label" />
+            <el-option v-for="t in sourceTypes" :key="t.value" :value="t.value" :label="t.tag" />
           </el-select>
         </div>
         <div class="fld">

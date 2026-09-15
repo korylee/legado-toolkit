@@ -8,8 +8,12 @@ from typing import Iterable, List, Sequence, Tuple
 
 # 类型标签与 Legado 的 bookSourceType 一一对应（0/1/2/3），不含任何未定义类型
 SYSTEM_TYPE_TAGS = {"📖小说", "🎧听书", "🎨漫画", "📥下载"}
-SYSTEM_STATUS_TAGS = {"可用", "待验证", "已失效", "需代理复检"}
-SYSTEM_QUALITY_TAGS = {"规则完整"}
+# 有序定义：下发给 Web 前端与界面渲染都按这个顺序（set 无序，不能直接下发）。
+# set 由元组派生，保证判定与展示用的是同一份定义。
+SYSTEM_STATUS_TAG_ORDER: Tuple[str, ...] = ("可用", "待验证", "已失效", "需代理复检")
+SYSTEM_QUALITY_TAG_ORDER: Tuple[str, ...] = ("规则完整",)
+SYSTEM_STATUS_TAGS = set(SYSTEM_STATUS_TAG_ORDER)
+SYSTEM_QUALITY_TAGS = set(SYSTEM_QUALITY_TAG_ORDER)
 SYSTEM_TAGS = SYSTEM_TYPE_TAGS | SYSTEM_STATUS_TAGS | SYSTEM_QUALITY_TAGS
 
 # 用户标签别名映射：新源带进来的别名先归一，再按已有标签过滤。
