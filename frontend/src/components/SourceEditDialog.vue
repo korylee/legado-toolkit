@@ -3,9 +3,10 @@
 import { ref, computed, watch, nextTick } from "vue";
 import { ElMessage } from "element-plus";
 import { api, subscribeJob } from "../api/client";
-import { getDetail, listTags, saveSource } from "../api/sources";
+import { getDetail, listTags, saveSource, sourceExists } from "../api/sources";
 import { mergeGroup, splitSystemUser } from "../utils/tags";
 import { useMobile } from "../composables/useMobile";
+import RuleDebugDrawer from "./RuleDebugDrawer.vue";
 
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
@@ -24,6 +25,9 @@ const testing = ref(false);
 const testKey = ref("我的");
 const testDetailUrl = ref("");
 const testResult = ref(null);
+const testStale = ref(false);      // 规则已改动，结果过期
+const debugVisible = ref(false);   // 调试抽屉
+const debugStep = ref("");         // 抽屉打开时定位到哪一步
 const systemTags = ref([]);
 const manualStatus = ref("");
 const userTags = ref([]);
@@ -122,8 +126,10 @@ function tabDot(name) {
   if (name === "quick") return quickVerify.value ? (quickVerify.value.all_ok ? "ok" : "warn") : "";
   if (name === "basic") return "ok";
   if (name === "rules") {
-    if (testResult.value && Array.isArray(testResult.value.steps)
-        && testResult.value.steps.some((s) => !s.ok)) return "err";
+    // 三态：有 fail 红；无 fail 但有附注（通过了但有疑点）黄；都没有才看规则是否填全
+    const steps = (testResult.value && testResult.value.steps) || [];
+    if (steps.some((s) => s.verdict === "fail")) return "err";
+    if (steps.some((s) => s.has_notes)) return "warn";
     return ["search", "detail", "toc", "content"].every(filled) ? "ok" : "warn";
   }
   if (name === "ext") {
@@ -133,14 +139,36 @@ function tabDot(name) {
   return "";
 }
 
+// 三态圆点与徽章：fail 红 / unknown 灰 / pass 且有附注 黄 / 纯 pass 绿
+function dotClass(step) {
+  if (step.verdict === "fail") return "err";
+  if (step.verdict === "unknown") return "unknown";
+  return step.has_notes ? "warn" : "ok";
+}
+function tagTypeOf(step) {
+  if (step.verdict === "fail") return "danger";
+  if (step.verdict === "unknown") return "info";
+  return step.has_notes ? "warning" : "success";
+}
+const STEP_LABELS = { search: "搜索", bookUrl: "详情链接", toc: "目录", content: "正文" };
+
+// 「全部通过」按 verdict 算，不再用 all_ok。**有附注的 pass 仍算通过**
+function allPassed() {
+  const steps = (testResult.value && testResult.value.steps) || [];
+  return steps.length > 0 && steps.every((s) => s.verdict === "pass");
+}
+
 function expandTestFailures(res) {
   if (!res || !Array.isArray(res.steps)) return;
+  // 失败和有附注的都要把人带到对应页签——附注是「通过了但有疑点」，
+  // 不引导过去的话用户根本不会看到
+  const interesting = res.steps.filter((s) => s.verdict === "fail" || s.has_notes);
+  if (!interesting.length) return;
   const map = { search: "search", bookUrl: "search", toc: "toc", content: "content" };
-  const failed = res.steps.filter((s) => !s.ok).map((s) => map[s.name]).filter(Boolean);
-  if (failed.length) {
-    activeTab.value = "rules";
-    activeRuleTab.value = failed[0];
-  }
+  const target = interesting.map((s) => map[s.name]).filter(Boolean);
+  if (!target.length) return;
+  activeTab.value = "rules";
+  activeRuleTab.value = target[0];
 }
 
 async function loadTagOptions() {
@@ -160,6 +188,12 @@ watch(() => props.modelValue, (show) => {
     quickLoading.value = false;
   }
 });
+
+// 规则一改，上一轮试跑结论就作废了。不标过期的话，用户改了规则
+// 还看到绿色的「全部通过」，会据此保存——这正是本次要消除的误导。
+watch(form, () => {
+  if (testResult.value) testStale.value = true;
+}, { deep: true });
 
 watch(() => [props.modelValue, props.sourceUrl], async ([show, url]) => {
   if (!show) return;
@@ -269,6 +303,7 @@ async function quickGenerate() {
 async function testRun() {
   testing.value = true;
   testResult.value = null;
+  testStale.value = false;          // 新一轮开始，先清过期标记
   try {
     testResult.value = await api.post("/rules/chain", {
       source: form.value,
@@ -282,6 +317,11 @@ async function testRun() {
     testing.value = false;
   }
   expandTestFailures(testResult.value);
+}
+
+function openDebug(step) {
+  debugStep.value = step || "";
+  debugVisible.value = true;
 }
 
 async function save() {
@@ -579,12 +619,24 @@ async function save() {
           </div>
           <template v-else-if="!testResult.error">
             <div v-for="s in testResult.steps" :key="s.name" class="quick-step">
-              <el-tag size="small" :type="s.ok ? 'success' : 'danger'">{{ s.name }}</el-tag>
+              <el-tag size="small" :type="tagTypeOf(s)">
+                {{ STEP_LABELS[s.name] || s.name }}
+              </el-tag>
               <span class="muted">{{ s.detail }}</span>
             </div>
-            <p style="margin: 10px 0 0">
-              <b>{{ testResult.all_ok ? "全部通过" : "未全部通过" }}</b>
+            <el-alert v-if="testStale" type="info" :closable="false" show-icon
+                      style="margin-top: 10px"
+                      title="规则已改动，结果已过期，请重跑" />
+            <p v-else style="margin: 10px 0 0">
+              <b>{{ allPassed() ? "全部通过" : "未全部通过" }}</b>
+              <span v-if="testResult.steps.some((s) => s.has_notes)"
+                    class="muted">（有疑点，见附注）</span>
             </p>
+            <div class="toolbar" style="margin-top: 8px">
+              <el-button size="small" type="primary" plain @click="openDebug()">
+                查看证据
+              </el-button>
+            </div>
           </template>
           <pre v-else class="mono" style="margin-top: 10px">{{ testResult.error }}</pre>
         </el-card>
@@ -606,6 +658,12 @@ async function save() {
       <el-button @click="visible = false">取消</el-button>
       <el-button type="primary" @click="save">保存</el-button>
     </template>
+
+    <!-- 抽屉常驻挂载，靠 v-model 控制显隐。**不要改成 v-if**：抽屉里的 watch 没有
+         immediate，initialStep 只在 modelValue 由 false → true 时生效，用 v-if 会让
+         首帧落到 steps[0] 而忽略 :initial-step -->
+    <RuleDebugDrawer v-model="debugVisible" :result="testResult"
+                     :initial-step="debugStep" />
   </el-dialog>
 </template>
 
