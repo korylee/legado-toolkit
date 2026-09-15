@@ -57,6 +57,20 @@ def get_detail(url: str, st=Depends(get_store)):
             "system_tags_locked": st.is_system_tags_locked(url)}
 
 
+@router.get("/exists")
+def source_exists(url: str, st=Depends(get_store)):
+    """查域名是否已存在。新建书源保存前调用，用于阻止静默覆盖。
+
+    比复用 /detail 再解析 404 错误串更稳（api/client.js 抛的是字符串错误）。
+    """
+    # get_source 内部会做 _normalize_url（去空白、去尾部斜杠、转小写），
+    # 所以这里直接传原始 url 即可，https://a.com 与 https://A.com/ 会命中同一源。
+    src = st.get_source(url)
+    if not src:
+        return {"exists": False, "name": ""}
+    return {"exists": True, "name": str(src.get("bookSourceName", "") or "")}
+
+
 @router.post("/save")
 def save_source(body: SourceSave, st=Depends(get_store)):
     from core.sanitize import clean_source
