@@ -27,8 +27,12 @@ def parse_source_header(raw: str) -> tuple:
 
     # BOM 必须先去：否则 `{"a":"b"}` 的 startswith("{") 为 False，会落到换行
     # 分隔分支被解析成 key='{"a"' / value='"b"}' —— 一个垃圾头真的发给服务器，
-    # 比丢掉更糟（会被表现成「源坏了」）
-    text = raw.lstrip("﻿").strip()
+    # 比丢掉更糟（会被表现成「源坏了」）。
+    # 注意先 strip 再剥 BOM：书源 JSON 里 BOM 前常带空格（如 ``  \ufeff{"a":"b"}``），
+    # 此时 BOM 不在首位，lstrip("\ufeff") 会剥不掉，故障静默重现（why 仍为 ""）。
+    # BOM 在源码里写成 "\ufeff" 转义而非裸字符：零宽不可见，编辑器清理或复制粘贴
+    # 一次就可能变成 lstrip("") 而静默失效。
+    text = raw.strip().lstrip("\ufeff").strip()
     if not text:
         return {}, ""
     if "<js" in text or "@js:" in text:
@@ -37,7 +41,8 @@ def parse_source_header(raw: str) -> tuple:
     # JSON 写法：看起来像 JSON（无论是否对象）就交给 json.loads 判，
     # 解析失败要给原因，不能静默丢。
     # 注意 `null` / `true` / `false` 是合法 JSON 字面量，但首字符既不特殊也不是
-    # 数字——漏掉它们，下面那条断言「必须给原因」的用例就会红。别删这个子条件。
+    # 数字——漏掉它们会被当换行写法处理，语义错位（例如 `null` 既非对象也无原因，
+    # 变成静默空头）。别删这个子条件。
     if (text[:1] in ("{", "[", '"', "-") or text[:1].isdigit()
             or text in ("null", "true", "false")):
         try:
@@ -69,15 +74,21 @@ def fetch(url: str, timeout: int = 15,
       - ``headers``：书源自身的 header；缺 User-Agent 时补默认 UA
         （对齐 BaseSource.kt 缺 UA 补 UA 的行为）
       - ``charset``：优先用它解码，失败按常见编码回退
-      - ``proxy``：形如 ``http://host:port`` / ``socks5://host:port``；
-        留空走直连
+      - ``proxy``：形如 ``http://host:port``；留空走直连。
+        **只支持 http 代理**——urllib 的 ProxyHandler 不认 ``socks5://``
+        （会抛 ``unknown url type: socks5``）。项目别处（cli/main.py --proxy 帮助、
+        WORKFLOW.md、checker.py 注释）宣传的 socks5 同样不成立，是既有的文档失实，
+        不属本模块要修的范围，但这里**不要**再写 socks5 以免加深误导。
     """
     h = {"User-Agent": DEFAULT_UA,
          "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
          "Accept-Language": "zh-CN,zh;q=0.9"}
-    # 书源 header 覆盖默认值；值为空的键不参与覆盖，避免把默认 UA 抹成空串
     if headers:
-        h.update({str(k): str(v) for k, v in headers.items() if v})
+        # 值为空（含纯空白）的键不覆盖默认值。用 if v 挡不住 " "，而 urllib 发送前
+        # 会 strip，结果服务端收到空 UA —— 与换行写法（已 strip）行为不一致。
+        # None 单独挡：str(None) 是 "None"，会被当成真值把默认 UA 覆盖成字面量 "None"
+        h.update({str(k): str(v) for k, v in headers.items()
+                  if v is not None and str(v).strip()})
 
     req = urllib.request.Request(url, headers=h)
 
@@ -94,7 +105,10 @@ def fetch(url: str, timeout: int = 15,
 
     # charset 优先，其次按常见编码回退
     order = []
-    if charset:
+    # charset 与 header 同源（都取自书源 JSON），同样可能是脏值：
+    # 直接 .strip() 会让 charset=123 抛 AttributeError。试跑接线后会直接从
+    # source.get("charset") 传进来，所以这里必须挡
+    if isinstance(charset, str) and charset.strip():
         order.append(charset.strip().lower())
     order += ["utf-8", "gbk", "gb2312", "big5"]
     for enc in order:
