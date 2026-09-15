@@ -518,7 +518,7 @@ def _shape_label(shape: str) -> str:
     }.get(shape, shape)
 
 
-def _safe_int(value: Any, default: int = 0) -> int:
+def safe_int(value: Any, default: int = 0) -> int:
     """宽松取整。脏值（"" / [] / "abc" / None）一律降级为默认值。
 
     书源的 bookSourceType 是从外部 JSON 来的，历史上就出现过 ''/[]/字符串数字
@@ -567,7 +567,7 @@ def judge_content(
     rule_error: str = "",
 ) -> Judgement:
     """正文判定。前置分流顺序**不可调换**。"""
-    st = _safe_int(source_type)
+    st = safe_int(source_type)
     clean = [str(v or "") for v in (values or [])]
     shape, _counts = sniff_shape(clean)
     evidence = build_evidence(clean, matched_html)
@@ -627,7 +627,7 @@ def judge_list_step(
     evidence = build_evidence(clean, matched_html)
 
     # 下载源不解析目录（Debug.kt:329-332）
-    if step_key == STEP_TOC and _safe_int(source_type) == 3:
+    if step_key == STEP_TOC and safe_int(source_type) == 3:
         return Judgement(VERDICT_UNKNOWN, "文件类书源不解析目录", shape, [], evidence)
 
     if str(rule_error or "").strip():
@@ -678,7 +678,7 @@ def static_misconfig_notes(source: Dict[str, Any]) -> List[str]:
         notes.append("ruleContent.webJs 已配置，但 URL 规则未开启 webView，"
                      "该段 JS 在 Legado 中不会生效（AnalyzeUrl.kt:441）")
 
-    if _safe_int(src.get("bookSourceType", 0)) == 4:
+    if safe_int(src.get("bookSourceType", 0)) == 4:
         notes.append("bookSourceType=4 是 Legado 不存在的取值，导出后行为未定义，"
                      "建议改为 0~3")
 
@@ -694,7 +694,7 @@ __all__ = [
     "EXPECTED_SHAPE", "STRUCT_TAG_RE", "CONTENT_NOISE_MARKERS",
     "MAX_PAGE_HTML_CHARS", "MAX_MATCHED_HTML_CHARS", "MATCHED_NODES_LIMIT",
     "MAX_VALUE_CHARS", "VALUES_PREVIEW_LIMIT", "MAX_EVIDENCE_TOTAL_CHARS",
-    "SHORT_CONTENT_CHARS",
+    "SHORT_CONTENT_CHARS", "safe_int",
 ]
 ```
 
@@ -1549,6 +1549,9 @@ CONTENT_HTML = '<div id="content">' + "正文内容" * 50 + "</div>"
 PAGES = {
     "https://site/search?q=%E6%88%91": SEARCH_HTML,
     "https://site/book/1": TOC_HTML,
+    # `ruleBookInfo.tocUrl` 分支用它：必须与搜索结果里的详情链接**不同**，
+    # 否则「分支有没有生效」区分不出来
+    "https://site/toc-page": TOC_HTML,
     "https://site/read/1.html": CONTENT_HTML,
 }
 
@@ -1624,15 +1627,22 @@ class CompatibilityTests(unittest.TestCase):
 
 class TocUrlBranchTests(unittest.TestCase):
     def test_toc_url_skips_detail_page(self):
-        """ruleBookInfo.tocUrl 非空时跳过详情页。对齐 Debug.kt:318-322。"""
+        """ruleBookInfo.tocUrl 非空时跳过详情页。对齐 Debug.kt:318-322。
+
+        **tocUrl 必须与搜索结果里的详情链接不同**：若两者相同（比如都写
+        "/book/1"），分支生效与否断言都成立，这条用例等于没测。同理
+        page_id 恒为 "detail"，断言 pages 里有没有 "detail" 也是恒真的，
+        要断言的是那个页面的 **url**。
+        """
         src = dict(SOURCE)
-        src["ruleBookInfo"] = {"tocUrl": "https://site/book/1"}
         src["ruleSearch"] = dict(SOURCE["ruleSearch"])
+        src["ruleBookInfo"] = {"tocUrl": "https://site/toc-page"}
         r = run_chain(src)
-        ids = [p["id"] for p in r["pages"]]
-        self.assertIn("detail", ids)      # tocUrl 指向的页面仍在 pages 里
         toc = [s for s in r["steps"] if s["name"] == "toc"][0]
-        self.assertEqual(toc["url"], "https://site/book/1")
+        self.assertEqual(toc["url"], "https://site/toc-page")
+        detail = [p for p in r["pages"] if p["id"] == "detail"]
+        self.assertEqual(len(detail), 1)
+        self.assertEqual(detail[0]["url"], "https://site/toc-page")
 
 
 class FileTypeTests(unittest.TestCase):
@@ -1764,7 +1774,10 @@ def verify_chain(source: dict, keyword: str, detail_url: str = "",
     steps: list = []
     pages: dict = {}
     src = source or {}
-    source_type = int(src.get("bookSourceType", 0) or 0)
+    # 用 quality.safe_int 而不是裸 int()：这个字段来自外部 JSON，脏值会让
+    # rules.py 变成 HTTP 400、让 ops.py 的快速生成任务整体失败。
+    # quality 里那条「唯一防线」的注释说的就是这件事——别在这里绕过它
+    source_type = Q.safe_int(src.get("bookSourceType", 0))
 
     # 书源自身的请求头：不带它抓回来的 HTML 是失真的，「看源码改规则」就失去地基
     headers, header_why = parse_source_header(str(src.get("header", "") or ""))
