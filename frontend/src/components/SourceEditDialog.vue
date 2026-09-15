@@ -38,10 +38,41 @@ function readAppHost() {
 const loading = ref(false);
 const appHost = ref(readAppHost());  // App 的 IP（连 App 调试用）
 const appDebugging = ref(false);
-const testKey = ref("我的");
-// 发现页 URL：填了走发现链路，留空走搜索链路。**一个输入框决定，不加开关**——
-// 快速生成页签那个「仅发现模式」开关不在这张卡片上，多一个开关只会让人对不上号
-const testExploreUrl = ref("");
+// 调试目标 → App 的 key 形态。分派依据是 Legado 的 `Debug.kt:236-279`
+// （那个 when 才是真正的规则），交互照 App 调试界面的 chip 行
+// （`BookSourceDebugScreen.kt:174-182`：一排 ToggleChip 选目标 + 一个输入框）。
+//
+// **选中的目标只是「提示 + 前缀构造器」，不是硬约束**：App 是按 key 的形态分派的
+// （isAbsUrl → contains("::") → ++ → -- → 兜底搜索）。所以「搜索」下填一个 URL
+// 会被 App 当详情页跑，「详情」下填关键词会被当搜索跑。这不是我们拼错了——App
+// 自己就是同一个 when，保持一致才是对的。
+const DEBUG_TARGETS = [
+  { value: "search", label: "搜索", hint: "关键词，如 我的" },
+  { value: "explore", label: "发现", hint: "发现页 URL" },
+  { value: "info", label: "详情", hint: "详情页 URL" },
+  { value: "toc", label: "目录", hint: "目录页 URL" },
+  { value: "content", label: "正文", hint: "正文页 URL" },
+];
+const debugTarget = ref("search");
+const debugQuery = ref("");
+const currentTarget = computed(
+  () => DEBUG_TARGETS.find((t) => t.value === debugTarget.value) || DEBUG_TARGETS[0],
+);
+
+/** 目标 + 输入 → App 认的 key。前缀构造照抄 App 的 `ViewModel:91-97`。 */
+function buildDebugKey() {
+  const q = debugQuery.value.trim();
+  switch (debugTarget.value) {
+    case "explore": return q ? `发现::${q}` : "";
+    // 幂等去前缀：用户手抄 URL 时常把 ++ / -- 一起带上，不去重就会拼成 ++++。
+    // 只去**一次**（等价 Kotlin 的 removePrefix），写成 /^\++/ 会把真想要的
+    // `+++url` 也一起吃掉、改成别的意思。
+    case "toc": return q ? `++${q.replace(/^\+\+/, "")}` : "";
+    case "content": return q ? `--${q.replace(/^--/, "")}` : "";
+    case "info": return q;              // 详情页就是裸 URL，App 靠 isAbsUrl 认它
+    default: return q || "我";          // 搜索：空则用默认关键词（沿用旧行为）
+  }
+}
 const testResult = ref(null);
 const testStale = ref(false);      // 规则已改动，结果过期
 const debugVisible = ref(false);   // 调试抽屉
@@ -438,13 +469,11 @@ async function quickGenerate() {
 async function appDebugRun() {
   const host = appHost.value.trim();
   if (!host) return ElMessage.warning("请先填 App 的 IP（App 通知栏里有）");
-  // 两个入口互斥，用「发现页 URL 是否为空」来分流：
-  // 填了 → 发现链路；留空 → 搜索链路（关键词参与，空则用默认「我」）。
-  // 发现链路的约定是 key 拼成 `发现::<发现页URL>`：Legado 的 Debug.kt
-  // 见 key 里含 "::" 就取 :: 之后的部分当发现页 URL（Debug.kt:246-250）。
-  // URL 里的 "://" 只有一个冒号，不会被误当成那个分隔符。
-  const exploreUrl = testExploreUrl.value.trim();
-  const key = exploreUrl ? `发现::${exploreUrl}` : (testKey.value.trim() || "我");
+  const key = buildDebugKey();
+  // 除「搜索」外都必须给出 URL（搜索空着会用默认关键词兜底）。放空进去会拼出
+  // `发现::` / `++` 这种 App 认不了的目标——它对无效 key 是**静默无响应**，
+  // 排查成本极高，宁可在这里挡住。
+  if (!key) return ElMessage.warning(`请填写${currentTarget.value.hint}`);
   appDebugging.value = true;
   testResult.value = null;
   testStale.value = false;
@@ -811,15 +840,21 @@ async function doSave(s) {
 
       <el-col :xs="24" :sm="24" :md="9">
         <el-card shadow="never" header="连 App 调试" class="sticky-test">
-          <div class="toolbar">
-            <el-input v-model="testKey" size="small" placeholder="关键词" style="width: 110px" />
-            <el-input v-model="testExploreUrl" size="small"
-                      placeholder="发现页 URL（留空 = 从搜索开始）"
-                      style="flex: 1 1 150px" />
+          <!-- 调试目标照 App 调试界面的 chip 行做。这排 chip 只负责改 placeholder
+               和拼 key 前缀，**不改变 App 的分派**——它认的是 key 的形态，
+               所以在这排选什么并不会「锁死」链路，理由见 buildDebugKey 上方 -->
+          <el-radio-group v-model="debugTarget" size="small" class="debug-targets">
+            <el-radio-button v-for="t in DEBUG_TARGETS" :key="t.value" :value="t.value">
+              {{ t.label }}
+            </el-radio-button>
+          </el-radio-group>
+          <div class="toolbar" style="margin-top: 8px">
+            <el-input v-model="debugQuery" size="small" :placeholder="currentTarget.hint"
+                      style="flex: 1 1 150px" @keyup.enter="appDebugRun" />
           </div>
           <p class="muted" style="margin: 8px 0 0">
-            两个入口二选一：<b>填了「发现页 URL」就走发现链路</b>，此时关键词不参与；
-            <b>留空则走搜索链路</b>（关键词 → 取第一个结果 → 目录 → 第一章正文）。
+            目标决定<b>从哪一步开始跑</b>：<b>搜索</b>从关键词开始（取第一条 → 目录 → 正文），
+            <b>发现</b>从发现页开始，<b>详情 / 目录 / 正文</b>各从对应页面开始。
           </p>
           <!-- 连 App 调试：我们离线回放不了 JS 规则（<js> / @js:），
                而 App 内建的调试 WebSocket 能跑完整链路。IP 填 App 通知栏里
@@ -914,6 +949,9 @@ async function doSave(s) {
 .source-tabs { min-height: 520px; }
 .source-tabs :deep(.el-tabs__header) { flex: 0 0 auto; }
 .tab-label { display: inline-flex; align-items: center; gap: 6px; }
+/* 5 个调试目标按钮：右列约 380px 宽，5 个两字按钮恰好放得下，这里只做换行兜底
+   （字号或容器宽度一变就不会横向溢出、把卡片撑破） */
+.debug-targets { display: flex; flex-wrap: wrap; }
 .dialog-header { display: flex; align-items: center; gap: 12px; }
 /* 圆点样式已上移到全局 styles.css（那里有完整的 .dot / .ok / .warn / .err / .unknown）。
    这里原先重复定义了一遍基础规则，而 scoped 版本的注入更晚、特异性同为 0,2,0，
