@@ -986,6 +986,25 @@ git commit -m "feat(replayer): 新增 extract_all_nodes 返回命中节点的 HT
                      "class.a@text", "text", "class.list@tag.li"):
             ok, why = R.rule_supported(rule)
             self.assertTrue(ok, "被误伤：%s (%s)" % (rule, why))
+
+    def test_js_in_middle_reports_js_reason(self):
+        """`selector@js:code` 的 JS 体里出现 $1/&&/@get: 时，报的原因必须是 JS。
+
+        实测真实语料里 1139 条源规则属于这一类。结论（unknown）本来就对，
+        但如果 JS 检测排在新检测段后面，报出的原因会变成「$n 取列表第 n 项
+        暂未支持」——把用户引向错误的方向，而这个工具的全部价值就是告诉他
+        为什么。断言必须检查**原因内容**，否则这类错报不会被任何用例发现。
+        """
+        rules = [
+            r"text@js:result.replace(/^(\d+)章/,'第$1章')",
+            "id.c@text@js:return result + '&&'",
+            "id.c@text@js:java.get('x')@get:{y}",
+        ]
+        for rule in rules:
+            ok, why = R.rule_supported(rule)
+            self.assertFalse(ok, rule)
+            self.assertIn("JS", why,
+                          "原因必须指向 JS 而不是别的 token：%s -> %s" % (rule, why))
 ```
 
 - [ ] **Step 2: 跑测试，确认失败**
@@ -1043,7 +1062,22 @@ Expected: `test_legado_only_syntax_reported` FAIL（第一条 `@@class.a@text` �
     # 3) 不支持的语法 -> 明确标注，避免被当成「解析为空 = 规则失效」
     bl = body.lower()
 
-    # 2.5) Legado 支持但本项目回放不了的语法（详见设计文档 7.2）
+    # 3.0) JS 检测必须排在下面那批**之前**
+    #
+    #  `selector@js:code` 这种形态里，JS 体内部完全可能出现 $1、&&、@get: 这些
+    #  token。若先命中下面的检测，报出的原因就是错的——实测真实语料里 1139 条
+    #  源规则会因此显示「$n 取列表第 n 项暂未支持」，而真实原因是 JS 无法离线回放。
+    #  结论仍是 unknown（灰），但「为什么测不了」正是调试功能的核心价值，
+    #  报错原因等于把用户引向错误的方向。
+    #
+    #  原检测只认 `<js`/`</js`/开头 `js:`，从来不认中间形态的 `@js:`，所以
+    #  `@js:` 这个条件是本任务顺带补上的（属既有的检测缺口，不是本次引入）。
+    if (pr.kind == "js" or "<js" in bl or "</js>" in bl
+            or bl.startswith("js:") or "@js:" in bl):
+        pr.unsupported = "JS 规则（@js:/<js>）需要 Legado 的 Rhino 引擎，无法离线回放"
+        return pr
+
+    # 3.1) Legado 支持但本项目回放不了的语法（详见设计文档 7.2）
     if raw.startswith("@@"):
         pr.unsupported = "@@ 强制 jsoup 规则暂未支持"
         return pr
@@ -1065,10 +1099,12 @@ Expected: `test_legado_only_syntax_reported` FAIL（第一条 `@@class.a@text` �
     if raw.count("##") >= 3:
         pr.unsupported = "## 第四段（只替换第一个匹配）暂未实现"
         return pr
-
-    if pr.kind == "js" or "<js" in bl or "</js>" in bl or bl.startswith("js:"):
 ```
 
+> **注意这与原计划的顺序相反**：原计划是把新检测段插在 JS 检测**之前**，实测证明那样会让 1139 条真实规则报错原因。现在 JS 检测在前，新检测段在后。
+>
+> **`@js:` 用精确匹配而不是裸 `"js:" in bl`**：后者会把任何含 `js:` 的选择器也判为不支持，造成「明明能跑却显示无法判定」的反向噪音。`"@js:" in bl` 加 `bl.startswith("js:")` 已覆盖 Legado 的全部 JS 书写形态。
+>
 > **`$n` 检测要小心**：`body` 在剥离 `##` 之后，正则 `$\d` 只在规则主体上匹配。但 `$.data.list[*].name` 这种 JSONPath 不含 `$数字`，不会被误伤。若发现误伤，把正则收紧为 `r"\$\d{1,2}$"`。
 
 - [ ] **Step 4: 跑测试**
