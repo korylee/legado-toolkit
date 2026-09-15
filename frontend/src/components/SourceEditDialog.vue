@@ -864,15 +864,35 @@ async function doSave(s) {
           <pre v-else class="mono" style="margin-top: 10px">{{ testResult.error }}</pre>
         </el-card>
 
-        <el-card shadow="never" header="语法速查" style="margin-top: 12px">
-          <ul class="muted" style="margin: 0; padding-left: 18px; line-height: 1.9">
+        <!-- grammar-card 这个 class 是给 styles.css 的桌面端布局用的：它要在右列
+             的 flex 列里吃掉剩余高度并自己滚。不加 class 的话只能靠 :last-child
+             去猜，将来中间插一张卡片就会选错。 -->
+        <el-card shadow="never" header="语法速查" class="grammar-card"
+                 style="margin-top: 12px">
+          <!-- 上半组逐条对过 core/rules/replayer.py（RULE_PREFIXES / VALUE_ACTIONS /
+               COMMON_ATTRS / parse_rule），都是本地回放得了的——照它写，「本地粗略
+               验证」一定给得出结论。下半组是 Legado 支持、但我们回放不了的，写了
+               就只剩「连 App 调试」一条路；提前标出来，免得在本地看到灰点「无法判定」
+               时以为是自己写错了规则。 -->
+          <ul class="muted" style="margin: 0; padding-left: 18px; line-height: 1.6">
             <li>简写：class.xxx → .xxx；tag.a → a</li>
             <li>链式：class.list@tag.li@tag.a@href</li>
             <li>索引：.0 第一个、.-1 最后一个</li>
+            <li>取值：@text / @textNodes / @ownText / @html / @all</li>
+            <li>属性：@href / @src / @data-original 等</li>
             <li>正则：规则##正则##替换（支持 $1）</li>
+            <li>类型前缀：@css: / @json: / @html:（@html: 直接取原始响应体）</li>
             <li>接口源：$.data.list[*].name</li>
             <li>取图：tag.img@src / @data-original</li>
           </ul>
+          <!-- v-pre 不是可选项：Vue 会把 {{ }} 当插值、把 <js> 当标签解析，
+               转义成实体也救不回来（编译发生在实体解码之后）。v-pre 让这一块
+               整段跳过编译、原样输出，才写得出这些字面量。 -->
+          <p class="muted" v-pre style="margin: 10px 0 0; line-height: 1.7">
+            <b>以下语法本地回放不了</b>，只能用「连 App 调试」验：<br>
+            @js: / &lt;js&gt; / {{ }} / || / @xpath: / &amp;&amp; / %% / $n /
+            区间索引 [0:10] / @webjs: / @get:{ } / ## 第四段
+          </p>
         </el-card>
       </el-col>
     </el-row>
@@ -902,7 +922,8 @@ async function doSave(s) {
 .quick-verify { border-top: 1px solid #ebeef5; margin-top: 4px; padding-top: 8px; }
 .quick-step { display: flex; align-items: center; gap: 8px; padding: 3px 0; }
 .raw-json :deep(textarea) { font-family: Consolas, Monaco, monospace; font-size: 12px; }
-@media (min-width: 993px) {
-  .sticky-test { position: sticky; top: 0; }
-}
+/* 这里原本有一条 `@media (min-width: 993px) { .sticky-test { position: sticky } }`，
+   已随右列布局改动删除：右列不再是滚动容器（见 styles.css 桌面端段——两张卡片
+   各滚各的），sticky 失去可吸附的上下文，留着只会让人以为它还在起作用。
+   .sticky-test 这个 class 仍在用，在那儿做右列的布局钩子。 */
 </style>
