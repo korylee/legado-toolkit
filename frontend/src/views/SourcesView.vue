@@ -1,11 +1,11 @@
 <script setup>
 import { ref, reactive, computed, nextTick, watch, onMounted, onUnmounted } from "vue";
-import { ElMessage, ElMessageBox, ElNotification } from "element-plus";
+import { ElMessage, ElMessageBox } from "element-plus";
 import { Search, Plus, Upload, Download, Delete, Filter, Refresh, Monitor } from "@element-plus/icons-vue";
 import { listSources, listSourceUrls, listGroups, patchTags, deleteSources, listTags, getStats } from "../api/sources";
 import { api, subscribeJob } from "../api/client";
 import { ensureTagMeta, isQualityTag, splitTags, tagOfType, sourceTypes } from "../utils/tags";
-import { describeChanges } from "../utils/health";
+import { HEALTH_LABELS, describeChanges, healthLabel, starBasisLabel } from "../utils/health";
 import { useMobile } from "../composables/useMobile";
 import SourceEditDialog from "../components/SourceEditDialog.vue";
 import TrashDrawer from "../components/TrashDrawer.vue";
@@ -107,27 +107,33 @@ const stats = ref(null);
 const jobsVisible = ref(false);
 const jobBadge = ref(0);
 const jobsRef = ref(null);
+//: 结果条上点「查看」时，要让抽屉直接展开哪一条任务
+const focusJobId = ref("");
+
+/** 结果条上的「查看」：打开任务抽屉，并展开刚跑完的那条（明细在里面） */
+function openJobDetail() {
+  focusJobId.value = (checkResult.value && checkResult.value.jobId) || "";
+  jobsVisible.value = true;
+}
 
 const query = reactive({
   q: "", type: null, health: "", group: "", tag: "",
   order: "-stars", limit: 50, offset: 0,
 });
 
-const HEALTH = [
-  { value: "ok", label: "✅可用" }, { value: "dead", label: "❌失效" },
-  { value: "auth", label: "🔒需验证" }, { value: "gfw", label: "🌐需翻墙" },
-];
 const healthType = { ok: "success", dead: "danger", auth: "warning", gfw: "info" };
 const typeLabel = (v) => tagOfType(v) || ("类型" + v);
 
-// 统计条上可下钻的健康度 chip。value 即 query.health 的取值，点一下直接改筛选条件
-const HEALTH_CHIPS = [
-  { value: "ok", label: "✅可用" },
-  { value: "dead", label: "❌失效" },
-  { value: "auth", label: "🔒需验证" },
-  { value: "gfw", label: "🌐需翻墙" },
-  { value: "none", label: "未校验" },      // 后端 _where 认这个值 → health IS NULL
-];
+// 健康度的取值：统计条上的 chip（点一下直接改筛选条件）和两个下拉共用这一份。
+//
+// **8 个健康态一个都不能少**：原来这里有两份，各只列了 4 个（ok/dead/auth/gfw），
+// 于是 timeout / no_search / error / skipped 的源在统计条上一个都数不到——各 chip
+// 之和小于总数，看着像凭空少了一批源，而且没法按它们下钻、下钻不到就没法批量处理。
+// 文案从 HEALTH_LABELS 取（那是 core/models.py HEALTH_NAMES 的显示层副本），
+// 别在这儿再抄一份名字。
+const HEALTH_OPTIONS = [
+  "ok", "dead", "auth", "gfw", "no_search", "timeout", "error", "skipped",
+].map((value) => ({ value, label: HEALTH_LABELS[value] }));
 
 // stats.health 的键是 str(health)：没有校验记录时 health 为 NULL，键就是字符串 "None"
 const healthCount = (key) => {
@@ -165,6 +171,57 @@ async function load() {
   // 翻页/刷新后把 selected 的状态同步回表格勾选（表格只渲染当前页，翻页会忘掉）
   await nextTick();
   syncTableSelection();
+}
+
+//: 上一次校验的结果摘要。**做成持久条而不是 toast**：校验是长时任务，
+//: 「新校验几条 / 复用几条 / 几条变了」是要看第二眼的东西，而 ElMessage 三秒就没了——
+//: 错过之后列表莫名其妙不一样了，用户没有任何线索。
+//: 值为 null 表示没有可展示的结果（没校验过 / 任务状态获取失败）。
+//: `stale` 是就地回填的副产品：行没动，所以排序和筛选项都可能已经不再成立。
+const checkResult = ref(null);
+
+//: 列表 API 的 toc_complete/content_ok 是 0/1/null（SourceOut 里是 Optional[int]，
+//: 由 SQLite 的三态整数来的），而校验结果里是 true/false/null（Python bool）。
+//: **不转就静默坏掉**：模板里判的是 `=== 1`，赋个 true 进去两个分支都不成立，
+//: 表现是那一格永远显示「未验证」——看着像没校验，其实是类型不对
+const triToInt = (v) => (v === true ? 1 : v === false ? 0 : null);
+
+//: URL 两侧必须同口径：列表里的 source_url 是库里归一化过的（去空白/尾斜杠/小写），
+//: 后端下发 items 时也已归一。这里再兜一次——归一化是最容易漏在半路的那种约定
+const urlKey = (u) => String(u || "").trim().replace(/\/+$/, "").toLowerCase();
+
+/**
+ * 用校验结果**就地回填**列表，不是整表重拉。
+ *
+ * 原来这里是 `await load()`：只校验了 7 条，整张表却重载——滚动位置会跳、
+ * 正在看的行会移位。`result_json.items` 已带每条源的新状态，替换即可。
+ *
+ * 两种情况返回 false，调用方退回全量刷新：
+ *   1. items 被后端截断（全量校验 3850 条，而 payload 是 `items[:500]`）
+ *   2. 一条都没匹配上——URL 口径不一致时就是这个表现，宁可重拉也别静默不做事
+ *
+ * **回填不重算筛选**：筛了「可用」的列表里会留着一行刚变成失效的源。这是有意的
+ * ——替用户决定「悄悄把它移走」比让他看见更糟。所以另给一条提示条，把选择权还回去。
+ */
+function applyCheckResults(resultJson) {
+  const items = (resultJson && resultJson.items) || [];
+  const checked = Number((resultJson && resultJson.checked) || 0);
+  if (!items.length || checked > items.length) return false;
+  const byUrl = new Map(items.map((it) => [urlKey(it.url), it]));
+  let hit = 0;
+  rows.value.forEach((row) => {
+    const it = byUrl.get(urlKey(row.source_url));
+    if (!it) return;
+    row.health = it.health;
+    row.stars = it.stars;
+    row.star_basis = it.star_basis;
+    row.toc_complete = triToInt(it.toc_complete);
+    row.content_ok = triToInt(it.content_ok);
+    row.search_hit = it.search_hit;
+    row.checked_at = it.checked_at;
+    hit += 1;
+  });
+  return hit > 0;
 }
 
 // 点健康度 chip：再点一次同一个就取消筛选，切回全部
@@ -236,13 +293,45 @@ function qualityTagsOf(row) {
   return splitTags(row.group_name || "").filter((t) => isQualityTag(t));
 }
 
+//: 移入回收站的确认框，返回**原因**（取消时抛出）。
+//:
+//: 原因走的是可选输入：不填也能删，但填了会写进 `data/backups/deleted.jsonl`
+//: 的那条记录 —— 那是「为什么删」**唯一**的存放处（库里没有这一列），而之前界面
+//: 从不传它，于是从界面删的全部是空原因，备份里那份审计信息形同虚设。
+//:
+//: 单条与批量共用这一处：各写一遍的话，同一件事会慢慢变成两种说法。
+async function askTrashReason(n) {
+  const res = await ElMessageBox.prompt(
+    "将把 " + n + " 条源移入回收站。不会再导出到 App，可随时恢复。",
+    "移入回收站",
+    {
+      type: "warning",
+      confirmButtonText: "移入回收站",
+      cancelButtonText: "取消",
+      inputPlaceholder: "可选：为什么删（会记进备份，如「非书源：影视站」）",
+      inputValue: "",
+    });
+  return String(res.value || "").trim();
+}
+
+/** 行内删除一条。走的是**软删除**（与批量同一个接口、同一套后果）。 */
+async function removeOne(row) {
+  try {
+    const reason = await askTrashReason(1);
+    const res = await deleteSources([row.source_url], reason);
+    ElMessage.success("已移入回收站 " + res.deleted + " 条");
+    // 这一行如果被勾选过，得把它从 selected 里摘掉：否则批量条上的「已选 N 条」
+    // 会算上一条已经不在列表里的源，后续批量动作还会拿它去发请求
+    selected.value = selected.value.filter((u) => u !== row.source_url);
+    load();
+  } catch (e) { /* 取消 */ }
+}
+
 async function removeSelected() {
   if (!selected.value.length) return ElMessage.warning("先勾选源");
   try {
-    await ElMessageBox.confirm(
-      "将把 " + selected.value.length + " 条源移入回收站。不会再导出到 App，可随时恢复。",
-      "移入回收站", { type: "warning" });
-    const res = await deleteSources(selected.value);
+    const reason = await askTrashReason(selected.value.length);
+    const res = await deleteSources(selected.value, reason);
     ElMessage.success("已移入回收站 " + res.deleted + " 条");
     clearSelection();
     load();
@@ -269,47 +358,33 @@ async function applyBatchTags(mode) {
   }
 }
 
-// 校验结果提示。**必须报出「复用了几条」**：有效期内的缓存不会重新请求，
-// 所以要是不说，「点校验 → 完成」和「一条请求都没发」在界面上长得一模一样
-function reportCheckResult(resultJson) {
+/**
+ * 把校验结果解析成结果条要的那几个数字。**不再弹 toast**——见 `checkResult` 的注释。
+ *
+ * **必须报出「复用了几条」**：有效期内的缓存不会重新请求，所以要是不说，
+ * 「点校验 → 完成」和「一条请求都没发」在界面上长得一模一样。
+ *
+ * 「首次有结论」与「变成 X」**分开**：库里绝大多数源从未校验过，第一次全量之后
+ * 「新增可用 2000 条」不是「比上次好」。混在一起这个数字就失去意义。
+ *
+ * 口径与任务抽屉里的摘要同源（都读 result_json），不另算一份。
+ */
+function parseCheckResult(resultJson) {
   let r = null;
-  try { r = resultJson ? JSON.parse(resultJson) : null; } catch (e) { return false; }
-  if (!r || typeof r.checked !== "number") return false;
+  try { r = resultJson ? JSON.parse(resultJson) : null; } catch (e) { return null; }
+  if (!r || typeof r.checked !== "number") return null;
   const cached = r.cached || 0;
-  const fetched = typeof r.fetched === "number" ? r.fetched : r.checked - cached;
-  if (fetched) {
-    ElMessage.success("校验完成：新校验 " + fetched + " 条"
-                      + (cached ? "，复用缓存 " + cached + " 条" : ""));
-  } else if (cached) {
-    ElMessage.success("校验完成：全部 " + cached + " 条命中缓存，未发起请求");
-  } else {
-    ElMessage.success("校验完成");
-  }
-  // 写库失败要单独报：结果没落库时列表状态不会变，而列表上完全看不出来
-  if (r.save_failures) {
-    ElMessage.error(r.save_failures + " 条结果没能写入管理库，列表状态不会更新");
-  }
-  // 「这次校验改变了什么」单独用 Notification 报：ElMessage 三秒就没了，而这是
-  // 列表状态变动的**唯一**解释——错过就只能看见列表莫名其妙不一样了。
-  // 「首次有结论」与「变成 X」分开：库里绝大多数源从未校验过，第一次全量之后
-  // 「新增可用 2000 条」不是「比上次好」，混在一起这个数字就失去意义
   const t = r.transitions || {};
-  const changes = describeChanges(t.changed);
-  const firstChecked = t.first_checked || 0;
-  const parts = [];
-  if (changes.length) parts.push("相对上次变化：" + changes.join("、"));
-  else if (!firstChecked) parts.push("无状态变化");
-  // 首次校验时不报「无状态变化」——那不是没变，是以前没有可比的对象
-  if (firstChecked) parts.push("其中 " + firstChecked + " 条首次有结论");
-  if (parts.length) {
-    ElNotification({
-      title: "校验结果",
-      message: parts.join("；"),
-      type: changes.length ? "warning" : "success",
-      duration: 8000,   // 比 ElMessage 的 3 秒久：这批数字是要看第二眼的
-    });
-  }
-  return true;
+  return {
+    checked: r.checked,
+    cached,
+    fetched: typeof r.fetched === "number" ? r.fetched : r.checked - cached,
+    firstChecked: t.first_checked || 0,
+    changes: describeChanges(t.changed),
+    // 写库失败要单独报：结果没落库时列表状态不会变，而列表上完全看不出来
+    saveFailures: r.save_failures || 0,
+    hitDowngrades: r.hit_downgrades || 0,
+  };
 }
 
 async function checkSources(urls = []) {
@@ -329,7 +404,8 @@ async function checkSources(urls = []) {
     if (Object.keys(checkOverride.value).length) payload.check = checkOverride.value;
     const r = await api.post("/jobs", { kind: "check", payload });
     checkJobId.value = r.job_id;
-    ElMessage.success("已提交校验任务 " + r.job_id);
+    // **不弹「已提交」的 toast**：上面那条状态条已经在说「正在校验 N 条」了，
+    // 再来一条浮层只是噪音——而且它挡在统计条旁边，反而盖住了真正的进度
     if (stopCheck) stopCheck();
     stopCheck = subscribeJob(
       r.job_id,
@@ -339,11 +415,29 @@ async function checkSources(urls = []) {
       async (data) => {
         resetCheckState();
         if (data.status === "done") {
-          if (!reportCheckResult(data.result_json)) ElMessage.success("校验完成");
-          await load();
+          const summary = parseCheckResult(data.result_json);
+          // 就地回填优先：整表重拉会让滚动位置跳、正在看的行移位。
+          // 回填不了（结果被截断 / 一条都没匹配上）才退回全量刷新
+          const backfilled = applyCheckResults(data.result_json);
+          if (!backfilled) await load();
+          if (summary) {
+            // 行没动 → 排序和筛选项都可能已经不再成立。**只有就地回填时才谈得上
+            // 过期**：退回全量刷新的话列表就是刚查的，没有过期问题。
+            // 排序过期只在按星级排时才成立（别的排序键不会因校验而变）
+            summary.stale = backfilled
+              && (filterCount.value > 0 || /stars/.test(query.order));
+            // **把 job_id 存进摘要**：resetCheckState() 刚把 checkJobId 清空了，
+            // 不存的话结果条上的「查看」点开抽屉不知道要看哪一条
+            summary.jobId = r.job_id;
+            checkResult.value = summary;
+          }
           try { tags.value = await listTags(); } catch (e) { /* 忽略 */ }
         } else if (data.status === "cancelled") {
           ElMessage.info("校验已取消");
+        } else if (data.status === "unknown") {
+          // 兜底出口：SSE 重连到上限仍没拿到终态。**话要说准**——不能说
+          // 「任务失败」，任务很可能早就跑完了，只是我们没收到
+          ElMessage.error(data.error || "任务状态获取失败，请刷新页面");
         } else {
           ElMessage.error("校验任务失败: " + (data.status || "unknown"));
         }
@@ -417,7 +511,7 @@ onUnmounted(() => {
         <button type="button" class="chip" :class="{ active: !filterCount }" @click="reset">
           源 <b>{{ stats ? stats.sources : "—" }}</b>
         </button>
-        <button v-for="h in HEALTH_CHIPS" :key="h.value" type="button" class="chip"
+        <button v-for="h in HEALTH_OPTIONS" :key="h.value" type="button" class="chip"
                 :class="{ active: query.health === h.value }" @click="onHealthChip(h.value)">
           {{ h.label }} <b>{{ healthCount(h.value) }}</b>
         </button>
@@ -448,7 +542,7 @@ onUnmounted(() => {
           <el-option v-for="t in sourceTypes" :key="t.value" :value="t.value" :label="t.tag" />
         </el-select>
         <el-select class="w-health" v-model="query.health" placeholder="健康度" clearable size="small">
-          <el-option v-for="h in HEALTH" :key="h.value" :value="h.value" :label="h.label" />
+          <el-option v-for="h in HEALTH_OPTIONS" :key="h.value" :value="h.value" :label="h.label" />
         </el-select>
         <el-select class="w-group" v-model="query.group" placeholder="分组" clearable filterable
                    size="small">
@@ -531,6 +625,33 @@ onUnmounted(() => {
                  @click="exportVisible = true">导出/订阅</el-button>
     </div>
 
+    <!-- 上次校验的结果条。**持久**，不是 toast——「新校验几条 / 复用几条 / 几条变了」
+         是要看第二眼的数字，而 ElMessage 三秒就没了；错过之后列表莫名其妙不一样了，
+         用户没有任何线索。「排序/筛选项过期」并进同一条：它是同一次校验的副产品，
+         分成两条只是在加噪音 -->
+    <el-alert v-if="checkResult" class="result-tip" show-icon
+              :type="checkResult.changes.length ? 'warning' : 'success'"
+              @close="checkResult = null">
+      <template #title>
+        <span>本次校验 {{ checkResult.checked }} 条：新校验 {{ checkResult.fetched }}、复用缓存 {{ checkResult.cached }}</span>
+        <span v-if="checkResult.changes.length"> · {{ checkResult.changes.join("、") }}</span>
+        <span v-else-if="!checkResult.firstChecked"> · 无状态变化</span>
+        <span v-if="checkResult.firstChecked"> · {{ checkResult.firstChecked }} 条首次有结论</span>
+        <span v-if="checkResult.stale" class="stale"> · 排序/筛选项可能已过期</span>
+      </template>
+      <template #default>
+        <el-button link type="primary" size="small" @click="openJobDetail">查看</el-button>
+        <el-button v-if="checkResult.stale" link type="primary" size="small"
+                   @click="checkResult = null; load()">刷新列表</el-button>
+        <span v-if="checkResult.saveFailures" class="warn">
+          {{ checkResult.saveFailures }} 条结果没能写入管理库，列表状态不会更新
+        </span>
+        <span v-if="checkResult.hitDowngrades" class="warn">
+          {{ checkResult.hitDowngrades }} 个源的命中判定降级（规则无法回放，已按「命中」处理）
+        </span>
+      </template>
+    </el-alert>
+
     <!-- 列表区：移动端卡片 / 桌面表格 -->
     <div class="page-fill">
       <div v-if="isMobile" class="card-list" v-loading="loading">
@@ -543,12 +664,15 @@ onUnmounted(() => {
             <div class="row1">
               <span class="nm">{{ row.name || "(无名)" }}</span>
               <span class="stars" v-if="row.stars">{{ "★".repeat(row.stars) }}</span>
+              <!-- 这一级是实测来的还是按规则推的。空串（0★）不渲染 -->
+              <span v-if="starBasisLabel(row.star_basis)" class="basis"
+                    :class="row.star_basis">{{ starBasisLabel(row.star_basis) }}</span>
             </div>
             <div class="host mono">{{ row.source_url }}</div>
             <div class="meta">
               <el-tag size="small">{{ typeLabel(row.source_type) }}</el-tag>
               <el-tag v-if="row.health" size="small" :type="healthType[row.health] || 'info'">
-                {{ row.health }}
+                {{ healthLabel(row.health) }}
               </el-tag>
               <span class="muted nowrap" v-if="row.toc_complete !== null || row.content_ok !== null">
                 {{ row.toc_complete === 1 ? "目录✓" : row.toc_complete === 0 ? "目录✗" : "" }}
@@ -570,6 +694,9 @@ onUnmounted(() => {
           <el-button link :icon="Refresh" :loading="isRowChecking(row.source_url)"
                      @click.stop="checkSources([row.source_url])" />
           <el-button link :icon="Filter" @click.stop="openEdit(row)" />
+          <!-- 与表格操作栏同一组动作：卡片是移动端的等价物，少一个就会
+               「手机上没有删除入口、只能先勾选再走批量条」 -->
+          <el-button link type="danger" :icon="Delete" @click.stop="removeOne(row)" />
         </div>
         <el-empty v-if="!loading && !rows.length" description="没有匹配的书源" :image-size="80" />
       </div>
@@ -588,18 +715,29 @@ onUnmounted(() => {
         <el-table-column label="健康" width="92" align="center">
           <template #default="{ row }">
             <el-tag v-if="row.health" size="small" :type="healthType[row.health] || 'info'">
-              {{ row.health }}
+              {{ healthLabel(row.health) }}
             </el-tag>
             <span v-else class="muted">未校验</span>
           </template>
         </el-table-column>
-        <el-table-column prop="stars" label="★" width="56" align="center" />
-        <el-table-column label="目录/正文" width="106" align="center">
+        <el-table-column label="★" width="92" align="center">
           <template #default="{ row }">
-            <span class="muted nowrap">
-              {{ row.toc_complete === 1 ? "目录✓" : row.toc_complete === 0 ? "目录✗" : "—" }}
-              {{ row.content_ok === 1 ? " 正文✓" : row.content_ok === 0 ? " 正文✗" : "" }}
-            </span>
+            <!-- 悬停看明细：原来有一列「目录/正文」专门显示这些，但它和
+                 「实测 / 仅规则」是同一件事的明细与摘要，两列并排是重复的。
+                 留下摘要（一眼看可信度），明细收进 tooltip -->
+            <el-tooltip placement="top" :show-after="200">
+              <template #content>
+                <div>域名：{{ row.health ? healthLabel(row.health) : "未校验" }}</div>
+                <div>搜索：{{ row.search_hit ? "命中《" + row.search_hit + "》" : "未命中" }}</div>
+                <div>目录：{{ row.toc_complete === 1 ? "完整 ✓" : row.toc_complete === 0 ? "不完整 ✗" : "未验证" }}</div>
+                <div>正文：{{ row.content_ok === 1 ? "可用 ✓" : row.content_ok === 0 ? "不可用 ✗" : "未验证" }}</div>
+              </template>
+              <span>
+                <span>{{ row.stars }}★</span>
+                <span v-if="starBasisLabel(row.star_basis)" class="basis"
+                      :class="row.star_basis">{{ starBasisLabel(row.star_basis) }}</span>
+              </span>
+            </el-tooltip>
           </template>
         </el-table-column>
         <el-table-column label="标签" min-width="210">
@@ -619,10 +757,12 @@ onUnmounted(() => {
           <template #default="{ row }"><span class="mono">{{ row.source_url }}</span></template>
         </el-table-column>
         <el-table-column prop="checked_at" label="校验时间" width="146" />
-        <el-table-column label="操作" width="90" align="center">
+        <el-table-column label="操作" width="140" align="center">
           <template #default="{ row }">
             <el-button link size="small" :loading="isRowChecking(row.source_url)"
                        @click="checkSources([row.source_url])">校验</el-button>
+            <el-button link type="danger" size="small"
+                       @click="removeOne(row)">删除</el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -651,7 +791,7 @@ onUnmounted(() => {
         <div class="fld">
           <label>健康度</label>
           <el-select v-model="query.health" placeholder="全部" clearable style="width: 100%">
-            <el-option v-for="h in HEALTH" :key="h.value" :value="h.value" :label="h.label" />
+            <el-option v-for="h in HEALTH_OPTIONS" :key="h.value" :value="h.value" :label="h.label" />
           </el-select>
         </div>
         <div class="fld">
@@ -705,7 +845,8 @@ onUnmounted(() => {
     <ExportDrawer v-model="exportVisible" :selected="selected"
                   :filter="query" :filtered-total="total" />
     <ImportDialog v-model="importVisible" @imported="load" />
-    <JobsDrawer ref="jobsRef" v-model="jobsVisible" @running-change="jobBadge = $event" />
+    <JobsDrawer ref="jobsRef" v-model="jobsVisible" :focus-job-id="focusJobId"
+                @running-change="jobBadge = $event" />
 
     <!-- 批量校验的确认弹框：选项 + 开始。桌面与移动端共用（移动端宽度由
          styles.css 的媒体查询压到 94vw）。单条校验不弹框，直接用全局设置。 -->
@@ -724,6 +865,25 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
+/* 星级旁边那个「实测 / 仅规则」。
+   光看星级分不出「验出来的」和「看规则推的」——库里 489 条 5★ 全是后者。
+   颜色用 element-plus 的 success / warning 色值（本文件其余部分用的也是字面色） */
+.basis {
+  font-size: 11px;
+  line-height: 16px;
+  padding: 0 4px;
+  margin-left: 4px;
+  border-radius: 3px;
+  white-space: nowrap;
+}
+.basis.measured { color: #67c23a; background: #f0f9eb; }
+.basis.static { color: #e6a23c; background: #fdf6ec; }
+
+/* 校验结果条：不挤占列表高度，只在需要时出现 */
+.result-tip { margin: 0 0 8px; }
+.result-tip .stale { color: #e6a23c; }
+.result-tip .warn { color: var(--el-color-danger); margin-left: 8px; }
+
 /* 统计条：与工具栏同一套底色/描边，夹在页面顶部 */
 .stats-bar {
   flex: 0 0 auto;

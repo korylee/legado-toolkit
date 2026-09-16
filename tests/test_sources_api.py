@@ -56,8 +56,17 @@ class _StoreCase(unittest.TestCase):
         self.root = os.path.join(_ROOT, "tmp_sources_api_" + uuid.uuid4().hex[:8])
         os.makedirs(self.root)
         self.db = os.path.join(self.root, "sources.sqlite3")
+        # **快照目录也要隔离**：`data_path("backups", …)` 读的是 LEGADO_DATA_DIR，
+        # 不设的话「删除」用例会把快照写进真实的 data/backups/——实测那里混着一批
+        # 空 reason、来自测试的文件（见 core/paths.py 的 data_dir）
+        self._old_data_dir = os.environ.get("LEGADO_DATA_DIR")
+        os.environ["LEGADO_DATA_DIR"] = self.root
 
     def tearDown(self) -> None:
+        if self._old_data_dir is None:
+            os.environ.pop("LEGADO_DATA_DIR", None)
+        else:
+            os.environ["LEGADO_DATA_DIR"] = self._old_data_dir
         shutil.rmtree(self.root, ignore_errors=True)
 
     def _seed(self) -> Store:
@@ -123,15 +132,40 @@ class BatchDeleteTests(_StoreCase):
             self.assertEqual(st.count_deleted(), 2)
             self.assertTrue(res["snapshot"])
 
+    def _snapshots(self, path: str) -> list:
+        """读快照文件里的全部记录。
+
+        **两种格式都要能读**：现在是单文件 JSONL（一行一次删除操作），
+        2026-09-16 之前是一次操作一个 `deleted_<时间戳>.json`。这条用例守的是
+        「原因被记下来了」，不该因为载体的变化而失去意义。
+        """
+        import json
+        if path.endswith(".jsonl"):
+            with open(path, "r", encoding="utf-8") as f:
+                return [json.loads(line) for line in f if line.strip()]
+        with open(path, "r", encoding="utf-8") as f:
+            return [json.load(f)]
+
     def test_reason_is_recorded_in_the_snapshot(self):
         with self._seed() as st:
             res = soft_delete_sources(
                 SourceDeleteIn(urls=["https://never.com"], reason="全选筛选结果"), st=st)
-            with open(res["snapshot"], "r", encoding="utf-8") as f:
-                import json
-                payload = json.load(f)
+        payload = self._snapshots(res["snapshot"])[-1]
         self.assertEqual(payload["reason"], "全选筛选结果")
         self.assertEqual(payload["count"], 1)
+
+    def test_two_deletes_append_two_records_to_one_file(self):
+        """同一个文件、两条记录。**这是这次改动的核心**：一次删除不再产出一个文件，
+        但两次删除必须是两条独立记录（原因与时间各自独立），而不是互相覆盖。"""
+        with self._seed() as st:
+            first = soft_delete_sources(
+                SourceDeleteIn(urls=["https://ok.com"], reason="第一次"), st=st)
+            second = soft_delete_sources(
+                SourceDeleteIn(urls=["https://dead.com"], reason="第二次"), st=st)
+        self.assertEqual(first["snapshot"], second["snapshot"])
+        rows = self._snapshots(second["snapshot"])
+        self.assertEqual([r["reason"] for r in rows[-2:]], ["第一次", "第二次"])
+        self.assertEqual([r["count"] for r in rows[-2:]], [1, 1])
 
     def test_blank_entries_are_ignored(self):
         """前端可能把空串混进来，别让它变成一条「删不掉的 URL」。"""

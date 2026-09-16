@@ -12,7 +12,7 @@ router = APIRouter()
 
 @router.get("", response_model=SourcePage)
 def list_sources(
-    type: Optional[int] = Query(None, description="0小说 1听书 2漫画 3视频"),
+    type: Optional[int] = Query(None, description="0小说 1听书 2漫画 3下载"),
     health: str = Query("", description="ok/dead/auth/gfw"),
     group: str = "",
     tag: str = "",
@@ -39,7 +39,7 @@ def list_source_urls(
     # 这里**不用 Query(...) 包默认值**：那样默认值是个 Query 对象，直接调端点函数
     # （本仓库的测试惯例，见 test_settings_api）时会被原样传进 SQL，报
     # 「int() argument must be ... not 'Query'」。校验需求（ge/le）也没有
-    type: Optional[int] = None,     # 0小说 1听书 2漫画 3视频；None = 不筛
+    type: Optional[int] = None,     # 0小说 1听书 2漫画 3下载；None = 不筛
     health: str = "",               # ok/dead/auth/gfw/none；空 = 不筛
     group: str = "",
     tag: str = "",
@@ -79,6 +79,7 @@ def tags_meta():
     前端不再自行维护这些枚举——两边各存一份必然漂移，历史上已经对不上过
     （书源类型一度把 3 当成视频、还编出了 Legado 不存在的 4）。
     """
+    from core.constants import TYPE_MAP
     from core.models import BOOK_SOURCE_TYPE_NAMES
     from core.tags import (
         SYSTEM_QUALITY_TAG_ORDER,
@@ -86,8 +87,14 @@ def tags_meta():
         USER_TAG_ALIASES,
     )
 
+    # 数值 → 键名（`TYPE_MAP` 是键名 → 数值，这是它的反向）。键名是
+    # `services/add_source.py` 的入参，前端提交「快速生成」任务时要给——它原来
+    # 自己抄了一份 `TYPE_KEYS`，与 `core/constants.py` 那份是同一事实的两处定义，
+    # 而书源类型这个枚举前端已经抄错过一次（把 3 当成视频、编出过 Legado 不存在的 4）
+    key_of_type = {v: k for k, v in TYPE_MAP.items()}
+
     return {
-        "source_types": [{"value": v, "tag": t}
+        "source_types": [{"value": v, "tag": t, "key": key_of_type.get(v, "")}
                          for v, t in sorted(BOOK_SOURCE_TYPE_NAMES.items())],
         "status_tags": list(SYSTEM_STATUS_TAG_ORDER),
         "quality_tags": list(SYSTEM_QUALITY_TAG_ORDER),
@@ -184,7 +191,7 @@ def normalize_tags(st=Depends(get_store)):
 @router.post("/delete")
 def soft_delete_sources(body: SourceDeleteIn, st=Depends(get_store)):
     # 软删除：UI 永不硬删。软删的源不再进导出，可随时恢复；
-    # 整条 raw_json 会快照到 data/backups/deleted_<时间戳>.json，
+    # 整条 raw_json 会追加到 data/backups/deleted.jsonl（一行一次删除操作），
     # 彻底删除由使用者在该文件层面处理。
     #
     # urls 从查询串换成 body：实测约 1600 条 / 57KB 通过、2000 条 / 72KB 被 400 拒绝，
@@ -195,7 +202,7 @@ def soft_delete_sources(body: SourceDeleteIn, st=Depends(get_store)):
     return {
         "deleted": n,
         "snapshot": snapshot,
-        "hint": "已软删除（不会再导出到 App）。彻底删除请处理上面这个快照文件。",
+        "hint": "已软删除（不会再导出到 App）。彻底删除请处理 deleted.jsonl 里对应的那条记录。",
     }
 
 

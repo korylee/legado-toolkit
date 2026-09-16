@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import threading
 import time
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence
 
@@ -33,6 +34,25 @@ from core.tags import (
 )
 
 SCHEMA_VERSION = 4
+
+#: 本进程内已经建过 schema 的库（绝对路径）。
+#:
+#: **建 schema 是进程级的一次性动作，不是连接级的**。Web 端每个请求都会新建一个
+#: Store，而 `_init_schema` 里有 `DROP VIEW v_sources` + `CREATE VIEW`
+#: （视图定义要重建才会更新，见 VIEW_DDL 的注释）——每次请求都跑的话，并发下几个
+#: 连接会互相把视图删掉再建，实测表现是「view v_sources already exists」与
+#: 「no such table: v_sources」交替出现，前端随机 500（20 并发复现 1 次）。
+#:
+#: 那几条 `*_once` 的存量修复也在 `_init_schema` 里，所以它们的口径也随之变成
+#: 「**每个进程**首次打开这个库时跑一次」。加新修复时按这个口径想：进程级幂等。
+#:
+#: 只协调本进程：CLI 与 Web 同时开着本来就该避开同时写，而 busy_timeout 只解决
+#: 锁等待，解决不了 DDL 交错。
+_SCHEMA_READY: set = set()
+_SCHEMA_LOCK = threading.Lock()
+
+#: 任务保留天数。过期由 `Store.sweep_jobs` 清理，对齐 exports 的 ttl_days=7
+JOBS_TTL_DAYS = 7
 DB_NAME = "sources.sqlite3"
 
 PRAGMAS = (
@@ -75,6 +95,7 @@ DDL = [
         search_response_ms  INTEGER,
         search_probed       INTEGER DEFAULT 0,
         stars               INTEGER DEFAULT 0,
+        star_basis          TEXT DEFAULT '',
         quality_tags        TEXT DEFAULT '',
         probe_depth         INTEGER DEFAULT 1,
         chapter_count       INTEGER DEFAULT 0,
@@ -129,6 +150,8 @@ DDL = [
         total       INTEGER DEFAULT 0,
         payload     TEXT DEFAULT '',
         result_json TEXT DEFAULT '',
+        expires_at  TEXT NOT NULL DEFAULT '',
+        pinned      INTEGER NOT NULL DEFAULT 0,
         created_at  TEXT NOT NULL,
         updated_at  TEXT NOT NULL
     )""",
@@ -154,11 +177,23 @@ class Store:
         d = os.path.dirname(os.path.abspath(self.path))
         if d and not readonly:
             os.makedirs(d, exist_ok=True)
+        # `check_same_thread=False` **必须给**：FastAPI 的 sync 依赖（`get_store`）
+        # 与 sync 端点各自向 anyio 线程池要线程，**不保证是同一个 worker**——
+        # 于是「依赖里建连接、端点里用连接」就会撞上 sqlite3 的默认保守检查，
+        # 抛 `ProgrammingError: SQLite objects created in a thread can only be
+        # used in that same thread`，表现是随机 500。只读/串行请求永远不复现，
+        # 只有并发到线程池扩容时才出——正是最难查的那类（实测 20 并发复现 1 次）。
+        #
+        # 放开是安全的：本机 `sqlite3.threadsafety == 3`（串行化），SQLite 自己会
+        # 串行化同一连接上的访问；而且这条连接始终只服务**一个**请求
+        # （依赖进入 → 端点执行 → 依赖退出是顺序的），不存在两个线程同处一个
+        # 事务的情况
         if readonly:
             self.conn = sqlite3.connect("file:%s?mode=ro" % self.path, uri=True,
-                                        timeout=5.0)
+                                        timeout=5.0, check_same_thread=False)
         else:
-            self.conn = sqlite3.connect(self.path, timeout=5.0)
+            self.conn = sqlite3.connect(self.path, timeout=5.0,
+                                        check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         for p in PRAGMAS:
             try:
@@ -166,7 +201,14 @@ class Store:
             except sqlite3.Error:
                 pass
         if not readonly:
-            self._init_schema()
+            try:
+                self._ensure_schema()
+            except Exception:
+                # 建 schema 失败就先把连接关掉再抛。构造里抛异常时 `__exit__` 不会
+                # 执行，连接会一直挂着——Windows 上表现为库文件被占住、删都删不掉
+                # （实测：本仓库的并发用例失败时会因此留下临时目录）
+                self.conn.close()
+                raise
 
     #: 需要幂等补加的新列 {表: [(列名, 定义)]}
     #: CREATE TABLE IF NOT EXISTS 不会给已存在的表加列，必须显式 ALTER
@@ -180,18 +222,58 @@ class Store:
         # checker.is_cache_item_valid 的 min_search。**不落这一列等于没修**：
         # item 里写了但读回来恒为 None，所有 OK 源的缓存永远不复用
         ("search_probed", "INTEGER DEFAULT 0"),
+        # 星级旁边那个「实测 / 仅规则」。不落这一列的话，列表只能显示星级，
+        # 用户分不出「5★ 是验出来的」还是「5★ 只是规则写齐了」——实测库里
+        # 489 条 5★ 全是后者（probe_depth 默认 1，目录/正文一次都没验）。
+        ("star_basis", "TEXT DEFAULT ''"),
+    ], "jobs": [
+        # 任务保留：对齐 exports（expires_at + pinned + sweep），**原来完全没有**——
+        # list_jobs 只是显示时 LIMIT 50，表本身无限增长
+        ("expires_at", "TEXT NOT NULL DEFAULT ''"),
+        ("pinned", "INTEGER NOT NULL DEFAULT 0"),
     ]}
 
     #: v_sources 视图每次重建：CREATE VIEW IF NOT EXISTS 不会更新已存在的视图定义
     VIEW_DDL = """CREATE VIEW v_sources AS
         SELECT s.id, s.source_url, s.name, s.source_type, s.group_name, s.enabled,
                s.user_tags, s.system_tags_locked, s.fingerprint, s.deleted_at, s.updated_at,
-               c.health, c.stars, c.checked_at, c.probe_depth,
+               c.health, c.stars, c.star_basis, c.checked_at, c.probe_depth,
                c.toc_complete, c.content_ok, c.search_hit, c.quality_tags
         FROM sources s
         LEFT JOIN checks c ON c.id = (
             SELECT id FROM checks WHERE source_url = s.source_url
             ORDER BY checked_at DESC, id DESC LIMIT 1)"""
+
+    def _schema_ok(self) -> bool:
+        """表和视图都在，才算这个库已经建好。
+
+        查一下 sqlite_master，而不是只信进程内那个标记：用户手删 `data/` 里的库
+        之后，新建的库里连 sources 表都没有，而标记还在——那会一路报
+        「no such table: sources」，看不出是库被删了。这条查询走内存里的 schema，
+        代价可以忽略
+        """
+        try:
+            rows = {r["name"] for r in self.conn.execute(
+                "SELECT name FROM sqlite_master WHERE name IN ('sources', 'v_sources')")}
+        except sqlite3.Error:
+            return False
+        return {"sources", "v_sources"} <= rows
+
+    def _ensure_schema(self) -> None:
+        """本进程内每个库只建一次 schema。理由见 `_SCHEMA_READY` 的注释。
+
+        先无锁查一遍（常见路径不争锁），再进锁复查一遍——两次之间可能有别的线程
+        刚建完。`_init_schema` 失败时不记标记，下次请求会重试：半途失败正是需要
+        重试的情况
+        """
+        key = os.path.abspath(self.path)
+        if key in _SCHEMA_READY and self._schema_ok():
+            return
+        with _SCHEMA_LOCK:
+            if key in _SCHEMA_READY and self._schema_ok():
+                return
+            self._init_schema()
+            _SCHEMA_READY.add(key)
 
     def _init_schema(self) -> None:
         for stmt in DDL:
@@ -201,10 +283,13 @@ class Store:
             for name, decl in cols:
                 if name not in have:
                     self.conn.execute("ALTER TABLE %s ADD COLUMN %s %s" % (table, name, decl))
+        self._backfill_job_expiry()
         self.conn.execute("DROP VIEW IF EXISTS v_sources")
         self.conn.execute(self.VIEW_DDL)
         self.migrate_user_tags_once()
         self.cleanup_system_tags_once()
+        self.fix_enabled_explore_once()
+        self.fix_dirty_source_type_once()
         self.conn.execute(
             "INSERT OR IGNORE INTO meta(key, value) VALUES (?, ?)", ("schema_version", "1"))
         self.conn.execute("UPDATE meta SET value = ? WHERE key = ?",
@@ -273,7 +358,25 @@ class Store:
         return out
 
     def upsert_sources(self, sources, with_fingerprint: bool = True, allow_new_tags: bool = False) -> int:
-        """批量写入/更新书源。同 URL 更新规则和系统标签，用户标签永久保留。"""
+        """批量写入/更新书源。同 URL 更新规则和系统标签，用户标签永久保留。
+
+        ``allow_new_tags`` 控制「库里还没见过的标签要不要收」——**但它当前没有任何
+        活调用者需要它**，写在这里是为了不让下一个人误以为它在生效：
+
+          - ``backend/api/imports.py`` 传的是 **True**（外部源带来的标签全收）
+          - ``backend/api/sources.py`` 的 `save_source` 用默认值，但它**紧接着**就调
+            `set_user_tags([url], body.user_tags)` 整组覆盖——上面过滤掉的东西
+            立刻被写回来
+          - ``core/store_migrate.py`` 用默认值，而那时库是空的 →
+            `allow_unknown` 必为 True，根本走不到过滤那一支
+
+        也就是说 `else` 那支（按 `known_tags` 过滤）**目前不会被执行**。它是一次
+        有意的设计（防外部源污染标签体系，`tests/test_store_tags.py` 的
+        `test_new_source_unknown_tags_are_filtered_after_aliases` 钉着它），
+        不是意外死代码——**所以没有删**。要动它得先回答一个产品问题：
+        「导入外部源时，它带来的陌生标签该不该进我们的标签表？」
+        见 `TODO.md`。
+        """
         from core.loader import _normalize_url, fingerprint as fp_of
 
         ts = now()
@@ -462,19 +565,6 @@ class Store:
                 (group, json.dumps(src, ensure_ascii=False), now(), key))
         return True
 
-    def delete_sources(self, urls: Sequence[str]) -> int:
-        from core.loader import _normalize_url
-
-        keys = [_normalize_url(u) for u in urls or [] if u]
-        if not keys:
-            return 0
-        n = 0
-        with self.conn:
-            for k in keys:
-                cur = self.conn.execute("DELETE FROM sources WHERE source_url = ?", (k,))
-                n += cur.rowcount or 0
-        return n
-
     def groups(self) -> List[tuple]:
         return [(r["group_name"], r["c"]) for r in self.conn.execute(
             "SELECT group_name, COUNT(*) AS c FROM sources GROUP BY group_name ORDER BY c DESC")]
@@ -529,6 +619,82 @@ class Store:
                     "UPDATE sources SET user_tags=?, updated_at=? WHERE source_url=?",
                     updates)
         self.set_meta("system_tags_cleaned_at", now())
+        return bool(updates)
+
+    def fix_enabled_explore_once(self) -> bool:
+        """Once-off：把 `enabledExplore` 与发现配置对齐。
+
+        **它必须由配置推导**。实测库里 885 条不一致：739 条「开着却完全没配置」
+        （App 的发现页里就是一堆点了没反应的死项）、146 条「有配置却被关着」
+        （功能静默失效）。编辑弹窗已在保存时推导，这条负责把存量一次摆正。
+
+        改的是 `raw_json` 里的字段，**不动指纹**——`fingerprint` 只覆盖
+        name/url/searchUrl/ruleSearch/ruleToc/ruleContent/exploreUrl（见 `core.loader`），
+        `enabledExplore` 不在其中，所以不会连带失效校验缓存。
+        """
+        if self.get_meta("enabled_explore_fixed_at"):
+            return False
+        rows = list(self.conn.execute("SELECT source_url, raw_json FROM sources"))
+        updates = []
+        for row in rows:
+            try:
+                src = json.loads(row["raw_json"])
+            except Exception:
+                continue
+            if not isinstance(src, dict):
+                continue
+            want = bool(str(src.get("exploreUrl") or "").strip()
+                        or (src.get("ruleExplore") or {}))
+            if bool(src.get("enabledExplore", False)) == want:
+                continue
+            src["enabledExplore"] = want
+            updates.append((json.dumps(src, ensure_ascii=False), now(), row["source_url"]))
+        if updates:
+            with self.conn:
+                self.conn.executemany(
+                    "UPDATE sources SET raw_json=?, updated_at=? WHERE source_url=?",
+                    updates)
+        self.set_meta("enabled_explore_fixed_at", now())
+        return bool(updates)
+
+    def fix_dirty_source_type_once(self) -> bool:
+        """Once-off：把 `bookSourceType` 的脏值归 0。
+
+        Legado 的 `@IntDef` 只有 0/1/2/3（`BookSourceType.kt`），而库里有过 `4`
+        这种不存在的取值（实测 5 条）。`clean_source` 已补上归一——**导入**与
+        **保存**都走它，所以新数据不会再带进来；这条负责存量。
+
+        **列与 raw_json 都要改**：`source_type` 列供筛选/统计/分组，而 `raw_json`
+        是导出与指纹的来源——只改一边会出现「列表按 4 分组、导出的却是 0」。
+        """
+        if self.get_meta("dirty_source_type_fixed_at"):
+            return False
+        rows = list(self.conn.execute(
+            "SELECT source_url, source_type, raw_json FROM sources"))
+        updates = []
+        for row in rows:
+            col_bad = int(row["source_type"] or 0) not in (0, 1, 2, 3)
+            raw_bad = False
+            src = None
+            try:
+                src = json.loads(row["raw_json"])
+                raw_bad = int(src.get("bookSourceType", 0) or 0) not in (0, 1, 2, 3)
+            except Exception:
+                src = None
+            if not (col_bad or raw_bad):
+                continue
+            if isinstance(src, dict):
+                src["bookSourceType"] = 0
+                raw_json = json.dumps(src, ensure_ascii=False)
+            else:
+                raw_json = row["raw_json"]
+            updates.append((0, raw_json, now(), row["source_url"]))
+        if updates:
+            with self.conn:
+                self.conn.executemany(
+                    "UPDATE sources SET source_type=?, raw_json=?, updated_at=? "
+                    "WHERE source_url=?", updates)
+        self.set_meta("dirty_source_type_fixed_at", now())
         return bool(updates)
 
     def is_system_tags_locked(self, url: str) -> bool:
@@ -640,8 +806,12 @@ class Store:
         old_tag, new_tag = old_tags[0], new_tags[0]
         if _is_system_tag(old_tag):
             return 0
+        # 口径必须与 tags_overview 一致（都排除回收站）：界面按未删除源计数，
+        # 操作就得只改未删除源。否则「显示 2 条、改了 3 条」，回收站里那条被
+        # 静默重命名，恢复出来时已经不是原来的标签了。
         rows = list(self.conn.execute(
-            "SELECT source_url, user_tags FROM sources WHERE user_tags LIKE ?",
+            "SELECT source_url, user_tags FROM sources "
+            "WHERE deleted_at = '' AND user_tags LIKE ?",
             ("%" + old_tag + "%",)))
         n = 0
         with self.conn:
@@ -662,7 +832,9 @@ class Store:
         if not src_tags or len(dst_tags) != 1:
             return 0
         target_tag = dst_tags[0]
-        rows = list(self.conn.execute("SELECT source_url, user_tags FROM sources"))
+        # 同 rename_user_tag：口径与 tags_overview 一致，不动回收站
+        rows = list(self.conn.execute(
+            "SELECT source_url, user_tags FROM sources WHERE deleted_at = ''"))
         n = 0
         with self.conn:
             for row in rows:
@@ -678,12 +850,15 @@ class Store:
         return n
 
     def delete_user_tag(self, tag: str) -> int:
-        """从所有源移除一个用户标签。"""
+        """从未删除的源上移除一个用户标签（回收站不动，见下）。"""
         tags = _canonical_tags(tag)
         if len(tags) != 1 or _is_system_tag(tags[0]):
             return 0
+        # 口径必须与 tags_overview 一致（都排除回收站）：界面按未删除源计数，
+        # 操作就得只改未删除源。否则「显示 2 条、删了 3 条」，回收站里那条被
+        # 静默清掉，用户恢复它时标签已经没了——而他从没在那个源上操作过。
         rows = list(self.conn.execute(
-            "SELECT source_url, user_tags FROM sources"))
+            "SELECT source_url, user_tags FROM sources WHERE deleted_at = ''"))
         n = 0
         with self.conn:
             for row in rows:
@@ -824,6 +999,7 @@ class Store:
                 # 缺失按 0 处理（= 没验过搜索）：方向是保守重验，不是错误复用
                 1 if r.get("search_probed") else 0,
                 int(r.get("quality_stars", 0) or 0),
+                str(r.get("star_basis", "") or ""),
                 tags or "",
                 int(r.get("probe_depth", 1) or 1),
                 int(r.get("chapter_count", 0) or 0),
@@ -840,9 +1016,9 @@ class Store:
         sql = (
             "INSERT INTO checks(source_url,fingerprint,cache_version,health,"
             "status_code,response_time_ms,search_hit,search_response_ms,search_probed,"
-            "stars,quality_tags,probe_depth,chapter_count,toc_complete,content_ok,"
+            "stars,star_basis,quality_tags,probe_depth,chapter_count,toc_complete,content_ok,"
             "toc_fail_reason,content_fail_reason,content_response_ms,error,checked_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
         with self.conn:
             self.conn.executemany(sql, out)
         return len(out)
@@ -877,6 +1053,10 @@ class Store:
             # 库里存的是 0/1，转成 bool 与 ndjson 后端返回同样的类型。
             # 老库没有这一列时（补列前落下的行）默认 0 → 保守重验，方向安全
             d["search_probed"] = bool(d.get("search_probed"))
+            # 老库没有这一列时（补列前落下的行）给空串 = 「没有可标注的来源」，
+            # 前端不渲染那个词。**不要默认成 "measured"**——那会把「不知道」
+            # 说成「验过了」，正是这一列要解决的病
+            d["star_basis"] = str(d.get("star_basis") or "")
             out[d["url"]] = d
         return out
 
@@ -884,14 +1064,47 @@ class Store:
         return self.conn.execute("SELECT COUNT(*) AS c FROM checks").fetchone()["c"]
 
     # ---------------------------------------------------------------- jobs
-    def create_job(self, job_id: str, kind: str, total: int = 0, payload=None) -> None:
-        ts = now()
+    def sweep_jobs(self) -> int:
+        """清掉过期的任务，返回清了几条。**在建新任务时顺带扫**（对齐 export.py 的
+        `sweep_exports`，不另开定时器）。
+
+        **跑着的任务不特殊保护**：过期时间是 7 天，一个校验任务跑不了 7 天。
+        真正会留下的是**僵尸行**——服务端重启后状态永远停在 running/pending、
+        再也没人推进它。给 running 开豁免，恰恰会让这些僵尸永远清不掉。
+        """
+        with self.conn:
+            cur = self.conn.execute(
+                "DELETE FROM jobs WHERE pinned = 0 AND expires_at < ?", (now(),))
+        return cur.rowcount or 0
+
+    def _backfill_job_expiry(self) -> None:
+        """给补列之前落下的任务行补上过期时间。
+
+        **不补的话它们会被立刻扫掉**：`expires_at` 补列时是空串，而空串按字符串
+        比较**小于任何时间戳**——`sweep_jobs` 一跑就把历史任务全删了，用户那边看起来
+        就是「升级一次，任务列表空了」。按 `updated_at + TTL` 补，等价于
+        「从最后一次更新算起还有 7 天」。
+        幂等：补完之后不会再有空串，之后每天启动都是一次 0 行的 UPDATE。
+        """
         with self.conn:
             self.conn.execute(
-                "INSERT INTO jobs(id,kind,status,progress,total,payload,created_at,updated_at)"
-                " VALUES (?,?,?,?,?,?,?,?)",
+                "UPDATE jobs SET expires_at = "
+                "COALESCE(datetime(updated_at, '+%d days'), '') WHERE expires_at = ''"
+                % JOBS_TTL_DAYS)
+
+    def create_job(self, job_id: str, kind: str, total: int = 0, payload=None) -> None:
+        ts = now()
+        expires = time.strftime(
+            "%Y-%m-%d %H:%M:%S",
+            time.localtime(time.time() + JOBS_TTL_DAYS * 86400))
+        self.sweep_jobs()          # 顺带清理（对齐 exports 的时机）
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO jobs(id,kind,status,progress,total,payload,"
+                "expires_at,pinned,created_at,updated_at)"
+                " VALUES (?,?,?,?,?,?,?,0,?,?)",
                 (job_id, kind, "pending", 0, int(total),
-                 json.dumps(payload or {}, ensure_ascii=False), ts, ts))
+                 json.dumps(payload or {}, ensure_ascii=False), expires, ts, ts))
 
     def update_job(self, job_id: str, status=None, progress=None, total=None,
                    result=None) -> None:
@@ -1016,7 +1229,25 @@ class Store:
     # 设计：UI 永不硬删除。软删时把整条 raw_json 快照到
     # data/backups/deleted_<时间戳>.json，彻底删除由使用者在该文件层面处理。
     def soft_delete(self, urls, reason: str = ""):
-        # 返回 (删除条数, 快照路径)
+        """软删除 + 往**同一个**快照文件追加一条记录。返回 (删除条数, 快照路径)。
+
+        快照是纯追加的 JSONL（`data/backups/deleted.jsonl`，一行一次删除操作）：
+        `{deleted_at, reason, count, sources:[...]}`。
+
+        **为什么是一个追加文件而不是一次操作一个文件**（原来是
+        `deleted_<时间戳>.json`）：
+
+          - 这里记的 `reason` **只存在于快照里**（`sources` 表没有这一列），
+            所以它是审计记录、不是副本，不能省。
+          - 但按操作切文件是拿文件系统当日志用：实测 198 个文件 / 273 KB，
+            读一次要列目录再逐个打开；而且文件名只到秒，同一秒内两次删除会
+            **静默互相覆盖**。
+          - 追加写（`open(path, "a")` 整行一次 write）不怕中断：最多留下最后半行，
+            前面所有记录完好。换成「一个 JSON 数组 + 读-改-写」反而危险——
+            重写途中崩掉会把全部历史一起写坏，而这是唯一的一份。
+
+        快照先写、再改库：写失败就不删（宁可记了一条没删成的，也不要删了没记上）。
+        """
         from core.loader import _normalize_url
         from core.paths import data_path
 
@@ -1029,8 +1260,7 @@ class Store:
             "WHERE deleted_at = '' AND source_url IN (%s)" % marks, keys))
         if not rows:
             return 0, ""
-        ts = time.strftime("%Y%m%d_%H%M%S")
-        path = data_path("backups", "deleted_%s.json" % ts)
+        path = data_path("backups", "deleted.jsonl")
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
         payload = {
             "deleted_at": now(),
@@ -1038,8 +1268,10 @@ class Store:
             "count": len(rows),
             "sources": [json.loads(r["raw_json"]) for r in rows],
         }
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False, indent=2)
+        with open(path, "a", encoding="utf-8") as f:
+            # json.dumps 会把记录内的换行转义成 \n，所以一条记录必然只占一行——
+            # 这是 JSONL 能被逐行读的前提
+            f.write(json.dumps(payload, ensure_ascii=False) + "\n")
         with self.conn:
             self.conn.execute(
                 "UPDATE sources SET deleted_at = ?, updated_at = ? "

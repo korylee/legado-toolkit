@@ -50,8 +50,17 @@ class HealthFilterTests(unittest.TestCase):
         self.root = os.path.join(_ROOT, "tmp_store_query_" + uuid.uuid4().hex[:8])
         os.makedirs(self.root)
         self.db = os.path.join(self.root, "sources.sqlite3")
+        # 数据目录一并隔离：软删除会往 `data_path("backups", "deleted.jsonl")`
+        # 追加记录，不设 LEGADO_DATA_DIR 就写进真实的 data/backups/ 里
+        # （实测那儿混着 183 个本文件产生的 `reason="测试"` 快照）
+        self._old_data_dir = os.environ.get("LEGADO_DATA_DIR")
+        os.environ["LEGADO_DATA_DIR"] = self.root
 
     def tearDown(self) -> None:
+        if self._old_data_dir is None:
+            os.environ.pop("LEGADO_DATA_DIR", None)
+        else:
+            os.environ["LEGADO_DATA_DIR"] = self._old_data_dir
         shutil.rmtree(self.root, ignore_errors=True)
 
     def _seed(self) -> Store:
@@ -98,8 +107,16 @@ class StatsParityTests(unittest.TestCase):
         self.root = os.path.join(_ROOT, "tmp_store_stats_" + uuid.uuid4().hex[:8])
         os.makedirs(self.root)
         self.db = os.path.join(self.root, "sources.sqlite3")
+        # 数据目录一并隔离：软删除会往 `data_path("backups", "deleted.jsonl")`
+        # 追加记录，不设 LEGADO_DATA_DIR 就写进真实的 data/backups/
+        self._old_data_dir = os.environ.get("LEGADO_DATA_DIR")
+        os.environ["LEGADO_DATA_DIR"] = self.root
 
     def tearDown(self) -> None:
+        if self._old_data_dir is None:
+            os.environ.pop("LEGADO_DATA_DIR", None)
+        else:
+            os.environ["LEGADO_DATA_DIR"] = self._old_data_dir
         shutil.rmtree(self.root, ignore_errors=True)
 
     def test_distributions_sum_to_source_count(self):
@@ -130,8 +147,16 @@ class QueryUrlsTests(unittest.TestCase):
         self.root = os.path.join(_ROOT, "tmp_store_urls_" + uuid.uuid4().hex[:8])
         os.makedirs(self.root)
         self.db = os.path.join(self.root, "sources.sqlite3")
+        # 数据目录一并隔离：软删除会往 `data_path("backups", "deleted.jsonl")`
+        # 追加记录，不设 LEGADO_DATA_DIR 就写进真实的 data/backups/
+        self._old_data_dir = os.environ.get("LEGADO_DATA_DIR")
+        os.environ["LEGADO_DATA_DIR"] = self.root
 
     def tearDown(self) -> None:
+        if self._old_data_dir is None:
+            os.environ.pop("LEGADO_DATA_DIR", None)
+        else:
+            os.environ["LEGADO_DATA_DIR"] = self._old_data_dir
         shutil.rmtree(self.root, ignore_errors=True)
 
     def _seed(self) -> Store:
@@ -177,8 +202,16 @@ class LatestCheckTests(unittest.TestCase):
         self.root = os.path.join(_ROOT, "tmp_store_latest_" + uuid.uuid4().hex[:8])
         os.makedirs(self.root)
         self.db = os.path.join(self.root, "sources.sqlite3")
+        # 数据目录一并隔离：软删除会往 `data_path("backups", "deleted.jsonl")`
+        # 追加记录，不设 LEGADO_DATA_DIR 就写进真实的 data/backups/
+        self._old_data_dir = os.environ.get("LEGADO_DATA_DIR")
+        os.environ["LEGADO_DATA_DIR"] = self.root
 
     def tearDown(self) -> None:
+        if self._old_data_dir is None:
+            os.environ.pop("LEGADO_DATA_DIR", None)
+        else:
+            os.environ["LEGADO_DATA_DIR"] = self._old_data_dir
         shutil.rmtree(self.root, ignore_errors=True)
 
     def _seed(self) -> Store:

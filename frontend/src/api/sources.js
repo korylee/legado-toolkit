@@ -42,7 +42,10 @@ export const normalizeTags = () => api.post("/sources/tags/normalize");
 // 批量软删除。**走 POST body**：旧写法把 URL 列表拼进查询串，实测约 1600 条 / 57KB
 // 通过、2000 条 / 72KB 被服务端拒绝，而全库 3850 条约 139KB——「全选全部」正好撞上，
 // 表现是请求失败而界面上看不出原因
-export const deleteSources = (urls) => api.post("/sources/delete", { urls });
+// reason 会写进 data/backups/deleted.jsonl 的那条删除记录。它是**唯一**记下
+// 「为什么删」的地方（库里的 sources 表没有这一列），所以界面别省这一步
+export const deleteSources = (urls, reason = "") =>
+  api.post("/sources/delete", { urls, reason });
 
 export const listDeleted = (limit = 200, offset = 0) =>
   api.get("/sources/deleted?limit=" + limit + "&offset=" + offset);
