@@ -397,6 +397,23 @@ class Store:
         sql = "SELECT COUNT(*) AS c FROM v_sources %s" % where
         return self.conn.execute(sql, args).fetchone()["c"]
 
+    def query_urls(self, source_type: Optional[int] = None, group: str = "",
+                   health: str = "", q: str = "", only_enabled: bool = False,
+                   user_tag: str = "") -> List[str]:
+        """只取 source_url 一列，供「选中全部 N 条筛选结果」。
+
+        **筛选口径必须与 query/count_query 共用 _where**：这个列表的下一步通常是
+        批量删除，口径一旦分叉，界面上写的「已选 N 条」就不是实际处理的那批——
+        而那个数字正是用户按下确认键的依据。
+
+        **不接 include_deleted**：全选只能在未删除范围内。留这个口子的话，将来
+        有人顺手透传，回收站里的源会被一起选进来，而它们是用户特意删掉的。
+        """
+        where, args = self._where(source_type, group, health, q, only_enabled,
+                                  False, user_tag)
+        sql = "SELECT source_url FROM v_sources %s" % where
+        return [r["source_url"] for r in self.conn.execute(sql, args)]
+
     def _where(self, source_type, group, health, q, only_enabled,
                include_deleted: bool = False, user_tag: str = ""):
         sql, args = ["WHERE 1=1"], []

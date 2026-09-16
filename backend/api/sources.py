@@ -4,7 +4,8 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from backend.deps import get_store
-from backend.schemas import SourcePage, SourceSave, TagDelete, TagMerge, TagPatch, TagRename
+from backend.schemas import (SourceDeleteIn, SourcePage, SourceSave, TagDelete,
+                             TagMerge, TagPatch, TagRename)
 
 router = APIRouter()
 
@@ -31,6 +32,34 @@ def list_sources(
                      only_enabled=only_enabled, limit=limit, offset=offset, order=order,
                      include_deleted=include_deleted, user_tag=tag)
     return {"total": total, "items": items}
+
+
+@router.get("/urls")
+def list_source_urls(
+    # 这里**不用 Query(...) 包默认值**：那样默认值是个 Query 对象，直接调端点函数
+    # （本仓库的测试惯例，见 test_settings_api）时会被原样传进 SQL，报
+    # 「int() argument must be ... not 'Query'」。校验需求（ge/le）也没有
+    type: Optional[int] = None,     # 0小说 1听书 2漫画 3视频；None = 不筛
+    health: str = "",               # ok/dead/auth/gfw/none；空 = 不筛
+    group: str = "",
+    tag: str = "",
+    q: str = "",
+    only_enabled: bool = False,
+    st=Depends(get_store),
+):
+    """当前筛选下的**全部** URL，供「选中全部 N 条筛选结果」。
+
+    参数与 ``list_sources`` 一致（因此共用同一套 ``Store._where`` 口径），但
+    **不分页**——调用方的语义就是要全部，上限由库本身兜底（本地单用户，量级即全库）。
+
+    **不接 include_deleted**：全选只能落在未删除范围内。留着那个口子，将来某个
+    调用点顺手透传，回收站里的源就会被一起选进来——而这一步的下一步是删除。
+    """
+    urls = st.query_urls(source_type=type, group=group, health=health, q=q,
+                         only_enabled=only_enabled, user_tag=tag)
+    # total 与 urls 同源：前端拿它写「选中全部 N 条」。分头算的话两边可能对不上，
+    # 而那个数字正是用户按下删除确认的依据
+    return {"urls": urls, "total": len(urls)}
 
 
 @router.get("/groups")
@@ -152,13 +181,17 @@ def normalize_tags(st=Depends(get_store)):
     return {"updated": st.normalize_user_tags()}
 
 
-@router.delete("")
-def soft_delete_sources(urls: str, reason: str = "", st=Depends(get_store)):
+@router.post("/delete")
+def soft_delete_sources(body: SourceDeleteIn, st=Depends(get_store)):
     # 软删除：UI 永不硬删。软删的源不再进导出，可随时恢复；
     # 整条 raw_json 会快照到 data/backups/deleted_<时间戳>.json，
     # 彻底删除由使用者在该文件层面处理。
-    keys = [u.strip() for u in urls.split(",") if u.strip()]
-    n, snapshot = st.soft_delete(keys, reason)
+    #
+    # urls 从查询串换成 body：实测约 1600 条 / 57KB 通过、2000 条 / 72KB 被 400 拒绝，
+    # 而全库 3850 条约 139KB——「全选全部」正好会撞上。批量数据本来也不该塞进 URL。
+    # 旧的 DELETE /sources 直接替换掉、不留兼容层——唯一调用方是前端，同一次改动里一起改
+    keys = [u.strip() for u in (body.urls or []) if u and u.strip()]
+    n, snapshot = st.soft_delete(keys, body.reason)
     return {
         "deleted": n,
         "snapshot": snapshot,

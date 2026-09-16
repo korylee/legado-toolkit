@@ -268,6 +268,8 @@ python cli/main.py merge -i a.json -i b.json -o merged.json --mode replace
 | GET /api/health | 服务统计 |
 | GET /api/net | 本机可用 IP/端口，供手机访问 |
 | GET /api/sources | 书源列表、筛选、分页 |
+| GET /api/sources/urls | 当前筛选下的全部 URL（不分页、不含回收站），供「选中全部 N 条筛选结果」 |
+| POST /api/sources/delete | 批量软删除。urls 走 body：全库 3850 条拼进查询串约 139KB，会超请求行上限 |
 | GET /api/sources/detail | 书源详情 |
 | POST /api/sources/save | 保存书源与标签 |
 | POST /api/import | 安全导入外部书源（新 URL 待校验 / 冲突留存 / 重复跳过） |

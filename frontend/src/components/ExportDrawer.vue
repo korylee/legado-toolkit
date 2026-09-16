@@ -72,7 +72,10 @@ async function doExport(mode) {
   const body = { ttl_days: ttlDays.value };
   if (mode === "selected") {
     if (!props.selected.length) return ElMessage.warning("先勾选要导出的源");
-    body.urls = props.selected.map((r) => r.source_url);
+    // selected 是 URL 字符串数组（SourcesView 的「选中全部 N 条」也往里塞 URL）。
+    // 这里写 .map((r) => r.source_url) 的话，对字符串取 .source_url 恒为 undefined
+    // ——界面照常显示「已勾选 N 条」，导出的却是空列表，不报错、看不出来
+    body.urls = [...props.selected];
   } else if (mode === "filter") {
     const f = props.filter || {};
     body.filter = { type: f.type, health: f.health, group: f.group, tag: f.tag, q: f.q };

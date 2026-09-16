@@ -2,7 +2,7 @@
 import { ref, reactive, computed, nextTick, watch, onMounted, onUnmounted } from "vue";
 import { ElMessage, ElMessageBox, ElNotification } from "element-plus";
 import { Search, Plus, Upload, Download, Delete, Filter, Refresh, Monitor } from "@element-plus/icons-vue";
-import { listSources, listGroups, patchTags, deleteSources, listTags, getStats } from "../api/sources";
+import { listSources, listSourceUrls, listGroups, patchTags, deleteSources, listTags, getStats } from "../api/sources";
 import { api, subscribeJob } from "../api/client";
 import { ensureTagMeta, isQualityTag, splitTags, tagOfType, sourceTypes } from "../utils/tags";
 import { describeChanges } from "../utils/health";
@@ -139,7 +139,11 @@ async function loadStats() {
   try { stats.value = await getStats(); } catch (e) { stats.value = null; }
 }
 
-const selectedUrls = computed(() => new Set(selected.value.map((r) => r.source_url)));
+//: 选中的是 **URL 字符串数组**，不是行对象。
+//: 「选中全部 N 条筛选结果」拿回来的那批源根本不在当前页、也不在 DOM 里，
+//: 行对象既拿不到也用不上；统一成 URL 之后，批量删除/加标签/校验/导出都只认它，
+//: 判断某一行是否选中走这个 Set
+const selectedUrls = computed(() => new Set(selected.value));
 const filterCount = computed(() => {
   const f = query;
   return [f.q, f.type !== null && f.type !== "", f.health, f.group, f.tag].filter(Boolean).length;
@@ -158,6 +162,9 @@ async function load() {
   }
   // 统计条和列表同屏，跟着一起刷，免得出现「条上说 12 条失效、列表却不是」的错位
   loadStats();
+  // 翻页/刷新后把 selected 的状态同步回表格勾选（表格只渲染当前页，翻页会忘掉）
+  await nextTick();
+  syncTableSelection();
 }
 
 // 点健康度 chip：再点一次同一个就取消筛选，切回全部
@@ -181,8 +188,42 @@ function isSelected(row) { return selectedUrls.value.has(row.source_url); }
 function toggleCard(row) {
   const key = row.source_url;
   selected.value = isSelected(row)
-    ? selected.value.filter((r) => r.source_url !== key)
-    : [...selected.value, row];
+    ? selected.value.filter((u) => u !== key)
+    : [...selected.value, key];
+}
+
+//: 表格勾选 → selected。**当前页的行以表格为准，不在当前页的保持原样**。
+//: 写成 `selected = v.map((r) => r.source_url)` 的话，「选中全部 800 条」之后
+//: 取消勾选一行，会变成「已选 49 条」——其余 750 条无声消失，界面上看不出丢过东西
+function onTableSelect(picked) {
+  const onPage = new Set(rows.value.map((r) => r.source_url));
+  const kept = selected.value.filter((u) => !onPage.has(u));
+  selected.value = [...kept, ...picked.map((r) => r.source_url)];
+}
+
+//: 把 selected 的状态同步回表格勾选。表格只渲染当前页，翻页后它自己会忘掉勾选
+//: 状态——不同步的话，翻回来看见的是「批量条说选了 800 条、表格上一个都没勾」
+function syncTableSelection() {
+  const t = tableRef.value;
+  if (!t || !selected.value.length) return;   // 常态（没选任何行）直接跳过
+  rows.value.forEach((row) => {
+    t.toggleRowSelection(row, selectedUrls.value.has(row.source_url));
+  });
+}
+
+//: 「选中全部 N 条筛选结果」，N 取 total（后端与列表同一套筛选口径）。
+//: 传的是**显式 URL 列表**而不是筛选条件：批量条上写的是「已选 N 条」，用户的心智是
+//: "我选中了这 N 条"；反过来让删除接口吃筛选条件的话，将来 _where 的语义一变，
+//: 这个按钮的含义会跟着静默改变——而它的下一步是不可逆操作
+async function selectAllFiltered() {
+  try {
+    const res = await listSourceUrls(query);
+    selected.value = res.urls;
+    syncTableSelection();
+    ElMessage.success("已选中全部 " + selected.value.length + " 条");
+  } catch (e) {
+    ElMessage.error("获取全部筛选结果失败: " + e.message);
+  }
 }
 
 function userTagsOf(row) {
@@ -201,7 +242,7 @@ async function removeSelected() {
     await ElMessageBox.confirm(
       "将把 " + selected.value.length + " 条源移入回收站。不会再导出到 App，可随时恢复。",
       "移入回收站", { type: "warning" });
-    const res = await deleteSources(selected.value.map((r) => r.source_url));
+    const res = await deleteSources(selected.value);
     ElMessage.success("已移入回收站 " + res.deleted + " 条");
     clearSelection();
     load();
@@ -211,7 +252,7 @@ async function removeSelected() {
 async function applyBatchTags(mode) {
   if (!selected.value.length) return ElMessage.warning("先勾选源");
   if (!batchTags.value.length) return ElMessage.warning("先选择或输入标签");
-  const urls = selected.value.map((r) => r.source_url);
+  const urls = selected.value;
   try {
     await patchTags(
       urls,
@@ -457,6 +498,12 @@ onUnmounted(() => {
     <!-- 批量操作条 -->
     <div class="batch-bar" v-if="selected.length">
       <span class="batch-text">已选 <b>{{ selected.length }}</b> 条</span>
+      <!-- 入口是「先在表头（或移动端卡片）上勾一条」——批量条本身只在有勾选时出现。
+           跨页勾选做不了（表格只渲染当前页），所以这一步走显式 URL 列表 -->
+      <el-button v-if="total > selected.length" size="small" link type="primary"
+                 @click="selectAllFiltered">
+        选中全部 {{ total }} 条筛选结果
+      </el-button>
       <template v-if="!isMobile">
         <el-divider direction="vertical" />
         <el-select class="w-batch" v-model="batchTags" multiple filterable allow-create
@@ -474,7 +521,7 @@ onUnmounted(() => {
       </template>
       <el-divider direction="vertical" />
       <el-button size="small" :icon="Refresh" :loading="checking" :disabled="!selected.length"
-                 @click="openCheckDialog(selected.map((r) => r.source_url))">
+                 @click="openCheckDialog([...selected])">
         校验选中
       </el-button>
       <el-button size="small" type="danger" plain @click="removeSelected">移入回收站</el-button>
@@ -528,7 +575,7 @@ onUnmounted(() => {
       </div>
 
       <el-table v-else ref="tableRef" :data="rows" v-loading="loading" border stripe size="small"
-                height="100%" @selection-change="(v) => (selected = v)">
+                height="100%" @selection-change="onTableSelect">
         <el-table-column type="selection" width="42" />
         <el-table-column prop="name" label="名称" min-width="170" show-overflow-tooltip>
           <template #default="{ row }">

@@ -39,6 +39,17 @@ class TagPatch(BaseModel):
     remove: List[str] = Field(default_factory=list)
 
 
+class SourceDeleteIn(BaseModel):
+    """批量软删除的请求体。
+
+    urls 走 body 而不是查询串。**阈值实测**（库副本 + uvicorn）：约 1600 条 / 57KB
+    通过，2000 条 / 72KB 被服务端以 400 拒绝，而全库 3850 条拼起来约 139KB——
+    「全选全部」正好落在会撞上的那一档。形状与既有的 ``POST /sources/restore`` 一致。
+    """
+    urls: List[str] = Field(default_factory=list)
+    reason: str = ""
+
+
 class TagRename(BaseModel):
     old: str
     new: str

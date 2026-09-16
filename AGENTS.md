@@ -24,6 +24,11 @@
    否则会把「无法验证」误判成「规则失效」。
 5. **URL 一律先规范化再用作 key**（`core/loader._normalize_url`）。
    这是迁移时踩过的真 bug：571 个源因为存了原始 URL 而关联不上校验记录。
+   跨表/跨库关联（如 `checks_map()` 与 `BookSourceRecord.url`）**两侧都要归一**。
+5b. **缓存有效性的两根轴**：`probe_depth`（探得多深）与 `search_probed`（探没探搜索，
+   见 `core/checker.is_cache_item_valid` 的 `min_search`）。新增任何影响结论的探测维度，
+   都要在这里加一根轴并把 `CACHE_VERSION` 加一——只比版本/指纹/时间的话，换个探测
+   参数重跑会**静默复用**上一次的结论，界面上显示「校验完成」，看起来一切正常。
 6. **改代码前确保 `git status` 干净**，改完立刻跑
    `python -c "import 模块"` 与 `python -m unittest discover -s tests -t .`。
 7. **系统标签枚举只在后端定义**（`core/tags.py`、`core/models.py`），
