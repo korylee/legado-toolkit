@@ -404,7 +404,10 @@ def cmd_reclassify(args) -> int:
 async def _diagnose_all(sources, args):
     import aiohttp
     sem = asyncio.Semaphore(args.concurrency)
-    connector = aiohttp.TCPConnector(limit=args.concurrency, limit_per_host=5)
+    # force_close：归因同样是**一场多主机扫描**，空闲连接池会随进度涨到几千个
+    # （aiohttp 的 limit 只管在飞的连接），理由与实测见 core/checker.py 的同一处
+    connector = aiohttp.TCPConnector(limit=args.concurrency, limit_per_host=5,
+                                     force_close=True)
 
     async def one(session, s):
         async with sem:

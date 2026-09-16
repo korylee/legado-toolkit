@@ -43,6 +43,8 @@ const checkingUrls = ref(new Set());
 const checkingAll = ref(false);
 const checkJobId = ref("");
 const checkTotal = ref(0);
+//: 后端**每完成一条**就更新一次的已完成数（见 checker.run 的 on_progress）
+const checkProgress = ref(0);
 
 //: 某一行是否正在校验。全量时所有行都在测，逐行订阅时只有命中的那些
 function isRowChecking(url) {
@@ -54,7 +56,13 @@ function isRowChecking(url) {
 //: 总数优先用后端报的（提交列表与"全量"的实际条数可能不同，比如回收站/禁用的源）
 const checkStatusText = computed(() => {
   const n = checkTotal.value || (checkingAll.value ? 0 : checkingUrls.value.size);
-  if (checkingAll.value) return n ? "正在校验全部 " + n + " 条" : "正在校验全部源";
+  // 全量校验是十几分钟的长任务，**带上跑动中的计数**：只有「正在校验全部 3861 条」
+  // 这句时，跑与没跑、跑到哪了在界面上完全看不出来（原话是"进度没更新"）。
+  // 逐条校验（选中 N 条）不加分数——那种几秒就完，分数只是噪音
+  if (checkingAll.value) {
+    if (!n) return "正在校验全部源";
+    return "正在校验全部 " + n + " 条 · 已完成 " + Math.min(checkProgress.value, n);
+  }
   return "正在校验 " + n + " 条";
 });
 
@@ -396,6 +404,7 @@ async function checkSources(urls = []) {
   checkingUrls.value = new Set(urls);
   checkJobId.value = "";
   checkTotal.value = 0;
+  checkProgress.value = 0;
   try {
     // refresh_cache：忽略有效期内的缓存，全部重新请求。
     // 校验参数（并发/超时/深度/代理等）不再写死在这里——不传就由后端取全局设置，
@@ -409,9 +418,13 @@ async function checkSources(urls = []) {
     if (stopCheck) stopCheck();
     stopCheck = subscribeJob(
       r.job_id,
-      // 每帧带整个 job（status/total/progress）。注意后端只在开头写 total、
-      // 结束后写 progress，中间没有增量，所以这里只能显示总数
-      (data) => { if (data && data.total) checkTotal.value = data.total; },
+      // 每帧带整个 job（status/total/progress）。**progress 是每完成一条就更新一次**
+      // 的（checker.run 的 on_progress），所以状态条上那个计数是跑动中的，不是跳变的
+      (data) => {
+        if (!data) return;
+        if (data.total) checkTotal.value = data.total;
+        if (typeof data.progress === "number") checkProgress.value = data.progress;
+      },
       async (data) => {
         resetCheckState();
         if (data.status === "done") {
@@ -459,6 +472,7 @@ function resetCheckState() {
   checkingUrls.value = new Set();
   checkJobId.value = "";
   checkTotal.value = 0;
+  checkProgress.value = 0;
   stopCheck = null;
 }
 

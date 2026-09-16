@@ -104,7 +104,7 @@ async def run_check_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict
             records,
             # **长任务必须报进度**：不报的话 `jobs.progress` 全程是 0，而全量 3800 条
             # 要跑十几分钟——用户看到的就是「点了没反应」，只能靠猜还在不在跑。
-            # run() 每批报一次（含缓存命中那部分的起步值，见那边的注释）
+            # run() 每完成一条报一次（含缓存命中那部分的起步值，见那边的注释）
             on_progress=lambda done, _total: st.update_job(job_id, progress=done),
         )
     finally:

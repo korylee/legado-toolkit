@@ -1177,9 +1177,10 @@ class AsyncChecker:
         - 仅规则指纹一致且未过期的缓存才复用，不再发请求
         - 新增、规则变化或缓存过期的源执行校验并追加写入缓存
 
-        ``on_progress(done, total)`` 每批报一次进度。**Web 那条链路必须传**：
-        不传的话长任务在界面上永远是 0——`jobs.progress` 没人写，而全量 3800 条
-        要跑十几分钟，用户看到的就是「点了没反应」。CLI 不用它（打印够了）。
+        ``on_progress(done, total)`` **每完成一条报一次**（含缓存命中那批的起步值）。
+        **Web 那条链路必须传**：不传的话长任务在界面上永远是 0——`jobs.progress`
+        没人写，而全量 3800 条要跑十几分钟，用户看到的就是「点了没反应」。
+        CLI 不用它（分批打印够了）。
         """
         # 读取历史缓存，标记已校验的源
         cache = {} if self.refresh_cache else self.load_cache()
@@ -1207,11 +1208,31 @@ class AsyncChecker:
         # 缓存目录就绪
         if self.cache_dir:
             os.makedirs(self.cache_dir, exist_ok=True)
+        # force_close：**连接用完即关，不进空闲池**。
+        #
+        # aiohttp 的 `limit` 只管「在飞」的连接；`_release` 之后连接会留在
+        # `connector._conns` 里等复用（默认 keepalive 15s 才回收），而那份池子
+        # **没有任何总量上限**（见 aiohttp/connector.py 的 `_release` 与 `_cleanup`）。
+        # 校验扫的是 2562 个不同主机（库里 3861 条源），每条源一个连接，池子于是
+        # 随进度单调上涨：实测 20 并发跑 200 个主机，池里躺着 182 个空闲连接、
+        # 事件循环注册了 199 个 socket，**远超并发上限 20**。
+        #
+        # 后果在本机是真崩，不是慢：`--reload` 起的后端跑的是 uvicorn 特意为子进程
+        # 选的 SelectorEventLoop（uvicorn/loops/asyncio.py:9-11），而 Windows 的
+        # select() 上限是 512 个 fd，一超就抛 `ValueError: too many file descriptors
+        # in select()` 并带走整个进程——实测日志崩在「500/3861」，正是池子堆到
+        # 512 的那一刻。默认（不带 --reload）走的是 ProactorEventLoop，没有这个
+        # 512 上限，但堆着上千个空闲 socket 同样是白占资源。
+        #
+        # 代价可忽略：跨源复用本来就少（65% 的主机只有一条源，最多的 11 条），
+        # 丢掉的只是同一源内部几个请求（域名→搜索→详情→章节）之间的复用。
+        # 换到的是「同时打开的 socket 数**恒定不超过并发上限**」这个硬保证。
         connector = aiohttp.TCPConnector(
             limit=self.concurrency,
             limit_per_host=5,
             ttl_dns_cache=300,
             enable_cleanup_closed=True,
+            force_close=True,
         )
         timeout = aiohttp.ClientTimeout(total=self.timeout)
         async with aiohttp.ClientSession(
@@ -1225,12 +1246,21 @@ class AsyncChecker:
             results: List[BookSourceRecord] = []
             for i in range(0, len(pending), batch):
                 chunk = pending[i:i + batch]
-                chunk_results = await asyncio.gather(*[self.check_one(session, r) for r in chunk])
-                results.extend(chunk_results)
-                done = i + len(chunk)
-                print(f"  进度: {done}/{len(pending)}")
+                tasks = [asyncio.ensure_future(self.check_one(session, r)) for r in chunk]
                 if on_progress:
-                    on_progress(self.cached_count + done, total)
+                    # **逐条报，不是逐批报**：3861 条按每批 500 报，整场只有 8 次更新，
+                    # 而一次全量要跑十几分钟——界面上就是「数字半天不动，像卡住了」。
+                    # 回调在 gather 返回**之前**全部触发（我们是在 gather 之前挂的，
+                    # 回调顺序有保证），所以 done_count 不会被下一批重置
+                    done_count = self.cached_count + i
+                    def _advance(_task):
+                        nonlocal done_count
+                        done_count += 1
+                        on_progress(done_count, total)
+                    for t in tasks:
+                        t.add_done_callback(_advance)
+                results.extend(await asyncio.gather(*tasks))
+                print(f"  进度: {i + len(chunk)}/{len(pending)}")
         # **保存条件是「有任一后端」，不是「有 cache_dir」。** 以前只判 cache_dir，
         # 而 Web 那条链路传的是 use_store=True、cache_dir=None，于是校验结果一条都
         # 不写——界面上请求成功、状态不变。这条门和 save_cache_append 里那句

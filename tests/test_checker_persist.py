@@ -192,11 +192,15 @@ class RunProgressTests(unittest.TestCase):
             os.environ["LEGADO_DATA_DIR"] = self._old
         self.tmp.cleanup()
 
-    def test_progress_is_reported_per_batch_not_only_at_the_end(self):
-        """**按批报**，不是跑完才报一次。
+    def test_progress_is_reported_per_source_not_only_per_batch(self):
+        """**逐条报**，不是逐批报，更不是跑完才报一次。
 
-        只断言「最后报了 (N,N)」的话，把回调挪到循环外面照样通过——而那样
-        对「卡在 0」这个问题等于没修。所以用 501 条（批量是 500）逼出两次回调。
+        断言的是**报了什么**，不是报了几次：
+        - 只断言「最后报了 (N,N)」→ 把回调挪到循环外照样过（M32 实测如此）
+        - 只断言「中间有两三次」→ **按批报**（501 条只报 0/500/501）照样过，
+          而按批报的表现正是「界面十几分钟只跳 8 次，看着像卡死」——本次要修的
+          就是它
+        所以钉死整条序列：0,1,2,…,501，一条都不能少。
         """
         ck = AsyncChecker(concurrency=1, use_store=True)
 
@@ -211,12 +215,9 @@ class RunProgressTests(unittest.TestCase):
         seen = []
         asyncio.run(ck.run(records, on_progress=lambda done, total: seen.append((done, total))))
         ck.close()
-        # **断言中间值，不是条数**：起步那次报 (0,N)、末尾那次报 (N,N)，两次就够
-        # 凑满 `len >= 2`——把回调挪到循环外面照样过（造 M32 时实测如此）。
-        # 只有「跑到 500 时报过 (500, 501)」才能证明它是**按批**报的
-        self.assertIn((0, 501), seen, "起步就该报一次（缓存命中的那批立刻算完成）")
-        self.assertIn((500, 501), seen, "第一批跑完必须报——这才是「卡在 0」的修复点")
-        self.assertEqual(seen[-1], (501, 501))
+        self.assertEqual([d for d, _ in seen], list(range(0, 502)),
+                         "每完成一条报一次，从起步那次的 0 一直到 501")
+        self.assertEqual(seen[-1][1], 501)
 
     def test_progress_callback_is_optional(self):
         """不给回调也要能跑——CLI 与既有的测试调用点都不传。"""
@@ -411,12 +412,18 @@ class CacheReuseTests(unittest.TestCase):
 # RunProgressTests 的变异（2026-09-16，修「全量校验卡在 0」）：
 #
 #  M32  把 on_progress 从批次循环里挪到循环外（只报末尾一次）
-#         → test_progress_is_reported_per_batch_not_only_at_the_end 红
+#         → test_progress_is_reported_per_source_not_only_per_batch 红
 #         ⚠️ **第一版测试没抓住它**：那时断言的是 `len(seen) >= 2` 与
 #         `seen[-1] == (N,N)`，而「起步报一次 (0,N) + 末尾报一次 (N,N)」正好满足
 #         两条——把回调挪出去照样全绿。**是变异暴露了测试写弱了**，改成断言
 #         中间值 `(500, 501)` 之后才真正拦住。
 #         教训：断言「报了几次」拦不住「报的时机不对」，得断言**报了什么**。
+#
+#  M33  改回**按批报**（每批 500 报一次，那次 `(500, 501)` 断言照样满足）
+#         → 红在 `[0, 500, 501] != [0, 1, 2, …, 501]`
+#         这条是同一格上的第二个坑：M32 修好之后，按批报仍然能骗过「有中间值」
+#         这种断言。全量 3861 条按批报 = 整场只有 8 次跳变，界面看着就是卡住，
+#         所以断言收成了**整条序列逐条对齐**。
 #
 # ChecksSchemaParityTests 与 star_basis 往返的变异（2026-09-16）：
 #
