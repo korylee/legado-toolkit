@@ -17,7 +17,7 @@ from collections import Counter
 from typing import Any, Dict, List
 
 from core.models import (BookSourceRecord, Health, DEAD_TAG_PATTERNS,
-                         BOOK_SOURCE_TYPE_NAMES)
+                         BOOK_SOURCE_TYPE_NAMES, HEALTH_NAMES)
 
 
 def build_report(
@@ -174,19 +174,12 @@ def build_report(
         lines.append("| 状态 | 数量 | 占比 |")
         lines.append("|------|-----:|-----:|")
         health_counter = Counter(r.health for r in enabled)
-        health_names = {
-            Health.OK: "✅可用",
-            Health.GFW: "🔒需翻墙",
-            Health.AUTH: "🔒需登录/验证",
-            Health.NO_SEARCH: "🔍不可搜索",
-            Health.TIMEOUT: "⏱超时",
-            Health.DEAD: "❌失效",
-            Health.ERROR: "⚠️异常",
-            Health.SKIPPED: "⏭跳过",
-        }
+        # **不再自带一份名字表**：原来这里抄了第三份（措辞还和后端不一致：
+        # 「🔒需登录/验证」vs「🔒需验证」），新增一个健康态时漏改是必然的。
+        # 唯一权威是 core/models.py 的 HEALTH_NAMES（`.get(h, h)` 兜住未来新增值）
         for h in sorted(health_counter, key=lambda x: -health_counter[x]):
             c = health_counter[h]
-            lines.append(f"| {health_names.get(h, h)} | {c} | {c/len(enabled)*100:.1f}% |")
+            lines.append(f"| {HEALTH_NAMES.get(h, h)} | {c} | {c/len(enabled)*100:.1f}% |")
         lines.append("")
 
         # ---- 疑似被墙源清单

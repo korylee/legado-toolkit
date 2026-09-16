@@ -35,9 +35,16 @@ class Health:
     TIMEOUT = "timeout"      # ⏱ 超时
     SKIPPED = "skipped"      # ⏭ 跳过（enabled=false）
     ERROR = "error"          # ⚠️ 校验异常
+    #: 🔐 证书问题（自签/过期/域名不匹配）。**单独一档**的理由：它是这批源里唯一
+    #: 「我们自己能处理」的一类——站点本身是通的，关掉证书校验（设置里的
+    #: verify_ssl）或用 http 就能用。混进「⚠️异常」时用户只看到"网络异常"，
+    #: 既不知道该翻墙、该删源，还是该关校验。实测 20 条异常抽样里有 1 条是它
+    CERT = "cert"
 
 
-#: 健康状态中文名
+#: 健康状态中文名。**这是唯一一份**（`core/organizer.py` 拿它写书源分组名，
+#: CLI 拿它打印分布，前端 `utils/health.js` 是显示层副本——那份的注释里写了
+#: 为什么允许存在、以哪份为准）
 HEALTH_NAMES: Dict[str, str] = {
     Health.OK: "✅可用",
     Health.DEAD: "❌失效",
@@ -47,6 +54,7 @@ HEALTH_NAMES: Dict[str, str] = {
     Health.TIMEOUT: "⏱超时",
     Health.SKIPPED: "⏭跳过",
     Health.ERROR: "⚠️异常",
+    Health.CERT: "🔐证书",
 }
 
 # ---------------------------------------------------------------- 失效/异常特征词

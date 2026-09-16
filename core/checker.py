@@ -31,6 +31,9 @@ from core.models import (
     NOVEL_TEST_KEYWORDS, MANGA_TEST_KEYWORDS, TEST_TITLES, TOC_COMPLETE_THRESHOLD,
 )
 from core.urls import abs_url as _abs_url
+# DNS 失败的归因（域名注销 vs 本地解析被污染）：**外部视角的唯一实现**，
+# 判定口径与「为什么不能只凭本机一次解析失败判死」都写在那模块的开头
+from core import dns_check
 from core.rules.replayer import (extract_all as apply_css_rule, extract_all_nodes,
                           parse_rule)
 from core.loader import _normalize_url, fingerprint
@@ -90,13 +93,20 @@ DEFAULT_TTL_OTHER = _SETTINGS_DEFAULTS["check"]["cache_ttl_other"]
 
 
 def classify_transport_error(error: str) -> str:
-    """将传输层错误映射为保守状态，避免断网把源误判为永久失效。"""
+    """将传输层错误映射为保守状态，避免断网把源误判为永久失效。
+
+    **DNS 单独说**：这里给的 ``TIMEOUT``（待复检）是**保守兜底**，因为只凭本机一次
+    解析失败无法区分「域名注销」和「本机解析被污染/断网」。真正的归因在
+    ``check_one`` 里做——它拿 ``core/dns_check`` 的外部视角去交叉验证，验得出来
+    才会升级成 ``DEAD``（两个公共 DNS 都说域名不存在）或 ``GFW``（公共 DNS 能解析
+    到）。**别在这里改成 DEAD**：那等于用一次本机解析失败判死。
+    """
     if error in ("reset", "tls"):
         return Health.GFW
+    if error == "cert":
+        return Health.CERT
     if error in ("timeout", "proxy"):
         return Health.TIMEOUT
-    # DNS 失败既可能是域名注销，也可能是本机/网络断开时的统一解析失败。
-    # 在批量校验中无法仅凭一次请求区分，按待复检处理，避免误杀并阻止缓存污染。
     if error == "dns":
         return Health.TIMEOUT
     return Health.ERROR
@@ -144,21 +154,42 @@ def classify_http_status(status: Optional[int], text: str,
     return Health.DEAD
 
 
-def should_cache_result(health: str) -> bool:
-    """瞬时网络错误不写缓存，避免一次断网污染后续校验。"""
-    return health not in (Health.TIMEOUT, Health.ERROR)
+def is_transient(health: str) -> bool:
+    """这次失败是「瞬时网络错误」吗（超时 / 网络异常）。
+
+    **这个判定只用来决定"能不能复用"，不再用来决定"要不要写"。**
+    原来它叫 `should_cache_result`，同时管着写库那道门——结果是超时/异常的源
+    **一条都不落库**，而列表是按"有没有 checks 行"算「未校验」的，于是这些源永久
+    显示成「未校验」：明明刚跑过，界面上却像没跑（实测 3861 条里有 1222 条是
+    这个状态，占 31.7%），而且每次全量都会把它们的请求重打一遍。
+
+    现在拆开：**照写**（界面能显示「⏱超时/⚠️异常」、能筛出来单独重测）+ **不复用**
+    （一次断网/抖动不会变成源的结论）。原来要防的那件事（污染）靠 `is_cache_item_valid`
+    的那道早退照样堵着。
+    """
+    return health in (Health.TIMEOUT, Health.ERROR)
 
 
-def _err_desc(err: str) -> str:
-    """失败原因 → 中文描述（用于诊断信息）。"""
-    return {
-        "dns": "DNS解析失败(可能域名不存在或被污染)",
+def _err_desc(err: str, detail: str = "") -> str:
+    """失败原因 → 中文描述（用于诊断信息）。
+
+    ``detail`` 是底层异常类名（``_request`` 的第五个返回值），**只附在「网络异常」
+    这一档上**：dns/timeout/reset/tls/cert 的中文描述本身已经指向具体成因，而
+    「网络异常」什么也没说——实测那一档底下混着连接被拒、对端断开、协议错误等好几种
+    （20 条抽样里 4 种），排查时那句"网络异常"等于没有。
+    """
+    desc = {
+        "dns": "DNS解析失败(待交叉验证)",
         "timeout": "连接超时",
         "reset": "连接被重置(典型被墙特征)",
         "tls": "TLS握手失败(可能SNI阻断)",
         "proxy": "代理连接失败",
+        "cert": "证书不被信任(自签/过期/域名不匹配)",
         "other": "网络异常",
     }.get(err, "网络异常")
+    if err == "other" and detail:
+        return "%s（%s）" % (desc, detail)
+    return desc
 
 
 #: Legado 的 URL 选项分隔符——**原文照抄** `AnalyzeUrl.kt:776` 的 `paramPattern`：
@@ -349,7 +380,13 @@ def is_cache_item_valid(
     ``min_depth`` 只有校验链路（``AsyncChecker.run``）需要传本次的配置。其余
     调用方——CLI 的 organize/report、cache_parity 的两库比对——只是拿缓存算标签和
     报告，重跑不了探测，保持默认（``DEPTH_HOME``）即「不因探测能力作废」。
+
+    **瞬时网络错误一律不复用**（见 :func:`is_transient`）：它们照常写进缓存（界面
+    要能看到「上次超时」），但复用它就等于把一次断网/抖动当成源的结论。原来这道防
+    线是"干脆不写"，代价是那些源永远显示「未校验」；现在防线挪到了这里。
     """
+    if is_transient(str(item.get("health", ""))):
+        return False
     if item.get("v") != CACHE_VERSION:
         return False
     if item.get("fingerprint") != fingerprint(record.raw):
@@ -605,6 +642,9 @@ class AsyncChecker:
         # 每个源上一次发请求的时刻（monotonic 毫秒），用于遵守该书源自己声明的
         # concurrentRate。见 _throttle
         self._rate_last: Dict[str, float] = {}
+        # DNS 归因结果，按**主机**缓存（不是按源）：同一主机的源成批出现，
+        # 每条都查一遍公共 DNS 是白费。见 _classify_dns
+        self._dns_verdicts: Dict[str, Tuple[str, str]] = {}
 
         if use_store is None:
             use_store = not os.getenv("LEGADO_LEGACY_CACHE")
@@ -693,9 +733,13 @@ class AsyncChecker:
         链路（``backend/api/ops.py``）正好只传 ``use_store=True``、不传 cache_dir。
         配上 ``run()`` 里那道 ``if self.cache_dir:`` 的门，结果是**校验算完从不落库**：
         界面上请求成功、状态不变。见 run() 里保存那一段。
+
+        **什么状态都写**（包括超时/异常）。原来这里有一道 ``should_cache_result``
+        的门把瞬时错误挡在库外，理由是"避免一次断网污染后续校验"——但列表按
+        "有没有 checks 行"算「未校验」，被挡掉的源于是永远显示成没校验过（实测
+        1222/3861 条），而它们每次全量还要被重打一遍请求。污染改由
+        ``is_cache_item_valid`` 挡（**照写、不复用**），两件事分开了。
         """
-        if not should_cache_result(record.health):
-            return
         url_key = re.sub(r"[^\w\-.]", "_", record.url or f"idx{record.index}")[:80]
         item = {
             "v": CACHE_VERSION,
@@ -779,11 +823,15 @@ class AsyncChecker:
         headers: Optional[Dict[str, str]] = None,
         allow_redirects: bool = True,
         body: str = "",
-    ) -> tuple[Optional[int], bytes, float, str]:
-        """发请求，返回 (状态码, 响应体, 耗时ms, 失败原因)。
+    ) -> tuple[Optional[int], bytes, float, str, str]:
+        """发请求，返回 (状态码, 响应体, 耗时ms, 失败原因, 底层异常类名)。
 
-        失败原因分为：dns / timeout / reset / tls / proxy / other
+        失败原因分为：dns / timeout / reset / tls / cert / proxy / other
         用于区分「真死」与「被墙」。
+
+        第五个值 ``detail`` 是**底层 aiohttp/系统异常的类名**（如 ``ClientOSError``、
+        ``ClientConnectorCertificateError``），只在诊断文案里用得上：写成中文之后
+        就没了，"网络异常"这种描述什么都说明不了。
 
         ``record`` **必填且不给默认值**：它用来读该书源的 concurrentRate 限速。
         留默认值的话，将来新增的调用点漏传就会静默不受限速约束——而「静默地打了
@@ -795,6 +843,7 @@ class AsyncChecker:
         if headers:
             h.update(headers)
         err = ""
+        detail = ""
         try:
             async with session.request(
                 method, url, headers=h, timeout=aiohttp.ClientTimeout(total=self.timeout),
@@ -806,23 +855,37 @@ class AsyncChecker:
             ) as resp:
                 body = await resp.read()
                 cost = (time.perf_counter() - t0) * 1000
-                return resp.status, body, cost, ""
+                return resp.status, body, cost, "", ""
         except asyncio.TimeoutError:
             err = "timeout"
-        except aiohttp.ClientConnectorDNSError:  # 域名解析失败：域名不存在或被 DNS 污染
+        except aiohttp.ClientConnectorDNSError as e:  # 域名解析失败：注销 or DNS 污染
             err = "dns"
-        except aiohttp.ClientConnectorSSLError as e:  # TLS 握手失败：SNI 阻断/证书问题
+            detail = type(e).__name__
+        except aiohttp.ClientConnectorCertificateError as e:
+            # **证书问题单独一档**：站点是通的（TCP/TLS 都握上手了），只是证书不被
+            # 信任。它原来掉进 `ClientError` → "other" →「⚠️异常」——用户看不出
+            # "关掉证书校验就能用"。注意它必须在 `ClientConnectorSSLError` 之前判：
+            # 两者是并列的具体类型，都继承自 `ClientConnectorError`，按书写顺序匹配
+            err = "cert"
+            detail = type(e).__name__
+        except aiohttp.ClientConnectorSSLError as e:  # TLS 握手失败：SNI 阻断
             err = "tls"
-        except aiohttp.ClientConnectionResetError:  # TCP 连接被重置：被墙典型特征
+            detail = type(e).__name__
+        except aiohttp.ClientConnectionResetError as e:  # TCP 连接被重置：被墙典型特征
             err = "reset"
-        except aiohttp.ServerDisconnectedError:  # 服务器主动断开
+            detail = type(e).__name__
+        except aiohttp.ServerDisconnectedError as e:  # 服务器主动断开
             err = "reset"
+            detail = type(e).__name__
         except aiohttp.ClientProxyConnectionError as e:  # 代理连接失败
             err = "proxy"
+            detail = type(e).__name__
         except aiohttp.ClientError as e:
             err = "other"
+            detail = type(e).__name__
         except Exception as e:
             err = "other"
+            detail = type(e).__name__
             # 这一支是**兜底**：常见的连接类错误在上面按 aiohttp 的具体类型分完了
             # （10054 → `aiohttp.ClientConnectionResetError` → "reset"；
             #  10061 → `aiohttp.ClientConnectorError` → `ClientError` → "other"；
@@ -835,7 +898,7 @@ class AsyncChecker:
             # 已删——删它们不改变任何分类结果
             if isinstance(e, (TimeoutError, OSError)) or "timed out" in str(e).lower():
                 err = "timeout"
-        return None, b"", (time.perf_counter() - t0) * 1000, err
+        return None, b"", (time.perf_counter() - t0) * 1000, err, detail
 
     def _classify(self, status: Optional[int], body: bytes, rec: BookSourceRecord) -> str:
         """根据 HTTP 状态与响应体判定健康状态。
@@ -844,6 +907,27 @@ class AsyncChecker:
         另写一遍**（那正是原来三处分叉的成因）。
         """
         return classify_http_status(status, _decode_body(body), rec.enabled_cookie_jar)
+
+    async def _classify_dns(self, record: BookSourceRecord,
+                            domain_url: str) -> Tuple[str, str]:
+        """DNS 解析失败 → ``(健康态, 给用户看的错误文案)``。
+
+        判定口径在 :mod:`core.dns_check`（**两个独立来源都同意才判死**，理由在那
+        模块的注释里）。这里只做两件事：把域名摘出来、把结论翻译成文案。
+
+        结果**按域名缓存**：同一主机的源常常成批出现（实测 35% 的主机有两条以上
+        源），每条都去查一遍公共 DNS 是白费。
+        """
+        host = domain_url.split("//", 1)[-1].split("/")[0]
+        if host not in self._dns_verdicts:
+            self._dns_verdicts[host] = await dns_check.probe(host)
+        verdict, note = self._dns_verdicts[host]
+        if verdict == dns_check.POLLUTED:
+            return (Health.GFW,
+                    "本机解析失败，但%s，本地 DNS 疑似被污染，可开代理复检" % note)
+        if verdict == dns_check.GONE:
+            return Health.DEAD, "域名已注销（%s），建议删除" % note
+        return Health.TIMEOUT, "DNS 解析失败待复检（%s）" % note
 
 
     async def check_one(
@@ -863,7 +947,7 @@ class AsyncChecker:
 
             # 1) 域名连通性探测
             domain_url = build_domain_url(record.url)
-            status, body, cost, err = await self._request(session, record, domain_url)
+            status, body, cost, err, detail = await self._request(session, record, domain_url)
             record.status_code = status or 0
             record.response_time_ms = int(cost)
             record.checked_at = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -874,8 +958,14 @@ class AsyncChecker:
                 if err in ("reset", "tls"):
                     health = Health.GFW
                     record.error = f"疑似被墙（{_err_desc(err)}）"
+                elif err == "dns":
+                    # **DNS 失败要交叉验证**，不能只凭本机这一次解析失败：
+                    # 域名注销（该删）和本机解析被污染（该翻墙）在这里长得一样。
+                    # 结论只能来自 core/dns_check 的外部视角，验不出来就维持
+                    # 「待复检」——见它的模块注释
+                    health, record.error = await self._classify_dns(record, domain_url)
                 elif err:
-                    record.error = _err_desc(err)
+                    record.error = _err_desc(err, detail)
                     health = classify_transport_error(err)
                 elif status:
                     # 传输是通的，是服务端回了 4xx 才判死。**不能沿用下面那句
@@ -977,14 +1067,14 @@ class AsyncChecker:
                     search_url = domain_url + search_url
                 elif not search_url.startswith(("http://", "https://")):
                     search_url = domain_url + "/" + search_url
-                s_status, s_body, s_cost, s_err = await self._request(
+                s_status, s_body, s_cost, s_err, s_detail = await self._request(
                     session, record, search_url, method=method, headers=headers,
                     body=req_body,
                 )
                 record.search_response_ms = int(s_cost)
                 if s_status is None:
                     record.health = classify_transport_error(s_err)
-                    record.error = f"疑似被墙（{_err_desc(s_err)}）" if s_err in ("reset", "tls") else _err_desc(s_err)
+                    record.error = f"疑似被墙（{_err_desc(s_err)}）" if s_err in ("reset", "tls") else _err_desc(s_err, s_detail)
                     return None
                 # 判定表只有一份（`classify_http_status`）。**这里只取它的 AUTH**：
                 # 搜索入口 404 不能推出「源死了」（可能只是搜索规则过期），
@@ -1058,7 +1148,8 @@ class AsyncChecker:
                 return None
             # 取第一条详情 URL（相对链接补全为绝对地址）
             detail_url = _abs_url(domain_url, urls[0])
-            d_status, d_body, d_cost, d_err = await self._request(session, record, detail_url)
+            d_status, d_body, d_cost, d_err, _d_detail = await self._request(
+                session, record, detail_url)
             if d_status is None or d_status >= 400:
                 record.toc_complete = None
                 record.toc_fail_reason = f"详情页请求失败(status={d_status})"
@@ -1139,7 +1230,8 @@ class AsyncChecker:
             # 中位章节（>1 时取中间），单章源取唯一章节
             pick = urls[len(urls) // 2] if len(urls) > 1 else urls[0]
             chap_url = _abs_url(domain_url, pick)
-            c_status, c_body, c_cost, c_err = await self._request(session, record, chap_url)
+            c_status, c_body, c_cost, c_err, _c_detail = await self._request(
+                session, record, chap_url)
             record.content_response_ms = int(c_cost)
             if c_status is None or c_status >= 400:
                 record.content_ok = None

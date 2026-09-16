@@ -134,13 +134,13 @@ const typeLabel = (v) => tagOfType(v) || ("类型" + v);
 
 // 健康度的取值：统计条上的 chip（点一下直接改筛选条件）和两个下拉共用这一份。
 //
-// **8 个健康态一个都不能少**：原来这里有两份，各只列了 4 个（ok/dead/auth/gfw），
+// **9 个健康态一个都不能少**：原来这里有两份，各只列了 4 个（ok/dead/auth/gfw），
 // 于是 timeout / no_search / error / skipped 的源在统计条上一个都数不到——各 chip
 // 之和小于总数，看着像凭空少了一批源，而且没法按它们下钻、下钻不到就没法批量处理。
 // 文案从 HEALTH_LABELS 取（那是 core/models.py HEALTH_NAMES 的显示层副本），
 // 别在这儿再抄一份名字。
 const HEALTH_OPTIONS = [
-  "ok", "dead", "auth", "gfw", "no_search", "timeout", "error", "skipped",
+  "ok", "dead", "auth", "gfw", "no_search", "timeout", "error", "cert", "skipped",
 ].map((value) => ({ value, label: HEALTH_LABELS[value] }));
 
 // stats.health 的键是 str(health)：没有校验记录时 health 为 NULL，键就是字符串 "None"

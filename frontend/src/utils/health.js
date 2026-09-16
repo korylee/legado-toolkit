@@ -11,7 +11,7 @@
 // 不是设计选择——完整的健康度下发（含 skipped）建议二期跟 status_tags 一起做。
 // 若两边漂移，以 core/models.py 为准。
 //
-// **8 个状态一个不能少**：统计条的 chip、表格的标签都从这份派生。少一个的后果
+// **9 个状态一个不能少**：统计条的 chip、表格的标签都从这份派生。少一个的后果
 // 不是少个标签，而是那种源的计数在整个统计条上都不出现（见 SourcesView）。
 export const HEALTH_LABELS = {
   ok: "✅可用",
@@ -21,6 +21,7 @@ export const HEALTH_LABELS = {
   no_search: "🔍不可搜",
   timeout: "⏱超时",
   error: "⚠️异常",
+  cert: "🔐证书",
   skipped: "⏭跳过",
 };
 

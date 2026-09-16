@@ -263,7 +263,8 @@ python cli/main.py merge -i a.json -i b.json -o merged.json --mode replace
 系统标签由程序维护：
 
 - 类型：📖小说、🎧听书、🎨漫画、📥下载（对应 bookSourceType 0/1/2/3）
-- 健康状态：可用、待验证、已失效、需代理复检
+- 健康状态：✅可用、❌失效、🔒需验证、🌐需翻墙、🔍不可搜、⏱超时、⚠️异常、🔐证书、⏭跳过
+  （**权威清单是 `core/models.py` 的 `HEALTH_NAMES`**，这里只是给人看的枚举）
 - 规则质量：规则完整
 
 其中：

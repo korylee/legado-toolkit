@@ -72,12 +72,15 @@ class _StubChecker(AsyncChecker):
         # 签名必须与 AsyncChecker._request 一致（record 是第二个位置参数）。
         # 漏改的话 url 会绑到 record 上——桩照样"能跑"，只是测的不是真东西。
         # `body` 是 2026-09-16 加的（书源可声明 `url,{"method":"POST","body":…}`）：
-        # 漏了它 `_probe_search` 传关键字参数会直接 TypeError
+        # 漏了它 `_probe_search` 传关键字参数会直接 TypeError。
+        # **返回值是五元组**（第五个是底层异常类名，2026-09-16 加的）：少一个会在
+        # 调用点解包时报 ValueError，而报出来的是"验证异常：ValueError"——
+        # 看着像被测的判定逻辑坏了，其实是桩没跟上
         self.requested.append(url)
         page = self.pages.get(url)
         if page is None:
-            return 404, b"", 1.0, ""        # 未预置的 URL 一律 404
-        return 200, page.encode("utf-8"), 1.0, ""
+            return 404, b"", 1.0, "", ""     # 未预置的 URL 一律 404
+        return 200, page.encode("utf-8"), 1.0, "", ""
 
 
 def make_raw(content_rule="id.content", toc_rule="class.chapters@tag.a"):
