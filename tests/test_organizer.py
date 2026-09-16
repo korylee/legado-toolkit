@@ -43,11 +43,22 @@ class OrganizerTests(unittest.TestCase):
 
         之前这里是**不对称**的：认得「需验证」-> AUTH，但 AUTH 写回去却是
         「待验证」，一读一写就丢了。迁移/导入都走这条往返，丢了不会报错。
+
+        **这份名单要跟着健康态枚举一起长**：新增一个健康态而忘了这两张表里的
+        任何一张，症状都是"它悄悄落进「待验证」"——和三千多条从没校验过的源
+        显示成同一个标签（CERT 就是这么被漏过一次）。
         """
-        for health in (Health.OK, Health.AUTH, Health.GFW, Health.DEAD):
+        for health in (Health.OK, Health.AUTH, Health.GFW, Health.DEAD, Health.CERT):
             tag = group_title(0, health).split(",", 1)[1]
             self.assertEqual(infer_health_from_group(tag), health,
                              "「%s」往返后变了" % tag)
+
+    def test_cert_is_a_conclusion_not_pending(self) -> None:
+        """证书问题与「待验证」必须分开，理由同 AUTH 那条：
+        它是**有结论**的（站点可达、只是证书不被信任），落进「待验证」就等于
+        和从没校验过的源显示成同一个标签。"""
+        self.assertEqual(group_title(0, Health.CERT), "📖小说,证书问题")
+        self.assertNotEqual(group_title(0, Health.CERT), group_title(0, Health.SKIPPED))
 
     def test_organize_removes_hit_marker_and_original_group_line(self) -> None:
         raw = source("📖小说/✅★★★★★,命中《斗破苍穹》,规则完整")

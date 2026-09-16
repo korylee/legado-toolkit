@@ -864,8 +864,11 @@ class AsyncChecker:
         except aiohttp.ClientConnectorCertificateError as e:
             # **证书问题单独一档**：站点是通的（TCP/TLS 都握上手了），只是证书不被
             # 信任。它原来掉进 `ClientError` → "other" →「⚠️异常」——用户看不出
-            # "关掉证书校验就能用"。注意它必须在 `ClientConnectorSSLError` 之前判：
-            # 两者是并列的具体类型，都继承自 `ClientConnectorError`，按书写顺序匹配
+            # "关掉证书校验就能用"。
+            #
+            # 顺序：它与 `ClientConnectorSSLError` 是同一层的两个具体类型（都直接
+            # 继承 `ClientSSLError`，互不为子类），所以两者谁先都行；**但它们都必须
+            # 排在 `ClientError` 之前**——错序不会报错，只会把一整类失败归错档
             err = "cert"
             detail = type(e).__name__
         except aiohttp.ClientConnectorSSLError as e:  # TLS 握手失败：SNI 阻断
@@ -963,7 +966,15 @@ class AsyncChecker:
                     # 域名注销（该删）和本机解析被污染（该翻墙）在这里长得一样。
                     # 结论只能来自 core/dns_check 的外部视角，验不出来就维持
                     # 「待复检」——见它的模块注释
-                    health, record.error = await self._classify_dns(record, domain_url)
+                    if self.proxy:
+                        # **带代理时不能套用上面那套**：aiohttp 走代理时不在本地解析
+                        # 目标域名（https 交给代理 CONNECT），所以这里的 dns 失败是
+                        # **代理主机自己**解析不了。拿目标域名去交叉验证会得出一句
+                        # 与事实无关的话（"本地 DNS 疑似被污染"），把排查引偏
+                        health = Health.TIMEOUT
+                        record.error = "代理主机解析失败，待复检（检查设置里的代理地址）"
+                    else:
+                        health, record.error = await self._classify_dns(record, domain_url)
                 elif err:
                     record.error = _err_desc(err, detail)
                     health = classify_transport_error(err)

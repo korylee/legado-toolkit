@@ -57,6 +57,25 @@ class ReplyParsingTests(unittest.TestCase):
         self.assertEqual(dns_check.parse_reply(data, 7), ("answer", "9.8.7.6"))
 
 
+class BuildQueryTests(unittest.TestCase):
+    def test_idn_host_is_sent_as_punycode(self) -> None:
+        """非 ASCII 域名要转 punycode。
+
+        不转的话 `encode("ascii")` 抛异常 → 被当成"解析器连不上" → 这类源永远停在
+        「待复检」，而原因与 DNS 无关（库里实测有这种源）。
+        """
+        packet = dns_check._build_query("飞速中文.com", 1)
+        self.assertIn(b"xn--", packet, "应当出现 punycode 标签（xn--）")
+        self.assertIn(b"\x03com\x00", packet)
+        self.assertNotIn("飞速".encode("utf-8"), packet, "中文原样发出去是发不出去的")
+
+    def test_garbage_host_does_not_raise(self) -> None:
+        """源里那些根本不是域名的 url（如「🌐绅士漫画」）不能把查询器带崩——
+        它会被解析器拒掉，落到 unknown/待复检。"""
+        packet = dns_check._build_query("🌐绅士漫画", 1)
+        self.assertTrue(packet.startswith(b"\x00\x01"), "首部里的 id 字段还在")
+
+
 class ProbeVerdictTests(unittest.TestCase):
     """判定规则。**关键是"只有一个来源说话时不下结论"**。"""
 

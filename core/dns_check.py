@@ -50,10 +50,20 @@ _KIND_NAMES = {"answer": "能解析", "nxdomain": "说不存在",
 
 
 def _build_query(name: str, qid: int) -> bytes:
-    """构造一个 A 记录查询报文（RD=1，单问题段）。"""
+    """构造一个 A 记录查询报文（RD=1，单问题段）。
+
+    非 ASCII 域名在这里转 punycode：库里实测有（如「飞速中文.com」），直接
+    ``encode("ascii")`` 会抛 UnicodeEncodeError，被当成"解析器连不上"——表现是
+    这类源永远停在「待复检」，而原因和 DNS 毫无关系。转不了的（源里那些
+    `🌐绅士漫画` 之类的垃圾域名）按原样发，解析器自然会拒掉。
+    """
+    try:
+        ascii_name = name.encode("idna").decode("ascii")
+    except (UnicodeError, ValueError):
+        ascii_name = name
     header = struct.pack(">HHHHHH", qid, 0x0100, 1, 0, 0, 0)
     qname = b"".join(bytes([len(p)]) + p.encode("ascii")
-                     for p in name.split(".") if p) + b"\x00"
+                     for p in ascii_name.split(".") if p) + b"\x00"
     return header + qname + struct.pack(">HH", 1, 1)   # QTYPE=A, QCLASS=IN
 
 

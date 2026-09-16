@@ -235,6 +235,74 @@ class CacheCliTests(unittest.TestCase):
         self.assertTrue(run.refresh_cache)
 
 
+class TransportErrorRoutingTests(unittest.TestCase):
+    """底层异常 → 失败原因那一桶。**由 except 子句的顺序决定**，写错了不报错，
+    只会把一整类失败归错档（用户看到的是一句没有信息量的中文）。
+
+    证书错误是最容易错的一个：它是「站点可达、只是证书不被信任」，唯一可操作的
+    一类（关掉证书校验就能用）。掉进 "other" 就变成了「⚠️异常」。
+    """
+
+    class _RaisingSession:
+        """`session.request(...)` 一进上下文就抛——正好落在 `_request` 的异常分支里。"""
+
+        def __init__(self, exc):
+            self.exc = exc
+
+        def request(self, *_a, **_kw):
+            exc = self.exc
+
+            class _CM:
+                async def __aenter__(self):
+                    raise exc
+
+                async def __aexit__(self, *_a):
+                    return False
+            return _CM()
+
+    def _call(self, exc):
+        from core.checker import AsyncChecker
+        ck = AsyncChecker(concurrency=1, use_store=False)
+        rec = build_record(make_source(), 0)
+        try:
+            import asyncio
+            return asyncio.run(ck._request(self._RaisingSession(exc), rec,
+                                           "https://example.com/"))
+        finally:
+            ck.close()
+
+    def test_certificate_error_is_its_own_bucket(self):
+        import aiohttp
+        import ssl
+        exc = aiohttp.ClientConnectorCertificateError(
+            None, ssl.SSLCertVerificationError("self signed"))
+        _status, _body, _cost, err, detail = self._call(exc)
+        self.assertEqual(err, "cert")
+        self.assertEqual(detail, "ClientConnectorCertificateError")
+
+    def test_tls_handshake_failure_stays_gfw(self):
+        """TLS 握手失败（SNI 阻断）与证书问题**不是一回事**，别一起归到 cert。"""
+        import aiohttp
+        import ssl
+        exc = aiohttp.ClientConnectorSSLError(None, ssl.SSLError("handshake"))
+        _status, _body, _cost, err, _detail = self._call(exc)
+        self.assertEqual(err, "tls")
+
+    def test_other_errors_carry_the_underlying_type_name(self):
+        """「网络异常」那一桶实测混着好几种成因，光看中文无从排查。"""
+        import aiohttp
+        exc = aiohttp.ClientOSError(10054, "连接被重置")
+        _status, _body, _cost, err, detail = self._call(exc)
+        self.assertEqual(err, "other")
+        self.assertEqual(detail, "ClientOSError")
+
+    def test_reset_error_keeps_its_own_bucket(self):
+        import aiohttp
+        exc = aiohttp.ServerDisconnectedError()
+        _status, _body, _cost, err, _detail = self._call(exc)
+        self.assertEqual(err, "reset")
+
+
 # ---------------------------------------------------------------- 变异记录
 # 以下为实测（改坏 → `python -B -m unittest tests.test_checker_cache` → 确认变红 → 还原）。
 #

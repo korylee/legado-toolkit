@@ -42,6 +42,11 @@ STATUS_GROUP_NAMES = {
     Health.OK: "可用", Health.AUTH: "需验证", Health.GFW: "需代理复检",
     Health.DEAD: "已失效", Health.NO_SEARCH: "待验证", Health.TIMEOUT: "待验证",
     Health.ERROR: "待验证", Health.SKIPPED: "待验证",
+    # CERT 也是**有结论**的（站点可达，只是证书不被信任），不能落进「待验证」。
+    # 漏了它的后果与上面 AUTH 那段完全一样：分组名走 .get(..., '待验证') 兜底，
+    # 于是一批"证书有问题、关掉校验就能用"的源，在编辑弹窗里和 3500 条从没校验过
+    # 的源显示成同一个标签。**新增健康态时这张表必须跟着加**
+    Health.CERT: "证书问题",
 }
 
 
@@ -59,6 +64,8 @@ def infer_health_from_group(group: str) -> str:
     if ("需翻墙" in value or "被墙" in value or "🌐" in value
             or "需代理复检" in value or "代理复检" in value):
         return Health.GFW
+    if "证书" in value or "🔐" in value:
+        return Health.CERT
     if "失效" in value or "❌" in value:
         return Health.DEAD
     if "需验证" in value or "需登录" in value or "🔒" in value:
