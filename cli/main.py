@@ -830,10 +830,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_rc.set_defaults(func=cmd_reclassify)
 
     # diagnose —— 失效源归因
-    p_dg = sub.add_parser("diagnose", help="失效源归因：死站/规则漂移/站点转型/需验证")
+    p_dg = sub.add_parser("diagnose",
+                          help="失效源归因：死站/需翻墙/规则漂移/站点转型/需验证")
     p_dg.add_argument("-i", "--input", required=True, help="书源 JSON 数组")
     p_dg.add_argument("-o", "--output", help="Markdown 报告输出路径")
-    p_dg.add_argument("--only-dead", action="store_true", help="只探测非 OK 的源")
+    p_dg.add_argument("--only-dead", action="store_true",
+                      help="按最近一次校验结果，只探测非「可用」的源")
+    p_dg.add_argument("--cache-dir", default="",
+                      help=f"校验结果目录（默认读管理库；NDJSON 用 {DEFAULT_CACHE_DIR}"
+                           " 并设 LEGADO_LEGACY_CACHE=1）")
     p_dg.add_argument("-c", "--concurrency", type=int, default=20)
     p_dg.add_argument("-t", "--timeout", type=float, default=8.0)
     p_dg.add_argument("--keywords", nargs="*", default=None, help="搜索探测关键词")

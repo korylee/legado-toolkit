@@ -15,10 +15,19 @@ lessons §四 定下的规矩是「实测优先于声明」「证据不足保持
 from __future__ import annotations
 
 import asyncio
+import json
+import os
+import tempfile
+import time
 import unittest
+from argparse import Namespace
 from unittest import mock
 
+from core.models import Health
 from core.reclassify import combine_type, homepage_signals, infer_type_static
+
+_TMP_ROOT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".tmp")
+os.makedirs(_TMP_ROOT, exist_ok=True)
 
 MANGA = 2
 NOVEL = 0
@@ -333,9 +342,40 @@ class DiagnoseBucketTests(unittest.TestCase):
         res = self._run({}, source={"bookSourceName": "没有域名的源"})
         self.assertEqual(res["bucket"], "其他")
 
-    def test_unreachable_is_dead(self):
-        res = self._run({self.HOME: (None, "", "dns")})
-        self.assertEqual(res["bucket"], "死站")
+    def test_dns_failure_is_attributed_not_assumed_dead(self):
+        """DNS 失败**不再一律「死站」**，判定与校验链路共用 `core/dns_check`。
+
+        改之前这里对任何传输失败都写「死站」（建议动作还是"两次明确失败后淘汰"），
+        而 DNS 失败里的大头是本机解析被污染/被墙——那些源开代理就能用，
+        **照这份报告清理就会把它们删掉**。三种结论各归各的桶（probe 打桩，不联网）。
+        """
+        from core import dns_check
+        for verdict, bucket in ((dns_check.POLLUTED, "需翻墙"),
+                                (dns_check.GONE, "死站"),
+                                (dns_check.UNKNOWN, "其他")):
+            async def fake_probe(_host, _v=verdict):
+                return _v, "（说明）"
+            with mock.patch.object(dns_check, "probe", fake_probe):
+                res = self._run({self.HOME: (None, "", "dns")})
+            self.assertEqual(res["bucket"], bucket, "verdict=%s 归错了桶" % verdict)
+
+    def test_walled_transport_error_is_gfw_not_dead(self):
+        """连接重置 / TLS 握手失败 = 被墙特征：校验链路那边判 GFW，这边要一致。"""
+        for err in ("reset", "tls"):
+            res = self._run({self.HOME: (None, "", err)})
+            self.assertEqual(res["bucket"], "需翻墙", "err=%s" % err)
+
+    def test_only_the_dead_bucket_advises_deleting(self):
+        """**只有「死站」能给淘汰建议。**
+
+        其余桶都是"还能救"或"没结论"：超时/网络异常（待复检）、需翻墙（开代理）、
+        需验证、规则漂移。改之前 DNS 失败落在「死站」，于是"本机解析被污染"的源
+        会拿到淘汰建议——而它们开代理就能用。
+        """
+        from core.reclassify import ACTION_OF
+        res = self._run({self.HOME: (None, "", "timeout")})
+        self.assertEqual(res["bucket"], "其他")
+        self.assertEqual([b for b, act in ACTION_OF.items() if "淘汰" in act], ["死站"])
 
     def test_no_search_rule_is_rule_drift(self):
         """可达但没有搜索规则（仅发现源）→ 规则漂移，不是死站。"""
@@ -371,6 +411,79 @@ class DiagnoseBucketTests(unittest.TestCase):
             self._search_url(): (200, '<div class="item">海贼王</div>', ""),
         }, source=src)
         self.assertEqual(res["bucket"], "疑似可用")
+
+
+class OnlyDeadFilterTests(unittest.TestCase):
+    """`--only-dead` 必须按**最近一次校验结果**筛。
+
+    它原来写的是 `build_record(s, 0).health != Health.OK`，而 `build_record`
+    **根本读不到校验结果**（health 恒为默认的 `skipped`）——条件永远为真，这个开关
+    从没筛掉过任何东西：命令照样对**全部**源一个不落地发请求，而用户以为自己只测
+    失效的那些。名不副实，且不报错。
+
+    这里用真的写库路径造缓存（`save_cache_append`，与校验链路同一个入口），
+    只把联网那步（`_diagnose_all`）换掉——**要看的就是"哪些源被送进了探测"**。
+    """
+
+    GOOD = {"bookSourceUrl": "https://ok.example/", "bookSourceName": "好的源"}
+    BAD = {"bookSourceUrl": "https://bad.example/", "bookSourceName": "失效的源"}
+    UNKNOWN = {"bookSourceUrl": "https://new.example/", "bookSourceName": "没校验过的源"}
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory(dir=_TMP_ROOT)
+        self._old = os.environ.get("LEGADO_DATA_DIR")
+        os.environ["LEGADO_DATA_DIR"] = self.tmp.name
+        self.inp = os.path.join(self.tmp.name, "in.json")
+
+    def tearDown(self) -> None:
+        if self._old is None:
+            os.environ.pop("LEGADO_DATA_DIR", None)
+        else:
+            os.environ["LEGADO_DATA_DIR"] = self._old
+        self.tmp.cleanup()
+
+    def _seed_cache(self) -> None:
+        """写两条结论：一条可用、一条失效。第三条（没校验过的）故意不写。"""
+        from core.checker import AsyncChecker
+        from core.models import build_record
+        ck = AsyncChecker(use_store=True)
+        for src, health in ((self.GOOD, Health.OK), (self.BAD, Health.DEAD)):
+            rec = build_record(src, 0)
+            rec.health = health
+            rec.checked_at = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time() - 300))
+            ck.save_cache_append(rec)
+        ck.close()
+
+    def _run(self, only_dead: bool):
+        from core import reclassify as R
+        with open(self.inp, "w", encoding="utf-8") as f:
+            json.dump([self.GOOD, self.BAD, self.UNKNOWN], f, ensure_ascii=False)
+        args = Namespace(input=self.inp, output="", only_dead=only_dead,
+                         concurrency=1, timeout=1.0, keywords=None)
+        seen = {}
+
+        async def fake_all(sources, _args):
+            seen["urls"] = [s["bookSourceUrl"] for s in sources]
+            return []
+
+        with mock.patch.object(R, "_diagnose_all", fake_all):
+            R.cmd_diagnose(args)
+        return seen["urls"]
+
+    def test_it_filters_out_sources_whose_last_result_is_ok(self) -> None:
+        self._seed_cache()
+        urls = self._run(only_dead=True)
+        self.assertNotIn(self.GOOD["bookSourceUrl"], urls,
+                         "最近一次是「可用」的源不该再花时间归因")
+        self.assertIn(self.BAD["bookSourceUrl"], urls)
+        self.assertIn(self.UNKNOWN["bookSourceUrl"], urls,
+                      "没有校验记录的源不算「已知可用」，要一起测")
+
+    def test_without_the_flag_everything_is_probed(self) -> None:
+        """反向断言：不加开关就不筛——否则"筛掉一切"也能让上面那条通过。"""
+        self._seed_cache()
+        urls = self._run(only_dead=False)
+        self.assertEqual(len(urls), 3)
 
 
 # ---------------------------------------------------------------- 变异记录

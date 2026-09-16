@@ -177,6 +177,35 @@ async def _get(session, url, timeout=8.0, method="GET", headers=None, body=""):
         return None, "", "other"
 
 
+async def _transport_attribution(err: str, host: str) -> Tuple[str, str]:
+    """传输层失败 → ``(归因桶, 说明)``。
+
+    **口径必须与校验链路一致**（`core/checker` + `core/dns_check`）：这是同一件事的
+    第二个入口，判成相反结论比"没有归因"更糟——用户是照着这份报告决定删源的。
+
+    改之前这里对**任何**传输失败都写「死站：…」，配的建议动作还是"两次明确失败后
+    淘汰"。而 DNS 失败里的大头是**本机解析被污染/被墙**（实测抽样 6 个域名里 5 个
+    是这一档），那些源开代理就能用——照报告清理就会把它们删掉。
+    """
+    from core import dns_check
+    from core.checker import err_desc      # 描述文案的唯一实现，别在这儿再抄一份
+    if err in ("reset", "tls"):
+        # 连接重置 / TLS 握手失败：校验链路判「需翻墙」（被墙典型特征）
+        return "需翻墙", "需翻墙：%s" % err_desc(err)
+    if err == "cert":
+        return "其他", "证书不被信任（关掉证书校验或用 http 复检）"
+    if err != "dns":
+        # 超时、其他网络错误：校验链路判「待复检」（一次失败不定性），
+        # 这里也不给淘汰建议——归到「其他」，由人再看
+        return "其他", "无法归因：%s（可能是临时故障）" % err_desc(err)
+    verdict, note = await dns_check.probe(host)
+    if verdict == dns_check.POLLUTED:
+        return "需翻墙", "需翻墙：本机解析不到，但%s" % note
+    if verdict == dns_check.GONE:
+        return "死站", "死站：域名已注销（%s）" % note
+    return "其他", "DNS 解析失败且%s，不下结论" % note
+
+
 def homepage_signals(html: str) -> Tuple[int, int, List[str]]:
     """从首页 HTML 提取「偏漫画/偏小说」信号。"""
 
@@ -237,6 +266,7 @@ def combine_type(source: Dict[str, Any], home: Optional[Tuple[int, int, List[str
 #: 归因结论 -> 建议动作
 ACTION_OF = {
     "死站": "两次明确失败后淘汰",
+    "需翻墙": "保留，开代理（或换 DNS）复检",
     "需验证": "保留，人工或改 UA/Cookie 复检",
     "规则漂移": "保留，进 AI 修复队列（域名活着，规则过期）",
     "站点转型": "改 bookSourceType 或按新类型重建规则",
@@ -269,8 +299,10 @@ async def diagnose_source(session, source, timeout=8.0, keywords=None):
     res["http_status"] = status or 0
     res["transport"] = err
     if status is None:
-        res["attribution"] = "死站：%s" % (err or "连接失败")
-        res["bucket"] = "死站"
+        # 传输层失败**不能一律归成「死站」**：DNS 失败里的大头是解析被污染/被墙，
+        # 那些源开代理就能用。判定口径与校验链路共用（见 _transport_attribution）
+        host = domain.split("//", 1)[-1].split("/")[0]
+        res["bucket"], res["attribution"] = await _transport_attribution(err, host)
         return res
     res["reachable"] = True
 
@@ -428,8 +460,34 @@ def cmd_diagnose(args) -> int:
         print("输入必须是书源数组（JSON array）")
         return 2
     if args.only_dead:
-        from core.models import Health, build_record
-        data = [s for s in data if build_record(s, 0).health != Health.OK]
+        # **筛的是「最近一次校验结果」，不是 build_record 的默认值。**
+        # 原来这里写的是 `build_record(s, 0).health != Health.OK`，而 build_record
+        # **根本不读校验结果**（health 恒为默认的 SKIPPED）——条件永远为真，这个开关
+        # 从没筛掉过任何东西：`--only-dead` 照样对全部 3861 条发请求，而用户以为只测
+        # 失效的。名不副实、且不报错。
+        #
+        # 读的是**与 check 命令同一个后端**（默认管理库；NDJSON 目录要
+        # `--cache-dir` + `LEGADO_LEGACY_CACHE=1`）。后端由 AsyncChecker 自己判，
+        # 这里**不能** import cli/main 的 `_resolve_check_cache`——core 层反向依赖
+        # CLI 是 lessons §十 记过的坑
+        from core.checker import AsyncChecker
+        from core.models import Health
+        from core.loader import _normalize_url
+        probe = AsyncChecker(cache_dir=getattr(args, "cache_dir", "") or None)
+        try:
+            checks = probe.load_cache()
+        finally:
+            probe.close()
+        if not checks:
+            # 不静默：空缓存时这个开关等于没开，用户至少要知道
+            print("警告: 读不到校验结果，--only-dead 本次不筛"
+                  "（默认读管理库；结果在 NDJSON 目录就加 --cache-dir 并设 "
+                  "LEGADO_LEGACY_CACHE=1）")
+        before = len(data)
+        data = [s for s in data
+                if str((checks.get(_normalize_url(str(s.get("bookSourceUrl", "") or "")))
+                        or {}).get("health", "")) != Health.OK]
+        print("--only-dead：%d → %d 条（按最近一次校验筛掉「可用」的源）" % (before, len(data)))
     print("待归因源: %d" % len(data))
     results = asyncio.run(_diagnose_all(data, args))
     buckets = Counter(r.get("bucket", "其他") for r in results)

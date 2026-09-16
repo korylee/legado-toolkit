@@ -170,7 +170,7 @@ def is_transient(health: str) -> bool:
     return health in (Health.TIMEOUT, Health.ERROR)
 
 
-def _err_desc(err: str, detail: str = "") -> str:
+def err_desc(err: str, detail: str = "") -> str:
     """失败原因 → 中文描述（用于诊断信息）。
 
     ``detail`` 是底层异常类名（``_request`` 的第五个返回值），**只附在「网络异常」
@@ -384,8 +384,14 @@ def is_cache_item_valid(
     **瞬时网络错误一律不复用**（见 :func:`is_transient`）：它们照常写进缓存（界面
     要能看到「上次超时」），但复用它就等于把一次断网/抖动当成源的结论。原来这道防
     线是"干脆不写"，代价是那些源永远显示「未校验」；现在防线挪到了这里。
+
+    **证书问题也不复用**，理由不同：它是**改设置就能变好**的状态。复用的话，
+    用户关掉「校验 SSL」再点一次全量，那些源在 TTL（7 天）内根本不会被重测——
+    "修了等于没修"，而界面上看起来一切正常。每次重测它的代价是几十个请求。
+    （「需翻墙」不在此列：代理是全局开关，改它时本来就该勾「忽略缓存」；
+    两者形状相同，但证书这条更便宜、更容易踩，所以单独给个例外。）
     """
-    if is_transient(str(item.get("health", ""))):
+    if is_transient(str(item.get("health", ""))) or str(item.get("health", "")) == Health.CERT:
         return False
     if item.get("v") != CACHE_VERSION:
         return False
@@ -960,7 +966,7 @@ class AsyncChecker:
                 # 传输层失败统一走保守分类；只有明确 HTTP 失败才保留 DEAD。
                 if err in ("reset", "tls"):
                     health = Health.GFW
-                    record.error = f"疑似被墙（{_err_desc(err)}）"
+                    record.error = f"疑似被墙（{err_desc(err)}）"
                 elif err == "dns":
                     # **DNS 失败要交叉验证**，不能只凭本机这一次解析失败：
                     # 域名注销（该删）和本机解析被污染（该翻墙）在这里长得一样。
@@ -976,7 +982,7 @@ class AsyncChecker:
                     else:
                         health, record.error = await self._classify_dns(record, domain_url)
                 elif err:
-                    record.error = _err_desc(err, detail)
+                    record.error = err_desc(err, detail)
                     health = classify_transport_error(err)
                 elif status:
                     # 传输是通的，是服务端回了 4xx 才判死。**不能沿用下面那句
@@ -1085,7 +1091,7 @@ class AsyncChecker:
                 record.search_response_ms = int(s_cost)
                 if s_status is None:
                     record.health = classify_transport_error(s_err)
-                    record.error = f"疑似被墙（{_err_desc(s_err)}）" if s_err in ("reset", "tls") else _err_desc(s_err, s_detail)
+                    record.error = f"疑似被墙（{err_desc(s_err)}）" if s_err in ("reset", "tls") else err_desc(s_err, s_detail)
                     return None
                 # 判定表只有一份（`classify_http_status`）。**这里只取它的 AUTH**：
                 # 搜索入口 404 不能推出「源死了」（可能只是搜索规则过期），
