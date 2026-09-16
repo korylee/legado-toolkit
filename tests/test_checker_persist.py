@@ -18,7 +18,10 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta
+import inspect
 import os
+import re
+import sqlite3
 import tempfile
 import unittest
 
@@ -52,7 +55,7 @@ def checked(url: str = "https://a.example/", health: str = "ok"):
     rec.health = health
     rec.quality_stars = 4
     # 搜索响应时间非 0 = 这条缓存是**带着搜索探测**写下的（search_probed=True）。
-    # 必须给：run() 默认 probe_search=True，而 is_cache_item_valid 会把「本次要验
+    # 必须给：run() 默认深度到了「搜索」档，而 is_cache_item_valid 会把「本次要验
     # 搜索、缓存却没验过」的条目作废。不给的话本文件所有用它的用例都会**因为错误
     # 的理由**通过——最典型的是 test_changed_rules_invalidate_the_cache，它守的是
     # 「指纹不符必须重校」，却会变成「没验过搜索所以不复用」，指纹那条断言白写
@@ -146,6 +149,174 @@ class StoreBackendSaveTests(unittest.TestCase):
         self.assertIsNotNone(item)
         self.assertTrue(item["search_probed"])
 
+    def test_star_basis_survives_the_store_roundtrip(self):
+        """`star_basis` 也必须真的落库、读得回来。
+
+        **和上面那条是同一个形状**（也就是本文件开头记的那次事故）：item 里写了而
+        `checks` 表没有这一列的话，读回来恒为空串——表现是「校验跑完了、星级也对」，
+        只是「实测 / 仅规则」这个标注永远不显示，界面上完全看不出异常。
+        """
+        rec = checked()
+        rec.star_basis = "static"
+        ck = AsyncChecker(concurrency=1, use_store=True)
+        ck.save_cache_append(rec)
+        ck.close()
+
+        ck2 = AsyncChecker(concurrency=1, use_store=True)
+        cache = ck2.load_cache()
+        ck2.close()
+        item = cache.get(_normalize_url("https://a.example/"))
+        self.assertIsNotNone(item)
+        self.assertEqual(item["star_basis"], "static")
+
+
+class RunProgressTests(unittest.TestCase):
+    """长任务必须把进度报出来——**不报的话界面上永远是 0**。
+
+    后端原来只把进度 `print` 到控制台（`进度: N/M`），`jobs.progress` 从头到尾
+    是 0，而全量 3800 条的校验要跑十几分钟。用户看到的就是「点了没反应」，
+    只能靠猜还在不在跑。
+
+    CLI 用不上这个回调（打印够了），所以它是可选的；但 Web 那条链路必须传。
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory(dir=_TMP_ROOT)
+        self._old = os.environ.get("LEGADO_DATA_DIR")
+        os.environ["LEGADO_DATA_DIR"] = self.tmp.name
+
+    def tearDown(self) -> None:
+        if self._old is None:
+            os.environ.pop("LEGADO_DATA_DIR", None)
+        else:
+            os.environ["LEGADO_DATA_DIR"] = self._old
+        self.tmp.cleanup()
+
+    def test_progress_is_reported_per_batch_not_only_at_the_end(self):
+        """**按批报**，不是跑完才报一次。
+
+        只断言「最后报了 (N,N)」的话，把回调挪到循环外面照样通过——而那样
+        对「卡在 0」这个问题等于没修。所以用 501 条（批量是 500）逼出两次回调。
+        """
+        ck = AsyncChecker(concurrency=1, use_store=True)
+
+        async def fake_check_one(session, record):
+            record.health = "ok"
+            record.checked_at = _just_checked()
+            return record
+
+        ck.check_one = fake_check_one
+        records = [build_record(make_source("https://a%d.example/" % i), i)
+                   for i in range(501)]
+        seen = []
+        asyncio.run(ck.run(records, on_progress=lambda done, total: seen.append((done, total))))
+        ck.close()
+        # **断言中间值，不是条数**：起步那次报 (0,N)、末尾那次报 (N,N)，两次就够
+        # 凑满 `len >= 2`——把回调挪到循环外面照样过（造 M32 时实测如此）。
+        # 只有「跑到 500 时报过 (500, 501)」才能证明它是**按批**报的
+        self.assertIn((0, 501), seen, "起步就该报一次（缓存命中的那批立刻算完成）")
+        self.assertIn((500, 501), seen, "第一批跑完必须报——这才是「卡在 0」的修复点")
+        self.assertEqual(seen[-1], (501, 501))
+
+    def test_progress_callback_is_optional(self):
+        """不给回调也要能跑——CLI 与既有的测试调用点都不传。"""
+        ck = AsyncChecker(concurrency=1, use_store=True)
+
+        async def fake_check_one(session, record):
+            record.health = "ok"
+            record.checked_at = _just_checked()
+            return record
+
+        ck.check_one = fake_check_one
+        asyncio.run(ck.run([build_record(make_source(), 0)]))
+        ck.close()
+
+
+class ChecksSchemaParityTests(unittest.TestCase):
+    """`save_checks` 写入的列，和 `checks` 表**实际的列**，必须对得上。
+
+    **结构性断言，不是逐列补**：`search_probed` 那次事故（item 里写了、表里没这列
+    → 读回来恒为 None → 所有 OK 源永远不复用缓存）之所以能发生，就是因为没有一条
+    测试把这两边对起来看。逐列补断言只能防住**已经踩过**的那些，而这类事情的形状
+    永远是同一个——**加了一个字段，忘了在其中一处落库**（DDL / NEW_COLUMNS /
+    INSERT / checks_map，四处要同时改）。这里把两个最容易漏的方向都钉住。
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory(dir=_TMP_ROOT)
+        self.db = os.path.join(self.tmp.name, "sources.sqlite3")
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    @staticmethod
+    def _inserted_columns():
+        sql = inspect.getsource(Store.save_checks)
+        m = re.search(r"INSERT INTO checks\(([^)]+)\)", sql)
+        assert m, "没找到 save_checks 的 INSERT——正则要跟着改"
+        # **只取标识符**：那条 SQL 在源码里被拆成多个字符串字面量（引号、换行、
+        # 缩进都在中间），按逗号切会把 `health,"` 这种碎片当成列名
+        return set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", m.group(1)))
+
+    def test_written_columns_all_exist_in_the_table(self):
+        """正向：写了表里没有的列 → 那一列静默丢失。"""
+        with Store(self.db) as st:
+            have = {r["name"] for r in st.conn.execute("PRAGMA table_info(checks)")}
+        self.assertEqual(self._inserted_columns() - have, set(),
+                         "save_checks 写了 checks 表里没有的列")
+
+    def test_checks_columns_are_added_to_an_existing_db(self):
+        """**老库**的 `checks` 表必须被幂等补列——这是上面两条都盖不住的方向。
+
+        那两条结构性断言用的是**全新的库**：DDL 直接把列建出来，所以「忘了往
+        `NEW_COLUMNS` 加一条」在它们那里是**全绿**的。这个缺口不是假想的——
+        造变异时我自己就踩了一次：还原没匹配上，`star_basis` 从 `NEW_COLUMNS`
+        掉了，测试照样全绿，是我回头 grep 才发现的。
+
+        而真实用户的库是旧 schema，补齐靠的就是 `NEW_COLUMNS` 这条路径。
+        """
+        conn = sqlite3.connect(self.db)
+        conn.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
+        conn.execute(
+            "CREATE TABLE sources (id INTEGER PRIMARY KEY, source_url TEXT UNIQUE, "
+            "name TEXT, source_type INTEGER, group_name TEXT, enabled INTEGER, "
+            "raw_json TEXT, fingerprint TEXT, deleted_at TEXT NOT NULL DEFAULT '', "
+            "created_at TEXT, updated_at TEXT)")
+        # 「老库」= 现在的 DDL **减去 NEW_COLUMNS 里那几条**——不是随手编一个最小表。
+        # 第一版就是编的最小表（只有 7 列），结果视图建不起来（引用了 probe_depth），
+        # 而那些列**本来就不该在 NEW_COLUMNS 里**：它们是老版本就有的。
+        # 判据是「哪些列是后来补的」，不是「哪些列我懒得写」。
+        conn.execute(
+            "CREATE TABLE checks (id INTEGER PRIMARY KEY, source_url TEXT NOT NULL, "
+            "fingerprint TEXT NOT NULL DEFAULT '', cache_version INTEGER NOT NULL DEFAULT 0, "
+            "health TEXT NOT NULL DEFAULT '', status_code INTEGER, response_time_ms INTEGER, "
+            "search_hit TEXT DEFAULT '', search_response_ms INTEGER, "
+            "stars INTEGER DEFAULT 0, quality_tags TEXT DEFAULT '', "
+            "probe_depth INTEGER DEFAULT 1, chapter_count INTEGER DEFAULT 0, "
+            "toc_complete INTEGER, toc_fail_reason TEXT DEFAULT '', "
+            "content_fail_reason TEXT DEFAULT '', content_response_ms INTEGER, "
+            "content_ok INTEGER, error TEXT DEFAULT '', checked_at TEXT NOT NULL)")
+        conn.commit()
+        conn.close()
+
+        with Store(self.db) as st:
+            have = {r["name"] for r in st.conn.execute("PRAGMA table_info(checks)")}
+            for name, _decl in Store.NEW_COLUMNS["checks"]:
+                self.assertIn(name, have, "老库补列漏了 %s" % name)
+            # 视图里引用了 c.star_basis——列没补上时这条会抛
+            self.assertEqual(st.query(), [])
+
+    def test_every_table_column_is_written(self):
+        """反向：表里有列从没被写过 → 它永远是默认值（读出来像「没数据」）。
+
+        `search_probed` 当初就是漏在这一侧的反面：列补上了、写入漏了。
+        自增 id 除外。
+        """
+        with Store(self.db) as st:
+            have = {r["name"] for r in st.conn.execute("PRAGMA table_info(checks)")}
+        self.assertEqual(have - self._inserted_columns() - {"id"}, set(),
+                         "checks 表里有列从没被 save_checks 写过")
+
 
 class CacheReuseTests(unittest.TestCase):
     """缓存复用与「复用了几条」的可见性。"""
@@ -236,3 +407,32 @@ class CacheReuseTests(unittest.TestCase):
 #        → test_store_write_failure_is_counted_not_swallowed 红
 #  M4  cached_count 恒定 0（不统计复用）
 #        → test_second_run_reuses_cache_and_sends_nothing 红
+#
+# RunProgressTests 的变异（2026-09-16，修「全量校验卡在 0」）：
+#
+#  M32  把 on_progress 从批次循环里挪到循环外（只报末尾一次）
+#         → test_progress_is_reported_per_batch_not_only_at_the_end 红
+#         ⚠️ **第一版测试没抓住它**：那时断言的是 `len(seen) >= 2` 与
+#         `seen[-1] == (N,N)`，而「起步报一次 (0,N) + 末尾报一次 (N,N)」正好满足
+#         两条——把回调挪出去照样全绿。**是变异暴露了测试写弱了**，改成断言
+#         中间值 `(500, 501)` 之后才真正拦住。
+#         教训：断言「报了几次」拦不住「报的时机不对」，得断言**报了什么**。
+#
+# ChecksSchemaParityTests 与 star_basis 往返的变异（2026-09-16）：
+#
+#  M17  `save_checks` 的 INSERT 里去掉 star_basis（**表里有列、只是不写它**，
+#        就是 search_probed 那次事故的形状）
+#         → test_every_table_column_is_written 红（结构性）
+#         → test_star_basis_survives_the_store_roundtrip 红（行为）
+#         **search_probed 的往返保持绿**——证明两条往返断言各守各的字段
+#  M17'（第一版写坏了）只从 INSERT 的列名里删、没同步占位符数量
+#         → 参数个数对不上，**六条一起红**（全都不是这条要测的东西）。
+#         变异写得过重时，红的理由就不指向被测对象了，等于没测
+#  M18  把 star_basis 从 DDL 与 NEW_COLUMNS 里都删掉（表里没这列、INSERT 却写）
+#         → test_written_columns_all_exist_in_the_table 红（结构性，反方向）
+#  M19  **只**把 star_basis 从 NEW_COLUMNS 删掉（DDL 保留）
+#         → test_checks_columns_are_added_to_an_existing_db 红
+#         ⚠️ **M18/M19 这两条是补测试的直接原因**：M19 是造变异时我自己真实犯的错
+#         （还原没匹配上注释），而当时**整个测试文件仍然全绿**——因为上面两条结构性
+#         断言用的是**全新的库**（DDL 直接建出列），根本走不到 NEW_COLUMNS 那条路径。
+#         真实用户的库是旧 schema，靠的正是那条路径。

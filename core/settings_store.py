@@ -8,8 +8,9 @@
 
 **收敛纪律**：谁都不能信任写进来的值（前端表单、未来的 CLI、手改的文件）。
 所有出口都过 :func:`coerce`，非法值一律回落默认而不是报错——设置坏掉不该让
-校验任务起不来。``probe_depth`` 的收敛口径与 ``checker.py`` 一致（不在 1/2/3
-就落 1），两处必须是同一个规则，否则「设置里存 3」和「实际按 1 跑」会分家。
+校验任务起不来。``probe_depth`` 的收敛口径与 ``checker.py`` 一致（不在
+``PROBE_DEPTHS`` 里就落 :data:`DEPTH_HOME`），两处必须是同一个规则，否则
+「设置里存 4」和「实际按 1 跑」会分家。
 """
 
 from __future__ import annotations
@@ -22,7 +23,24 @@ from typing import Any, Dict, Optional
 from core.paths import data_path
 
 SETTINGS_NAME = "settings.json"
-VERSION = 1
+#: 设置文件的 schema 版本。2 = 探测深度合并成一根四档轴（见 `_migrate_legacy`）。
+#: **加一就意味着 `_migrate_legacy` 多一条迁移分支**，不是单纯的标记位。
+VERSION = 2
+
+#: 探测深度：**一根轴四档，一档对一级星级**。
+#:
+#:   1 主页  仅域名探测（1 次请求）                → 1★ 可达
+#:   2 搜索  搜索探测 + 命中判定（+1~2 次）         → 2★ 连通 / 3★ 命中
+#:   3 目录  详情页 + 目录页，比对章节数（+2 次）    → 4★ 实测目录
+#:   4 正文  章节页抓一章全文（+1 次）              → 5★ 实测正文
+#:
+#: 合并前这里是「深度 1/2/3」**加**一个独立的 `probe_search` 开关，两根轴能配出
+#: 非法组合：关掉搜索探测却选 2/3 档——目录/正文的门要求 `search_hit`，于是永远
+#: 进不去，深度白设。合成一根轴之后「深度 = 星级 = 每源的请求数」，不用再理解
+#: 两个开关的交互。``AsyncChecker`` 的收敛口径就是这个元组
+#: （``core/checker.py`` 直接 import 这里的常量），改这里即两边同时改。
+PROBE_DEPTHS = (1, 2, 3, 4)
+DEPTH_HOME, DEPTH_SEARCH, DEPTH_TOC, DEPTH_CONTENT = PROBE_DEPTHS
 
 #: 全局设置的**唯一权威来源**。前端不硬编码默认值——``GET /api/settings`` 把这份
 #: 原样下发（含 defaults），「恢复默认」直接用后端给的值，避免两处各存一份漂移
@@ -34,8 +52,10 @@ DEFAULTS: Dict[str, Dict[str, Any]] = {
     "check": {
         "concurrency": 50,
         "timeout": 8.0,
-        "probe_depth": 1,
-        "probe_search": True,
+        #: 默认停在「搜索」档：与合并前（深度 1 + 搜索探测开）的有效行为一致。
+        #: 落成「主页」的话，重置设置会**静默**把搜索探测关掉——search_hit 全空、
+        #: 星级整体下降，而用户什么都没改
+        "probe_depth": DEPTH_SEARCH,
         "verify_ssl": True,
         "proxy": "",
         #: 缓存有效期（天）。可用源留久一点；其余状态一律短 TTL——「待验证」
@@ -45,10 +65,6 @@ DEFAULTS: Dict[str, Dict[str, Any]] = {
         "cache_ttl_other": 7,
     },
 }
-
-#: 探测深度的合法取值。``AsyncChecker`` 的收敛口径就是这三个数
-#: （``core/checker.py`` 直接 import 这里的常量），改这里即两边同时改。
-PROBE_DEPTHS = (1, 2, 3)
 
 #: 各键的合法区间。**「clamp 到多少」的唯一定义处**——前端表单的
 #: ``el-input-number`` 上下界由 ``GET /api/settings`` 的 ``limits`` 下发，
@@ -127,17 +143,53 @@ def _to_proxy(value: Any) -> str:
 
 
 def _to_probe_depth(value: Any) -> int:
-    """不在 ``PROBE_DEPTHS`` 里一律落 1，与 ``AsyncChecker`` 的收敛同一规则。
+    """不在 ``PROBE_DEPTHS`` 里一律落 :data:`DEPTH_HOME`，与 ``AsyncChecker``
+    的收敛同一规则。
 
-    「回落」而不是「落到最近的合法值」：5 是垃圾输入，不是「比 3 更深」。
+    「回落」而不是「落到最近的合法值」：5 是垃圾输入，不是「比 4 更深」。
     """
     if isinstance(value, bool):
-        return 1
+        return DEPTH_HOME
     try:
         n = int(float(value))
     except (TypeError, ValueError):
-        return 1
-    return n if n in PROBE_DEPTHS else 1
+        return DEPTH_HOME
+    return n if n in PROBE_DEPTHS else DEPTH_HOME
+
+
+def _migrate_legacy(data: Dict[str, Any]) -> None:
+    """把 v1 的两根轴（``probe_depth`` 1/2/3 + ``probe_search``）折成 v2 的一根。
+
+    判据是 ``schema_version``，**不是「旧键还在不在」**：app 自己写的文件当然一整套
+    键都在，但手改过的可能只写一半——`{"probe_depth": 2}` 少一个 `probe_search` 时，
+    旧代码的实际行为是「深度 2 + 搜索探开」，只认键在不在会把它当成新的「搜索档」，
+    **已经验过的目录白丢**。
+
+    映射（旧的有效行为 → 新档位），只往「验得更多」的那侧偏：
+
+        旧深度 2 / 3          → 3 / 4     （那两档本来就必须验搜索：门要求 search_hit）
+        旧深度 1 + 搜索探打开  → 2
+        旧深度 1 + 搜索探关闭  → 1
+
+    ``probe_search`` 缺失时**按 True 算**（它当年的默认值）。幂等：新版 `_empty()`
+    写下的 `schema_version` 已是 2，不会再进来。
+    """
+    try:
+        ver = int(data.get("schema_version") or 1)
+    except (TypeError, ValueError):
+        ver = 1
+    if ver >= VERSION:
+        return
+    section = data.get("check")
+    if not isinstance(section, dict):
+        return
+    old = _to_probe_depth(section.get("probe_depth"))
+    wants_search = _to_bool(section.get("probe_search"), True)
+    if old >= DEPTH_SEARCH:
+        section["probe_depth"] = min(old + 1, DEPTH_CONTENT)
+    else:
+        section["probe_depth"] = DEPTH_SEARCH if wants_search else DEPTH_HOME
+    section.pop("probe_search", None)
 
 
 #: ``(section, key)`` → 收敛函数。**没登记就是未知键**，由 coerce 返回 None 丢弃。
@@ -148,8 +200,6 @@ _SPECS: Dict[tuple, Any] = {
     ("check", "timeout"): lambda v: _to_float(
         v, DEFAULTS["check"]["timeout"], *LIMITS["timeout"]),
     ("check", "probe_depth"): _to_probe_depth,
-    ("check", "probe_search"): lambda v: _to_bool(
-        v, DEFAULTS["check"]["probe_search"]),
     ("check", "verify_ssl"): lambda v: _to_bool(
         v, DEFAULTS["check"]["verify_ssl"]),
     ("check", "proxy"): _to_proxy,
@@ -215,6 +265,7 @@ def load() -> Dict[str, Any]:
     if not isinstance(data, dict):
         data = {}
     out = _empty()
+    _migrate_legacy(data)          # 旧的两根轴（深度 + 搜索开关）折成一根
     for section, values in DEFAULTS.items():
         raw = data.get(section)
         if not isinstance(raw, dict):
@@ -255,10 +306,11 @@ def resolve_check(override: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     「本次覆盖 > 全局设置 > 内置默认」中，后两层由 :func:`load` 完成，这里只做第一层。
 
     **判据必须是 ``is not None``，不能是 ``payload.get(k) or 全局``**：
-    ``False`` / ``0`` / ``""`` 都是有意义的值——
-      - ``probe_search=False`` = 明确要跳过搜索探测
+    ``0`` / ``""`` 都是有意义的值——
+      - ``probe_depth=0``（或任何非法值）会在 :func:`coerce` 那层落回 ``DEPTH_HOME``，
+        不能在这里被 ``or`` 吃掉而退回全局值
       - ``proxy=""`` = 明确要本次直连（哪怕全局配了代理）
-    用 ``or`` 会把这三个当成「没传」，覆盖**静默失效**，现象只是「参数好像没生效」，
+    用 ``or`` 会把这两个当成「没传」，覆盖**静默失效**，现象只是「参数好像没生效」，
     几乎不可能从界面上查出来。
 
     反过来 ``None`` 视同「没传」→ 用全局值：覆盖表单是从全局值预填的，
@@ -278,6 +330,7 @@ def resolve_check(override: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     return cfg
 
 
-__all__ = ["DEFAULTS", "LIMITS", "PROBE_DEPTHS", "SETTINGS_NAME", "VERSION",
+__all__ = ["DEFAULTS", "DEPTH_CONTENT", "DEPTH_HOME", "DEPTH_SEARCH", "DEPTH_TOC",
+           "LIMITS", "PROBE_DEPTHS", "SETTINGS_NAME", "VERSION",
            "coerce", "load", "reset", "resolve_check", "settings_path",
            "update"]

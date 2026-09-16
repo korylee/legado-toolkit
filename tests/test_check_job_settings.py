@@ -41,7 +41,9 @@ class FakeChecker:
         self.hit_downgrades = []
         self.refresh_cache = False
 
-    async def run(self, records):
+    async def run(self, records, on_progress=None):
+        # 签名必须与 AsyncChecker.run 一致（含 on_progress）——ops.run_check_job
+        # 是按关键字传的，桩漏改会直接 TypeError
         return []
 
     def close(self):
@@ -129,12 +131,13 @@ class CheckJobSettingsTests(unittest.TestCase):
     def test_false_and_empty_overrides_are_not_treated_as_absent(self) -> None:
         """最脆的一条：False / "" 是有效值，不能被当成「没传」而回落全局。
 
-        全局配了代理时，「本次直连」必须真的直连；`probe_search=False` 必须真的跳过。
+        全局配了代理时，「本次直连」必须真的直连；全局开着证书校验时，
+        `verify_ssl=False` 必须真的关掉。
         """
-        S.update({"check": {"proxy": "http://127.0.0.1:7890", "probe_search": True}})
-        self._run({"check": {"proxy": "", "probe_search": False}})
+        S.update({"check": {"proxy": "http://127.0.0.1:7890", "verify_ssl": True}})
+        self._run({"check": {"proxy": "", "verify_ssl": False}})
         self.assertIsNone(FakeChecker.last["proxy"])
-        self.assertFalse(FakeChecker.last["probe_search"])
+        self.assertFalse(FakeChecker.last["verify_ssl"])
 
     def test_partial_override_keeps_global_for_other_keys(self) -> None:
         S.update({"check": {"concurrency": 7, "timeout": 30.0}})

@@ -94,7 +94,7 @@ class PatchSemanticsTests(SettingsApiTestCase):
         self.assertEqual(set(got["limits"]),
                          {"concurrency", "timeout", "probe_depth",
                           "cache_ttl_ok", "cache_ttl_other"})
-        self.assertEqual(got["limits"]["probe_depth"], (1, 2, 3))
+        self.assertEqual(got["limits"]["probe_depth"], (1, 2, 3, 4))
 
     def test_reset_endpoint_restores_defaults(self) -> None:
         reset_settings()

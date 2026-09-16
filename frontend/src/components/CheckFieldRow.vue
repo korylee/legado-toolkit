@@ -27,7 +27,7 @@ const width = computed(() => (props.compact ? "100%" : "160px"));
                      :min="limits[field.key]?.[0]" :max="limits[field.key]?.[1]" />
     <el-select v-else-if="field.type === 'depth'" v-model="value" size="small"
                :style="{ width: compact ? '100%' : '260px' }">
-      <el-option v-for="d in (limits.probe_depth || [1, 2, 3])" :key="d" :value="d"
+      <el-option v-for="d in (limits.probe_depth || [1, 2, 3, 4])" :key="d" :value="d"
                  :label="DEPTH_LABELS[d] || ('深度 ' + d)" />
     </el-select>
     <el-switch v-else-if="field.type === 'bool'" v-model="value" size="small" />

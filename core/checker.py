@@ -21,19 +21,18 @@ import json
 import os
 import re
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote
 
 import aiohttp
 
 from core.models import (
-    Health, BookSourceRecord, build_record, ANTI_BOT_MARKERS, LOGIN_MARKERS,
+    Health, BookSourceRecord, ANTI_BOT_MARKERS, LOGIN_MARKERS,
     NOVEL_TEST_KEYWORDS, MANGA_TEST_KEYWORDS, TEST_TITLES, TOC_COMPLETE_THRESHOLD,
 )
 from core.urls import abs_url as _abs_url
-from core.rules.replayer import (extract_all as apply_css_rule, extract_all_ex,
-                          extract_all_nodes, rule_kind, parse_list, parse_field,
-                          rule_supported)
+from core.rules.replayer import (extract_all as apply_css_rule, extract_all_nodes,
+                          parse_rule)
 from core.loader import _normalize_url, fingerprint
 # 判定口径的唯一来源（与「全链路试跑」共用，避免同源两判）。
 # 依赖方向：checker → quality，quality 不依赖 replayer，这是刻意的。
@@ -45,18 +44,15 @@ from core.quality import rate_interval_ms
 # 探测深度的合法取值只在 settings_store 定义一份（那边同时供设置接口的收敛用）。
 # 依赖方向：checker → settings_store，反过去会把 aiohttp 拖进配置模块
 from core.settings_store import DEFAULTS as _SETTINGS_DEFAULTS
-from core.settings_store import PROBE_DEPTHS
+from core.settings_store import (DEPTH_CONTENT, DEPTH_HOME, DEPTH_SEARCH,
+                                DEPTH_TOC, PROBE_DEPTHS)
+# 常见 User-Agent（规避简单 UA 拦截）的**唯一实现在 constants**，这里只引用——
+# 本模块原来自己存了一份，已经和 constants 漂成两条（`Chrome/124.0.0.0` vs
+# `Chrome/124.0`），而构建 / fetch / reclassify 读的都是 constants 那份。
+# 与上面 rate_interval_ms 同一个道理：core 层不许有第二份定义
+from core.constants import DEFAULT_UA
 
-# 常见 User-Agent（规避简单 UA 拦截）
-DEFAULT_UA = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-)
-
-# 常见爬虫/安全拦截状态码
-BLOCKED_STATUS = {403, 429, 401, 503, 406}
-
-# 缓存版本 8：判定口径新增「验过搜索」这一维（见 is_cache_item_valid 的 min_search）。
+# 缓存版本 8：判定口径新增「验过搜索」这一维（见 is_cache_item_valid 的 search_probed）。
 # 现在库里的条目没有 search_probed 字段，item.get("search_probed") 为假——对开着
 # 搜索探测的用户来说，所有历史 OK 缓存都会被判为"没验过搜索"而重验。这正是想要的，
 # 但必须**显式**发生：只靠"字段缺失"这个巧合的话，将来若给旧条目补回该字段就会
@@ -68,7 +64,20 @@ BLOCKED_STATUS = {403, 429, 401, 503, 406}
 # 不作废的后果不是"结果旧一点"，而是**修了等于没修**：那条源的 auth 会在 7 天
 # TTL 内一直命中缓存，看起来像修复失效。（v6 是同一理由：正文/目录判定收拢到
 # core.quality，底线改为「非空即通过」。）
-CACHE_VERSION = 8
+# 缓存版本 9：4xx 不再算「可达」。`_classify` 原来末尾直接 `return Health.OK`，
+# 注释却写「其他 2xx/3xx 视为可达」——404/400/410/451 全被判成「可用」
+# （实测库里 91 条是 ok+4xx）。口径变了：原来判 ok 的现在判 dead，
+# 旧缓存的 health 是旧逻辑的产物，必须整体作废——理由同 v7，
+# **不作废就是「修了等于没修」**（结论会在 TTL 内一直命中旧缓存）。
+# 缓存版本 10：探测深度从「1/2/3 + 独立的搜索开关」合并成「1/2/3/4 一根轴」，
+# 缓存里的 `probe_depth` 是**实际执行到的深度**，所以整列的含义随编号一起平移了
+# （旧 1 档 = 域名+搜索 = 新 2 档，旧 2/3 = 新 3/4）。
+#
+# 严格说旧编号是**单调小于**新编号的，沿用旧行不会放出错误的结论（只会更保守地
+# 重验）。但「深度 1 + 搜索开」这档旧行在新口径下必然判「深度不够」，等于整体重跑
+# 一遍——把这件事标成版本变化，比让它以「我什么都没改，怎么全量又跑了」的样子
+# 出现要好。
+CACHE_VERSION = 10
 
 #: 缓存有效期（天）：可用源留久一点，其余状态一律短 TTL——「待验证」「需代理复检」
 #: 长期停在旧结论上，比多校验几次更糟。
@@ -93,6 +102,48 @@ def classify_transport_error(error: str) -> str:
     return Health.ERROR
 
 
+def classify_http_status(status: Optional[int], text: str,
+                         enabled_cookie_jar: bool = False) -> str:
+    """HTTP 状态码 + 响应体 → 健康态。**全仓库唯一的判定表**。
+
+    三处需要它：`AsyncChecker._classify`（域名探测）、`_probe_search`（搜索探测）、
+    `reclassify.diagnose_source`（失效归因）。原来各写一份，实测已在 5 种输入上分叉：
+
+        503（无响应体）         域名探测=dead    归因=需验证
+        404 / 500 / 406         域名探测=dead    归因=继续判
+        200 + 登录页 + cookie   域名探测=auth    归因=继续判
+
+    **判定与后果要分开**：本函数只回答「这个响应算什么」，各调用点自己决定怎么用。
+    最典型的是搜索入口 404——那**不能**推出「源死了」（可能只是搜索规则过期），
+    所以 `_probe_search` 只取它的 AUTH，不套用 4xx → DEAD。
+    """
+    if status is None:
+        return Health.DEAD
+    low = (text or "").lower()
+    # 401 / 403 / 429 一律 AUTH：它们本身就是「要登录 / 被拒」，不必再看响应体
+    if status in (401, 403, 429):
+        return Health.AUTH
+    # 503 要看响应体：带反爬特征才算「需验证」，否则是服务端挂了
+    if status == 503 and any(m in low for m in ANTI_BOT_MARKERS):
+        return Health.AUTH
+    if status >= 500:
+        return Health.DEAD
+    if status == 200:
+        if any(m in low for m in ANTI_BOT_MARKERS):
+            return Health.AUTH
+        # 登录墙要看源有没有声明 cookie jar——「请登录」在正常页面的导航栏里太常见
+        if any(m in low for m in LOGIN_MARKERS) and enabled_cookie_jar:
+            return Health.AUTH
+        return Health.OK
+    # 2xx / 3xx 都是可达（204、301、302 是大量正常源的形态）
+    if 200 <= status < 400:
+        return Health.OK
+    # 其余 4xx：服务端明确说「这个入口拿不到东西」——不是可达。
+    # **原来这里直接 return OK**，而注释写「其他 2xx/3xx 视为可达」，于是
+    # 404/400/410/451 全被判成「可用」（实测库里 91 条 ok+4xx）。
+    return Health.DEAD
+
+
 def should_cache_result(health: str) -> bool:
     """瞬时网络错误不写缓存，避免一次断网污染后续校验。"""
     return health not in (Health.TIMEOUT, Health.ERROR)
@@ -110,23 +161,74 @@ def _err_desc(err: str) -> str:
     }.get(err, "网络异常")
 
 
-def parse_search_request(url_template: str, keyword: str) -> tuple[str, str, Dict[str, str]]:
-    """
-    解析 searchUrl 模板，返回 (请求URL, 方法, 附加Header)。
+#: Legado 的 URL 选项分隔符——**原文照抄** `AnalyzeUrl.kt:776` 的 `paramPattern`：
+#:
+#:     Regex("\s*,\s*(?=\{)")
+#:
+#: 逗号 + 可选空白 + 紧随其后的 `{`。**切第一个匹配**，不是最后一个：切最后一个
+#: 会让 URL 里残留一段 `,{...}`，请求就变形了。
+_URL_OPTION_RE = re.compile(r"\s*,\s*(?=\{)")
 
-    Legado 的 searchUrl 支持：
-        "https://host/search?q={{key}}"
-        "https://host/search?q={{key}}@POST"
-        "https://host/search?q={{key}}@headers=XXX"
-        "https://host/search?q={{key}}@Cookie=xxx"
-    关键词占位符可能是 {{key}} / {{searchKey}} / {{keyword}}
+#: 关键词占位符（Legado 的 searchUrl 模板里可能是这几种写法之一）
+_KEYWORD_PLACEHOLDERS = ("{{key}}", "{{searchKey}}", "{{keyword}}", "$searchKey")
+
+
+def split_url_options(rule: str) -> Tuple[str, Dict[str, Any]]:
+    """把 ``url,{json}`` 拆成 ``(url, 选项 dict)``。
+
+    **JSON 解不出来时照样把 URL 切下来**、选项当空——这是**对齐 App**，不是随手：
+    Legado 先按 `paramPattern` 切出 `urlNoOption` 拿去发请求，**之后**才解析选项；
+    解析失败只是不应用选项，URL 已经被切了（`AnalyzeUrl.kt:219-231`）。
     """
+    text = rule or ""
+    m = _URL_OPTION_RE.search(text)
+    if not m:
+        return text, {}
+    url = text[:m.start()]
+    try:
+        opt = json.loads(text[m.end():])
+    except Exception:
+        return url, {}
+    return url, opt if isinstance(opt, dict) else {}
+
+
+def parse_search_request(url_template: str, keyword: str
+                         ) -> Tuple[str, str, Dict[str, str], str]:
+    """解析 searchUrl 模板，返回 ``(请求URL, 方法, 附加Header, body)``。
+
+    **两条语法都要认**：
+
+    1. **Legado 的 URL 选项**——``url,{"method":"POST","body":"kw={{key}}"}``
+       （`AnalyzeUrl.kt` 的 `UrlOption`）。实测库里 **1551 条源**在用
+       （method 1167 / body 1141 / charset 627 / headers 53），**它才是官方语法**。
+    2. **本项目早期的 ``@POST`` / ``@headers=`` / ``@Cookie=`` 后缀**——只作兼容，
+       库里仅 1 条在用。**别再往这条上扩展**，新写法一律用选项 JSON。
+
+    > 修之前第 1 条完全没人解析：整段 JSON 被留在 URL 里当 GET 发出去，
+    > **关键词根本没到服务端**。实测带该语法的源搜索命中率 **1.0%（17/1674）**，
+    > 不带的是 **20.5%（446/2175）**——差 20 倍。
+
+    ``charset`` 选项**暂不处理**：响应解码走 `_decode_body` 的
+    utf-8 → gbk → gb2312 回退，已覆盖常见情况；真要按声明解码需要把它一路铺到
+    `_request`，收益与改动面不成比例。**留着它不影响正确性**（回退本来就会命中）。
+    """
+    body, options = split_url_options(url_template)
+    url_part = body
     method = "GET"
     headers: Dict[str, str] = {}
-    url_part = url_template
 
-    # 按 @ 拆方法/头（注意 URL 本身可含 @，尽量从后向前取最后一个 @POST）
-    for token in sorted(["@POST", "@post", "@GET", "@get", "@headers=", "@Cookie="], key=len, reverse=True):
+    # ① Legado 的 URL 选项
+    m = str(options.get("method", "") or "").strip().upper()
+    if m in ("GET", "POST"):
+        method = m
+    hdr = options.get("headers")
+    if isinstance(hdr, dict):
+        headers.update({str(k): str(v) for k, v in hdr.items()})
+    body_tpl = str(options.get("body", "") or "")
+
+    # ② 兼容早期的 @ 后缀（库里仅 1 条；别在这条上扩展）
+    for token in sorted(["@POST", "@post", "@GET", "@get", "@headers=", "@Cookie="],
+                        key=len, reverse=True):
         idx = url_part.rfind(token)
         if idx > 0:
             if token in ("@POST", "@post"):
@@ -136,12 +238,11 @@ def parse_search_request(url_template: str, keyword: str) -> tuple[str, str, Dic
                 method = "GET"
                 url_part = url_part[:idx]
             elif token == "@headers=":
-                # headers=后接 JSON 或名称
                 rest = url_part[idx + len(token):]
                 url_part = url_part[:idx]
                 if rest.startswith("{"):
                     try:
-                        headers = json.loads(rest)
+                        headers.update(json.loads(rest))
                     except Exception:
                         pass
             elif token == "@Cookie=":
@@ -150,15 +251,17 @@ def parse_search_request(url_template: str, keyword: str) -> tuple[str, str, Dic
                 headers["Cookie"] = rest
             break
 
-    # 关键词占位符替换（中文关键词需 URL 编码）
+    # 关键词占位符替换（中文关键词需 URL 编码）。**URL 与 body 都要替**
     encoded_keyword = quote(keyword, safe="")
-    for ph in ("{{key}}", "{{searchKey}}", "{{keyword}}", "$searchKey"):
+    for ph in _KEYWORD_PLACEHOLDERS:
         if ph in url_part:
             url_part = url_part.replace(ph, encoded_keyword)
-            break
+        if ph in body_tpl:
+            body_tpl = body_tpl.replace(ph, encoded_keyword)
     # 分页占位符替换为 1
     url_part = url_part.replace("{{page}}", "1")
-    return url_part, method, headers
+    body_tpl = body_tpl.replace("{{page}}", "1")
+    return url_part, method, headers, body_tpl
 
 
 def build_domain_url(url: str) -> str:
@@ -230,20 +333,22 @@ def is_cache_item_valid(
     record: BookSourceRecord,
     item: Dict[str, Any],
     now: Optional[datetime] = None,
-    min_depth: int = 1,
-    min_search: bool = False,
+    min_depth: int = DEPTH_HOME,
     ttl_ok: int = DEFAULT_TTL_OK,
     ttl_other: int = DEFAULT_TTL_OTHER,
 ) -> bool:
     """判断缓存是否仍可用于该书源。
 
     复用必须满足：缓存版本正确、规则指纹一致、校验时间有效且不在未来；
-    若本次要跑验证，缓存还必须是**在同等或更强探测能力下**产出的——探测能力有两根
-    轴，``min_depth``（探得多深）与 ``min_search``（探没探搜索），两者都要判。
+    若本次要跑验证，缓存还必须是**在同等或更深探测下**产出的。
 
-    ``min_depth`` / ``min_search`` 只有校验链路（``AsyncChecker.run``）需要传本次
-    的配置。其余调用方——CLI 的 organize/report、cache_parity 的两库比对——只是拿
-    缓存算标签和报告，重跑不了探测，保持默认（1 / False）即「不因探测能力作废」。
+    探测能力现在只有一根轴（``min_depth``）：深度到「搜索」档就意味着这次要验搜索，
+    所以「探没探搜索」不再单独传参——合并前它是第二根轴 ``min_search``，两根轴能
+    配出「要求搜索但不要求深度」这种没有意义的组合。
+
+    ``min_depth`` 只有校验链路（``AsyncChecker.run``）需要传本次的配置。其余
+    调用方——CLI 的 organize/report、cache_parity 的两库比对——只是拿缓存算标签和
+    报告，重跑不了探测，保持默认（``DEPTH_HOME``）即「不因探测能力作废」。
     """
     if item.get("v") != CACHE_VERSION:
         return False
@@ -271,22 +376,22 @@ def is_cache_item_valid(
     # 只对 OK 的源要求深度：非 OK 的源按 fail-fast 根本走不到深度验证
     # （check_one 里要求 health == OK 才继续），强制重验只是白打请求。
     if health == Health.OK:
-        if int(item.get("probe_depth", 1) or 1) < min_depth:
+        if int(item.get("probe_depth", DEPTH_HOME) or DEPTH_HOME) < min_depth:
             return False
-    # 「探没探搜索」是另一根轴，而且它是深度验证的**前提**（搜索没命中就没有目录与
-    # 正文可验）。判据方向只能是「本次要求更高才作废」：缓存比本次更"强"（验过搜索、
-    # 本次不验）时照常复用，否则关掉搜索探测会顺带把缓存全部打回重验。
+    # 「探没探搜索」原本是第二根轴，现在由深度推出：深度到了「搜索」档就是要验搜索。
+    # 缓存行里 `search_probed` 记的是**实际跑没跑**（不是参数开没开），判据方向只能
+    # 是「本次要求更高才作废」——缓存比本次"强"（验过搜索、本次只到主页档）时照常复用。
     #
     # 对本来就走不到搜索的源（health 非 OK、无搜索规则）不设此要求：check_one 的
-    # 条件正是 `health == OK and self.probe_search and record.has_search`。对它们也
-    # 要求的话，这些源**永远命中不了缓存**，每次校验都白打一遍请求。
-    if (min_search and health == Health.OK and record.has_search
+    # 条件正是 `health == OK and self.wants_search and record.has_search`。对它们
+    # 也要求的话，这些源**永远命中不了缓存**，每次校验都白打一遍请求。
+    if (min_depth >= DEPTH_SEARCH and health == Health.OK and record.has_search
             and not item.get("search_probed")):
         return False
     return True
 
 
-def calc_stars(
+def evaluate_stars(
     health: str,
     has_search: bool,
     search_response_ms: int,
@@ -294,9 +399,30 @@ def calc_stars(
     toc_complete: Optional[bool],
     content_ok: Optional[bool],
     raw: Optional[Dict[str, Any]] = None,
-) -> int:
-    """
-    星级评分（0-5★）阶梯规则——每一级依赖上一级（方案D 分档宽松）：
+) -> Tuple[int, str]:
+    """星级评分 + **这一级是实测还是推定**。
+
+    返回 ``(星级, 来源)``，来源取值：
+
+    - ``"measured"``：这个星级依赖的每一级都有真实请求的结论支撑
+    - ``"static"``  ：中间有某一级是「没验到，按静态规则回退通过」的
+    - ``""``        ：0★（不可达），没有可标注的东西
+
+    **为什么要这一维**：3★ 有**两种完全不同的来源**，界面上长得一模一样——
+
+        (a) 搜索实测命中              → 看就是「验过了」
+        (b) 没验过，只是静态规则齐全   → 其实是「看规则推的」
+
+    用户看到「可用 3★」分不出这两种。海豚书屋（404 却报 3★）本质就撞在这一格上。
+    4★/5★ 同样可能是推的：`toc_complete` / `content_ok` 为 None（验证跑不了，
+    例如规则含 JS）时会回退静态规则，**那一格就没有实测支撑**。
+
+    判定规则只有一条：**把「靠静态规则回退通过」的那几级记下来，出现任意一级就是
+    ``static``**。所以「命中 + 规则齐全、但目录正文一次都没验」的源会拿到
+    ``5★ static``——5★ 的含义是「正文可用」，而它里面没有一格正文是实测的。
+    如实呈现；**要不要连星级本身也收紧是另一个问题，本函数只负责说清楚**。
+
+    阶梯本身（每一级依赖上一级，方案D 分档宽松）：
 
       1★ 可达：health ∈ (ok / auth / no_search)（域名通或能访问，仅需登录/不可搜）
       2★ 搜索连通：有搜索规则且搜索请求有响应（search_response_ms > 0）
@@ -313,26 +439,59 @@ def calc_stars(
       - 实测明确不达标（False）仍按不满足扣分——不误放真坏的源
     """
     if health not in (Health.OK, Health.AUTH, Health.NO_SEARCH):
-        return 0
-    stars = 1  # 可达
+        return 0, ""
+    stars = 1  # 可达（域名请求本身是实测）
     if not (has_search and search_response_ms > 0):
-        return stars
-    stars = 2  # 搜索连通
+        return stars, "measured"
+    stars = 2  # 搜索连通（实测）
+    # 命中和静态规则都不满足 → 2★。静态判据被问过但**没给分**，不算「推的」
     if not (search_hit or static_rule_complete(raw)):
-        return stars
+        return stars, "measured"
     stars = 3  # 命中 或 静态规则完整（弱证据档）
     if not search_hit:
-        return stars  # 未命中源最高 3★
+        # 这一级的依据**就是**静态规则 → 推定
+        return stars, "static"
+    used_static = False
     # 目录完整：实测优先，None（无法验证）回退静态规则；False 仍不达标
-    toc_ok = toc_complete if toc_complete is not None else _static_toc_ok(raw)
+    toc_ok = toc_complete
+    if toc_ok is None:
+        toc_ok = _static_toc_ok(raw)
+        # **只有静态回退真的放行了才算「推的」**：回退了但没通过时，这一级并没有
+        # 靠静态规则拿到东西（星级由下面的 return 决定，依据是实测的命中）
+        if toc_ok:
+            used_static = True
     if not toc_ok:
-        return stars
+        return stars, _basis(used_static)
     stars = 4  # 目录完整
     # 正文可用：实测优先，None（无法验证）回退静态规则；False 仍不达标
-    content_ok_ = content_ok if content_ok is not None else _static_content_ok(raw)
+    content_ok_ = content_ok
+    if content_ok_ is None:
+        content_ok_ = _static_content_ok(raw)
+        if content_ok_:
+            used_static = True
     if not content_ok_:
-        return stars
-    return 5  # 正文可用
+        return stars, _basis(used_static)
+    return 5, _basis(used_static)  # 正文可用
+
+
+def _basis(used_static: bool) -> str:
+    return "static" if used_static else "measured"
+
+
+def calc_stars(
+    health: str,
+    has_search: bool,
+    search_response_ms: int,
+    search_hit: str,
+    toc_complete: Optional[bool],
+    content_ok: Optional[bool],
+    raw: Optional[Dict[str, Any]] = None,
+) -> int:
+    """星级评分（0-5★）。阶梯、宽严边界、以及「实测 / 推定」的口径见
+    :func:`evaluate_stars`（本函数只是它的取值出口，**不要在这里另写一套阶梯**）。
+    """
+    return evaluate_stars(health, has_search, search_response_ms, search_hit,
+                          toc_complete, content_ok, raw)[0]
 
 
 def restore_from_cache(rec: BookSourceRecord, item: Dict[str, Any]) -> None:
@@ -350,8 +509,8 @@ def restore_from_cache(rec: BookSourceRecord, item: Dict[str, Any]) -> None:
     rec.checked_at = item.get("checked_at", "")
     rec.search_hit = item.get("search_hit", "")
     rec.search_response_ms = int(item.get("search_response_ms", 0) or 0)
-    # 深度验证字段（v3 旧缓存无这些字段 → 按浅探测默认值处理）
-    rec.probe_depth = int(item.get("probe_depth", 1) or 1)
+    # 深度验证字段（旧缓存没有这些字段 → 按最低档处理）
+    rec.probe_depth = int(item.get("probe_depth", DEPTH_HOME) or DEPTH_HOME)
     rec.chapter_count = int(item.get("chapter_count", 0) or 0)
     rec.toc_complete = item.get("toc_complete")  # None / True / False
     rec.toc_fail_reason = item.get("toc_fail_reason", "")
@@ -359,7 +518,7 @@ def restore_from_cache(rec: BookSourceRecord, item: Dict[str, Any]) -> None:
     rec.content_fail_reason = item.get("content_fail_reason", "")
     rec.content_response_ms = int(item.get("content_response_ms", 0) or 0)
     # 星级重算（规则升级后旧缓存不失效；方案D：实测优先、None 回退静态，无需配置深度）
-    rec.quality_stars = calc_stars(
+    rec.quality_stars, rec.star_basis = evaluate_stars(
         health=rec.health,
         has_search=rec.has_search,
         search_response_ms=rec.search_response_ms,
@@ -394,14 +553,13 @@ class AsyncChecker:
         self,
         concurrency: int = 50,
         timeout: float = 8.0,
-        probe_search: bool = True,
         keyword: str = "我",
         verify_ssl: bool = True,
         cache_dir: Optional[str] = None,
         testset: Optional[Dict[str, List[str]]] = None,
         max_keywords: int = 2,
         proxy: Optional[str] = None,
-        probe_depth: int = 1,
+        probe_depth: int = DEPTH_HOME,
         test_titles: Optional[Dict[str, Dict[str, Any]]] = None,
         use_store: Optional[bool] = None,
         store_path: Optional[str] = None,
@@ -410,7 +568,6 @@ class AsyncChecker:
     ):
         self.concurrency = concurrency
         self.timeout = timeout
-        self.probe_search = probe_search
         self.keyword = keyword
         self.verify_ssl = verify_ssl
         self.cache_dir = cache_dir
@@ -420,10 +577,12 @@ class AsyncChecker:
         self.novel_keywords = self.testset.get("novel") or NOVEL_TEST_KEYWORDS
         self.manga_keywords = self.testset.get("manga") or MANGA_TEST_KEYWORDS
         self.max_keywords = max_keywords  # 每个源最多尝试测试的关键词数
-        # 探测深度：1=浅探测（现状速度，静态规则判星级）
-        #           2=命中后验证目录完整度（参考表比例比对）
-        #           3=再抽样一章验证正文可用性（速度+内容）
-        self.probe_depth = probe_depth if probe_depth in PROBE_DEPTHS else 1
+        # 探测深度：一根轴四档，一档对一级星级（口径的唯一定义在 settings_store）：
+        #   DEPTH_HOME 1 主页  仅域名探测
+        #   DEPTH_SEARCH 2 搜索  搜索探测（含命中判定）
+        #   DEPTH_TOC 3 目录  详情页 + 目录页，比对章节数
+        #   DEPTH_CONTENT 4 正文  章节页抓一章全文
+        self.probe_depth = probe_depth if probe_depth in PROBE_DEPTHS else DEPTH_HOME
         # 缓存有效期（天）。取值由调用方决定（Web 端从全局设置来），
         # 这里不再自己读设置——checker 不该隐式依赖用户配置
         self.cache_ttl_ok = cache_ttl_ok
@@ -452,6 +611,16 @@ class AsyncChecker:
         self.use_store = bool(use_store)
         self.store_path = store_path
         self._store_conn = None
+
+    @property
+    def wants_search(self) -> bool:
+        """本次要不要验搜索。**判据只有一条**：深度到「搜索」档及以上。
+
+        合并前这是一个独立的 `probe_search` 开关，与深度是两根轴，能配出
+        「关搜索 + 选目录档」这种永远进不去目录的非法组合（目录/正文的门要求
+        `search_hit`）。现在由深度推出，判据只有这一处。
+        """
+        return self.probe_depth >= DEPTH_SEARCH
 
     def _store(self):
         if self._store_conn is None:
@@ -550,6 +719,7 @@ class AsyncChecker:
             # 重探、多打一次请求），别把它"修正"成严格相等
             "search_probed": bool(record.search_response_ms or record.search_hit),
             "quality_stars": record.quality_stars,
+            "star_basis": record.star_basis,
             "quality_tags": record.quality_tags,
             # 深度验证字段
             "probe_depth": record.probe_depth,
@@ -608,6 +778,7 @@ class AsyncChecker:
         method: str = "GET",
         headers: Optional[Dict[str, str]] = None,
         allow_redirects: bool = True,
+        body: str = "",
     ) -> tuple[Optional[int], bytes, float, str]:
         """发请求，返回 (状态码, 响应体, 耗时ms, 失败原因)。
 
@@ -629,6 +800,9 @@ class AsyncChecker:
                 method, url, headers=h, timeout=aiohttp.ClientTimeout(total=self.timeout),
                 allow_redirects=allow_redirects, ssl=None if self.verify_ssl else False,
                 proxy=self.proxy,
+                # 书源可以声明 body（`url,{"method":"POST","body":"kw={{key}}"}`）。
+                # **关键词在这里，不在 URL 里**——不传 body 的话服务端收不到搜索词
+                data=body if body else None,
             ) as resp:
                 body = await resp.read()
                 cost = (time.perf_counter() - t0) * 1000
@@ -649,42 +823,28 @@ class AsyncChecker:
             err = "other"
         except Exception as e:
             err = "other"
-            # 超时可能是 aiohttp 的 ServerTimeoutError（非 asyncio.TimeoutError）
+            # 这一支是**兜底**：常见的连接类错误在上面按 aiohttp 的具体类型分完了
+            # （10054 → `aiohttp.ClientConnectionResetError` → "reset"；
+            #  10061 → `aiohttp.ClientConnectorError` → `ClientError` → "other"；
+            #  超时 → `asyncio.TimeoutError` → "timeout"），走到这里的是没归类的。
+            #
+            # 这里原本还有两支按 `winerror` 分 10054 / 10060 / 10061 的 elif，
+            # **两支都不可达**：`TimeoutError` 本身就是 `OSError` 的子类，所以
+            # 这一支的 `isinstance(e, OSError)` 已经把 OSError 全吃掉了
+            # （实测：伪造一个 `winerror=10054` 的 OSError，命中的是这一支）。
+            # 已删——删它们不改变任何分类结果
             if isinstance(e, (TimeoutError, OSError)) or "timed out" in str(e).lower():
                 err = "timeout"
-            elif isinstance(e, OSError) and getattr(e, "winerror", None) == 10054:
-                err = "reset"
-            elif isinstance(e, OSError) and getattr(e, "winerror", None) in (10060, 10061):
-                err = "timeout"
-            elif isinstance(e, OSError) and getattr(e, "winerror", None) == 10061:
-                err = "reset"
         return None, b"", (time.perf_counter() - t0) * 1000, err
 
     def _classify(self, status: Optional[int], body: bytes, rec: BookSourceRecord) -> str:
-        """根据 HTTP 状态与响应体判定健康状态。"""
-        if status is None:
-            return Health.DEAD
-        text = _decode_body(body)
-        # 状态码拦截
-        if status in (403, 401):
-            if any(m in text.lower() for m in ANTI_BOT_MARKERS):
-                return Health.AUTH
-            return Health.AUTH
-        if status in (429,):
-            return Health.AUTH
-        if status == 503 and any(m in text.lower() for m in ANTI_BOT_MARKERS):
-            return Health.AUTH
-        if status >= 500:
-            return Health.DEAD
-        # 200 时看响应体特征
-        if status == 200:
-            low = text.lower()
-            if any(m in low for m in ANTI_BOT_MARKERS):
-                return Health.AUTH
-            if any(m in low for m in LOGIN_MARKERS) and rec.enabled_cookie_jar:
-                return Health.AUTH
-            return Health.OK
-        return Health.OK  # 其他 2xx/3xx 视为可达
+        """根据 HTTP 状态与响应体判定健康状态。
+
+        判定表只有一份，见模块级的 :func:`classify_http_status`——**不要在这里
+        另写一遍**（那正是原来三处分叉的成因）。
+        """
+        return classify_http_status(status, _decode_body(body), rec.enabled_cookie_jar)
+
 
     async def check_one(
         self,
@@ -698,6 +858,7 @@ class AsyncChecker:
                 record.health = Health.ERROR
                 record.error = "无 bookSourceUrl"
                 record.quality_stars = 0
+                record.star_basis = ""
                 return record
 
             # 1) 域名连通性探测
@@ -713,30 +874,37 @@ class AsyncChecker:
                 if err in ("reset", "tls"):
                     health = Health.GFW
                     record.error = f"疑似被墙（{_err_desc(err)}）"
+                elif err:
+                    record.error = _err_desc(err)
+                    health = classify_transport_error(err)
+                elif status:
+                    # 传输是通的，是服务端回了 4xx 才判死。**不能沿用下面那句
+                    # 「连接失败/超时/DNS错误」**——结论对了、理由错了同样没用，
+                    # 而且会把排查引向网络层（lessons §二 的同一类问题）。
+                    record.error = "HTTP %s（入口不存在或被拒）" % status
                 else:
-                    record.error = "连接失败/超时/DNS错误" if not err else _err_desc(err)
-                    if err:
-                        health = classify_transport_error(err)
+                    record.error = "连接失败/超时/DNS错误"
 
             # 2) 若域名可达且有搜索规则，用测试集探测搜索并判定命中
             s_body: Optional[bytes] = None
-            if health == Health.OK and self.probe_search and record.has_search:
+            if health == Health.OK and self.wants_search and record.has_search:
                 record.health = health
                 s_body = await self._probe_search(session, record, domain_url)
                 health = record.health
 
-            # 3) 深度验证：命中测试作品后才链式验证目录（深度2）与正文（深度3）
+            # 3) 深度验证：命中测试作品后才链式验证目录（目录档）与正文（正文档）
             #    fail-fast：未命中/搜索不通 → 零额外请求；目录验证失败 → 不再验证正文
             #    注意：此处条件必须用配置深度 self.probe_depth（而非 record.probe_depth，
-            #    后者由 _probe_toc/_probe_content 内部记录"实际执行到的深度"，目录阶段已置 2）
-            if record.health == Health.OK and record.search_hit and self.probe_depth >= 2 and s_body:
+            #    后者由 _probe_* 内部记录"实际执行到的深度"，目录阶段已置 DEPTH_TOC）
+            if (record.health == Health.OK and record.search_hit
+                    and self.probe_depth >= DEPTH_TOC and s_body):
                 toc_body = await self._probe_toc(session, record, domain_url, s_body)
-                if self.probe_depth >= 3 and toc_body:
+                if self.probe_depth >= DEPTH_CONTENT and toc_body:
                     await self._probe_content(session, record, domain_url, toc_body)
 
             record.health = health
-            # 4) 计算星级（阶梯规则公共函数，方案D：实测优先、None 回退静态）
-            record.quality_stars = calc_stars(
+            # 4) 计算星级 + 证据来源（阶梯与「实测/推定」口径都见 evaluate_stars）
+            record.quality_stars, record.star_basis = evaluate_stars(
                 health=record.health,
                 has_search=record.has_search,
                 search_response_ms=record.search_response_ms,
@@ -764,7 +932,17 @@ class AsyncChecker:
         rule = str(((record.raw or {}).get("ruleSearch") or {}).get("bookList", "") or "").strip()
         if not rule:
             return True
-        if "<js" in rule or rule.startswith("js:") or "@xpath" in rule:
+        # 规则离线跑不了（JS / 模板 / XPath / 多规则合并…）→ 保守算命中。
+        # **判据只能来自 replayer**：原来这里手写子串（`<js` / 开头的 `js:` /
+        # `@xpath`），漏掉最常见的**中间形态** `selector@js:code`——那条会掉到
+        # 下面被 apply_css_rule 跑出空（实测 `@js:` 恒返回 []），于是判「未命中」，
+        # 而判未命中会让整个深度验证跳过（上面 check_one 要求 search_hit）。
+        # 同一张判据表散在三处必然漂移，见本文件另外两处同源改动。
+        #
+        # **这里刻意不留痕**：明知的能力边界，每次记会把真正要看的异常
+        # （依赖缺失、解析器坏掉）淹没——见 tests/test_checker_judge.py 的
+        # test_js_rule_is_a_known_tradeoff_not_a_downgrade。
+        if parse_rule(rule).unsupported:
             return True
         try:
             html = _decode_body(s_body)
@@ -784,12 +962,15 @@ class AsyncChecker:
     ) -> Optional[bytes]:
         """用测试集关键词逐个尝试搜索，命中即停；同时记录搜索响应时间。
 
-        返回命中的搜索响应体（bytes，供深度2 复用解析详情 URL），未命中/失败返回 None。
+        返回命中的搜索响应体（bytes，供目录档复用解析详情 URL），未命中/失败返回 None。
         """
+        # 到这一步就算「走到了搜索档」——记在 record 上的是**实际执行到的深度**，
+        # 缓存据此判断下次要不要重验（见 is_cache_item_valid）
+        record.probe_depth = DEPTH_SEARCH
         keywords = self.keywords_for(record)
         for kw in keywords[:self.max_keywords]:
             try:
-                search_url, method, headers = parse_search_request(
+                search_url, method, headers, req_body = parse_search_request(
                     record.search_url_template, kw
                 )
                 if search_url.startswith("/"):
@@ -797,24 +978,27 @@ class AsyncChecker:
                 elif not search_url.startswith(("http://", "https://")):
                     search_url = domain_url + "/" + search_url
                 s_status, s_body, s_cost, s_err = await self._request(
-                    session, record, search_url, method=method, headers=headers
+                    session, record, search_url, method=method, headers=headers,
+                    body=req_body,
                 )
                 record.search_response_ms = int(s_cost)
                 if s_status is None:
                     record.health = classify_transport_error(s_err)
                     record.error = f"疑似被墙（{_err_desc(s_err)}）" if s_err in ("reset", "tls") else _err_desc(s_err)
                     return None
-                if s_status in (403, 401, 429):
+                # 判定表只有一份（`classify_http_status`）。**这里只取它的 AUTH**：
+                # 搜索入口 404 不能推出「源死了」（可能只是搜索规则过期），
+                # 所以不套用那张表的 4xx → DEAD。≥500 仍然判死——那是服务端挂了。
+                text = _decode_body(s_body)
+                s_health = classify_http_status(s_status, text,
+                                                record.enabled_cookie_jar)
+                if s_health == Health.AUTH:
                     record.health = Health.AUTH
                     return None
                 if s_status >= 500:
                     record.health = Health.DEAD
                     return None
                 if s_status == 200:
-                    text = _decode_body(s_body)
-                    if any(m in text.lower() for m in ANTI_BOT_MARKERS):
-                        record.health = Health.AUTH
-                        return None
                     # 命中判定：响应体含该测试词，且 bookList 规则真实解析出结果
                     # 仅记录 search_hit 内部字段（用于星级评分与报告），不再打「命中《》」分组标签
                     if kw in text and self._confirm_hit(s_body, record):
@@ -845,7 +1029,7 @@ class AsyncChecker:
             配置错误与我们的能力边界在这里已经分开）
         解析出章节数后再与参考表比对（小说 ≥80% / 漫画 ≥60%），比不过才判 False。
         """
-        record.probe_depth = 2
+        record.probe_depth = DEPTH_TOC
         raw = record.raw or {}
         search = raw.get("ruleSearch") or {}
         toc = raw.get("ruleToc") or {}
@@ -855,9 +1039,14 @@ class AsyncChecker:
             record.toc_complete = None
             record.toc_fail_reason = "bookUrl/chapterList 规则缺失"
             return None
-        if "<js" in book_url_rule or "<js" in chapter_list_rule:
+        # 判据来自 replayer（原来只查 `"<js"`，漏掉中间形态 `selector@js:` 与
+        # 模板/xpath/多规则合并——那些会掉到下面被 apply_css_rule 跑出空，
+        # 于是报「解析为空（搜索结果页结构变化？）」，把「工具测不了」说成「源坏了」）
+        reason = (parse_rule(book_url_rule).unsupported
+                  or parse_rule(chapter_list_rule).unsupported)
+        if reason:
             record.toc_complete = None
-            record.toc_fail_reason = "bookUrl/chapterList 含 JS 规则，无法用 CSS 验证"
+            record.toc_fail_reason = "bookUrl/chapterList 规则无法离线回放：%s" % reason
             return None
         try:
             html = _decode_body(s_body)
@@ -923,7 +1112,7 @@ class AsyncChecker:
         请求正文并计时 → ruleContent.content 提取后交 core.quality 判定
         （底线是「非空 / 不报错」，与「全链路试跑」同口径）。
         """
-        record.probe_depth = 3
+        record.probe_depth = DEPTH_CONTENT
         raw = record.raw or {}
         toc = raw.get("ruleToc") or {}
         content = raw.get("ruleContent") or {}
@@ -933,9 +1122,11 @@ class AsyncChecker:
             record.content_ok = None
             record.content_fail_reason = "chapterUrl 规则缺失"
             return
-        if "<js" in chapter_url_rule:
+        # 判据来自 replayer，同 _probe_toc：只查 `"<js"` 会漏掉中间形态 `@js:`
+        reason = parse_rule(chapter_url_rule).unsupported
+        if reason:
             record.content_ok = None
-            record.content_fail_reason = "chapterUrl 含 JS 规则，无法用 CSS 验证"
+            record.content_fail_reason = "chapterUrl 规则无法离线回放：%s" % reason
             return
         try:
             html = _decode_body(toc_body)
@@ -955,7 +1146,7 @@ class AsyncChecker:
                 record.content_fail_reason = f"正文请求失败(status={c_status})"
                 return
             # 判定收拢到 core.quality：与「全链路试跑」共用同一套口径，
-            # 避免同一个源在两个入口得到相反结论（详见设计文档 1.2）
+            # 避免同一个源在两个入口得到相反结论
             c_html = _decode_body(c_body)
             if content_rule:
                 # 截断上限必须显式传：extract_all_nodes 故意没有默认值，
@@ -978,12 +1169,17 @@ class AsyncChecker:
             record.content_fail_reason = f"验证异常：{type(e).__name__}"
 
     # ------------------------------------------------------------ 批量校验
-    async def run(self, records: List[BookSourceRecord]) -> List[BookSourceRecord]:
+    async def run(self, records: List[BookSourceRecord],
+                  on_progress=None) -> List[BookSourceRecord]:
         """并发校验所有书源，返回带结果的对象列表。
 
         若配置了 cache_dir，会读取历史校验结果缓存：
         - 仅规则指纹一致且未过期的缓存才复用，不再发请求
         - 新增、规则变化或缓存过期的源执行校验并追加写入缓存
+
+        ``on_progress(done, total)`` 每批报一次进度。**Web 那条链路必须传**：
+        不传的话长任务在界面上永远是 0——`jobs.progress` 没人写，而全量 3800 条
+        要跑十几分钟，用户看到的就是「点了没反应」。CLI 不用它（打印够了）。
         """
         # 读取历史缓存，标记已校验的源
         cache = {} if self.refresh_cache else self.load_cache()
@@ -991,10 +1187,9 @@ class AsyncChecker:
         for r in records:
             # 键规范化后再查：缓存两侧的口径见 load_cache 的注释
             item = cache.get(_normalize_url(r.url))
-            # min_search 直接用 probe_search：两者在这里语义重合（"本次要不要
-            # 验搜索"），没必要再开一个构造参数让调用方去对表
+            # 「本次要不要验搜索」由深度推出（wants_search），不再单独传——
+            # 深度到「搜索」档就是要验，两根轴能配出没有意义的组合
             if item and is_cache_item_valid(r, item, min_depth=self.probe_depth,
-                                            min_search=self.probe_search,
                                             ttl_ok=self.cache_ttl_ok,
                                             ttl_other=self.cache_ttl_other):
                 restore_from_cache(r, item)
@@ -1002,6 +1197,11 @@ class AsyncChecker:
                 pending.append(r)
         # 复用了几条要说出来：不然「点校验 → 完成」和「一条请求都没发」长得一样
         self.cached_count = len(records) - len(pending)
+        total = len(records)
+        # 先报一次「起步」：缓存命中的那批是**立刻就算完成的**，进度要从它们算起——
+        # 否则界面上会出现「849/849」而任务总数写着 3849，两个数字对不上
+        if on_progress:
+            on_progress(self.cached_count, total)
 
         self._sem = asyncio.Semaphore(self.concurrency)
         # 缓存目录就绪
@@ -1029,6 +1229,8 @@ class AsyncChecker:
                 results.extend(chunk_results)
                 done = i + len(chunk)
                 print(f"  进度: {done}/{len(pending)}")
+                if on_progress:
+                    on_progress(self.cached_count + done, total)
         # **保存条件是「有任一后端」，不是「有 cache_dir」。** 以前只判 cache_dir，
         # 而 Web 那条链路传的是 use_store=True、cache_dir=None，于是校验结果一条都
         # 不写——界面上请求成功、状态不变。这条门和 save_cache_append 里那句
@@ -1057,7 +1259,6 @@ def run_check(
     records: List[BookSourceRecord],
     concurrency: int = 50,
     timeout: float = 8.0,
-    probe_search: bool = True,
     keyword: str = "我",
     verify_ssl: bool = True,
     cache_dir: Optional[str] = None,
@@ -1065,19 +1266,20 @@ def run_check(
     testset: Optional[Dict[str, List[str]]] = None,
     max_keywords: int = 2,
     proxy: Optional[str] = None,
-    probe_depth: int = 1,
+    probe_depth: int = DEPTH_HOME,
     refresh_cache: bool = False,
 ) -> List[BookSourceRecord]:
     """同步入口：运行校验（Windows 上 asyncio.run 即可）。
 
-    probe_depth: 1=浅探测（静态规则判星级，现状速度）
-                 2=命中后验证目录完整度（参考表比例比对）
-                 3=再抽样一章验证正文可用性（速度+内容）
+    probe_depth 一档对一级星级（口径定义在 core/settings_store.py）：
+        1 主页   仅域名探测                                   → 1★
+        2 搜索   搜索探测 + 命中判定                           → 2★ / 3★
+        3 目录   详情页 + 目录页比对章节数                      → 4★
+        4 正文   章节页抓一章全文                              → 5★
     """
     checker = AsyncChecker(
         concurrency=concurrency,
         timeout=timeout,
-        probe_search=probe_search,
         keyword=keyword,
         verify_ssl=verify_ssl,
         cache_dir=cache_dir,

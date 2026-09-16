@@ -36,6 +36,15 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from core.loader import load_json_file, dump_json_file, dedupe_sources, merge_sources, fingerprint  # noqa: E402
 from core.models import build_record, Health  # noqa: E402
+# 探测深度的取值与默认值只在 settings_store 定义（AGENTS.md 硬性约定 #8），
+# 这里只引用——CLI 的 argparse 默认值曾与 AsyncChecker / ops.py 各写一份而漂移
+from core.settings_store import PROBE_DEPTHS, DEPTH_SEARCH  # noqa: E402
+
+#: ``--probe-depth`` 的帮助文本。**一档对一级星级**，并把每档要多打几次请求写出来——
+#: 这是决定「值不值得开高档」的唯一依据（深度到正文档 = 每源多 3 个请求）
+DEPTH_HELP = ("探测深度（一档对一级星级）：1=主页 只测域名连通；"
+              "2=搜索 搜索探测 + 命中判定（默认）；"
+              "3=目录 再加详情页与目录页、比对章节数；4=正文 再抓一章全文")
 
 
 def _load_records(path: str, limit: int = 0):
@@ -70,6 +79,19 @@ def _resolve_check_cache(args: argparse.Namespace) -> tuple[str, bool]:
         return "", False
     cache_dir = getattr(args, "cache_dir", "") or DEFAULT_CACHE_DIR
     return cache_dir, bool(getattr(args, "refresh_cache", False))
+
+
+def _cache_backend(args: argparse.Namespace, cache_dir: str) -> str:
+    """按**真实**的缓存后端写那行「结果写到哪」。
+
+    不能直接报 `cache_dir`：`AsyncChecker` 默认走 SQLite 管理库
+    （`use_store` 默认 True，见 core/checker.py），此时 cache_dir **一次都不会被
+    读写**——只有 `--legacy-cache` 把 `LEGADO_LEGACY_CACHE` 置起来才轮到它。
+    报一个用不上的目录名，正是本项目一直在消灭的那种「静默说反话」。
+    """
+    if getattr(args, "legacy_cache", False):
+        return "NDJSON %s" % cache_dir
+    return "管理库（要退回 NDJSON 目录加 --legacy-cache）"
 
 
 def _auto_detect_input() -> str:
@@ -139,7 +161,7 @@ def cmd_check(args: argparse.Namespace) -> int:
     if getattr(args, "no_cache", False):
         print("缓存策略：不读取、不写入缓存")
     elif refresh_cache:
-        print(f"缓存策略：跳过旧缓存，成功结果写入 {cache_dir}")
+        print(f"缓存策略：跳过旧缓存，成功结果写入 {_cache_backend(args, cache_dir)}")
     print(f"加载书源 {len(records)} 个，开始校验（并发 {args.concurrency}，超时 {args.timeout}s）...")
     testset = None
     if getattr(args, "testset", ""):
@@ -154,14 +176,13 @@ def cmd_check(args: argparse.Namespace) -> int:
         records,
         concurrency=args.concurrency,
         timeout=args.timeout,
-        probe_search=not args.no_search_probe,
         keyword=args.keyword,
         verify_ssl=not args.insecure,
         cache_dir=cache_dir,
         testset=testset,
         max_keywords=getattr(args, "max_keywords", 2),
         proxy=getattr(args, "proxy", None),
-        probe_depth=getattr(args, "probe_depth", 1),
+        probe_depth=getattr(args, "probe_depth", DEPTH_SEARCH),
         refresh_cache=refresh_cache,
     )
     # 统计
@@ -469,7 +490,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     if getattr(args, "no_cache", False):
         print("缓存策略：不读取、不写入缓存")
     elif refresh_cache:
-        print(f"缓存策略：跳过旧缓存，成功结果写入 {cache_dir}")
+        print(f"缓存策略：跳过旧缓存，成功结果写入 {_cache_backend(args, cache_dir)}")
 
     # 1) check
     print(f"\n===== [1/3] 联网校验（{len(records)} 个源）=====")
@@ -477,13 +498,12 @@ def cmd_run(args: argparse.Namespace) -> int:
         records,
         concurrency=args.concurrency,
         timeout=args.timeout,
-        probe_search=not args.no_search_probe,
         keyword=args.keyword,
         verify_ssl=not args.insecure,
         cache_dir=cache_dir,
         max_keywords=getattr(args, "max_keywords", 2),
         proxy=getattr(args, "proxy", None),
-        probe_depth=getattr(args, "probe_depth", 1),
+        probe_depth=getattr(args, "probe_depth", DEPTH_SEARCH),
         refresh_cache=refresh_cache,
     )
     from collections import Counter
@@ -587,9 +607,8 @@ def cmd_menu(args: argparse.Namespace) -> int:
         ns.keyword = "我"
         ns.testset = ""
         ns.max_keywords = 2
-        ns.probe_depth = 1
+        ns.probe_depth = DEPTH_SEARCH
         ns.proxy = ""
-        ns.no_search_probe = False
         ns.insecure = False
         ns.keep_disabled = False
         ns.cache_dir = DEFAULT_CACHE_DIR
@@ -611,9 +630,8 @@ def cmd_menu(args: argparse.Namespace) -> int:
         ns.timeout = 8.0
         ns.keyword = "我"
         ns.max_keywords = 2
-        ns.probe_depth = 1
+        ns.probe_depth = DEPTH_SEARCH
         ns.proxy = ""
-        ns.no_search_probe = False
         ns.insecure = False
         ns.keep_disabled = False
         ns.cache_dir = DEFAULT_CACHE_DIR
@@ -669,11 +687,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_check.add_argument("-k", "--keyword", default="我", help="搜索探测关键词（默认「我」）")
     p_check.add_argument("--testset", default="", help="自定义测试集 JSON 文件：{\"novel\": [书名], \"manga\": [漫画名]}（默认内置）")
     p_check.add_argument("--max-keywords", type=int, default=2, help="每个源最多尝试测试集关键词数（默认 2）")
-    p_check.add_argument("--probe-depth", type=int, choices=[1, 2, 3], default=1,
-                         help="探测深度：1=浅探测(静态规则判星级，默认) 2=命中后验证目录完整度 3=再抽样一章验证正文可用性")
+    p_check.add_argument("--probe-depth", type=int, choices=list(PROBE_DEPTHS),
+                         default=DEPTH_SEARCH, help=DEPTH_HELP)
     p_check.add_argument("--proxy", default="", help="代理地址（如 socks5://127.0.0.1:1080 或 http://127.0.0.1:7890），用于对疑似被墙源复检")
     p_check.add_argument("--limit", type=int, default=0, help="只处理前 N 个源（测试用）")
-    p_check.add_argument("--no-search-probe", action="store_true", help="跳过搜索探测，只测域名连通")
     p_check.add_argument("--insecure", action="store_true", help="不校验证书（规避 SSL 报错）")
     p_check.add_argument("--keep-disabled", action="store_true", help="输出时保留 enabled=false 的源")
     p_check.add_argument("--cache-dir", default="", help=f"校验缓存目录（缺省 {DEFAULT_CACHE_DIR}）")
@@ -766,11 +783,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("-t", "--timeout", type=float, default=8.0, help="单请求超时秒数（默认 8）")
     p_run.add_argument("-k", "--keyword", default="我", help="搜索探测关键词（默认「我」）")
     p_run.add_argument("--max-keywords", type=int, default=2, help="每个源最多尝试测试集关键词数（默认 2）")
-    p_run.add_argument("--probe-depth", type=int, choices=[1, 2, 3], default=1,
-                       help="探测深度：1=浅探测(静态规则判星级，默认) 2=命中后验证目录完整度 3=再抽样一章验证正文可用性")
+    p_run.add_argument("--probe-depth", type=int, choices=list(PROBE_DEPTHS),
+                       default=DEPTH_SEARCH, help=DEPTH_HELP)
     p_run.add_argument("--proxy", default="", help="代理地址")
     p_run.add_argument("--limit", type=int, default=0, help="只处理前 N 个源（测试用）")
-    p_run.add_argument("--no-search-probe", action="store_true", help="跳过搜索探测")
     p_run.add_argument("--insecure", action="store_true", help="不校验证书")
     p_run.add_argument("--keep-disabled", action="store_true", help="输出时保留 enabled=false 的源")
     p_run.add_argument("--drop-dead", action="store_true",

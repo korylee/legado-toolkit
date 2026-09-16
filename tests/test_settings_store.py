@@ -60,7 +60,10 @@ class SettingsStoreTests(unittest.TestCase):
         got = S.load()["check"]
         self.assertEqual(got["concurrency"], 10)
         self.assertEqual(got["timeout"], S.DEFAULTS["check"]["timeout"])
-        self.assertEqual(got["probe_depth"], 1)
+        # 深度这一项有一层迁移：没写 schema_version 的旧文件按 v1 处理，
+        # 「深度缺省（1）+ 搜索探开」→ 搜索档，正好与新默认值同值（见 _migrate_legacy）
+        self.assertEqual(got["probe_depth"], S.DEFAULTS["check"]["probe_depth"])
+        self.assertEqual(got["probe_depth"], 2)
 
     def test_unknown_keys_are_hidden_on_read(self) -> None:
         self._write_raw('{"check": {"concurrency": 10, "keyword": "我"}}')
@@ -104,14 +107,21 @@ class SettingsStoreTests(unittest.TestCase):
         self.assertEqual(S.coerce("check", "probe_depth", True), 1)
 
     def test_checker_and_settings_share_one_probe_depth_rule(self) -> None:
-        """两处收敛必须是同一份常量，不能各写一个 (1, 2, 3)。"""
+        """两处收敛必须是同一份常量，不能各写一个四档表。
+
+        连四个档位的**编号含义**（哪一档验到什么）也只在这里定义一次——
+        checker 里写的都是 DEPTH_* 常量，不是字面量。
+        """
         from core import checker
-        self.assertEqual(S.PROBE_DEPTHS, (1, 2, 3))
+        self.assertEqual(S.PROBE_DEPTHS, (1, 2, 3, 4))
         self.assertIs(checker.PROBE_DEPTHS, S.PROBE_DEPTHS)
+        for name in ("DEPTH_HOME", "DEPTH_SEARCH", "DEPTH_TOC", "DEPTH_CONTENT"):
+            with self.subTest(const=name):
+                self.assertIs(getattr(checker, name), getattr(S, name))
 
     def test_bool_accepts_word_forms(self) -> None:
         self.assertFalse(S.coerce("check", "verify_ssl", "false"))
-        self.assertTrue(S.coerce("check", "probe_search", "on"))
+        self.assertTrue(S.coerce("check", "verify_ssl", "on"))
         self.assertEqual(S.coerce("check", "verify_ssl", "听不懂"), True)
 
     def test_proxy_rejects_non_http_schemes(self) -> None:
@@ -193,9 +203,9 @@ class SettingsStoreTests(unittest.TestCase):
 
         用 `or` 合并会把这三种覆盖静默吃掉，现象只是「参数好像没生效」。
         """
-        S.update({"check": {"probe_search": True, "proxy": "http://127.0.0.1:7890"}})
-        got = S.resolve_check({"probe_search": False, "proxy": ""})
-        self.assertFalse(got["probe_search"])
+        S.update({"check": {"verify_ssl": True, "proxy": "http://127.0.0.1:7890"}})
+        got = S.resolve_check({"verify_ssl": False, "proxy": ""})
+        self.assertFalse(got["verify_ssl"])
         self.assertEqual(got["proxy"], "")
 
     def test_resolve_clamps_override_too(self) -> None:
@@ -208,6 +218,78 @@ class SettingsStoreTests(unittest.TestCase):
         S.update({"check": {"concurrency": 10}})
         S.resolve_check({"concurrency": 3})
         self.assertEqual(S.load()["check"]["concurrency"], 10)
+
+
+class LegacyDepthMigrationTests(unittest.TestCase):
+    """v1 → v2 的深度迁移：两根轴（深度 + 搜索开关）折成一根四档。
+
+    这是这次改动**唯一会动到用户已有设置**的地方，而且改错了不会报错——只会让
+    下一次校验悄悄少验或多验。映射规则（旧的有效行为 → 新档位）：
+
+        旧深度 2 / 3          → 3 / 4
+        旧深度 1 + 搜索探打开  → 2
+        旧深度 1 + 搜索探关闭  → 1
+    """
+
+    def setUp(self) -> None:
+        self.path = os.path.join(_ROOT, "tmp_settings_" + uuid.uuid4().hex[:8] + ".json")
+        os.environ["LEGADO_SETTINGS"] = self.path
+
+    def tearDown(self) -> None:
+        os.environ.pop("LEGADO_SETTINGS", None)
+        for p in (self.path, self.path + ".tmp"):
+            if os.path.exists(p):
+                os.remove(p)
+
+    def _depth_from(self, raw: dict) -> int:
+        with open(self.path, "w", encoding="utf-8") as f:
+            json.dump(raw, f, ensure_ascii=False)
+        return S.load()["check"]["probe_depth"]
+
+    def test_v1_two_axes_fold_into_one(self) -> None:
+        cases = [
+            ({"schema_version": 1, "check": {"probe_depth": 1, "probe_search": True}}, 2),
+            ({"schema_version": 1, "check": {"probe_depth": 1, "probe_search": False}}, 1),
+            ({"schema_version": 1, "check": {"probe_depth": 2, "probe_search": True}}, 3),
+            ({"schema_version": 1, "check": {"probe_depth": 3, "probe_search": True}}, 4),
+        ]
+        for raw, want in cases:
+            with self.subTest(raw=raw):
+                self.assertEqual(self._depth_from(raw), want)
+
+    def test_missing_probe_search_counts_as_on(self) -> None:
+        """缺键按 True 算——那是它当年的默认值。
+
+        按 False 处理会把搜索探测**静默关掉**（search_hit 全空、星级整体下降），
+        而用户什么都没改。
+        """
+        self.assertEqual(self._depth_from({"schema_version": 1,
+                                           "check": {"probe_depth": 1}}), 2)
+
+    def test_missing_schema_version_is_v1(self) -> None:
+        """判据是 schema_version，不是「旧键在不在」：手改过的文件可能只写了一半。"""
+        self.assertEqual(self._depth_from({"check": {"probe_depth": 2}}), 3)
+
+    def test_v2_file_is_not_migrated_again(self) -> None:
+        # 已经迁过的 4 档不能再 +1（幂等：读多少次都是它自己）
+        for d in (1, 2, 3, 4):
+            with self.subTest(depth=d):
+                self.assertEqual(
+                    self._depth_from({"schema_version": 2, "check": {"probe_depth": d}}), d)
+
+    def test_migration_is_idempotent_and_legacy_key_is_dropped(self) -> None:
+        raw = {"schema_version": 1, "check": {"probe_depth": 2, "probe_search": True}}
+        with open(self.path, "w", encoding="utf-8") as f:
+            json.dump(raw, f)
+        self.assertEqual([S.load()["check"]["probe_depth"] for _ in range(3)], [3, 3, 3])
+        S.update({"check": {"concurrency": 60}})      # 落盘一次
+        saved = self._read_raw()
+        self.assertEqual(saved["schema_version"], S.VERSION)
+        self.assertNotIn("probe_search", saved["check"])
+
+    def _read_raw(self) -> dict:
+        with open(self.path, "r", encoding="utf-8") as f:
+            return json.load(f)
 
 
 if __name__ == "__main__":
@@ -227,6 +309,12 @@ if __name__ == "__main__":
 #        → test_timeout_rejects_nan_and_inf 红
 #  M5  update() 不收敛就落盘（raw[key] 直接写）
 #        → test_update_writes_coerced_values_to_disk 红
+#  M6  _migrate_legacy 的 `probe_search` 缺省改成 False
+#        → LegacyDepthMigrationTests 红 2 条（test_missing_probe_search_counts_as_on
+#           + test_v1_two_axes_fold_into_one）
+#  M7  迁移判据从 schema_version 改回「`probe_search` 键在不在」
+#        → LegacyDepthMigrationTests 红 2 条（test_missing_schema_version_is_v1
+#           + test_migration_is_idempotent_and_legacy_key_is_dropped）
 #
 # **守不住的**：原子写本身（进程崩在 write 与 replace 之间）在单测里复现不出来，
 # test_atomic_save_leaves_no_tmp_file 只能守「tmp 文件没残留」。

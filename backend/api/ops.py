@@ -1,12 +1,17 @@
 # -*- coding: utf-8 -*-
 # 耗时操作的任务入口：把 CLI 的能力暴露成 job。
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 from core import settings_store
 from core.loader import _normalize_url
 from core.store import Store
 
 from backend.jobs import runner
+
+#: 「变成 X」的**明细**最多带多少条（计数不受影响，见 summarize_transitions）。
+#: 全量校验时变化可能有几千条，明细全带上会把 result_json 撑到几百 KB——
+#: 而它是要走 SSE 推送的
+CHANGED_ITEMS_LIMIT = 200
 
 
 def summarize_transitions(prev: Dict[str, Dict[str, Any]],
@@ -25,6 +30,7 @@ def summarize_transitions(prev: Dict[str, Dict[str, Any]],
     """
     first_checked = 0
     changed: Dict[str, int] = {}
+    changed_items: List[Dict[str, str]] = []
     for r in results:
         old = (prev.get(_normalize_url(r.url)) or {}).get("health")
         if old is None:
@@ -33,7 +39,15 @@ def summarize_transitions(prev: Dict[str, Dict[str, Any]],
         elif old != r.health:
             # 只统计**变了**的，按新的 health 分桶
             changed[r.health] = changed.get(r.health, 0) + 1
-    return {"first_checked": first_checked, "changed": changed}
+            # 明细。**只有计数是不够的**：摘要说「6 条变成失效」，用户下一步
+            # 一定是问「哪 6 条」——只给计数等于让他自己去 3800 行里翻。
+            # 超出上限时只截明细，**计数仍然准确**（前端靠两者对比报「还有 N 条」）
+            if len(changed_items) < CHANGED_ITEMS_LIMIT:
+                changed_items.append({"url": _normalize_url(r.url),
+                                      "name": r.name or r.url,
+                                      "from": old, "to": r.health})
+    return {"first_checked": first_checked, "changed": changed,
+            "changed_items": changed_items}
 
 
 @runner.register("check")
@@ -43,7 +57,7 @@ async def run_check_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict
     #   limit: 限制条数
     #   refresh_cache: 忽略有效期内的缓存。它是**每次动作**而非默认值，所以不进
     #                  设置，由前端直接传
-    #   check: {concurrency/timeout/probe_depth/probe_search/verify_ssl/proxy}
+    #   check: {concurrency/timeout/probe_depth/verify_ssl/proxy}
     #          本次临时覆盖，只作用于这一个 job，**不写回全局设置**
     #          （单独一层是为了不和 urls/limit/refresh_cache/total 挤在一个命名空间）
     from core.checker import AsyncChecker
@@ -72,7 +86,6 @@ async def run_check_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict
     checker = AsyncChecker(
         concurrency=cfg["concurrency"],
         timeout=cfg["timeout"],
-        probe_search=cfg["probe_search"],
         # 以前根本没读 payload 的 verify_ssl，前端给了也不生效
         verify_ssl=cfg["verify_ssl"],
         probe_depth=cfg["probe_depth"],
@@ -87,16 +100,28 @@ async def run_check_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict
     )
     checker.refresh_cache = bool(payload.get("refresh_cache"))
     try:
-        results = await checker.run(records)
+        results = await checker.run(
+            records,
+            # **长任务必须报进度**：不报的话 `jobs.progress` 全程是 0，而全量 3800 条
+            # 要跑十几分钟——用户看到的就是「点了没反应」，只能靠猜还在不在跑。
+            # run() 每批报一次（含缓存命中那部分的起步值，见那边的注释）
+            on_progress=lambda done, _total: st.update_job(job_id, progress=done),
+        )
     finally:
         checker.close()
 
     st.update_job(job_id, progress=len(results))
     st.rebuild_system_tags()
     items = [{
-        "url": r.url, "name": r.name, "health": r.health,
-        "stars": r.quality_stars, "error": r.error,
+        # **url 必须归一化后再下发**：前端拿它当 key 回填列表，而列表里的
+        # `source_url` 是 Store 归一化后存的（去空白/尾斜杠/转小写）。
+        # 而 `r.url` 是 build_record 从 bookSourceUrl 直接取的**原文**——
+        # 两侧不归一的话前端一条都匹配不上，表现是「校验完了列表不更新」，
+        # 且看不出任何异常。这正是 lessons §五 那条（本项目实测 20.7% 的源带尾斜杠）
+        "url": _normalize_url(r.url), "name": r.name, "health": r.health,
+        "stars": r.quality_stars, "star_basis": r.star_basis, "error": r.error,
         "toc_complete": r.toc_complete, "content_ok": r.content_ok,
+        "search_hit": r.search_hit, "checked_at": r.checked_at,
     } for r in results]
     return {
         "checked": len(items),

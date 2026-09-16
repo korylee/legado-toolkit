@@ -16,6 +16,10 @@ class SourceOut(BaseModel):
     fingerprint: str = ""
     health: Optional[str] = None
     stars: Optional[int] = None
+    #: 这个星级是实测来的还是按静态规则推的（"measured" / "static" / ""）。
+    #: **必须声明在这里**：response_model 会按模型裁字段，漏了它就静默丢掉，
+    #: 前端那边表现为「这个词永远不显示」——查起来很像前端 bug
+    star_basis: Optional[str] = None
     checked_at: Optional[str] = None
     probe_depth: Optional[int] = None
     toc_complete: Optional[int] = None
@@ -163,8 +167,9 @@ class CheckSettingsPatch(BaseModel):
 
     concurrency: Optional[int] = None
     timeout: Optional[float] = None
+    # 一档对一级星级（1 主页 / 2 搜索 / 3 目录 / 4 正文）。合并前这里还有一个
+    # probe_search 开关，与深度是两根轴——已去掉
     probe_depth: Optional[int] = None
-    probe_search: Optional[bool] = None
     verify_ssl: Optional[bool] = None
     proxy: Optional[str] = None
     cache_ttl_ok: Optional[int] = None
