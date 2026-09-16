@@ -73,6 +73,7 @@ DDL = [
         response_time_ms    INTEGER,
         search_hit          TEXT DEFAULT '',
         search_response_ms  INTEGER,
+        search_probed       INTEGER DEFAULT 0,
         stars               INTEGER DEFAULT 0,
         quality_tags        TEXT DEFAULT '',
         probe_depth         INTEGER DEFAULT 1,
@@ -173,6 +174,12 @@ class Store:
         ("deleted_at", "TEXT NOT NULL DEFAULT ''"),
         ("user_tags", "TEXT NOT NULL DEFAULT ''"),
         ("system_tags_locked", "INTEGER NOT NULL DEFAULT 0"),
+    ], "checks": [
+        # 缓存版本 8 起：这条缓存是"带着搜索探测"写下的吗？默认 0 = 没验过搜索，
+        # 于是开着搜索探测的用户会把旧缓存整体重验一遍（正是 v8 想要的）。判定见
+        # checker.is_cache_item_valid 的 min_search。**不落这一列等于没修**：
+        # item 里写了但读回来恒为 None，所有 OK 源的缓存永远不复用
+        ("search_probed", "INTEGER DEFAULT 0"),
     ]}
 
     #: v_sources 视图每次重建：CREATE VIEW IF NOT EXISTS 不会更新已存在的视图定义
@@ -184,7 +191,7 @@ class Store:
         FROM sources s
         LEFT JOIN checks c ON c.id = (
             SELECT id FROM checks WHERE source_url = s.source_url
-            ORDER BY checked_at DESC LIMIT 1)"""
+            ORDER BY checked_at DESC, id DESC LIMIT 1)"""
 
     def _init_schema(self) -> None:
         for stmt in DDL:
@@ -797,6 +804,8 @@ class Store:
                 r.get("response_time_ms"),
                 str(r.get("search_hit", "") or ""),
                 r.get("search_response_ms"),
+                # 缺失按 0 处理（= 没验过搜索）：方向是保守重验，不是错误复用
+                1 if r.get("search_probed") else 0,
                 int(r.get("quality_stars", 0) or 0),
                 tags or "",
                 int(r.get("probe_depth", 1) or 1),
@@ -813,17 +822,19 @@ class Store:
             return 0
         sql = (
             "INSERT INTO checks(source_url,fingerprint,cache_version,health,"
-            "status_code,response_time_ms,search_hit,search_response_ms,stars,"
-            "quality_tags,probe_depth,chapter_count,toc_complete,content_ok,"
+            "status_code,response_time_ms,search_hit,search_response_ms,search_probed,"
+            "stars,quality_tags,probe_depth,chapter_count,toc_complete,content_ok,"
             "toc_fail_reason,content_fail_reason,content_response_ms,error,checked_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
         with self.conn:
             self.conn.executemany(sql, out)
         return len(out)
 
     def last_check(self, url: str) -> Optional[Dict[str, Any]]:
         row = self.conn.execute(
-            "SELECT * FROM checks WHERE source_url = ? ORDER BY checked_at DESC LIMIT 1",
+            # id DESC 的兜底理由同 checks_map()
+            "SELECT * FROM checks WHERE source_url = ? "
+            "ORDER BY checked_at DESC, id DESC LIMIT 1",
             (url,)).fetchone()
         return dict(row) if row else None
 
@@ -831,9 +842,13 @@ class Store:
         # 返回 {url: 最近一条缓存}；字段与旧 check_cache 的 NDJSON 完全兼容，
         # 可直接顶替 AsyncChecker.load_cache() 的返回值。
         out: Dict[str, Dict[str, Any]] = {}
+        # id DESC 是**必须的兜底**：checked_at 只到秒，同一秒里写了两条时，
+        # 只按时间排的话顺序不确定（实测走索引返回先写入的那条），「最新结论」
+        # 会变成上一轮的——列表显示旧 health，而缓存判定会拿旧的 search_probed
+        # 判成「没验过搜索」，每次校验都白打请求
         sql = ("SELECT * FROM checks c WHERE c.id = ("
                "SELECT id FROM checks WHERE source_url = c.source_url "
-               "ORDER BY checked_at DESC LIMIT 1)")
+               "ORDER BY checked_at DESC, id DESC LIMIT 1)")
         for r in self.conn.execute(sql):
             d = dict(r)
             d["url"] = d.pop("source_url", "")
@@ -842,6 +857,9 @@ class Store:
             d["quality_tags"] = [t for t in (d.pop("quality_tags", "") or "").split(",") if t]
             d["toc_complete"] = _untri(d.get("toc_complete"))
             d["content_ok"] = _untri(d.get("content_ok"))
+            # 库里存的是 0/1，转成 bool 与 ndjson 后端返回同样的类型。
+            # 老库没有这一列时（补列前落下的行）默认 0 → 保守重验，方向安全
+            d["search_probed"] = bool(d.get("search_probed"))
             out[d["url"]] = d
         return out
 

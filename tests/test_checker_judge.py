@@ -114,10 +114,12 @@ class CacheVersionTests(unittest.TestCase):
     def test_version_bumped(self):
         """判定逻辑变了，缓存必须整体作废，否则改了等于没改。
 
+        v8：判定口径新增「验过搜索」这一维——旧条目没有 search_probed 字段，
+        对开着搜索探测的用户必须整体重验，否则快速体检写下的结论会一直被复用。
         v7：反爬词表删掉裸 "cloudflare"——原来判 auth 的源现在判 ok，
         不作废的话那条 auth 会在 TTL 内一直命中缓存，看起来像修复失效。
         """
-        self.assertEqual(checker.CACHE_VERSION, 7)
+        self.assertEqual(checker.CACHE_VERSION, 8)
 
     def test_old_cache_item_rejected(self):
         raw = {"bookSourceUrl": "https://a.com", "bookSourceName": "x",

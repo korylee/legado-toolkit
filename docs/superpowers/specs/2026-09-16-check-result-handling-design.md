@@ -145,6 +145,15 @@ frontend/src/views/SourcesView.vue:510   @selection-change="(v) => (selected = v
 
 与既有 `probe_depth`（实际执行到的深度）并列，互不替代。
 
+**store 后端必须同步加列**——这是原稿漏掉的一处。Web 链路走的是 `use_store=True`，
+`save_cache_append` 写的 item 要经 `Store.save_checks` 落进 `checks` 表，再由
+`checks_map()` 读回来。表里没有 `search_probed` 列的话，item 里写了也读不回来：
+`item.get("search_probed")` 恒为 None，于是**所有 OK 源的缓存永远被判为「没验过
+搜索」**，每次校验都重新发请求。表现是「校验跑完了、状态也变了」，看不出异常，只是慢
+——而慢在 3861 条上是几分钟，很难归因到这里。四处都要改：`DDL` 的建表语句、
+`NEW_COLUMNS`（给已有库幂等补列）、`save_checks` 的 INSERT 列与值、`checks_map`
+读回时转成 bool。
+
 ### 5.2 check job 的结果新增 `transitions`
 
 ```jsonc
@@ -309,7 +318,7 @@ frontend/src/views/SourcesView.vue:510   @selection-change="(v) => (selected = v
 | 文件 | 动作 |
 |---|---|
 | `core/checker.py` | `save_cache_append` 写 `search_probed`；`is_cache_item_valid` 加 `min_search`；`run()` 传参；`CACHE_VERSION` 7→8 |
-| `core/store.py` | 新增 `query_urls(...)`（只取 URL，供 `/api/sources/urls`） |
+| `core/store.py` | `checks` 表加 `search_probed` 列（DDL + `NEW_COLUMNS` + `save_checks` 的 INSERT + `checks_map` 读出）；新增 `query_urls(...)`（只取 URL，供 `/api/sources/urls`） |
 | `backend/api/sources.py` | 新增 `GET /urls`；`DELETE /sources` 换成 `POST /sources/delete` |
 | `backend/schemas.py` | 新增 `SourceDeleteIn` |
 | `backend/api/ops.py` | 跑前快照 + 变化统计，写进返回值 |

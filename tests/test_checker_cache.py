@@ -115,6 +115,78 @@ class CacheValidityTests(unittest.TestCase):
         self.assertFalse(is_cache_item_valid(build_record(source, 0), item,
                                              now=NOW, min_depth=2))
 
+    # ------------------------------------------------------ 探测能力：搜索（本轮新增）
+
+    def test_search_unprobed_cache_is_not_reused_when_search_required(self) -> None:
+        """本次要验搜索，而缓存是「没验搜索」时写下的 → **不可复用**。
+
+        这是 1.2 那个静默失效的核心：先关掉搜索探测快速体检一遍，再开着搜索校验
+        一遍，第二遍会直接复用第一遍的缓存——搜索探测根本没跑，而界面显示
+        「校验完成：全部命中缓存」。更糟的是第一遍给每个可达源都写了一星
+        （calc_stars 要求 has_search 且 search_response_ms > 0 才给 2★），
+        而这个错误结论会在 TTL 内一直命中。
+        """
+        source = make_source()          # 有 searchUrl → has_search=True
+        item = make_cache_item(source, Health.OK, "2026-08-21 10:00:00")
+        item["probe_depth"] = 1
+        item["search_probed"] = False
+
+        self.assertFalse(is_cache_item_valid(build_record(source, 0), item,
+                                             now=NOW, min_search=True))
+
+    def test_search_probed_cache_is_reused(self) -> None:
+        """成对的另一条：验过搜索的缓存照常复用。
+
+        **必须与上一条同时存在**——单独任何一条都拦不住「方向写反」（把
+        「本次要求更高才作废」写成「缓存要求更高才作废」），两条一起才看得出来。
+        """
+        source = make_source()
+        item = make_cache_item(source, Health.OK, "2026-08-21 10:00:00")
+        item["probe_depth"] = 1
+        item["search_probed"] = True
+
+        self.assertTrue(is_cache_item_valid(build_record(source, 0), item,
+                                            now=NOW, min_search=True))
+
+    def test_cache_without_search_requirement_still_reused(self) -> None:
+        """反向：本次不要求验搜索时，没验过搜索的缓存照常复用。
+
+        作废的方向只能是「本次要求更高」。缓存比本次更「强」（验过搜索、本次不验）
+        时也必须照常复用，否则关掉搜索探测这个动作会顺带把缓存全部打回重验。
+        """
+        source = make_source()
+        item = make_cache_item(source, Health.OK, "2026-08-21 10:00:00")
+        item["probe_depth"] = 1
+        item["search_probed"] = False
+
+        self.assertTrue(is_cache_item_valid(build_record(source, 0), item,
+                                            now=NOW, min_search=False))
+
+    def test_source_without_search_rule_is_unaffected(self) -> None:
+        """没有搜索规则的源，即使 min_search=True 也不作废。
+
+        它本来就走不到搜索（check_one 的条件是 health == OK and self.probe_search
+        and record.has_search）。若把它也算作废，这些源**永远命中不了缓存**，
+        每次校验都白打一遍请求。
+        """
+        source = make_source("")        # 无 searchUrl → has_search=False
+        item = make_cache_item(source, Health.OK, "2026-08-21 10:00:00")
+        item["probe_depth"] = 1
+        item["search_probed"] = False
+
+        self.assertTrue(is_cache_item_valid(build_record(source, 0), item,
+                                            now=NOW, min_search=True))
+
+    def test_unreachable_source_is_unaffected(self) -> None:
+        """health 非 OK 的缓存同理不受 min_search 影响（同样走不到搜索）。"""
+        source = make_source()
+        item = make_cache_item(source, Health.AUTH, "2026-08-15 12:00:00")
+        item["probe_depth"] = 1
+        item["search_probed"] = False
+
+        self.assertTrue(is_cache_item_valid(build_record(source, 0), item,
+                                            now=NOW, min_search=True))
+
 
 class CacheCliTests(unittest.TestCase):
     def test_no_cache_disables_read_and_write(self) -> None:
@@ -148,3 +220,9 @@ class CacheCliTests(unittest.TestCase):
 #        → test_shallow_cache_is_not_reused_when_depth_raised 红
 #  M2  深度判定不设 health == OK 前提（对非 OK 的源也要求深度）
 #        → test_shallow_cache_of_failed_source_is_still_reused 红
+#  M3  搜索判定去掉 `and record.has_search` 出口（对无搜索规则的源也要求验过搜索）
+#        → test_source_without_search_rule_is_unaffected 红
+#  M4  搜索判定方向写反（写成「缓存验过搜索、本次不验 → 作废」）
+#        → test_search_unprobed_cache_is_not_reused_when_search_required 红
+#        （**只红这一条**：test_search_probed_cache_is_reused 在写反时照样绿，
+#          这正是两条断言成对存在的理由——单看任何一条都拦不住方向写反）

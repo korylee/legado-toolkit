@@ -56,13 +56,19 @@ DEFAULT_UA = (
 # 常见爬虫/安全拦截状态码
 BLOCKED_STATUS = {403, 429, 401, 503, 406}
 
+# 缓存版本 8：判定口径新增「验过搜索」这一维（见 is_cache_item_valid 的 min_search）。
+# 现在库里的条目没有 search_probed 字段，item.get("search_probed") 为假——对开着
+# 搜索探测的用户来说，所有历史 OK 缓存都会被判为"没验过搜索"而重验。这正是想要的，
+# 但必须**显式**发生：只靠"字段缺失"这个巧合的话，将来若给旧条目补回该字段就会
+# 静默失效，而且很难看出是版本号的锅。
+#
 # 缓存版本 7：反爬特征词表删掉裸 "cloudflare"（它匹配的是 Cloudflare 的邮箱保护
 # 脚本，站点当 CDN 用就会被注入，与反爬无关）。判定口径变了——原来被判 auth 的源
 # 现在会判 ok，旧缓存里的 health 是旧逻辑的产物，必须整体作废。
 # 不作废的后果不是"结果旧一点"，而是**修了等于没修**：那条源的 auth 会在 7 天
 # TTL 内一直命中缓存，看起来像修复失效。（v6 是同一理由：正文/目录判定收拢到
 # core.quality，底线改为「非空即通过」。）
-CACHE_VERSION = 7
+CACHE_VERSION = 8
 
 #: 缓存有效期（天）：可用源留久一点，其余状态一律短 TTL——「待验证」「需代理复检」
 #: 长期停在旧结论上，比多校验几次更糟。
@@ -225,17 +231,19 @@ def is_cache_item_valid(
     item: Dict[str, Any],
     now: Optional[datetime] = None,
     min_depth: int = 1,
+    min_search: bool = False,
     ttl_ok: int = DEFAULT_TTL_OK,
     ttl_other: int = DEFAULT_TTL_OTHER,
 ) -> bool:
     """判断缓存是否仍可用于该书源。
 
     复用必须满足：缓存版本正确、规则指纹一致、校验时间有效且不在未来；
-    若本次要跑深度验证，缓存还必须是**在同等或更深深度下**产出的。
+    若本次要跑验证，缓存还必须是**在同等或更强探测能力下**产出的——探测能力有两根
+    轴，``min_depth``（探得多深）与 ``min_search``（探没探搜索），两者都要判。
 
-    ``min_depth`` 只有校验链路（``AsyncChecker.run``）需要传配置深度。其余调用方
-    ——CLI 的 organize/report、cache_parity 的两库比对——只是拿缓存算标签和报告，
-    重跑不了探测，保持默认 1 即「不因深度作废」。
+    ``min_depth`` / ``min_search`` 只有校验链路（``AsyncChecker.run``）需要传本次
+    的配置。其余调用方——CLI 的 organize/report、cache_parity 的两库比对——只是拿
+    缓存算标签和报告，重跑不了探测，保持默认（1 / False）即「不因探测能力作废」。
     """
     if item.get("v") != CACHE_VERSION:
         return False
@@ -265,6 +273,16 @@ def is_cache_item_valid(
     if health == Health.OK:
         if int(item.get("probe_depth", 1) or 1) < min_depth:
             return False
+    # 「探没探搜索」是另一根轴，而且它是深度验证的**前提**（搜索没命中就没有目录与
+    # 正文可验）。判据方向只能是「本次要求更高才作废」：缓存比本次更"强"（验过搜索、
+    # 本次不验）时照常复用，否则关掉搜索探测会顺带把缓存全部打回重验。
+    #
+    # 对本来就走不到搜索的源（health 非 OK、无搜索规则）不设此要求：check_one 的
+    # 条件正是 `health == OK and self.probe_search and record.has_search`。对它们也
+    # 要求的话，这些源**永远命中不了缓存**，每次校验都白打一遍请求。
+    if (min_search and health == Health.OK and record.has_search
+            and not item.get("search_probed")):
+        return False
     return True
 
 
@@ -522,6 +540,15 @@ class AsyncChecker:
             "checked_at": record.checked_at,
             "search_hit": record.search_hit,
             "search_response_ms": record.search_response_ms,
+            # 本次是否**真的跑过**搜索探测——注意不是"参数开着"。取或的理由：
+            # search_response_ms 在 _probe_search 里赋值，没跑过时为 0；search_hit
+            # 只在命中时非空。而「跑过但没命中」正是最需要与"没跑"区分开的情况，
+            # 它会让 search_response_ms > 0。
+            #
+            # 唯一的假 False 路径：parse_search_request / _request 每次都在抛异常，
+            # 关键词耗尽后返回 None，此时两值都是 0。这个方向是**对的**（下次保守
+            # 重探、多打一次请求），别把它"修正"成严格相等
+            "search_probed": bool(record.search_response_ms or record.search_hit),
             "quality_stars": record.quality_stars,
             "quality_tags": record.quality_tags,
             # 深度验证字段
@@ -964,7 +991,10 @@ class AsyncChecker:
         for r in records:
             # 键规范化后再查：缓存两侧的口径见 load_cache 的注释
             item = cache.get(_normalize_url(r.url))
+            # min_search 直接用 probe_search：两者在这里语义重合（"本次要不要
+            # 验搜索"），没必要再开一个构造参数让调用方去对表
             if item and is_cache_item_valid(r, item, min_depth=self.probe_depth,
+                                            min_search=self.probe_search,
                                             ttl_ok=self.cache_ttl_ok,
                                             ttl_other=self.cache_ttl_other):
                 restore_from_cache(r, item)

@@ -23,6 +23,7 @@ import tempfile
 import unittest
 
 from core.checker import AsyncChecker
+from core.loader import _normalize_url
 from core.models import build_record
 from core.store import Store
 
@@ -50,6 +51,12 @@ def checked(url: str = "https://a.example/", health: str = "ok"):
     rec = build_record(make_source(url), 0)
     rec.health = health
     rec.quality_stars = 4
+    # 搜索响应时间非 0 = 这条缓存是**带着搜索探测**写下的（search_probed=True）。
+    # 必须给：run() 默认 probe_search=True，而 is_cache_item_valid 会把「本次要验
+    # 搜索、缓存却没验过」的条目作废。不给的话本文件所有用它的用例都会**因为错误
+    # 的理由**通过——最典型的是 test_changed_rules_invalidate_the_cache，它守的是
+    # 「指纹不符必须重校」，却会变成「没验过搜索所以不复用」，指纹那条断言白写
+    rec.search_response_ms = 120
     rec.checked_at = _just_checked()
     return rec
 
@@ -119,6 +126,25 @@ class StoreBackendSaveTests(unittest.TestCase):
         ck.save_cache_append(checked(health="timeout"))
         ck.close()
         self.assertEqual(self._rows(), [])
+
+    def test_search_probed_survives_the_store_roundtrip(self):
+        """search_probed 必须真的落库、读得回来。
+
+        **这是 v8 那根判定轴的命脉**。item 里写了而 checks 表没有这一列的话，
+        checks_map 读回来恒为 None → 所有 OK 源被判「没验过搜索」→ 每次校验都重新
+        发请求。表现是"校验跑完了、状态也变了"，完全看不出异常，只是慢——而慢在
+        3861 条上是几分钟的事，很难归因到这里。
+        """
+        ck = AsyncChecker(concurrency=1, use_store=True)
+        ck.save_cache_append(checked())          # checked() 带着搜索响应时间
+        ck.close()
+
+        ck2 = AsyncChecker(concurrency=1, use_store=True)
+        cache = ck2.load_cache()
+        ck2.close()
+        item = cache.get(_normalize_url("https://a.example/"))
+        self.assertIsNotNone(item)
+        self.assertTrue(item["search_probed"])
 
 
 class CacheReuseTests(unittest.TestCase):
@@ -202,6 +228,9 @@ class CacheReuseTests(unittest.TestCase):
 #  M1  run() 里的保存条件改回 `if self.cache_dir:`
 #        → test_run_persists_when_only_the_store_backend_exists 红
 #  M2  save_cache_append 把 os.makedirs 挪回 use_store 分支之前
+#  M3  Store.save_checks 的 INSERT 里 search_probed 写死 0（= 写了但没落库）
+#        → test_search_probed_survives_the_store_roundtrip 与
+#          test_second_run_reuses_cache_and_sends_nothing 红
 #        → test_save_writes_to_store_without_cache_dir 红（TypeError）
 #  M3  store 写失败的 except 改回 `pass`（不计数）
 #        → test_store_write_failure_is_counted_not_swallowed 红
