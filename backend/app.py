@@ -7,6 +7,7 @@
 # 约定：所有耗时操作都走 /api/jobs，不要新增同步的慢接口。
 import mimetypes
 import pathlib
+from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI
@@ -15,10 +16,24 @@ from fastapi.staticfiles import StaticFiles
 from backend import netinfo
 from backend.api import (export, feed, imports, jobs, llm, ops, rules,
                          settings, sources)
+from backend.jobs import runner
 from core.store import Store
 
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    # 收尾上一次进程留下的任务（崩溃、强杀、热重载都会留下）。
+    # **位置就是这段逻辑的一部分**，三个候选只有这个对：
+    #   - 模块级 import：测试与 CLI 顺手 import 一下就会写库
+    #   - backend/__main__.py：--reload 下跑在监督进程里，热重载重启子进程时不会执行
+    #   - lifespan：跑在**服务进程**里，每次启动/重启都执行一次
+    runner.recover_orphans()
+    yield
+
+
 app = FastAPI(title="Legado 书源管理", version="0.1.0",
-              description="候选主库 + 校验缓存 + 失效归因 + AI 修复")
+              description="候选主库 + 校验缓存 + 失效归因 + AI 修复",
+              lifespan=_lifespan)
 
 app.include_router(sources.router, prefix="/api/sources", tags=["sources"])
 app.include_router(jobs.router, prefix="/api/jobs", tags=["jobs"])

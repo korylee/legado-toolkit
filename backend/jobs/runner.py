@@ -61,6 +61,28 @@ async def _run(job_id: str, kind: str, payload: Dict[str, Any]) -> None:
         TASKS.pop(job_id, None)
 
 
+def recover_orphans() -> int:
+    """把上次进程留下的孤儿任务收尾（标成 failed），返回收了几条。
+
+    **必须在服务进程启动时调一次**：任务活在进程内的 asyncio task 里（``TASKS``），
+    进程一死它们就没了，而库里那行还写着 running/pending。调用点的选择见
+    ``backend/app.py`` 的 lifespan——**别挪到模块级 import**（测试和 CLI 顺手 import
+    一下就会写库），**也别挪进 ``__main__.py``**（--reload 下那里跑的是监督进程，
+    热重载重启子进程时不会执行，恰好漏掉最常发生的那种情况）。
+
+    **不静默**：收掉几条要说出来，否则「重启后任务列表里那条变红了」在日志里
+    没有任何痕迹。判据与假定见 ``Store.fail_orphan_jobs``。
+    """
+    st = Store()
+    try:
+        n = st.fail_orphan_jobs()
+    finally:
+        st.close()
+    if n:
+        print("警告: 上次进程结束时 %d 个任务没写终态，已标为 failed" % n, flush=True)
+    return n
+
+
 def cancel(job_id: str) -> bool:
     t = TASKS.get(job_id)
     if not t:

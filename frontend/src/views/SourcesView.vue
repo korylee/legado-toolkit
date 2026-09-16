@@ -377,6 +377,17 @@ async function applyBatchTags(mode) {
  *
  * 口径与任务抽屉里的摘要同源（都读 result_json），不另算一份。
  */
+/**
+ * 任务失败的原因（后端写进 `result_json` 的 `error`）。
+ *
+ * **失败原因不能只显示状态名**：后端为失败任务写的是 `{"error","trace"}`，
+ * 其中「进程重启，任务没写终态（崩溃或被强杀）」这类原因（见 Store.fail_orphan_jobs）
+ * 是用户唯一能看到的解释——直接显示 "failed" 等于把原因丢了。
+ */
+function jobFailReason(resultJson) {
+  try { return JSON.parse(resultJson || "{}").error || ""; } catch (e) { return ""; }
+}
+
 function parseCheckResult(resultJson) {
   let r = null;
   try { r = resultJson ? JSON.parse(resultJson) : null; } catch (e) { return null; }
@@ -452,7 +463,8 @@ async function checkSources(urls = []) {
           // 「任务失败」，任务很可能早就跑完了，只是我们没收到
           ElMessage.error(data.error || "任务状态获取失败，请刷新页面");
         } else {
-          ElMessage.error("校验任务失败: " + (data.status || "unknown"));
+          ElMessage.error("校验任务失败：" + (jobFailReason(data.result_json)
+                                            || data.status || "unknown"));
         }
         // 任务收尾后让抽屉那份列表/徽标跟上
         jobsRef.value?.refresh();

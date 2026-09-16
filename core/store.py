@@ -1064,6 +1064,33 @@ class Store:
         return self.conn.execute("SELECT COUNT(*) AS c FROM checks").fetchone()["c"]
 
     # ---------------------------------------------------------------- jobs
+    def fail_orphan_jobs(self) -> int:
+        """把**上次进程留下的**非终态任务标成 failed，返回改了几条。
+
+        任务活在进程内的 asyncio task 里（``backend/jobs/runner.py`` 的 ``TASKS``），
+        进程一死它们必然不存在——所以「本进程启动时，库里任何非终态任务都是孤儿」
+        是**确定性**的，没有假阳性。判据不能用 `updated_at` 超时来找补：进程活着
+        但卡在一个慢源上（超时 8s × 最多 5 个请求），和进程死了长得一模一样。
+
+        `sweep_jobs` 那套 TTL 最终也能收掉这些行，但要等 7 天（那条注释里管它们叫
+        **僵尸行**）。这 7 天里任务抽屉一直显示它在跑、「任务」按钮的徽标也一直挂着
+        ——实测崩溃那次就是这样：一条 check 永远停在 500/3861。
+
+        **调用点只能是「服务进程启动」**，见 ``backend/jobs/runner.recover_orphans``
+        （它说明了为什么不能放模块级 import、也不能放 ``backend/__main__.py``）。
+
+        **假定一个库只有一个后端进程**（单机单用户）。真同时起两个打同一个库时，
+        后起的会把先起的在跑任务标成 failed——任务本身还在跑，结束时会把真实终态
+        写回去。属于短暂的显示错乱，不是数据损坏。
+        """
+        with self.conn:
+            cur = self.conn.execute(
+                "UPDATE jobs SET status = 'failed', result_json = ?, updated_at = ?"
+                " WHERE status IN ('running', 'pending')",
+                (json.dumps({"error": "进程重启，任务没写终态（崩溃或被强杀）"},
+                            ensure_ascii=False), now()))
+        return cur.rowcount or 0
+
     def sweep_jobs(self) -> int:
         """清掉过期的任务，返回清了几条。**在建新任务时顺带扫**（对齐 export.py 的
         `sweep_exports`，不另开定时器）。
@@ -1071,6 +1098,8 @@ class Store:
         **跑着的任务不特殊保护**：过期时间是 7 天，一个校验任务跑不了 7 天。
         真正会留下的是**僵尸行**——服务端重启后状态永远停在 running/pending、
         再也没人推进它。给 running 开豁免，恰恰会让这些僵尸永远清不掉。
+        （僵尸行的**即时**收尾在 `fail_orphan_jobs`：进程一启动就把它们标成 failed，
+        不用等这 7 天。）
         """
         with self.conn:
             cur = self.conn.execute(

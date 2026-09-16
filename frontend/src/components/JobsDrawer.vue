@@ -67,6 +67,12 @@ function watchJob(jobId) {
 const details = ref({});
 
 function buildDetail(r) {
+    if (r && r.error) {
+        // 失败的任务：后端写的是 {"error","trace"}。**不能返回 null**——那会让详情
+        // 显示「没有可展示的结果」，而这里恰恰是最需要说清原因的地方（比如
+        // 「进程重启，任务没写终态」）。trace 不带：几百行堆栈塞进抽屉没人看
+        return { lines: [], warns: [r.error], changedItems: [], changedTotal: 0 };
+    }
     if (!r || typeof r.checked !== "number") return null;   // 非校验任务（如 add）
     const cached = r.cached || 0;
     const fetched = typeof r.fetched === "number" ? r.fetched : r.checked - cached;
