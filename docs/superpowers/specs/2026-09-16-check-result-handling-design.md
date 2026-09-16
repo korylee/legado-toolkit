@@ -258,7 +258,19 @@ frontend/src/views/SourcesView.vue:510   @selection-change="(v) => (selected = v
   - 点击后调 `listSourceUrls(query)` 拿回全部 URL，写入 `selected`
   - 移动端批量条（`v-if="isMobile"` 那段）同样加
 
-**关于 `selected` 的内容**：现在是表格行对象数组（`selected.value.map((r) => r.source_url)`），"全选"拿不到行对象。要把 `selected` 的语义统一成 **URL 字符串数组**，用 `selectedUrls` 判断行是否选中。这会动到 `isSelected` / `toggleCard` / `batchTags` 几处——**是本项里改动面最大的地方，单独一步做**。
+**关于 `selected` 的内容**：现在是表格行对象数组（`selected.value.map((r) => r.source_url)`），"全选"拿不到行对象。要把 `selected` 的语义统一成 **URL 字符串数组**，用 `selectedUrls` 判断行是否选中。**是本项里改动面最大的地方，单独一步做**，改之前先把消费者列全：
+
+| 位置 | 现在的用法 | 改成 URL 数组后 |
+|---|---|---|
+| `SourcesView.vue:179` `isSelected` | 走 `selectedUrls` 查 url | 不受影响 |
+| `SourcesView.vue:182-184` `toggleCard` | 存/删**行对象** | 存/删 url |
+| `SourcesView.vue:203` `removeSelected` | `.map((r) => r.source_url)` | 直接用 |
+| `SourcesView.vue:213` `applyBatchTags` | 同上 | 直接用 |
+| `SourcesView.vue:456` `openCheckDialog` | 同上 | 直接用 |
+| `SourcesView.vue:510` `@selection-change` | el-table 给**行对象数组** | 在这里转成 url |
+| `SourcesView.vue:637` → **`ExportDrawer.vue:75`** | `.map((r) => r.source_url)` | 直接用 |
+
+**最后一行是最容易漏的一处**：`ExportDrawer` 只认 `props.selected` 的 `.length` 和 `.map((r) => r.source_url)`。语义换成字符串数组后，`.length` 照常（`:130,136` 显示「已勾选 N 条」），而 `.source_url` 对字符串恒为 `undefined`——**界面显示勾选了 N 条，导出出去的却是空列表，不报错、界面上看不出来**。改 `selected` 语义时必须一并改它。
 
 - 回收站的批量恢复（`TrashDrawer`）可顺带对齐，但**不在本次范围**（它已有自己的实现）。
 
@@ -303,6 +315,7 @@ frontend/src/views/SourcesView.vue:510   @selection-change="(v) => (selected = v
 | `backend/api/ops.py` | 跑前快照 + 变化统计，写进返回值 |
 | `frontend/src/api/sources.js` | `listSourceUrls`；`deleteSources` 改 POST |
 | `frontend/src/views/SourcesView.vue` | 「选中全部 N 条」；`selected` 语义改为 URL 数组；摘要展示 |
+| `frontend/src/components/ExportDrawer.vue` | 跟着 `selected` 改 URL 数组（`.map((r) => r.source_url)` 会静默变 `undefined`） |
 | `frontend/src/components/JobsDrawer.vue` | 展示任务结果摘要 |
 | `tests/test_checker_cache.py` | 5 条缓存判定用例 + 变异记录 |
 | `tests/` | 变化统计的用例（`test_check_job_settings.py` 或新建） |
@@ -344,13 +357,17 @@ frontend/src/views/SourcesView.vue:510   @selection-change="(v) => (selected = v
 
 ## 十一、实施顺序与回退
 
-1. **① 缓存判定**（独立、可单独回退）
-   - 先做，因为它会污染**即将发生的第一次全量校验**的结论
+1. **③ 变化摘要**（**不依赖 ①**，先做）
+   - 论证：它比的是 `prev` 快照里的 `health` 与本次 `r.health`，与缓存有效性判定**无关**——缓存命中的源 old==new 天然不进 `changed`，① 修不修都不改变这个性质。原稿把它排在 ① 之后、理由是"依赖 ① 的口径稳定"，不成立。
+   - 收益/成本最高：3861 条首次全量里唯一有价值的信息就是"哪些变了"，而后端只有约 20 行。
+   - 顺带在真实数据上量一次 `checks_map()` 的耗时——① 的实现要在同一条数据上跑。
+2. **① 缓存判定**（独立、可单独回退）
+   - 成本极低（约 30 行 + 5 用例），修的是缓存不变量里缺的一根轴。
+   - **紧迫性要说准**：默认参数（`probe_search=True`）下走不到 1.2 那个场景，必须先把 `probe_search` 关掉、再打开才触发。所以"必须先做否则污染第一次全量"这个说法偏强——它是纯正确性修复，不是上线阻塞项。另注：1.2 的静默失效只在 `probe_depth=1`（默认）时发生，深度 ≥2 时 `min_depth` 会兜住。
    - 回退：改回 `CACHE_VERSION`（但已写入的 v8 缓存会被判为过期，行为是"重新校验"，安全方向）
-2. **② 全选 + 批量删除改 POST**（分两步：先后端接口，再前端）
-   - `selected` 语义改动面较大，单独一步，改完立刻手工验一遍勾选/取消/批量加标签
-3. **③ 变化摘要**（依赖 ① 的口径稳定）
-   - 后端算 + 前端展示可分两步
+3. **② 全选 + 批量删除改 POST**（分两步：先后端接口，再前端）
+   - `selected` 语义改动面较大（见 7.2 的消费者表，含 `ExportDrawer.vue`），单独一步，改完立刻手工验一遍勾选/取消/批量加标签/**导出勾选**。
+   - 触发阈值比原稿估计的更低：`encodeURIComponent` 会把 `://` 撑成 `%3A%2F%2F`，而 h11 的请求行上限约 16KB，**实际撞墙可能在一两百条**，不是 800 条。
 
 每步一个提交。
 

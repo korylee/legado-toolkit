@@ -1,10 +1,11 @@
 <script setup>
 import { ref, reactive, computed, nextTick, watch, onMounted, onUnmounted } from "vue";
-import { ElMessage, ElMessageBox } from "element-plus";
+import { ElMessage, ElMessageBox, ElNotification } from "element-plus";
 import { Search, Plus, Upload, Download, Delete, Filter, Refresh, Monitor } from "@element-plus/icons-vue";
 import { listSources, listGroups, patchTags, deleteSources, listTags, getStats } from "../api/sources";
 import { api, subscribeJob } from "../api/client";
 import { ensureTagMeta, isQualityTag, splitTags, tagOfType, sourceTypes } from "../utils/tags";
+import { describeChanges } from "../utils/health";
 import { useMobile } from "../composables/useMobile";
 import SourceEditDialog from "../components/SourceEditDialog.vue";
 import TrashDrawer from "../components/TrashDrawer.vue";
@@ -246,6 +247,26 @@ function reportCheckResult(resultJson) {
   // 写库失败要单独报：结果没落库时列表状态不会变，而列表上完全看不出来
   if (r.save_failures) {
     ElMessage.error(r.save_failures + " 条结果没能写入管理库，列表状态不会更新");
+  }
+  // 「这次校验改变了什么」单独用 Notification 报：ElMessage 三秒就没了，而这是
+  // 列表状态变动的**唯一**解释——错过就只能看见列表莫名其妙不一样了。
+  // 「首次有结论」与「变成 X」分开：库里绝大多数源从未校验过，第一次全量之后
+  // 「新增可用 2000 条」不是「比上次好」，混在一起这个数字就失去意义
+  const t = r.transitions || {};
+  const changes = describeChanges(t.changed);
+  const firstChecked = t.first_checked || 0;
+  const parts = [];
+  if (changes.length) parts.push("相对上次变化：" + changes.join("、"));
+  else if (!firstChecked) parts.push("无状态变化");
+  // 首次校验时不报「无状态变化」——那不是没变，是以前没有可比的对象
+  if (firstChecked) parts.push("其中 " + firstChecked + " 条首次有结论");
+  if (parts.length) {
+    ElNotification({
+      title: "校验结果",
+      message: parts.join("；"),
+      type: changes.length ? "warning" : "success",
+      duration: 8000,   // 比 ElMessage 的 3 秒久：这批数字是要看第二眼的
+    });
   }
   return true;
 }

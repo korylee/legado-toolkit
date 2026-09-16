@@ -56,6 +56,11 @@ class FakeStore:
     def get_source(self, url):
         return None
 
+    def checks_map(self):
+        # run_check_job 会在跑之前读一次上一版结论（供变化摘要）。
+        # 替身返回空 = 没有历史，本次全部算「首次有结论」
+        return {}
+
     def update_job(self, *args, **kwargs):
         pass
 

@@ -3,9 +3,37 @@
 from typing import Any, Dict
 
 from core import settings_store
+from core.loader import _normalize_url
 from core.store import Store
 
 from backend.jobs import runner
+
+
+def summarize_transitions(prev: Dict[str, Dict[str, Any]],
+                          results) -> Dict[str, Any]:
+    """统计本次校验相对**上一次结论**的变化，供任务结果展示。
+
+    ``prev`` 是跑之前读的 ``Store.checks_map()``（``{url: item}``，键已规范化），
+    ``results`` 是本次的 ``BookSourceRecord`` 列表。
+
+    **两侧的 URL 必须用同一套规范化再比**：``prev`` 的键在写库时就归一了，而
+    ``results`` 里的 ``r.url`` 是抓取时的原文（实测 20.7% 的源带尾斜杠）。
+    不归一的话那些源会被当成「首次有结论」，把没变的说成变了。
+
+    「首次有结论」与「变成 X」**分开计**：库里绝大多数源从未校验过，第一次全量
+    之后「新增可用 2000 条」不代表比上次好，那是首次。
+    """
+    first_checked = 0
+    changed: Dict[str, int] = {}
+    for r in results:
+        old = (prev.get(_normalize_url(r.url)) or {}).get("health")
+        if old is None:
+            # 之前没有校验记录，这次有了结论 → 首次，不进 changed
+            first_checked += 1
+        elif old != r.health:
+            # 只统计**变了**的，按新的 health 分桶
+            changed[r.health] = changed.get(r.health, 0) + 1
+    return {"first_checked": first_checked, "changed": changed}
 
 
 @runner.register("check")
@@ -32,6 +60,11 @@ async def run_check_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict
     st.update_job(job_id, total=len(srcs))
 
     records = [build_record(s, i) for i, s in enumerate(srcs)]
+    # 上一版结论的快照，**必须在 run() 之前读**：跑完之后新结论就落库了，
+    # 那时再读，每条源都是 old == new，摘要会永远报「无状态变化」——看起来一切
+    # 正常，却把这次改动要回答的问题答错了。checks_map 的键是规范化的，
+    # 比对时两侧都要归一（见 summarize_transitions）
+    prev_checks = st.checks_map()
     # 取值顺序：本次覆盖 > 全局设置 > 内置默认。三级都在 resolve_check 里完成，
     # 这里**不要**再出现 payload.get("concurrency", 20) 这类写法——默认值散落在
     # 调用点是漂移的源头（ops.py 曾写 20、CLI 写 50、AsyncChecker 写 50）
@@ -67,6 +100,10 @@ async def run_check_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict
     } for r in results]
     return {
         "checked": len(items),
+        # 相对上一次的变化。与上面「命中多少」同一动机：把看不见的事实报出来。
+        # 「首次有结论」与「变成 X」分开——绝大多数源从未校验过，混在一起
+        # 「新增可用 2000 条」就会被读成「比上次好」
+        "transitions": summarize_transitions(prev_checks, results),
         # 本次实际用的参数。和下面三项同一动机：把看不见的事实报出来——
         # 否则「为什么这次慢得多」「设置改了到底生效没有」在界面上无从回答
         "params": cfg,
