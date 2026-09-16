@@ -7,7 +7,8 @@ Legado 书源整理工具 CLI。
   organize 按内容类型 + 健康状态重建清晰分组
   report   生成 Markdown 诊断报告
   merge    合并/更新多份书源文件（URL 去重）
-  dedupe   按 URL/名称去重
+  dedupe   按 URL/名称去重（写出新文件）
+  dups     找重复源：规则相同、只有地址/署名不同的（只读清单，不改数据）
   add      快捷新增书源：给搜索 URL 自动推断规则生成书源
   import-sources 安全导入外部书源，生成待校验/待审记录
   review-imports 查看或批准外部书源规则冲突
@@ -396,6 +397,49 @@ def cmd_review_imports(args: argparse.Namespace) -> int:
     print(f"待校验新源: {len(pending_sources)} 个")
     for source in pending_sources:
         print(f"- {source.url}（批次 #{source.batch_id}，{source.created_at}）")
+    return 0
+
+
+# ---------------------------------------------------------------- dups
+def cmd_dups(args: argparse.Namespace) -> int:
+    """找重复源（**只读**）：规则完全相同、只有地址/署名/排序/备注不同的那些。
+
+    与 `dedupe` 是两件事：那个按**地址**去重并写出一个新文件，抓不到"地址不同
+    （署名不同）、内容一字不差"的重复；这个按**行为字段**找出来、只出清单，
+    删哪条由人定。默认读**管理库**（你的库在那儿），`-i` 才读 JSON 文件。
+    """
+    from core.dups import find_dup_groups, render_report, summarize
+
+    input_path = getattr(args, "input", "") or ""
+    if input_path:
+        data = load_json_file(input_path)
+        if not isinstance(data, list):
+            print("[错误] 输入不是书源列表", file=sys.stderr)
+            return 1
+        sources, checks, label = data, {}, input_path
+    else:
+        from core.store import Store
+        with Store(readonly=True) as st:      # **只读**：这命令不写库
+            sources = st.export_sources()
+            checks = st.checks_map()
+        label = "管理库（未删除的源 %d 条）" % len(sources)
+
+    groups = find_dup_groups(sources, checks)
+    report = render_report(groups, len(sources), source_label=label)
+    s = summarize(groups, len(sources))
+    headline = ("重复 %d 组 / 涉及 %d 条：同域名可精简 %d 条，"
+                "跨域名 %d 组需逐个看（可能是镜像站）"
+                % (s["groups"], s["same_host_rows"] + s["cross_host_rows"],
+                   s["same_host_redundant"], s["cross_host_groups"]))
+    if args.output:
+        with open(args.output, "w", encoding="utf-8", newline="\n") as f:
+            f.write(report)
+        print(headline)
+        print("清单写到 %s" % args.output)
+    else:
+        print(headline)
+        print()
+        print(report, end="")
     return 0
 
 
@@ -843,6 +887,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_dg.add_argument("-t", "--timeout", type=float, default=8.0)
     p_dg.add_argument("--keywords", nargs="*", default=None, help="搜索探测关键词")
     p_dg.set_defaults(func=cmd_diagnose)
+
+    # dups —— 找重复源（只读清单）
+    p_dp = sub.add_parser(
+        "dups", help="找重复源：规则相同、只有地址/署名不同的（只读，不改数据）")
+    p_dp.add_argument("-i", "--input", help="书源 JSON 数组（缺省读管理库）")
+    p_dp.add_argument("-o", "--output", help="清单写到这个文件（缺省直接打印）")
+    p_dp.set_defaults(func=cmd_dups)
 
     # repair —— AI 规则修复循环（提议 -> 回放验证 -> 重试）
     p_rp = sub.add_parser("repair", help="AI 修复失效规则：抓证据 -> 模型提议 -> 回放验证 -> 重试")

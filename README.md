@@ -217,7 +217,8 @@ python cli/main.py
 | `run` | 一条龙：校验 → 整理 → 报告 |
 | `merge` | 合并/更新多份书源 JSON |
 | `prepare` | 附件优先合并，生成完整候选版/快速使用版 |
-| `dedupe` | 按 URL/名称去重 |
+| `dedupe` | 按 URL/名称去重（写出新文件） |
+| `dups` | 找重复源：规则相同、只有地址/署名不同的（**只读清单**，缺省读管理库） |
 | `sanitize` | 清洗字段类型，兼容 Legado/Gson 导入 |
 | `add` | 给搜索 URL 自动推断规则生成书源 |
 | `import-sources` | 安全导入外部书源，生成待校验/待审记录 |
