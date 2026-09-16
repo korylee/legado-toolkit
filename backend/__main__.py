@@ -13,6 +13,9 @@
 import argparse
 import os
 import pathlib
+from typing import List, Optional, Sequence
+
+from backend import netinfo
 
 _ROOT = pathlib.Path(__file__).resolve().parent.parent
 
@@ -27,6 +30,28 @@ RELOAD_DIRS = ("backend", "core", "services", "cli", "tools")
 
 def _env_flag(name: str) -> bool:
     return os.getenv(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _address_line(host: str, port: int,
+                  ips: Optional[Sequence[str]] = None) -> str:
+    """启动日志里的访问地址。
+
+    `--host 0.0.0.0` 时**不能照搬**：0.0.0.0 不是一个能打开的地址，照搬等于
+    给出一条打不开的链接。要换成局域网 IP——探测与 `GET /api/net` 共用一份，
+    见 backend/netinfo.py。
+
+    **只报第一顺位**：日志里的地址点不动、复制还得手选，列出一串只会让人不知道
+    该用哪个。想挑网卡去导出抽屉里挑，那里的地址是可点可选的。
+
+    `ips` 只为可测性留出注入点，默认现取。
+    """
+    if ips is None:
+        ips = netinfo.local_ips()
+    if host not in ("0.0.0.0", "::"):
+        return "地址：http://%s:%d" % (host, port)
+    if not ips:
+        return "地址：http://127.0.0.1:%d（未探测到局域网 IP，手机访问不了）" % port
+    return "地址：http://%s:%d" % (ips[0], port)
 
 
 def _watchfiles_installed() -> bool:
@@ -58,7 +83,16 @@ def main(argv=None) -> None:
     import uvicorn
 
     args = build_parser().parse_args(argv)
-    print("Legado 后端启动中 -> http://%s:%d  (文档 /docs)" % (args.host, args.port))
+    # 把最终端口回写环境变量：`GET /api/net` 只读 `LEGADO_PORT`，而前端拿它拼
+    # 「手机能访问的地址」和导出二维码。不回写的话，`--port 9000` 起的服务报给
+    # 手机的仍是 8787——二维码扫出来连不上，且没有任何线索
+    os.environ["LEGADO_PORT"] = str(args.port)
+    # 界面与 API 同端口：构建过前端（pnpm build）就一并托管，见 backend/app.py 末尾。
+    # **flush 不是可选项**：输出重定向到文件（`> log.txt`、nohup、注册成服务）时
+    # stdout 是块缓冲的，不 flush 的话这几行要等缓冲区满或进程退出才出现——
+    # 而地址行恰恰是最需要在日志里立刻看到的那条
+    print("Legado 后端启动中（界面 / ，文档 /docs）", flush=True)
+    print("  " + _address_line(args.host, args.port), flush=True)
     if args.reload:
         # 热重载会杀掉进行中的后台任务（校验/修复），别在做全量校验时开着
         print("热重载已开启，监视: %s" % "、".join(RELOAD_DIRS))

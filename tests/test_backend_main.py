@@ -11,7 +11,7 @@ import os
 import unittest
 from unittest import mock
 
-from backend.__main__ import RELOAD_DIRS, _ROOT, build_parser
+from backend.__main__ import RELOAD_DIRS, _ROOT, _address_line, build_parser
 
 _ENV_KEYS = ("LEGADO_HOST", "LEGADO_PORT", "LEGADO_RELOAD")
 
@@ -79,6 +79,35 @@ class ReloadScopeTests(unittest.TestCase):
             self.assertNotIn(name, RELOAD_DIRS)
 
 
+class AddressLineTests(unittest.TestCase):
+    """启动日志里的地址行（`--host 0.0.0.0` 时不能照搬）。
+
+    0.0.0.0 不是一个能打开的地址，照搬等于给出一条打不开的链接；而这行日志正是
+    「手机连不上」时第一个被看的地方。
+    """
+
+    def test_any_host_uses_the_lan_ip(self):
+        self.assertEqual(_address_line("0.0.0.0", 8787, ["192.168.1.5"]),
+                         "地址：http://192.168.1.5:8787")
+
+    def test_only_the_first_nic_is_reported(self):
+        # 装了 WSL / Hyper-V 的机器上会有多张网卡，但日志里的地址点不动、复制
+        # 还得手选，列一串只会让人不知道用哪个；要挑网卡去导出抽屉挑
+        self.assertEqual(_address_line("0.0.0.0", 8787,
+                                       ["192.168.1.5", "172.28.80.1"]),
+                         "地址：http://192.168.1.5:8787")
+
+    def test_explicit_host_is_kept_as_is(self):
+        self.assertEqual(_address_line("127.0.0.1", 9000, ["192.168.1.5"]),
+                         "地址：http://127.0.0.1:9000")
+
+    def test_probe_failure_is_not_papered_over(self):
+        # 探不到就说探不到，不编一个地址出来
+        line = _address_line("0.0.0.0", 8787, [])
+        self.assertIn("127.0.0.1", line)
+        self.assertIn("未探测到", line)
+
+
 # ---------------------------------------------------------------- 变异记录
 # 以下为实测（照项目惯例：改坏 → 跑 → 确认变红 → 改回）。
 #
@@ -86,3 +115,5 @@ class ReloadScopeTests(unittest.TestCase):
 #        → ParserTests.test_env_supplies_defaults / test_no_reload_can_override_env 红
 #  M2  去掉 --no-reload（改回 action="store_true"）
 #        → ParserTests.test_no_reload_can_override_env 红（报 unrecognized arguments）
+#  M3  _address_line 里把 0.0.0.0 判断换成恒真（照搬 host）
+#        → AddressLineTests 红 3 条（地址变成打不开的 http://0.0.0.0:8787）
