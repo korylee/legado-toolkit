@@ -11,12 +11,15 @@ Legado 书源规则回放器（rule replayer）。
 
 支持（对标 Legado 语法）
 ------------------------
-- 规则类型前缀：@css:（默认）、@json:、@html:
+- 规则类型前缀：@css:（默认）、@json:、@js:、@xpath:
+  （**没有 `@html:`**——Legado 的 `@html` 是取值动作，不是前缀，见 RULE_PREFIXES 的注释）
 - 选择器简写：class.xxx -> .xxx 、 id.xxx -> #xxx 、 tag.a -> a
 - @ 链式选择：class.item@tag.a@href
 - 索引：.-1（最后一个）/ .0 / .1
 - 取值动作：text / textNodes / ownText / html / all，或任意属性名
 - 正则后处理：rule##正则##替换（支持 $1 反向引用；只写 ##正则 表示删除匹配）
+  第四段 rule##正则##替换### = **只替换第一个匹配**，且**不命中时给空串**
+  （不是原样保留——这两条都对齐 Legado 的 `replaceRegex`，别当成笔误）
 - JSONPath 子集：$.data.list[*].name
 
 明确不支持（返回 unsupported 原因，调用方应视为「无法验证」而非「校验失败」）
@@ -40,7 +43,11 @@ from typing import Any, List, Optional, Sequence, Tuple
 RULE_PREFIXES = {
     "@css:": "css",
     "@json:": "json",
-    "@html:": "html",
+    # **没有 `@html:`**：Legado 的前缀集只有 @CSS: / @@ / @XPath: / @Json:
+    # （AnalyzeRule.kt:603-618），`@html` 只是**取值动作**（没有冒号）。
+    # 这里曾经把它当合法前缀、返回整份响应体——于是 App 里跑不出东西的规则，
+    # 被我们判成「有正文」，是典型的误放。实测库里 0 条规则用它，删掉零影响。
+    # 别把 `@html`（动作）和 `@html:`（前缀）搞混，区别就在那个冒号。
     "@js:": "js",
     "@xpath:": "xpath",
 }
@@ -86,10 +93,11 @@ class ParsedRule:
     """解析后的规则结构。"""
 
     raw: str = ""
-    kind: str = "css"                       # css / json / html / js / xpath
+    kind: str = "css"                       # css / json / js / xpath（没有 html）
     steps: List[Tuple[str, str]] = field(default_factory=list)
     regex: str = ""                         # ##之后的匹配式
     replacement: Optional[str] = None       # ##之后的替换式（None=未给出）
+    replace_first: bool = False             # 第四段存在（##正则##替换###）= 只替换第一个
     unsupported: str = ""                   # 非空表示无法回放
 
     @property
@@ -157,11 +165,36 @@ def _parse_css_steps(body: str) -> List[Tuple[str, str]]:
     if len(segs) == 1 and _looks_like_attr(segs[0]):
         return [("attr", segs[0])]
 
+    last = len(segs) - 1
     steps: List[Tuple[str, str]] = []
     for i, seg in enumerate(segs):
         # 纯索引段：-1 / 0 / 1
         if re.fullmatch(r"-?\d+", seg):
             steps.append(("index", seg))
+            continue
+        # **末段的取值动作优先于「裸标签名」**。`html` 既是取值动作又是 HTML 标签名，
+        # 而 `_looks_like_attr` 里 `_is_selector_like` 先命中 HTML_TAGS → 它被判成标签，
+        # 于是 `class.a@tag.p@html` 解析成「在 p 里再选一个 html 元素」→ **永远取空**。
+        # 实测语料 1889 条规则用这个形态（`.rd-article-wr@html` 这类）。
+        #
+        # 依据是 Legado 的语义，**但要说准是哪一半**（2026-09-16 订正）：
+        # Legado 对**取值类**规则走 `getStringList` → `getResultList` →
+        # `getResultLast(elements, rules[last])`，而 `getResultLast` 的 `when`
+        # 明确把 text/textNodes/ownText/html/all 当**动作**（其余当属性名）。
+        # 所以取值规则里末段是动作。
+        #
+        # **列表类规则不走这条路**：`chapterList` 用的是 `getElements`
+        # （`BookChapterList.kt:203`），它把**每个 @ 段都当选择器**——
+        # 所以 `class.chapter-list@tag.a` 能跑出章节（实测确认过）。
+        # 两份函数不同，别拿一套去套另一套。
+        #
+        # 本条改动只影响取值规则：实测末段用 `@html` 的规则分布是
+        # `content.content` 2131 / `bookinfo.intro` 356 / …，**没有一条在
+        # chapterList 或 bookList 上**，也就不会踩到 `getElements` 那条路。
+        #
+        # 单段规则（`html` / `text`）不受影响——那时它是选择器，不是动作。
+        if i == last and last > 0 and seg.lower() in VALUE_ACTIONS:
+            steps.append(("attr", seg))
             continue
         if i == 0 or not _looks_like_attr(seg):
             sel, idx = _split_trailing_index(seg)
@@ -225,12 +258,18 @@ def parse_rule(rule: str) -> ParsedRule:
         return pr
 
     body = raw
-    # 1) 剥离 ##正则##替换
+    # 1) 剥离 ##正则##替换[##只替换第一个]
+    #    切法对齐 Legado `AnalyzeRule.kt:760-770`：**不限次数**地 split("##")，
+    #    取前三段，**第四段存在即 replaceFirst**（第四段本身是 `###` 的余料，丢弃）。
+    #    以前这里用 `split("##", 2)`，第四段不识别，于是 `##a##$1###` 的替换式
+    #    被切成 `$1###`——那时不影响结果，因为整条规则在下面被报成 unsupported；
+    #    现在实现了这个形式，切法就必须先对。
     if "##" in raw:
-        parts = raw.split("##", 2)
+        parts = raw.split("##")
         body = parts[0]
         pr.regex = parts[1] if len(parts) > 1 else ""
         pr.replacement = parts[2] if len(parts) > 2 else ""
+        pr.replace_first = len(parts) > 3
     body = body.strip()
 
     # 2) 规则类型前缀
@@ -291,7 +330,7 @@ def parse_rule(rule: str) -> ParsedRule:
         pr.unsupported = "{{}} 模板/变量求值需要 Legado 的 JS 引擎，无法离线回放"
         return pr
 
-    # 3.1) Legado 支持但本项目回放不了的语法（详见设计文档 7.2）
+    # 3.1) Legado 支持但本项目回放不了的语法
     #      必须显式报 unsupported，否则会被静默当成 CSS 选择器跑出空结果，
     #      让试跑把「工具测不了」误判成「源坏了」
     if raw.startswith("@@"):
@@ -312,20 +351,14 @@ def parse_rule(rule: str) -> ParsedRule:
     if re.search(r"\$\d{1,2}", body):
         pr.unsupported = "$n 取列表第 n 项暂未支持"
         return pr
-    if raw.count("##") >= 3:
-        pr.unsupported = "## 第四段（只替换第一个匹配）暂未实现"
-        return pr
+    # 原本这里还有一条 `raw.count("##") >= 3` → 「## 第四段暂未实现」，
+    # 2026-09-16 实现该形式后删除（切法见上面第 1 步，应用见 _apply_regex）。
 
     if pr.kind == "xpath" or bl.startswith("@xpath"):
         pr.unsupported = "XPath 规则需要 Legado 引擎，无法离线回放"
         return pr
     if "||" in body:
         pr.unsupported = "备选规则（||）暂未支持"
-        return pr
-
-    # 4) @html: 直接返回原始响应体
-    if pr.kind == "html":
-        pr.steps = [("raw", "")]
         return pr
 
     # 5) 切分步骤
@@ -497,10 +530,11 @@ def _walk_hits(
     nodes: List[Any] = list(start_nodes)
     hits: List[Any] = []
     for st, val in steps:
-        if st == "raw":
-            # @html: 规则：不做任何选择，整份响应体就是命中内容
-            hits = list(nodes)
-            break
+        # 这里原本有一条 `st == "raw"` 的分支（`@html:` 规则：整份响应体就是命中
+        # 内容），**已随 `@html:` 前缀一起删除**：那个前缀不是 Legado 的语法
+        # （见 RULE_PREFIXES 的注释），删掉之后 `("raw", …)` 这个步骤类型
+        # **没有任何生产者**（`_parse_css_steps` 只产 select/attr/index，
+        # `_parse_json_steps` 只产 key/wild/index），整段是死代码。
         if st == "select":
             nodes = _css_select(nodes, val)
         elif st == "attr":
@@ -536,8 +570,19 @@ def _convert_replacement(repl: str) -> str:
     return re.sub(r"\$(\d+)", lambda m: "\\g<%s>" % m.group(1), repl or "")
 
 
-def _apply_regex(values: Sequence[Any], regex: str, replacement: Optional[str]) -> List[str]:
-    """对取出的值做正则后处理（不匹配则原样保留，与 Legado 一致）。"""
+def _apply_regex(values: Sequence[Any], regex: str, replacement: Optional[str],
+                 replace_first: bool = False) -> List[str]:
+    """对取出的值做正则后处理。
+
+    **两支的行为不同，别当成一支**（Legado `AnalyzeRule.kt:487-497` 的 `replaceRegex`）：
+
+    - 三段式 ``##正则##替换``：全部替换；**不匹配则原样保留**
+    - 四段式 ``##正则##替换###``（``replace_first``）：只替换**第一个**匹配；
+      **不匹配则返回空串**——不是原样保留
+
+    「不匹配就返回空」看着刺眼，但它是 App 的行为，复刻它才谈得上「判定对齐 Legado」；
+    代价是一条正则不命中的规则这一格会变空，在报告里可能表现为判失败。
+    """
     out = ["" if v is None else str(v) for v in values]
     if not regex:
         return out
@@ -549,7 +594,11 @@ def _apply_regex(values: Sequence[Any], regex: str, replacement: Optional[str]) 
     res: List[str] = []
     for s in out:
         try:
-            res.append(pat.sub(repl, s))
+            if replace_first:
+                # count=1：只替第一处；没命中给空串（对齐 Legado 的 `else ""`）
+                res.append(pat.sub(repl, s, count=1) if pat.search(s) else "")
+            else:
+                res.append(pat.sub(repl, s))
         except Exception:
             res.append(s)
     return res
@@ -558,8 +607,9 @@ def _apply_regex(values: Sequence[Any], regex: str, replacement: Optional[str]) 
 def _root_of(content: str, kind: str) -> Any:
     if kind == "json":
         return _loads_json(content)
-    if kind == "html":
-        return content
+    # `kind == "html"` 的分支随 `@html:` 前缀一起删了（那个前缀不是 Legado 的，
+    # 库里 0 条规则用它）。留着的话就是一段「看起来像合法输入」的死代码——
+    # 正是 lessons §十九 说的那种陷阱
     return _make_soup(content)
 
 
@@ -593,7 +643,7 @@ def extract_all_ex(content: str, rule: str) -> Tuple[List[str], str]:
             values = [_json_to_text(n) for n in nodes]
         else:
             values = [_extract_value(n, "text", pr.kind) for n in nodes]
-    return _apply_regex(values, pr.regex, pr.replacement), ""
+    return _apply_regex(values, pr.regex, pr.replacement, pr.replace_first), ""
 
 
 def extract_all_nodes(
@@ -636,7 +686,7 @@ def extract_all_nodes(
             values = [_json_to_text(n) for n in nodes]
         else:
             values = [_extract_value(n, "text", pr.kind) for n in nodes]
-    values = _apply_regex(values, pr.regex, pr.replacement)
+    values = _apply_regex(values, pr.regex, pr.replacement, pr.replace_first)
 
     # 命中节点 -> HTML 片段：DOM 节点取 outerHTML，JSON 节点退化为文本
     hits: List[str] = []
@@ -644,12 +694,6 @@ def extract_all_nodes(
         html = str(node) if _is_tag(node) else _json_to_text(node)
         hits.append(html[:max_chars] if max_chars > 0 else html)
     return values, hits, ""
-
-
-def extract_first(content: str, rule: str) -> str:
-    """取第一条结果（取不到返回空串）。"""
-    vals = extract_all(content, rule)
-    return vals[0] if vals else ""
 
 
 def parse_list(content: str, rule: str) -> Tuple[List[Any], str]:
@@ -687,8 +731,6 @@ def parse_field(node: Any, rule: str) -> List[str]:
     if pr.unsupported or not pr.steps:
         return []
     kind = "css" if _is_tag(node) else "json"
-    if pr.kind == "html":
-        return [str(node)]
     try:
         nodes, values, err = _walk([node], pr.steps, kind)
     except Exception:
@@ -700,7 +742,7 @@ def parse_field(node: Any, rule: str) -> List[str]:
             values = [_json_to_text(n) for n in nodes]
         else:
             values = [_extract_value(n, "text", kind) for n in nodes]
-    return _apply_regex(values, pr.regex, pr.replacement)
+    return _apply_regex(values, pr.regex, pr.replacement, pr.replace_first)
 
 
 def parse_field_first(node: Any, rule: str) -> str:
@@ -709,12 +751,13 @@ def parse_field_first(node: Any, rule: str) -> str:
     return vals[0] if vals else ""
 
 
-# ------------------------------------------------------------------ 兼容旧接口
-
-def apply_css_rule(content: str, rule: str) -> List[str]:
-    """``add_source.apply_css_rule`` 的兼容实现（语义更接近 Legado）。"""
-    return extract_all(content, rule)
-
+# 这里原本有个「兼容旧接口」段，只剩 `apply_css_rule` / `extract_first` 两个转发
+# 函数。两者都已删除：
+#   - `apply_css_rule`：三个调用点（checker / verify / add_source）用的都是
+#     `from core.rules.replayer import extract_all as apply_css_rule` 这个**别名**，
+#     从来没人调 replayer 自己的那个——它注释里写的「add_source 仍在用」是错的
+#   - `extract_first`：全仓库零调用
+# 转发函数的价值是「让旧调用点不用改」，既然没有旧调用点，它只是多一层间接。
 
 def looks_like_image_rule(rule: str) -> bool:
     """启发式判断「这条正文规则产出的是图片 URL」。"""
@@ -735,18 +778,18 @@ def image_ratio(values: Sequence[str]) -> float:
         return 0.0
     hits = 0
     for v in vals:
-        if _IMG_EXT_RE.search(v):
-            hits += 1
-        elif v.lower().startswith(("http", "//", "/")) and "<img" in v.lower():
-            hits += 1
-        elif "<img" in v.lower():
+        # 原本是三支（图片扩展名 / URL 前缀且含 <img> / 含 <img>）：三支体完全相同，
+        # 中间那支的条件又是第三支的子集，合成一支。
+        # **不是「后一支不可达」**——`<img src=…>` 这种不以 URL 前缀开头的值
+        # 只有第三支接得住（实测 image_ratio(['<img src=x>']) == 1.0）
+        if _IMG_EXT_RE.search(v) or "<img" in v.lower():
             hits += 1
     return hits / len(vals)
 
 
 __all__ = [
     "ParsedRule", "parse_rule", "rule_supported", "rule_kind",
-    "extract_all", "extract_all_ex", "extract_all_nodes", "extract_first",
+    "extract_all", "extract_all_ex", "extract_all_nodes",
     "parse_list", "parse_field", "parse_field_first",
-    "apply_css_rule", "looks_like_image_rule", "image_ratio",
+    "looks_like_image_rule", "image_ratio",
 ]

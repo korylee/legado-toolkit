@@ -22,11 +22,11 @@ import json
 import os
 import re
 import sys
-from collections import Counter, defaultdict
+from collections import Counter
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import quote
 
-from core.models import BOOK_SOURCE_TYPE_NAMES, build_record
+from core.models import BOOK_SOURCE_TYPE_NAMES, Health, build_record
+from core.tags import extract_user_tags_from_group
 
 # ------------------------------------------------------------------ 类型信号表
 
@@ -56,9 +56,24 @@ def _host(url: str) -> str:
 
 
 def _text_of(source: Dict[str, Any]) -> str:
+    """参与判定的文本：名称 + 注释 + group 里的**用户标签**。
+
+    group 必须只取用户标签。系统标签（`📖小说` / `🎨漫画` / `待验证` …）是
+    `organizer.group_title` 按 `bookSourceType` 生成的，而 `bookSourceType` 正是
+    本模块要判的东西——读整个 group 会形成循环：
+
+        类型错(默认 0) → group 写成「📖小说」 → 命中 "小说" → novel +3
+                      → 单独就到阈值 3 → 再判成小说   ↺
+
+    错的标签就此固化。实测：命中 "小说" 的 3540 条源里 3506 条的 group 带系统
+    类型标签，剥掉后 119 条改判（32 条从「小说」纠正为「漫画」）。
+
+    用户标签要留着——那是人主动打的真信号，`extract_user_tags_from_group`
+    负责把两者分开（`漫画` 二字不算系统标签，`🎨漫画` 才算）。
+    """
     parts = [
         str(source.get("bookSourceName", "") or ""),
-        str(source.get("bookSourceGroup", "") or ""),
+        " ".join(extract_user_tags_from_group(source.get("bookSourceGroup", ""))),
         str(source.get("bookSourceComment", "") or ""),
     ]
     return " ".join(parts)
@@ -77,7 +92,6 @@ def infer_type_static(source: Dict[str, Any]) -> Tuple[int, int, int, List[str]]
     content = source.get("ruleContent") or {}
     toc = source.get("ruleToc") or {}
     content_rule = str(content.get("content", "") or "")
-    image_rule = str(content.get("image", "") or "")
     chapter_rule = str(toc.get("chapterUrl", "") or "")
 
     manga = 0
@@ -91,9 +105,10 @@ def infer_type_static(source: Dict[str, Any]) -> Tuple[int, int, int, List[str]]
     if any(h in low_text for h in MANGA_TEXT_HINTS):
         manga += 3
         why.append("名称/分组含漫画特征")
-    if image_rule.strip():
-        manga += 3
-        why.append("有 ruleContent.image 图片规则")
+    # 这里原本还有一条 `ruleContent.image` 非空 → 漫画 +3 的信号，2026-09-16 删除。
+    # 那个字段 Legado 的 ContentRule 里没有，本项目也从不写：实测库里的 3861 条源，
+    # 非空的是 0 条。所以它从来没加上过分，是死代码——**别再按 image 字段加信号**，
+    # 要判图片源就看 content 规则本身（下一行的 looks_like_image_rule）。
     if content_rule and looks_like_image_rule(content_rule):
         manga += 2
         why.append("正文规则取的是图片")
@@ -109,7 +124,7 @@ def infer_type_static(source: Dict[str, Any]) -> Tuple[int, int, int, List[str]]
     if any(h in low_text for h in NOVEL_TEXT_HINTS):
         novel += 3
         why.append("名称/分组含小说特征")
-    if content_rule and not looks_like_image_rule(content_rule) and not image_rule.strip():
+    if content_rule and not looks_like_image_rule(content_rule):
         novel += 2
         why.append("正文规则取的是文本")
 
@@ -133,14 +148,15 @@ HOMEPAGE_MANGA_PATH = re.compile(r"/(manhua|comic|manga|dm|mh)/", re.I)
 HOMEPAGE_NOVEL_PATH = re.compile(r"/(novel|book|read|chapter|xiaoshuo)/", re.I)
 
 
-async def _get(session, url, timeout=8.0, method="GET", headers=None):
+async def _get(session, url, timeout=8.0, method="GET", headers=None, body=""):
     """返回 (status, text, err)。err 见 checker.classify_transport_error。"""
     import aiohttp
 
     h = headers or {}
     try:
         async with session.request(method, url, headers=h,
-                                   timeout=aiohttp.ClientTimeout(total=timeout)) as resp:
+                                   timeout=aiohttp.ClientTimeout(total=timeout),
+                                   data=body if body else None) as resp:
             body = await resp.read()
             try:
                 text = body.decode("utf-8", errors="replace")
@@ -230,7 +246,8 @@ ACTION_OF = {
 
 async def diagnose_source(session, source, timeout=8.0, keywords=None):
     # 对单个书源做归因探测：域名可达性 -> 反爬特征 -> 类型信号 -> 搜索页可解析性
-    from core.checker import parse_search_request, build_domain_url, DEFAULT_UA, ANTI_BOT_MARKERS, LOGIN_MARKERS
+    from core.checker import (parse_search_request, build_domain_url,
+                              classify_http_status, DEFAULT_UA)
     from core.rules.replayer import parse_list
 
     keywords = keywords or ["海贼王", "斗破苍穹"]
@@ -257,10 +274,16 @@ async def diagnose_source(session, source, timeout=8.0, keywords=None):
         return res
     res["reachable"] = True
 
-    low = (text or "").lower()
-    if status in (401, 403, 429, 503) or any(m in low for m in ANTI_BOT_MARKERS):
+    # 判定表只有一份（`classify_http_status`）——原来这里自己写了一遍，
+    # 与域名探测在 503 / 404 / 500 / 登录页四类输入上分叉过。
+    h = classify_http_status(status, text, bool(source.get("enabledCookieJar")))
+    if h == Health.AUTH:
         res["attribution"] = "需验证：反爬/登录墙 (status=%s)" % status
         res["bucket"] = "需验证"
+        return res
+    if h == Health.DEAD:
+        res["attribution"] = "死站：HTTP %s" % status
+        res["bucket"] = "死站"
         return res
 
     guess, why = combine_type(source, homepage_signals(text))
@@ -280,7 +303,7 @@ async def diagnose_source(session, source, timeout=8.0, keywords=None):
     last_status = 0
     for kw in keywords[:2]:
         try:
-            surl, method, headers = parse_search_request(search_url, kw)
+            surl, method, headers, s_body = parse_search_request(search_url, kw)
         except Exception:
             continue
         if surl.startswith("/"):
@@ -289,7 +312,8 @@ async def diagnose_source(session, source, timeout=8.0, keywords=None):
             surl = domain + "/" + surl
         headers = dict(headers or {})
         headers.setdefault("User-Agent", DEFAULT_UA)
-        s_status, s_text, s_err = await _get(session, surl, timeout, method=method, headers=headers)
+        s_status, s_text, s_err = await _get(session, surl, timeout, method=method,
+                                             headers=headers, body=s_body)
         last_status = s_status or 0
         if s_status is None:
             continue

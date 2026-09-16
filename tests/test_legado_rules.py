@@ -43,6 +43,55 @@ class RegexTests(unittest.TestCase):
     def test_no_match_keeps_original(self):
         self.assertEqual(R.extract_all(HTML, "class.author@text##不存在##"), ["作者：张三", "作者：李四"])
 
+    def test_fourth_segment_replaces_only_the_first_match(self):
+        """`##正则##替换###` 的第四段 = **只替换第一个匹配**。
+
+        依据 Legado `AnalyzeRule.kt:760-770`：
+
+            val ruleStrS = rule.split("##")
+            if (ruleStrS.size > 2) replacement  = ruleStrS[2]
+            if (ruleStrS.size > 3) replaceFirst = true
+
+        这个形式以前被整体报成 unsupported（「暂未实现」）——**安全，但没有结论**，
+        实测语料里约 825 条规则卡在这。现在实现它：同一个值里有两处命中时只动第一处。
+        """
+        self.assertEqual(
+            R.extract_all(HTML, "class.book-list@text##作者：(.)##X###"),
+            ["测试书 X三 第二本 作者：李四"])
+
+    def test_third_segment_still_replaces_all(self):
+        """反向断言：没有第四段时仍然是**全部替换**。
+
+        少了这条，把 `count=1` 写成这两个分支的默认值也会全绿——而三段式
+        （`##正则##替换`）才是主力用法，实测语料里的绝大多数 `##` 规则都是它。
+        """
+        self.assertEqual(
+            R.extract_all(HTML, "class.book-list@text##作者：(.)##X"),
+            ["测试书 X三 第二本 X四"])
+
+    def test_fourth_segment_with_no_match_returns_empty(self):
+        """第四段形式**找不到匹配时返回空串**，不是原样保留。
+
+        Legado 的 `replaceRegex` 是两支（`AnalyzeRule.kt:487-497`），
+
+            if (rule.replaceFirst) {
+                val match = regex.find(result)
+                return if (match != null) match.value.replaceFirst(regex, replacement) else ""
+            } else {
+                return result.replace(regex, replacement)
+            }
+
+        「不匹配则原样返回」**只对三段式成立**——`_apply_regex` 原来的 docstring
+        写「不匹配则原样保留，与 Legado 一致」，那句话在这里是错的。
+
+        复刻它意味着：一条 `##...###` 规则若正则不命中，这一格就是空的
+        （在报告里可能表现为判失败）。这是**有意与 App 对齐**，不是回归。
+        """
+        self.assertEqual(R.extract_all(HTML, "class.book-list@text##不存在##X###"), [""])
+        # 对照组：同样不命中，三段式必须原样保留
+        self.assertEqual(R.extract_all(HTML, "class.book-list@text##不存在##X"),
+                         ["测试书 作者：张三 第二本 作者：李四"])
+
 
 class IndexTests(unittest.TestCase):
     def test_last_and_first(self):
@@ -106,7 +155,6 @@ class UnsupportedTests(unittest.TestCase):
             "tag.div[2:5]",                 # 区间索引
             "tag.div[0:10:2]",              # 区间索引（带步长）
             "$.data.list$1",                # $n 取列表第 n 项
-            "id.content@text##广告##x###",   # ## 第四段（只替换第一个）
             "class.a@text@get:{name}",      # 变量读取
         ]
         for rule in rules:
@@ -119,6 +167,7 @@ class UnsupportedTests(unittest.TestCase):
         for rule in ("class.a@tag.b@text", "class.item@href", "@css:class.a@text",
                      "$.data.list[*].name", "id.content@text##广告##",
                      "id.content@text##广告##替换",
+                     "id.content@text##广告##x###",   # ## 第四段：2026-09-16 起已实现
                      "class.a@text", "text", "class.list@tag.li"):
             ok, why = R.rule_supported(rule)
             self.assertTrue(ok, "被误伤：%s (%s)" % (rule, why))
@@ -245,18 +294,62 @@ class ExtractAllNodesTests(unittest.TestCase):
         self.assertTrue(err)
         self.assertEqual(hits, [])
 
-    def test_html_rule_returns_raw_response(self):
-        """@html: 分支不做任何选择，整份响应体就是命中内容。
+    def test_at_html_prefix_is_not_a_legado_rule(self):
+        """`@html:` **不是** Legado 的规则前缀——整份响应体不再是「命中内容」。
 
-        该分支此前无任何测试保护——但它保护的具体是「整份响应体」这一语义：
-        把分支条件改成永假会让 err 变成「未知步骤：raw」从而报错，真正无覆盖的是
-        分支内那行 `hits = list(nodes)`（它被函数末尾的兜底掩盖，删掉测试仍全绿）。
+        Legado 只认 `@CSS:` / `@@` / `@XPath:` / `@Json:`（`AnalyzeRule.kt:603-618`），
+        全仓库没有 `@html:`。我们曾把它当作「返回整份响应体」的合法规则，
+        于是**在 App 里跑不出东西的规则，被我们判成「有正文」**——典型的误放。
+
+        **别和 `@html` 搞混**：没有冒号的那个是**取值动作**，Legado 支持，
+        库里 2863 条规则在用，必须照旧。区别就在那个冒号。
+
+        实测（2026-09-16）：库里以 `@html:` 开头的规则 **0 条**，任意位置出现也是 0——
+        所以删掉它是零影响的。这条测试锁的是「以后别再把它加回来」。
         """
-        vals, hits, err = self._nodes(HTML, "@html:")
-        self.assertEqual(err, "")
-        self.assertEqual(vals, [HTML])
-        self.assertEqual(hits, [HTML])
+        self.assertEqual(R.extract_all(HTML, "@html:"), [],
+                         "整份响应体不该再被当成命中内容")
+
+    def test_html_value_action_still_works(self):
+        """反向断言：`@html`（**无冒号**）是取值动作，必须照旧可用。
+
+        少了这条，为了删前缀把 `html` 从 VALUE_ACTIONS 里一起删掉也会全绿——
+        而那是 2863 条规则在用的东西。
+        """
+        vals = R.extract_all(HTML, "class.item@html")
+        self.assertTrue(vals)
+        self.assertIn("<a href=\"/book/1\">", vals[0])
 
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------- 变异记录
+# 以下为实测（改坏 → `python -B -m unittest tests.test_legado_rules` → 确认变红 → 还原）。
+#
+#  **2026-09-16 起本文件唯一有变异记录的一段：`##` 第四段（只替换第一个）的实现。**
+#
+#  M8  不命中时返回原文（`else ""` → `else s`）——**有意偏离 Legado 的那条路口**
+#        → test_fourth_segment_with_no_match_returns_empty 红
+#        （这条变异值得单列：它是「对齐 App」与「别让源集体翻红」两个原则的
+#          分界点，改回原文而不加断言的话，两种行为在测试上完全看不出差别）
+#  M9  忽略 `count=1`（回到全部替换）
+#        → test_fourth_segment_replaces_only_the_first_match 红
+#  M10 第四段判定写成 `len(parts) > 4`（差一段）
+#        → 上面两条都红
+#
+#  M27 去掉「末段取值动作优先」（`class.a@tag.p@html` 又被当成「再选 html 元素」）
+#        → test_html_value_action_still_works 红
+#        这条守的是**误杀**方向：实测 2566 条规则末段用 @html，其中 2131 条是
+#        `ruleContent.content`。不修的话，一跑 probe_depth=3，1737 个源的正文
+#        会被判成「不可用」——而它们的规则其实是对的。
+#  M28  把 `@html:` 前缀加回来
+#        ⚠️ **第一次只还原了前缀，测试全绿**——因为那处改动是三个地方一起删的
+#        （`RULE_PREFIXES` 的映射、`parse_rule` 里 `kind == "html"` 的早退、
+#        `_root_of` 的 `kind == "html"` 分支）。只还原一处复现不出原行为，
+#        等于没测。**三处一起还原**后才红。
+#        （与 M18/M19 同型：多处改动只还原一部分，变异就是无效的。）
+#
+#  反向断言 `test_third_segment_still_replaces_all` 在 M8/M9/M10 下**全绿**——
+#  它守的是「别把三段式也改成只替第一处」，方向相反，本就不该被这三条变异触发。

@@ -16,7 +16,8 @@ from __future__ import annotations
 from collections import Counter
 from typing import Any, Dict, List
 
-from core.models import BookSourceRecord, Health, DEAD_TAG_PATTERNS
+from core.models import (BookSourceRecord, Health, DEAD_TAG_PATTERNS,
+                         BOOK_SOURCE_TYPE_NAMES)
 
 
 def build_report(
@@ -42,8 +43,10 @@ def build_report(
     lines.append("| 类型 | 数量 | 占比 |")
     lines.append("|------|-----:|-----:|")
     type_counter = Counter(r.source_type for r in enabled)
-    # 与 core/models.py 的 BOOK_SOURCE_TYPE_NAMES 保持一致；Legado 无 4，兜底直接显示原始数值
-    type_names = {0: "📖小说", 1: "🎧听书", 2: "🎨漫画", 3: "📥下载"}
+    # 类型名的**唯一来源**是 models 那份，别在这里抄第二份（这里原来抄了一份，
+    # 靠注释「保持一致」维持，那正是会漂的写法）。兜底 `.get(t, t)`：
+    # Legado 没有 4，认不出就显示原始数值
+    type_names = BOOK_SOURCE_TYPE_NAMES
     for t in sorted(type_counter, key=lambda x: -type_counter[x]):
         c = type_counter[t]
         lines.append(f"| {type_names.get(t, t)} | {c} | {c/len(enabled)*100:.1f}% |")

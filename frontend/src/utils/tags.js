@@ -65,6 +65,22 @@ export function tagOfType(value) {
   return hit ? hit.tag : "";
 }
 
+/**
+ * 类型的**键名**（"novel" / "audio" / "manga" / "file"），不是显示用的标签。
+ *
+ * 它是 `services/add_source.py` 的入参，前端提交「快速生成」任务时要给。
+ * 本组件原来自己抄了一份 `TYPE_KEYS` 常量——那正是这个接口存在的理由：
+ * 书源类型这个枚举，前端历史上抄错过一次（把 3 当成视频、还编出了 Legado
+ * 不存在的 4）。所以一律从后端下发取。
+ *
+ * 枚举没就绪时返回空串。**调用方必须自己处理空值**——读空了当成 "novel"
+ * 会把漫画/听书源生成成小说源，而且看不出来。
+ */
+export function typeKeyOf(value) {
+  const hit = sourceTypes.value.find((t) => t.value === Number(value));
+  return (hit && hit.key) || "";
+}
+
 const _has = (list, tag) => list.some((t) => t === String(tag || "").trim());
 
 export function isTypeTag(tag) {

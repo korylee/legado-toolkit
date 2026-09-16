@@ -43,11 +43,13 @@ MAX_PAGE_HTML_CHARS = 1_000_000
 MAX_MATCHED_HTML_CHARS = 200_000
 #: 命中节点最多回传几个（目录列表类规则会命中上百个；3 个够看出结构）
 MATCHED_NODES_LIMIT = 3
-#: 单条提取值上限。0 = 不截断——正文全文是本次的核心产出
-MAX_VALUE_CHARS = 0
-#: 提取值最多回传几条（列表步可能上百条）
-VALUES_PREVIEW_LIMIT = 100
 #: 证据总量硬上限。这是唯一一道与调用方无关的保险
+#
+# 这里原本还有两个常量 `MAX_VALUE_CHARS`（单条提取值上限，= 0 表示不截断）与
+# `VALUES_PREVIEW_LIMIT`（提取值最多回传几条），**都已删除**——它们只有定义与
+# `__all__`，**全仓库零消费者**。两条决定仍在，只是不再以常量的形式存在：
+#   - 正文全文不截断 → 由下面这条总量上限兜底（正文全文是核心产出）
+#   - 回传条数 → 由总量上限 + `MATCHED_NODES_LIMIT` 共同约束
 MAX_EVIDENCE_TOTAL_CHARS = 2_000_000
 
 #: 「正文较短」阈值。取自 Legado 自身 BookContent.kt:194 的
@@ -195,9 +197,11 @@ def sniff_shape(values: Sequence[str]) -> Tuple[str, Dict[str, int]]:
         counts[_classify_value(s)] += 1
     if total == 0:
         return SHAPE_EMPTY, counts
+    # 这里原本还有一条 `if hit == 0: return SHAPE_EMPTY`，**恒假、已删**：
+    # `counts` 只有 text/image/audio 三个键，`_classify_value` 的返回值必属于其一；
+    # 而上面 `total == 0` 已早退 ⇒ `sum(counts) == total ≥ 1` ⇒ `max ≥ 1`。
+    # 将来若给 counts 加第四种形态，这条不变量要重新确认（别默认它还在）。
     shape, hit = max(counts.items(), key=lambda kv: kv[1])
-    if hit == 0:
-        return SHAPE_EMPTY, counts
     # 最高占比未过半即视为形态不统一：1:1 这类平局（如一条图片 + 一条文本）
     # 要判 mixed，所以用 <= 而非 <（plain < 会让平局落在 max() 的字典序赢家上）
     if hit / total <= 0.5:
@@ -234,7 +238,7 @@ def build_evidence(values: Sequence[str], matched_html: str = "") -> Dict[str, A
         # 字符串对象。150 万字符实测：峰值内存 findall 约 100MB、finditer 约 0MB。
         # 本改动针对的是**内存**，不是速度——耗时差异随机器与测法浮动
         # （同一段代码在不同机器上实测到过 1.0x 与 1.5x 两种结果），不要把它当性能优化引用。
-        # 正文全文不截断（MAX_VALUE_CHARS = 0），这个量级会真实出现，
+        # 正文全文不截断，这个量级会真实出现，
         # 而这个字段只用于统计展示——不值得为它瞬时吃上百 MB
         "cjk_chars": sum(1 for _ in _CJK_RE.finditer(joined)),
         # 段落信息只能从命中节点的 HTML 拿：replayer 的 text 动作会 re.sub(r"\s+", " ")
@@ -435,18 +439,41 @@ def judge_list_step(
 # ------------------------------------------------------------------ 静态错配检查
 
 #: 可能是 URL 规则的字段（Legado 的 webView 是 URL 规则的选项，不是 ContentRule 字段）
-_URL_RULE_KEYS = ("searchUrl", "exploreUrl")
+#: **URL 规则**在书源里的位置：(容器键, 字段名)，容器键为空串表示在书源顶层。
+#:
+#: webView 是 **URL 规则**的选项（`AnalyzeUrl.kt:254` 的 `option.useWebView()`），
+#: 所以「开没开」必须扫全这些位置——**少扫一处会得出相反的结论**，而错误提示
+#: 比没有提示更糟：用户会照着去改一个本来没问题的源。
+#:
+#: `ruleToc.chapterUrl` 是 2026-09-16 补的：正文请求用的是**它**解析出来的章节 URL
+#: （`WebBook.kt:429`），原来只扫前三个，于是库里 5 条源一直被误报「webJs 不生效」。
+#:
+#: `ruleContent.nextContentUrl` **不在此列**——它是取值规则
+#: （`getStringList(..., isUrl = true)`，`BookContent.kt:257`），不携带 URL 选项。
+#: 加之前先确认它到底是不是 URL 规则，别照着"看起来像 URL"往里塞。
+_URL_RULE_PATHS = (
+    ("", "searchUrl"),
+    ("", "exploreUrl"),
+    ("ruleBookInfo", "tocUrl"),
+    ("ruleToc", "chapterUrl"),
+)
 
 _WEBVIEW_ON_RE = re.compile(r'"?webView"?\s*:\s*(?:true|"true"|1)', re.I)
 
 
 def _any_url_rule_uses_webview(source: Dict[str, Any]) -> bool:
-    """宽松检测 URL 规则里是否开了 webView（形如 ``url,{"webView":true}``）。"""
-    for key in _URL_RULE_KEYS:
-        if _WEBVIEW_ON_RE.search(str((source or {}).get(key, "") or "")):
+    """扫**所有** URL 规则，看有没有哪条开了 webView（形如 ``url,{"webView":true}``）。
+
+    遍历 `_URL_RULE_PATHS` 而不是硬编码：少扫一处就是静默的**反向结论**。
+    """
+    src = source or {}
+    for container, field in _URL_RULE_PATHS:
+        holder = src if not container else (src.get(container) or {})
+        if not isinstance(holder, dict):
+            continue
+        if _WEBVIEW_ON_RE.search(str(holder.get(field, "") or "")):
             return True
-    toc_url = str(((source or {}).get("ruleBookInfo") or {}).get("tocUrl", "") or "")
-    return bool(_WEBVIEW_ON_RE.search(toc_url))
+    return False
 
 
 def static_misconfig_notes(source: Dict[str, Any]) -> List[str]:
@@ -514,7 +541,9 @@ def rate_interval_ms(value: Any) -> int:
         return max(1, round(interval / limit))
     try:
         return max(0, int(float(text)))
-    except (TypeError, ValueError):
+    # OverflowError 必须接：`float("1e400")` 返回 inf 而**不报错**，到 `int(inf)`
+    # 才抛——漏掉它的话，库里一条 `"1e400"` 脏数据就能让整批校验崩掉
+    except (TypeError, ValueError, OverflowError):
         return 0
 
 
@@ -526,6 +555,6 @@ __all__ = [
     "static_misconfig_notes", "new_page", "rate_interval_ms",
     "EXPECTED_SHAPE", "STRUCT_TAG_RE", "CONTENT_NOISE_MARKERS",
     "MAX_PAGE_HTML_CHARS", "MAX_MATCHED_HTML_CHARS", "MATCHED_NODES_LIMIT",
-    "MAX_VALUE_CHARS", "VALUES_PREVIEW_LIMIT", "MAX_EVIDENCE_TOTAL_CHARS",
+    "MAX_EVIDENCE_TOTAL_CHARS",
     "SHORT_CONTENT_CHARS", "safe_int",
 ]

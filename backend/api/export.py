@@ -131,8 +131,13 @@ def pin_export(uid: str, pinned: bool = True, st=Depends(get_store)):
 @router.delete("/{uid}")
 def delete_export(uid: str, st=Depends(get_store)):
     ok = st.delete_export(uid)
-    try:
-        _file_of(uid).unlink()
-    except Exception:
-        pass
+    # **先确认库里有这条记录，再删文件**：uid 是直接拼进路径的，路由只拦得住 `/`，
+    # 而 `\` 在 Windows 上被 pathlib 当成分隔符——`..\..\x` 这种 uid 能指到
+    # export 目录之外（实测解析出仓库根下的文件）。与 `GET /{uid}.json` 同口径：
+    # 库里没有这条导出记录，那个同名文件就不是这次该动的
+    if ok:
+        try:
+            _file_of(uid).unlink()
+        except Exception:
+            pass
     return {"deleted": ok}

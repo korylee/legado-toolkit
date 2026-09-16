@@ -10,6 +10,8 @@ import { ref, computed, watch, nextTick } from "vue";
 import { ElMessage } from "element-plus";
 
 import { replayStep } from "../api/rules";
+// 步骤名 → 中文的**唯一**一份（编辑弹窗共用），别再在本组件里写第二份
+import { STEP_LABELS } from "../utils/steps";
 
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
@@ -27,7 +29,6 @@ const visible = computed({
 });
 
 // explore 是发现链路的产出步（key 带 `发现::` 时后端才产出它）
-const STEP_LABELS = { search: "搜索", explore: "发现", bookUrl: "详情链接", toc: "目录", content: "正文" };
 //: 每次渲染的字符数。整页 HTML 可能 100 万字符，全量进 DOM 会卡
 const RENDER_CHUNK = 20000;
 //: 搜索最多索引的命中数。整页 HTML 里搜 div / class 必然远超此数，

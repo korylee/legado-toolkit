@@ -67,12 +67,13 @@ Legado（阅读）书源管理工具链：CLI + FastAPI + SQLite + Vue 3。
 
 ```text
 .
-├─ backend/                FastAPI 后端
+├─ backend/                FastAPI 后端（**入口之一**）
 │  ├─ api/                 路由：sources/jobs/export/feed/rules/llm
 │  ├─ jobs/                后台任务运行器 + SSE
 │  ├─ app.py               FastAPI 应用
 │  └─ __main__.py          后端启动入口
-├─ core/                   核心业务
+├─ cli/main.py             CLI 入口（**入口之二**）
+├─ core/                   核心引擎——**不依赖上面两个入口，也不依赖 services**
 │  ├─ rules/               Legado 规则回放器
 │  ├─ repair/              AI 修复循环
 │  ├─ store.py             SQLite 管理库
@@ -80,16 +81,20 @@ Legado（阅读）书源管理工具链：CLI + FastAPI + SQLite + Vue 3。
 │  ├─ organizer.py         分组整理
 │  ├─ tags.py              标签规范化 / 系统标签
 │  └─ ...
-├─ cli/main.py             CLI 入口
-├─ services/add_source.py  快速新增源
+├─ services/               **应用编排层**：串起多个 core 模块完成一件业务动作
+│  └─ add_source.py        快速新增源——CLI 与 backend **共用**，所以不放在任一个入口里
 ├─ frontend/               Vue 3 管理台
 ├─ tests/                  Python 测试
-├─ docs/                   设计/计划文档
+├─ tools/                  **开发与 agent 工具，不是运行时依赖**
+│  ├─ apply_edits.py       行级补丁应用器（绕开 shell 转义），见 skills/agent-write-safety
+│  └─ probe_app_debug.py   手工探测 App 调试 WS 推了什么
 ├─ skills/                 Agent / 开发技能文档
 ├─ deploy/fnos/            飞牛 NAS 书库部署示例
 ├─ data/                   运行时数据（已 gitignore）
-├─ AGENTS.md               开发约定
-├─ WORKFLOW.md             完整工作流
+├─ README.md               本文件：功能、用法、API
+├─ AGENTS.md               硬性约定（**改代码前必读**）
+├─ WORKFLOW.md             书源「新增/导入 → 校验 → 整理 → 报告」完整链路
+├─ TODO.md                 待办 / 待决策 / 需先调研
 └─ pyproject.toml
 ```
 
@@ -177,7 +182,14 @@ pnpm dev
 pnpm build
 ```
 
-输出目录：`frontend/dist/`
+输出目录：`frontend/dist/`，**它由后端托管**：构建之后不必再开 vite，只启动后端，
+访问 `http://127.0.0.1:8787/` 就是完整界面（手机换成局域网 IP + 同一端口）。
+界面与 API 同源，所以既不需要 CORS，也不需要 rewrite 规则（路由用 hash 模式）。
+
+`pnpm dev`（5173 + 代理）仍然用于开发，它带热更新；两者互不影响，可以同时开着。
+
+> 改了前端源码却没重新 `pnpm build` 时，后端启动会提示「dist 落后于源码」——
+> 不提示的话，「改动没生效」这条线索会被误当成 bug 去找。
 
 ---
 
@@ -231,7 +243,10 @@ python cli/main.py merge -i a.json -i b.json -o merged.json --mode replace
 
 ## Web 管理台
 
-启动前后端后访问 http://127.0.0.1:5173 。
+访问地址取决于怎么起：
+
+- 开发（`pnpm dev`）：http://127.0.0.1:5173 ，带热更新
+- 构建过前端（`pnpm build`）：只起后端即可，http://127.0.0.1:8787/
 
 主要页面：
 
@@ -299,7 +314,7 @@ python cli/main.py merge -i a.json -i b.json -o merged.json --mode replace
 
 ### 校验参数的取值优先级
 
-并发数、超时、探测深度、搜索探测、校验 SSL、代理这 6 项，按三层取值：
+并发数、超时、探测深度、校验 SSL、代理这 5 项，按三层取值：
 
     本次覆盖（书源页工具栏「校验参数」按钮） > 全局设置（设置 → 校验） > 内置默认
 
@@ -322,7 +337,7 @@ python cli/main.py merge -i a.json -i b.json -o merged.json --mode replace
 | data/sources.sqlite3 | 管理库：源、校验缓存、诊断、修复、任务 |
 | data/check_cache/ | 书源校验缓存 |
 | data/out/exports/ | 临时导出快照 |
-| data/backups/ | 软删除快照 / 手动备份 |
+| data/backups/ | 软删除记录（`deleted.jsonl`，一行一次删除操作，含原因）/ 手动备份 |
 | data/imports/raw/ | 外部源原始文件 |
 | data/config/llm_profiles.json | LLM 模型配置（含 API Key，勿提交） |
 | data/config/settings.json | 全局设置：校验参数默认值（并发/超时/探测深度/代理等） |
@@ -410,18 +425,11 @@ pnpm build
 
 ## 开发约定
 
-完整的约定清单以 [`AGENTS.md`](AGENTS.md) 为准，每条背后的「症状 → 根因 → 结论」见
-`skills/legado-source-lessons`。这里只留两条最容易被踩的：
+见 [`AGENTS.md`](AGENTS.md)——约定清单只在那里维护；每条背后的「症状 → 根因 → 结论」
+见 `skills/legado-source-lessons`。
 
-- 运行时数据全部放在 data/，不要提交数据库、缓存、导出和 API Key。
-- 前端改弹窗/抽屉的样式要写全局 `frontend/src/styles.css`——el-dialog 是 teleport 到 body 的，组件内的 scoped 样式够不到它内部。
-
-改代码后建议运行：
-
-```powershell
-.\.venv\Scripts\python.exe -c "import backend.app, core.store"
-.\.venv\Scripts\python.exe -m unittest discover -s tests -t . -v
-```
+**这里不复述任何一条**：复述出来的那份会和 AGENTS 分叉，而两份分叉的规矩比没有规矩更糟
+（这条经验本身写在 `AGENTS.md` 硬性约定 #9）。
 
 ---
 
@@ -429,7 +437,7 @@ pnpm build
 
 - WORKFLOW.md：书源新增/导入 → 校验 → 整理 → 报告完整链路
 - AGENTS.md：Agent/开发约定
-- docs/：设计文档与实施计划
+- TODO.md：明确记录但未实施的待办与二期候选
 - skills/：书源规则、工具链、安全写入技能
 - deploy/fnos/README.md：飞牛 NAS 书库部署
 

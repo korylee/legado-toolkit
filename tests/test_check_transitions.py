@@ -59,6 +59,33 @@ class TransitionSummaryTests(unittest.TestCase):
         self.assertEqual(out["first_checked"], 0)
         self.assertEqual(out["changed"], {})
 
+    def test_changed_items_name_the_sources(self) -> None:
+        """变化必须给出**明细**，不只是计数。
+
+        摘要说「6 条变成失效」，用户下一步一定是问「哪 6 条」——只给计数
+        等于让他自己去 3800 行里翻。明细里的 url 同样要归一（前端拿它跳转/匹配）。
+        """
+        prev = {_normalize_url("https://a.com"): {"health": Health.OK}}
+        out = summarize_transitions(prev, [make_record("https://A.com/", Health.DEAD)])
+        self.assertEqual(out["changed_items"],
+                         [{"url": "https://a.com", "name": "example",
+                           "from": Health.OK, "to": Health.DEAD}])
+
+    def test_unchanged_and_first_checked_are_not_in_the_items(self) -> None:
+        """反向断言：明细里只有**真变了**的。
+
+        首次有结论的源（库里绝大多数）不能混进来——那会把明细冲成几千条，
+        而它们不需要被「跟进处理」，和「变成失效」完全不是一回事。
+        """
+        prev = {_normalize_url("https://a.com"): {"health": Health.OK}}
+        out = summarize_transitions(prev, [
+            make_record("https://a.com", Health.OK),      # 没变
+            make_record("https://b.com", Health.DEAD),    # 库里没有 → 首次
+        ])
+        self.assertEqual(out["changed"], {})
+        self.assertEqual(out["first_checked"], 1)
+        self.assertEqual(out["changed_items"], [])
+
     def test_mixed_batch_buckets_correctly(self) -> None:
         """一批里三种情况并存时，各归各的桶。"""
         prev = {
@@ -92,9 +119,14 @@ class FakeChecker:
         self.hit_downgrades = []
         self.refresh_cache = False
 
-    async def run(self, records):
+    async def run(self, records, on_progress=None):
+        # 签名必须与 AsyncChecker.run 一致（多一个 on_progress）——漏改的话
+        # ops.run_check_job 传关键字参数会直接 TypeError，桩"跑不起来"总比
+        # "跑起来了但测的不是真东西"好，但仍然是没跟上，得改
         for r in FakeChecker.records:
             FakeChecker.store.record_result(_normalize_url(r.url), r.health)
+        if on_progress:
+            on_progress(len(FakeChecker.records), len(FakeChecker.records))
         return FakeChecker.records
 
     def close(self):
@@ -153,6 +185,33 @@ class CheckJobTransitionsTests(unittest.TestCase):
         self.assertEqual(out["transitions"]["changed"], {Health.DEAD: 1})
         self.assertEqual(out["transitions"]["first_checked"], 1)
 
+    def test_item_urls_are_normalized_for_the_frontend(self) -> None:
+        """`items[].url` 必须是**归一化**后的 URL——前端拿它当 key 回填列表。
+
+        `build_record` 给的 `r.url` 是 bookSourceUrl 的**原文**，而列表里的
+        `source_url` 是 Store 归一化后存的（去空白 / 尾斜杠 / 转小写）。
+        两侧不归一的话前端**一条都匹配不上**，表现是「校验完了列表不更新」，
+        界面上看不出任何异常。本项目实测 20.7% 的源带尾斜杠（lessons §五）。
+
+        这条断言看着琐碎，但它守的是一个**静默失效**：写错了不会报错，
+        只会让就地回填这个功能整个不生效。
+        """
+        FakeChecker.records = [make_record("https://A.com/", Health.OK)]
+        out = asyncio.run(ops.run_check_job("j1", self.store, {}))
+        self.assertEqual(out["items"][0]["url"], "https://a.com")
+
+    def test_items_carry_what_the_list_needs_to_backfill(self) -> None:
+        """就地回填要用的字段一个都不能少——少一个就是「那一格永远不更新」。
+
+        列表行的字段来自 `SourceOut`，回填直接覆盖它们；`items` 里缺哪个，
+        页面上就有一格看起来像「没校验」。
+        """
+        FakeChecker.records = [make_record("https://a.com", Health.OK)]
+        out = asyncio.run(ops.run_check_job("j1", self.store, {}))
+        for key in ("url", "health", "stars", "star_basis",
+                    "toc_complete", "content_ok", "search_hit", "checked_at"):
+            self.assertIn(key, out["items"][0], "回填缺字段: %s" % key)
+
 
 if __name__ == "__main__":
     unittest.main()
@@ -161,6 +220,19 @@ if __name__ == "__main__":
 # ---------------------------------------------------------------- 变异记录
 # 以下为实测（改坏 → `python -B -m unittest tests.test_check_transitions`
 # → 确认变红 → 还原）。
+#
+#  M23 把「首次有结论」的源也塞进 changed_items（明细退化成「所有源」）
+#        → test_unchanged_and_first_checked_are_not_in_the_items 红
+#        （明细被几千条「首次」冲掉，而它们不需要跟进处理——和「变成失效」不是一回事）
+#  M24 changed_items 里的 url 去掉归一化（计数那条测试**不红**，只有明细这条红）
+#        → test_changed_items_name_the_sources 红
+#        与 M22 同一课：归一化漏在**任何一处**都是静默失效，所以每处都要有断言
+#
+#  M22 `items[].url` 去掉归一化（`_normalize_url(r.url)` → `r.url`）
+#        → test_item_urls_are_normalized_for_the_frontend 红
+#        守的是一个**静默失效**：前端拿 items[].url 当 key 回填列表，而列表里的
+#        source_url 是库归一化过的。不归一 → 一条都匹配不上 → 「校验完了列表不更新」，
+#        界面上看不出任何异常。本条与 M1（两侧归一后才比）是同一课的两处落点。
 #
 #  M1  summarize_transitions 的 `elif old != r.health` 改成 `elif True`
 #        （没变也算进 changed，即「缓存命中的源也会被报成变化」）

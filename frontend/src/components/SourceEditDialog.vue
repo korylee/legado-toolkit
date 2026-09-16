@@ -7,9 +7,11 @@ import { getDetail, listTags, saveSource, sourceExists } from "../api/sources";
 import { appDebug, appPreflight } from "../api/rules";
 import {
   canonicalTag, ensureTagMeta, isQualityTag, isStatusTag,
-  mergeGroup, sourceTypes, splitSystemUser, statusTags, tagOfType,
+  mergeGroup, sourceTypes, splitSystemUser, statusTags, tagOfType, typeKeyOf,
 } from "../utils/tags";
 import { useMobile } from "../composables/useMobile";
+// 步骤名 → 中文的**唯一**一份（调试抽屉共用），别再在本组件里写第二份
+import { STEP_LABELS } from "../utils/steps";
 import RuleDebugDrawer from "./RuleDebugDrawer.vue";
 
 const props = defineProps({
@@ -52,9 +54,12 @@ const appChecking = ref(false);
 // （isAbsUrl → contains("::") → ++ → -- → 兜底搜索）。所以「搜索」下填一个 URL
 // 会被 App 当详情页跑，「详情」下填关键词会被当搜索跑。这不是我们拼错了——App
 // 自己就是同一个 when，保持一致才是对的。
+//: hint 只回答「这格填什么」。「留空会怎样」不写在这里：三个下游目标是同一个
+//: 答案，写三遍不如在 chip 上方统一说一句。唯一例外是「发现」——留空落回配置里的
+//: `exploreUrl` 而不是搜索，说不到一起，所以由它自己写
 const DEBUG_TARGETS = [
   { value: "search", label: "搜索", hint: "关键词，如 我的" },
-  { value: "explore", label: "发现", hint: "发现页 URL" },
+  { value: "explore", label: "发现", hint: "留空则用配置里的 exploreUrl" },
   { value: "info", label: "详情", hint: "详情页 URL" },
   { value: "toc", label: "目录", hint: "目录页 URL" },
   { value: "content", label: "正文", hint: "正文页 URL" },
@@ -65,20 +70,77 @@ const currentTarget = computed(
   () => DEBUG_TARGETS.find((t) => t.value === debugTarget.value) || DEBUG_TARGETS[0],
 );
 
+//: 输入框的提示。**必须说实话**：选了「发现」而这个源又没配 `exploreUrl` 时，
+//: 「留空则用配置里的 exploreUrl」就是一句假话——用户留空、点下去、失败，
+//: 再回头看提示才发现被误导了。提示的价值就在于**在下手之前**说清这一格要什么
+const debugHint = computed(() => {
+  if (debugTarget.value === "explore" && !hasExploreConfig.value) {
+    return "这个源没配 exploreUrl，请填一个发现页 URL";
+  }
+  return currentTarget.value.hint;
+});
+
 /** 目标 + 输入 → App 认的 key。前缀构造照抄 App 的 `ViewModel:91-97`。 */
 function buildDebugKey() {
   const q = debugQuery.value.trim();
   switch (debugTarget.value) {
-    case "explore": return q ? `发现::${q}` : "";
+    // **发现页 URL 直接从配置取**——`exploreUrl` 就是它，库里 2659/3861 条源都有。
+    // 让用户再抄一遍是重复劳动，而且抄错了就是一次静默失败（App 对认不出
+    // 的目标是**无响应**，最难排查）。留空时才回落到输入框
+    case "explore": {
+      const url = q || String(form.value.exploreUrl || "").trim();
+      return url ? `发现::${url}` : "";
+    }
     // 幂等去前缀：用户手抄 URL 时常把 ++ / -- 一起带上，不去重就会拼成 ++++。
     // 只去**一次**（等价 Kotlin 的 removePrefix），写成 /^\++/ 会把真想要的
     // `+++url` 也一起吃掉、改成别的意思。
     case "toc": return q ? `++${q.replace(/^\+\+/, "")}` : "";
     case "content": return q ? `--${q.replace(/^--/, "")}` : "";
     case "info": return q;              // 详情页就是裸 URL，App 靠 isAbsUrl 认它
-    default: return q || "我";          // 搜索：空则用默认关键词（沿用旧行为）
+    // 搜索：空则用默认关键词。**详情/目录/正文留空时也落到这里**——见下
+    default: return q || "我";
   }
 }
+
+/**
+ * 交给 App 的调试 key。
+ *
+ * 与 `buildDebugKey` 的区别只有一处：**「详情/目录/正文」留空时不报错，而是退回
+ * 搜索入口**。
+ *
+ * 依据是 App 自己的行为（`Debug.kt:279-297` 的 exploreDebug / searchDebug）：
+ * 拿到入口后它会**自动沿规则链往下跑**（取第一本书 → 详情 → 目录 → 正文），
+ * 用户从来不需要手填下游 URL。我们原来要求手填三者之一，等于把引擎该算出来的
+ * 东西交给用户——而 App 里根本没有这一步。
+ *
+ * 退回搜索之后，调试抽屉照样会把每一步摊开，所以「想看某一步」的信息一点不丢。
+ * 真的想**从中间切入**（手里已经有一本书的 URL）时，填上它即可，两条路都在。
+ */
+function debugKeyForApp() {
+  const q = debugQuery.value.trim();
+  if (!q && ["info", "toc", "content"].includes(debugTarget.value)) {
+    return "我";        // 搜索入口，App 会自己往下串
+  }
+  return buildDebugKey();
+}
+//: 这个源**有没有发现配置**。判断口径与 `tabDot("discover")` 一致。
+const hasExploreConfig = computed(
+  () => !!(String(form.value.exploreUrl || "").trim()
+           || Object.keys(form.value.ruleExplore || {}).length));
+
+//: 「配了发现，但不想让它在 App 里出现」。
+//
+// `enabledExplore` 在 Legado 里是用户开关（`BookSourceDao.kt:87` 决定源是否进
+// 发现模块），但它**必须由配置推导**——实测库里 739 条「开着却完全没配置」
+// （App 里就是点了没反应的死项）、133 条「有配置却关着」（功能被静默关掉）。
+// 手工维护的状态一定会漂，而它本来就算得出来。
+//
+// 所以这里只留**唯一一个显式用法**：配了但想藏起来。默认跟随配置。
+const hideExplore = computed({
+  get: () => !form.value.enabledExplore,
+  set: (v) => { form.value.enabledExplore = !v; },
+});
+
 const testResult = ref(null);
 const testStale = ref(false);      // 规则已改动，结果过期
 const debugVisible = ref(false);   // 调试抽屉
@@ -111,10 +173,6 @@ watch(appHost, (value) => {
   }
 });
 
-// 类型键名对齐后端 TYPE_MAP：3 是「只提供下载服务的网站」（file），不是视频。
-// 这是接口参数名，不是标签枚举——标签本身由后端下发（见 utils/tags.js）
-const TYPE_KEYS = { 0: "novel", 1: "audio", 2: "manga", 3: "file" };
-
 const activeTab = ref("quick");
 const activeRuleTab = ref("search");
 const extActive = ref(["request"]);
@@ -127,7 +185,7 @@ function blank() {
   return {
     bookSourceName: "", bookSourceUrl: "", bookSourceType: 0,
     bookSourceGroup: "", bookSourceComment: "",
-    enabled: true, enabledExplore: false, charset: "",
+    enabled: true, enabledExplore: true, charset: "",
     customOrder: 0, weight: 0,
     searchUrl: "", header: "",
     loginUrl: "", loginCheckJs: "", jsLib: "", concurrentRate: 1,
@@ -136,7 +194,7 @@ function blank() {
     ruleSearch: { bookList: "", name: "", bookUrl: "", coverUrl: "", author: "", intro: "" },
     ruleBookInfo: { name: "", coverUrl: "", author: "", intro: "", lastChapter: "", tocUrl: "" },
     ruleToc: { chapterList: "", chapterName: "", chapterUrl: "", nextTocUrl: "" },
-    ruleContent: { content: "", nextContentUrl: "", imageStyle: "", webView: false, webJs: "" },
+    ruleContent: { content: "", nextContentUrl: "", imageStyle: "", webJs: "" },
   };
 }
 const form = ref(blank());
@@ -310,7 +368,6 @@ function tagTypeOf(step) {
   return step.has_notes ? "warning" : "success";
 }
 // explore 是发现链路的产出步（key 带 `发现::` 时后端才产出它）
-const STEP_LABELS = { search: "搜索", explore: "发现", bookUrl: "详情链接", toc: "目录", content: "正文" };
 
 // 整体汇总。**三态，不是二态**——原来只有「全部通过 / 未全部通过」，
 // 而 `unknown`（我们的工具回放不了）被算进「未通过」会误报：
@@ -370,6 +427,9 @@ watch(() => props.modelValue, (show) => {
 // 还看到绿色的「全部通过」，会据此保存——这正是本次要消除的误导。
 watch(form, () => {
   if (testResult.value) testStale.value = true;
+  // 预检里的「已连接」= App 里那份与本地规则一致，规则一改这句话就不成立了。
+  // 其余三态（连不上 / App 里没有 / 是旧版本）与本地规则无关，留着仍然成立
+  if ((appPreflightState.value || {}).state === "ready") appPreflightState.value = null;
   // 用户没动过文本域时保持快照新鲜——否则「应用到表单」会把表单改动全部回滚
   if (!rawDirty) rawJsonText.value = JSON.stringify(form.value, null, 2);
 }, { deep: true });
@@ -448,6 +508,16 @@ async function applyGenerated(result) {
 async function quickGenerate() {
   const url = quickUrl.value.trim();
   if (!url) return ElMessage.warning("请先填带真实关键词的搜索 URL");
+  // 类型键名由后端下发（见 typeKeyOf）。**读空了不能猜**：猜成 "novel" 会把
+  // 漫画/听书源生成成小说源，而且界面上完全看不出来。宁可挡在这里
+  let typeKey = "";
+  try {
+    await ensureTagMeta();
+    typeKey = typeKeyOf(Number(form.value.bookSourceType));
+  } catch (e) { /* 下面统一挡 */ }
+  if (!typeKey) {
+    return ElMessage.warning("书源类型枚举还没就绪，请稍后重试");
+  }
   quickLoading.value = true;
   quickProgress.value = "提交中...";
   quickVerify.value = null;
@@ -457,7 +527,7 @@ async function quickGenerate() {
       payload: {
         url,
         name: form.value.bookSourceName || "",
-        type: TYPE_KEYS[Number(form.value.bookSourceType)] || "novel",
+        type: typeKey,
         detail_url: quickDetailUrl.value.trim(),
         probe: quickProbe.value,
         discover: quickDiscover.value,
@@ -509,11 +579,13 @@ async function quickGenerate() {
 async function appDebugRun() {
   const host = appHost.value.trim();
   if (!host) return ElMessage.warning("请先填 App 的 IP（App 通知栏里有）");
-  const key = buildDebugKey();
+  const key = debugKeyForApp();
   // 除「搜索」外都必须给出 URL（搜索空着会用默认关键词兜底）。放空进去会拼出
   // `发现::` / `++` 这种 App 认不了的目标——它对无效 key 是**静默无响应**，
   // 排查成本极高，宁可在这里挡住。
-  if (!key) return ElMessage.warning(`请填写${currentTarget.value.hint}`);
+  if (!key) {
+    return ElMessage.warning("这个源没配 exploreUrl，请先填发现页 URL");
+  }
   appDebugging.value = true;
   testResult.value = null;
   testStale.value = false;
@@ -522,7 +594,7 @@ async function appDebugRun() {
     // **先预检**。调试 WS 对 App 库里查不到的 tag 什么都不做，只能干等到超时；
     // 而且它跑的始终是 **App 里那份规则**，所以「App 里是旧版本」这种情况会
     // 悄悄答非所问——预检一并判掉
-    const pf = await runPreflight(host, { quiet: true });
+    const pf = await runPreflight(host);
     if (pf.state === "unreachable") {
       testResult.value = { error: pf.error };
       return;
@@ -569,32 +641,53 @@ const preflightType = computed(
 //: 本次调试前做了什么推送："" | "missing"（新建）| "stale"（覆盖旧规则）
 const pushed = ref("");
 
-async function runPreflight(host, { quiet = false } = {}) {
-  appChecking.value = true;
-  try {
-    // 用 form.value：它的 bookSourceUrl 是导入原文，App 那边按精确字符串匹配；
-    // 整份传过去才能和 App 里那份比对规则（见 core/app_debug.py:preflight）
-    appPreflightState.value = await appPreflight(form.value, host, 0);
-  } catch (e) {
-    appPreflightState.value = { state: "unreachable", error: String(e.message) };
-  } finally {
-    appChecking.value = false;
+//: 在途的预检请求。输入框失焦和「连 App 调试」会来问同一个问题——点按钮时
+//: 输入框必然先失焦——合成一次：它们是同一个问题，没必要问 App 两遍，
+//: 并发还会让「检测中…」在第一个先回来时提前熄灭
+let preflightPending = null;
+
+// 只读预检：连不连得上、App 里有没有这个源、是不是旧版本。
+// 结果照常写进 appPreflightState（卡片和调试流程都读它），不弹 toast——
+// 标签就在输入框下一行，每次失焦弹一次太吵；动作的提示留给「连 App 调试」。
+async function runPreflight(host) {
+  if (!preflightPending) {
+    preflightPending = (async () => {
+      appChecking.value = true;
+      try {
+        // 用 form.value：它的 bookSourceUrl 是导入原文，App 那边按精确字符串匹配；
+        // 整份传过去才能和 App 里那份比对规则（见 core/app_debug.py:preflight）
+        appPreflightState.value = await appPreflight(form.value, host, 0);
+      } catch (e) {
+        appPreflightState.value = { state: "unreachable", error: String(e.message) };
+      } finally {
+        appChecking.value = false;
+        preflightPending = null;
+      }
+      // 原始异常只记 console，不往界面上摆（那是开发者视角）。但也不能丢——
+      // 「连不上」必须留得下痕迹
+      const s = appPreflightState.value;
+      if (s.detail) console.warn("[app-debug] 预检失败:", s.detail);
+    })();
   }
-  const s = appPreflightState.value;
-  // 原始异常只记 console，不往界面上摆（那是开发者视角）。但也不能丢——
-  // 「连不上」必须留得下痕迹
-  if (s.detail) console.warn("[app-debug] 预检失败:", s.detail);
-  if (!quiet) {
-    if (s.state === "ready") ElMessage.success("已连上 App，规则一致");
-    else if (s.state === "unreachable") ElMessage.error(s.error);
-    else ElMessage.warning(PREFLIGHT_TEXT[s.state] + "，调试前会先推过去");
-  }
-  return s;
+  await preflightPending;
+  return appPreflightState.value;
 }
 
+// IP 输入框的失焦 / Enter：只读预检，就地更新卡片上那个 tag。
+//
+// 它以前是「测试连接」按钮，撤掉的理由：这段预检「连 App 调试」本来就会跑
+// （见 appDebugRun），两者结果落在同一个 tag 上——一个动作没必要占两个入口。
+// 挪到输入框上反而更顺：填完 IP 松手就有反馈，还省下一行按钮。
 async function appPreflightRun() {
   const host = appHost.value.trim();
-  if (!host) return ElMessage.warning("请先填 App 的 IP（App 通知栏里有）");
+  // 清空 IP 就把 tag 一并清掉：留着上一轮的「已连接」等于说假话
+  if (!host) {
+    appPreflightState.value = null;
+    return;
+  }
+  // 新建 / 另存时域名还没填，后端会直接判 unreachable（core/app_debug.py:286）。
+  // 那不是「连不上」，不该摆到卡片上——静默跳过，等域名填了再说
+  if (!String(form.value.bookSourceUrl || "").trim()) return;
   await runPreflight(host);
 }
 
@@ -664,6 +757,11 @@ async function save() {
   s.bookSourceType = Number(s.bookSourceType);
   // 合法取值只有 Legado 的 0/1/2/3；4 及其它脏值一律归 0（文本）
   if (![0, 1, 2, 3].includes(s.bookSourceType)) s.bookSourceType = 0;
+  // `enabledExplore` **在这里推导**，不靠用户维护那个开关：没配发现规则一律关
+  // （否则 App 的发现页会列出一堆点了没反应的源），配了则遵从「隐藏」那个例外
+  s.enabledExplore = !!(String(s.exploreUrl || "").trim()
+                        || Object.keys(s.ruleExplore || {}).length)
+                     && !hideExplore.value;
   if (!String(s.bookSourceName || "").trim()) return ElMessage.warning("名称不能为空");
   if (!String(s.bookSourceUrl || "").trim()) return ElMessage.warning("域名不能为空");
   // 新建书源时若填了已存在的域名，后端 upsert_sources 会按 URL 主键
@@ -909,12 +1007,20 @@ async function doSave(s) {
                       <el-option value="TEXT" label="TEXT" />
                     </el-select>
                   </el-form-item>
-                  <el-form-item label="webView">
-                    <el-switch v-model="form.ruleContent.webView" />
-                  </el-form-item>
+                  <!-- **这里原本有个 `webView` 开关，删掉了**：Legado 的 `ContentRule`
+                       没有这个字段（`ContentRule.kt:12-25`），写进去 App 根本不读——
+                       一个开了没用的开关比没有更糟。`webView` 是 **URL 规则**的选项，
+                       写在 URL 后面（如 `url,{"webView":true}`，见 AnalyzeUrl.kt:254）。
+                       实测库里 0 条源带过这个字段，所以删掉没有任何数据要迁 -->
                   <el-form-item label="webJs">
                     <el-input v-model="form.ruleContent.webJs" type="textarea" :rows="3"
                               placeholder="页面内执行的 ES5 JS，返回正文内容" />
+                    <div class="muted" style="line-height: 1.5">
+                      只在**对应的 URL 规则**开了 <code>webView</code> 时才生效——
+                      要写成 <code>url,{"webView":true}</code> 挂在
+                      <code>目录规则</code> 的 <code>chapterUrl</code> 后面。
+                      没开的话这段 JS 在 App 里会被静默忽略。
+                    </div>
                   </el-form-item>
                 </el-tab-pane>
               </el-tabs>
@@ -944,13 +1050,20 @@ async function doSave(s) {
                   </el-form-item>
                 </el-collapse-item>
                 <el-collapse-item name="discover" title="发现配置">
-                  <!-- 开关原本在「基本信息」页签，和它管的东西隔了两个页签，
-                       关系看不出来。挪进这里与 exploreUrl 同处 -->
-                  <el-form-item label="启用发现">
-                    <el-switch v-model="form.enabledExplore" />
-                    <span class="muted" style="margin-left: 8px">
-                      关闭后 App 不显示该源的发现页
+                  <!-- **不是一个中立的开关**：`enabledExplore` 由配置推导，
+                       这里只表达「配了但不想显示」这一个例外。原来的开关会让用户
+                       手动维护一个算得出来的状态——实测 739 条开着却没配置、
+                       133 条有配置却关着，两边都是错的 -->
+                  <el-form-item label="发现">
+                    <span v-if="!hasExploreConfig" class="muted">
+                      未配置发现规则，不会出现在 App 的发现页
                     </span>
+                    <template v-else>
+                      <el-checkbox v-model="hideExplore">在 App 的发现页隐藏</el-checkbox>
+                      <span class="muted" style="margin-left: 8px">
+                        留空则跟随配置（配了就显示）
+                      </span>
+                    </template>
                   </el-form-item>
                   <el-form-item label="exploreUrl">
                     <el-input v-model="form.exploreUrl" type="textarea" :rows="3"
@@ -1006,6 +1119,12 @@ async function doSave(s) {
 
       <el-col :xs="24" :sm="24" :md="9">
         <el-card shadow="never" header="连 App 调试" class="sticky-test">
+          <!-- 这一句是**规格**，不是客套：App 拿到入口后会自己沿规则链往下跑
+               （Debug.kt:279-297），所以下游 URL 本来就不该由用户提供。
+               放在 chip 之前——先知道「可以留空」，再看那排 chip 才不慌 -->
+          <p class="muted" style="margin: 0 0 8px">
+            留空就从搜索开始，App 自己跑到底。
+          </p>
           <!-- 调试目标照 App 调试界面的 chip 行做。这排 chip 只负责改 placeholder
                和拼 key 前缀，**不改变 App 的分派**——它认的是 key 的形态，
                所以在这排选什么并不会「锁死」链路，理由见 buildDebugKey 上方 -->
@@ -1015,52 +1134,49 @@ async function doSave(s) {
             </el-radio-button>
           </el-radio-group>
           <div class="toolbar" style="margin-top: 8px">
-            <el-input v-model="debugQuery" size="small" :placeholder="currentTarget.hint"
+            <el-input v-model="debugQuery" size="small" :placeholder="debugHint"
                       style="flex: 1 1 150px" @keyup.enter="appDebugRun()" />
           </div>
-          <p class="muted" style="margin: 8px 0 0">
-            目标决定<b>从哪一步开始跑</b>；输入框的提示就是这一步该填什么。
-          </p>
           <!-- 连 App 调试：我们离线回放不了 JS 规则（<js> / @js:），
                而 App 内建的调试 WebSocket 能跑完整链路。IP 填 App 通知栏里
-               显示的那个（端口取 HTTP 端口 + 1，默认 1123），填过就记住了。 -->
+               显示的那个（端口取 HTTP 端口 + 1，默认 1123），填过就记住了。
+               失焦 / Enter 即预检（只读，不写 App），所以这一行不需要
+               「测试连接」占位——见 appPreflightRun -->
           <div class="toolbar" style="margin-top: 8px">
             <el-input v-model="appHost" size="small" placeholder="App 的 IP，如 192.168.1.5"
-                      style="flex: 1 1 150px" />
-            <el-button size="small" :loading="appChecking" @click="appPreflightRun">
-              测试连接
-            </el-button>
-          </div>
-          <!-- 预检结果就地显示。以前只有一个「连」按钮：连不上或缺源都要干等
-               60 秒超时，而且两者表现完全一样，没法对症下药 -->
-          <p v-if="appPreflightState" style="margin: 8px 0 0">
-            <el-tag size="small" :type="preflightType">{{ preflightText }}</el-tag>
-            <span class="muted" style="margin-left: 6px">{{ appPreflightState.error }}</span>
-          </p>
-          <!-- 一个按钮就够：该不该先推送由预检的三态决定（App 里没有 / 是旧版本 /
-               一致），用户不必知道这一层。推送走 App 的 HTTP 接口，幂等 -->
-          <div class="toolbar" style="margin-top: 8px">
+                      style="flex: 1 1 150px"
+                      @blur="appPreflightRun" @keyup.enter="appPreflightRun" />
+            <!-- 唯一的按钮：该不该先推送由预检的三态决定（App 里没有 / 是旧版本 /
+                 一致），用户不必知道这一层。推送走 App 的 HTTP 接口，幂等 -->
             <el-button type="primary" size="small" :loading="appDebugging"
                        @click="appDebugRun()">
               连 App 调试
             </el-button>
           </div>
+          <!-- 预检结果就地显示。以前只有一个「连」按钮：连不上或缺源都要干等
+               60 秒超时，而且两者表现完全一样，没法对症下药。「检测中」得留一格：
+               预检现在是失焦触发的，不给在途状态就成了「点完什么也没发生」 -->
+          <p v-if="appPreflightState || appChecking" style="margin: 8px 0 0">
+            <template v-if="appChecking">
+              <el-tag size="small" type="info">检测中…</el-tag>
+            </template>
+            <template v-else>
+              <el-tag size="small" :type="preflightType">{{ preflightText }}</el-tag>
+              <span class="muted" style="margin-left: 6px">{{ appPreflightState.error }}</span>
+            </template>
+          </p>
           <p v-if="pushed" style="margin: 8px 0 0">
             <el-tag size="small" type="success">已推送到 App</el-tag>
             <span class="muted" style="margin-left: 6px">
               {{ pushed === "missing" ? "（新建）" : "（覆盖了 App 里的旧规则）" }}
             </span>
           </p>
-          <p class="muted" style="margin: 8px 0 0">
-            需要 App 打开「Web 服务」，手机与电脑在同一局域网。
-          </p>
-          <p class="muted" style="margin: 4px 0 0">
-            调试跑的是 App 里那个源：App 里没有、或与这里不一致时会先问你
-            要不要推过去（<b>覆盖 App 里同 URL 的源</b>）。
-          </p>
-
+          <!-- 空态只在没跑过时出现，正好承接「第一次用才知道」的事：
+               IP 从哪来。跑过一次它就自己消失，不常驻占地方。
+               「需要开 Web 服务、同一局域网」不再单说——连不上时后端那句
+               error 已经说了，而且更全（还带端口） -->
           <div v-if="!testResult" class="muted" style="padding: 22px; text-align: center">
-            改完规则点「连 App 调试」，让 App 按真实阅读路径跑一遍。
+            App 打开「Web 服务」，把通知栏显示的 IP 填到上面那格。
           </div>
           <template v-else-if="!testResult.error">
             <div v-for="s in testResult.steps" :key="s.name" class="quick-step">

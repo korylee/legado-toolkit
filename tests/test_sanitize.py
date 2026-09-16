@@ -54,6 +54,29 @@ class ConcurrentRateTests(unittest.TestCase):
         self.assertEqual(clean([]), 0)
         self.assertEqual(clean({}), 0)
 
+    def test_dirty_book_source_type_is_normalized(self):
+        """`bookSourceType` 只允许 Legado 的 0/1/2/3。
+
+        实测库里有过 6 条 `4`（`BookSourceType.kt` 的 `@IntDef` 里没有 4），
+        而 `clean_source` 原来**根本不看这个字段**——于是导入外部源时，对方带个
+        4（或 99）会被原样收下、再原样导出回 App。UI 保存时本来就会归 0，
+        这里补上是为了**导入那条路**（`backend/api/imports.py` 也调 clean_source）。
+        """
+        for dirty in (4, 99, -1, "4", None, "", [], {}):
+            with self.subTest(value=dirty):
+                src = {"bookSourceType": dirty}
+                clean_source(src)
+                self.assertIn(src["bookSourceType"], (0, 1, 2, 3),
+                              "脏值必须归一：%r" % (dirty,))
+
+    def test_legal_types_are_untouched(self):
+        """反向断言：0/1/2/3 一个都不能动——归一化写成恒 0 就会全绿。"""
+        for ok in (0, 1, 2, 3):
+            with self.subTest(value=ok):
+                src = {"bookSourceType": ok}
+                clean_source(src)
+                self.assertEqual(src["bookSourceType"], ok)
+
     def test_sibling_int_fields_untouched(self):
         # 改 concurrentRate 不能顺带改坏同一批处理的其它 int 字段
         source = {"customOrder": "5", "respondTime": "abc", "weight": 3,

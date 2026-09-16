@@ -177,11 +177,15 @@ python main.py report -i out/organized.json -r check_cache -o out/final_report.m
     4★/5★ 保留给有命中实测证据的源
   - 深度验证**无法验证**（XPath/JS 规则、网络失败、参考表缺项）的维度**回退静态规则判定**，
     不误杀规则齐全的源；实测**明确不达标**（False）仍扣分，不误放真坏的源
-- **验证深度**由 `--probe-depth` 控制（默认 **1** = 浅探测，现状速度）：
-  - `1`：不实测，目录/正文维度走静态规则判定（星级与深度 3 结果一致，仅缺实测细节）
-  - `2`：命中后**实测目录**——解析详情页数章节数与参考表比对（新增 1 个请求/源）
-  - `3`：再**抽样一章实测正文**——中位章节，计时 + 文本/图片判定（新增 2 个请求/源）
-  - 定期全量审计用 `--probe-depth 3`，日常增量校验用默认 1
+- **验证深度**由 `--probe-depth` 控制。**一根轴四档，一档对一级星级**（默认 **2** = 搜索）：
+  - `1` 主页：只测域名连通（1 个请求/源），目录/正文维度走静态规则判定
+  - `2` 搜索：再**实测搜索**是否命中测试作品（+1~2 个请求/源）→ 2★连通 / 3★命中
+  - `3` 目录：命中后**实测目录**——解析详情页数章节数与参考表比对（+2 个请求/源）→ 4★
+  - `4` 正文：再**抽样一章实测正文**——中位章节，计时 + 文本/图片判定（+1 个请求/源）→ 5★
+  - 定期全量审计用 `--probe-depth 4`，日常增量校验用默认 2
+  - 合并前是「深度 1/2/3 + 独立的 `--no-search-probe` 开关」，两个旋钮能配出「关掉搜索
+    却选目录档」这种永远进不去的组合。旧编号对应新编号：旧 1+搜索开 = 新 2，旧 2 = 新 3，
+    旧 3 = 新 4（设置文件自动迁移，见 `core/settings_store._migrate_legacy`）
 - 内置参考表（models.py `TEST_TITLES`，数据截至 2026-08）：斗破苍穹 1681 / 凡人修仙传 2446 / 赘婿 1358 / 诡秘之主 1432 / 庆余年 826 章；海贼王 1190 / 火影忍者 700 / 斗罗大陆 750 / 进击的巨人 139 / 龙珠 519 话
 
 ### 质量标签（追加在分组后，逗号分隔）
@@ -203,7 +207,7 @@ python main.py report -i out/organized.json -r check_cache -o out/final_report.m
 | 批准规则冲突 | `python main.py review-imports --candidate candidates.json --registry book_sources.sqlite3 --approve URL` |
 | 清洗类型脏值（导入前必跑） | `python main.py sanitize -i 外部.json`（缺省就地覆盖） |
 | 校验+整理+报告 | `python main.py run -i candidates.json -o out/checked.json` |
-| 深度验证审计（目录+正文实测） | `python main.py check -i candidates.json --probe-depth 3 --cache-dir check_cache` |
+| 深度验证审计（目录+正文实测） | `python main.py check -i candidates.json --probe-depth 4 --cache-dir check_cache` |
 | 仅可用源精简版 | `python main.py run -i candidates.json --keep-only-ok -o out/checked_ok.json` |
 | 只要报告（不重新校验） | `python main.py report -i out/organized.json -r check_cache -o out/report.md` |
 | 去重检查 | `python main.py dedupe -i 某文件.json -o 去重后.json` |
@@ -313,5 +317,5 @@ python main.py diagnose -i out/checked.json -o out/diagnose.md --only-dead -c 20
 而非「规则失效」，避免误杀：`@js:`、`<js>`、`@xpath:`、`||` 备选规则、JSONPath `..`。
 
 > 注意：`beautifulsoup4` 是必需依赖（`pyproject.toml` 已加）。此前缺失导致所有规则
-> 解析静默失败、深度验证（`--probe-depth 2/3`）实际未生效。
+> 解析静默失败、深度验证（`--probe-depth` 3/4）实际未生效。
 

@@ -57,12 +57,6 @@ DEAD_TAG_PATTERNS: List[str] = [
     "js失效", "校验超时", "搜索链接规则为空",
 ]
 
-#: 需要登录/验证的信号词（出现在 group / comment 中）
-AUTH_TAG_PATTERNS: List[str] = [
-    "需登录", "需要登录", "登录", "人机验证", "验证码", "cf盾",
-    "CF盾", "cf验证", "cf盾", "验证", "需梯子", "被墙", "墙",
-]
-
 #: 响应体中出现的"反爬/验证"特征
 ANTI_BOT_MARKERS: List[str] = [
     "验证码", "人机验证", "安全验证", "滑动验证",
@@ -123,17 +117,6 @@ ORIGINAL_TAG_PATTERNS: List[str] = [
 
 
 @dataclass
-class SearchTarget:
-    """从书源规则中提取的搜索目标信息。"""
-    url_template: str = ""       # searchUrl 或 ruleSearch.url
-    method: str = "GET"          # GET/POST
-    has_book_list_rule: bool = False  # 是否有 bookList 抽取规则
-    keyword_placeholder: str = "{{key}}"  # 关键词占位符
-    raw_search_url: str = ""     # 原始 searchUrl 字段
-    raw_book_list: str = ""      # 原始 ruleSearch.bookList
-
-
-@dataclass
 class BookSourceRecord:
     """单个书源的诊断视图（只读，不修改原始 JSON）。"""
     raw: Dict[str, Any] = field(default_factory=dict)
@@ -144,20 +127,21 @@ class BookSourceRecord:
     url: str = ""
     enabled: bool = True
     comment: str = ""
-    login_url: str = ""
-    enabled_cookie_jar: bool = False
-    has_search: bool = False           # 是否有搜索能力（searchUrl 或 ruleSearch.url）
-    has_book_list: bool = False        # ruleSearch.bookList 非空
-    has_explore: bool = False          # exploreUrl 非空
-    is_js_search: bool = False         # 搜索规则是 JS 实现（无法纯 HTTP 验证）
-    has_header_js: bool = False        # header 含 js
-    has_login_js: bool = False         # loginUrl 含 js
-    concurrent_rate: str = ""          # 并发限制
-    # ---- 静态诊断 ----
-    dead_tagged: bool = False          # 分组/备注标注失效
-    auth_tagged: bool = False          # 标注需登录/验证
+    enabled_cookie_jar: bool = False   # 供 checker 判「登录墙」用（有读者）
+    has_search: bool = False           # 是否有**可探测**的搜索（searchUrl 或 ruleSearch.url）
     search_url_template: str = ""      # 提取的搜索 URL 模板
-    search_method: str = "GET"
+    # ---- 静态诊断 ----
+    dead_tagged: bool = False          # 分组/备注标注失效（reporter 在读）
+    #
+    # 这里删掉了一批「算了没人读」的字段（2026-09-16 逐个 grep 确认零读者）：
+    #   login_url / has_book_list / has_explore / has_header_js / has_login_js /
+    #   concurrent_rate / auth_tagged，以及**没有声明过、动态挂上去的** raw_book_list。
+    # 它们大多能从 `raw` 现算，留着只会让人以为有人在用。
+    #
+    # 两处**有意的例外**，不在这里、也不该顺手补回来：
+    #   - `dead_tagged` 留着：`core/reporter.py` 在读它（同名的 `auth_tagged` 没人读，删了）
+    #   - `has_search` 留着：探测门与星级都在读
+    # 另外 `AUTH_TAG_PATTERNS` 也随 `auth_tagged` 一起删了——它的唯一读者就是那个字段。
     # ---- 动态校验结果 ----
     health: str = Health.SKIPPED
     status_code: int = 0
@@ -168,6 +152,10 @@ class BookSourceRecord:
     search_hit: str = ""             # 命中的测试作品名（空=未命中/未测）
     search_response_ms: int = 0      # 搜索请求响应耗时
     quality_stars: int = 0           # 星级 0-5
+    #: 这个星级是**实测**来的还是**按静态规则推的**（见 checker.evaluate_stars）：
+    #: "measured" / "static" / ""（0★ 不可达，无可标注）。**必须与 quality_stars 一起
+    #: 看**——3★ 有「搜索实测命中」和「只是规则齐全」两种来源，光看星级分不出来。
+    star_basis: str = ""
     quality_tags: List[str] = field(default_factory=list)  # 如 ["规则完整"]（命中不在此打标签，见 search_hit）
     # ---- 深度验证结果（probe_depth >= 2 时填充；None=未验证/无法验证）----
     probe_depth: int = 1             # 实际执行的验证深度（1=浅探测 / 2=+目录 / 3=+正文）
@@ -205,47 +193,36 @@ def build_record(raw: Dict[str, Any], index: int) -> BookSourceRecord:
     rec.url = str(raw.get("bookSourceUrl", "") or "")
     rec.enabled = bool(raw.get("enabled", True))
     rec.comment = str(raw.get("bookSourceComment", "") or "")
-    rec.login_url = str(raw.get("loginUrl", "") or "")
     rec.enabled_cookie_jar = bool(raw.get("enabledCookieJar", False))
-    rec.concurrent_rate = str(raw.get("concurrentRate", "") or "")
 
     # 搜索规则提取
     rule_search = raw.get("ruleSearch", {}) or {}
     if not isinstance(rule_search, dict):
         rule_search = {}
-    rec.raw_book_list = str(rule_search.get("bookList", "") or "")
     raw_search_url = str(raw.get("searchUrl", "") or "")
     rule_url = str(rule_search.get("url", "") or "")
-    rec.search_url_template = raw_search_url or rule_url
-    rec.has_search = bool(rec.search_url_template)
-    rec.has_book_list = bool(rec.raw_book_list)
-    rec.is_js_search = "<js" in rec.raw_book_list or "<js" in rec.search_url_template
-    # 若 bookList 为纯 JS 且无 url，则无法纯 HTTP 验证搜索
-    if not rec.search_url_template and rec.raw_book_list:
-        rec.has_search = False  # 只有 JS bookList 而无 URL，视为不可纯HTTP搜索
+    tpl = raw_search_url or rule_url
+    # **先剥 `@` 后缀、再判 `has_search`**——顺序很关键（实测 252 条踩过）：
+    # `@js:` 形态的 searchUrl **整段都落在 `@` 之后**，剥完是空串。先判的话会留下
+    # 「有搜索规则、模板却是空」的矛盾态，checker 拿这个空模板去拼 `domain + "/"`，
+    # **把站点首页当搜索页打**：白费一次请求，而且结论无从解释。
+    # 剥了再判，「我们回放不了的搜索」自然就落成「没有搜索」。
+    #
+    # 后缀本身不必在这里解读：`parse_search_request` 才是**唯一**懂
+    # `@POST` / `@headers=` / `@Cookie=` 的地方，让它去认，别再存第二份。
+    if "@" in tpl:
+        tpl = tpl.rpartition("@")[0]
+    rec.search_url_template = tpl
+    rec.has_search = bool(tpl)
+    # 这里原本还有一条「无 url 但有 bookList → has_search = False」。剥 `@` 挪到
+    # 前面之后它成了空操作（模板为空时上面已经给了 False），删掉。
+    #
+    # 这里原本还算了 header / loginCheckJs / loginUi / exploreUrl 的四个静态标记
+    # （has_header_js / has_login_js / has_explore，以及动态挂上去的 raw_book_list），
+    # **都已删除**——逐个 grep 确认零读者。
 
-    # 探索规则
-    explore = str(raw.get("exploreUrl", "") or "")
-    rec.has_explore = bool(explore)
-
-    # header / login js 标记
-    header = str(raw.get("header", "") or "")
-    rec.has_header_js = "<js" in header or "@js" in header
-    login_js = str(raw.get("loginCheckJs", "") or "") + str(raw.get("loginUi", "") or "")
-    rec.has_login_js = "<js" in login_js or "@js" in login_js or "<js" in rec.login_url
-
-    # 静态失效/验证标注
+    # 静态失效标注（`dead_tagged` 是这里唯一有读者的产物，见 reporter.py）
     combined_tag = f"{rec.group} {rec.comment} {rec.name}"
     rec.dead_tagged = any(p in combined_tag for p in DEAD_TAG_PATTERNS)
-    rec.auth_tagged = any(p in combined_tag for p in AUTH_TAG_PATTERNS)
-
-    # 搜索方法判定（searchUrl 可能带 @POST 后缀）
-    if "@" in rec.search_url_template:
-        parts = rec.search_url_template.rsplit("@", 1)
-        if len(parts) == 2:
-            tail = parts[1].upper()
-            if tail.startswith("POST") or tail == "POST" or "POST" in tail:
-                rec.search_method = "POST"
-            rec.search_url_template = parts[0]
 
     return rec

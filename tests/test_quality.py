@@ -257,6 +257,35 @@ class StaticMisconfigTests(unittest.TestCase):
         })
         self.assertEqual([n for n in notes if "webJs" in n], [])
 
+    def test_webjs_with_webview_on_chapter_url_is_clean(self):
+        """`chapterUrl` 上的 `{"webView":true}` 同样算数——**它才是正文那条 URL 规则**。
+
+        App 的正文请求是拿 `ruleToc.chapterUrl` 解析出的章节 URL 发的
+        （`WebBook.kt:429`），`useWebView` 来自那条规则自己的选项
+        （`AnalyzeUrl.kt:254`）。所以开着它时 `ContentRule.webJs` **会生效**。
+        只扫 searchUrl / exploreUrl / tocUrl 的话，这里会给出**反的**结论——
+        而错误提示比没有提示更糟：用户会照着去改一个本来没问题的源。
+
+        实测库里 5 条源正是这个形状（`chapterUrl = tag.a@href##$##,{"webView":true}`），
+        一直在被误报。
+        """
+        notes = Q.static_misconfig_notes({
+            "ruleToc": {"chapterUrl": 'tag.a@href##$##,{"webView":true}'},
+            "ruleContent": {"webJs": "return 1"},
+        })
+        self.assertEqual([n for n in notes if "webJs" in n], [])
+
+    def test_webjs_without_webview_on_chapter_url_still_warns(self):
+        """反向断言：`chapterUrl` 没开 webView 时**仍要提醒**。
+
+        少了这条，为了修误报把整个提醒关掉（例如把判断改成恒 False）也会全绿。
+        """
+        notes = Q.static_misconfig_notes({
+            "ruleToc": {"chapterUrl": "tag.a@href"},
+            "ruleContent": {"webJs": "return 1"},
+        })
+        self.assertTrue(any("webJs" in n for n in notes))
+
     def test_type_four_warns(self):
         notes = Q.static_misconfig_notes({"bookSourceType": 4})
         self.assertTrue(any("bookSourceType" in n for n in notes))
@@ -427,3 +456,19 @@ class AsStepDictTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------- 变异记录
+# 以下为实测（改坏 → `python -B -m unittest tests.test_quality` → 确认变红 → 还原）。
+#
+#  StaticMisconfigTests 的 webView 扫描（2026-09-16）：
+#
+#  M25  从 `_URL_RULE_PATHS` 里去掉 `("ruleToc", "chapterUrl")`
+#         → test_webjs_with_webview_on_chapter_url_is_clean 红
+#         （这正是修复前的状态：库里 5 条源的 chapterUrl 带着 ,{"webView":true}，
+#           却一直被告知「webJs 不会生效」）
+#  M26  `_any_url_rule_uses_webview` 恒返回 True（**修误报修过头**：把提醒整个关掉）
+#         → test_webjs_without_webview
+#           test_webjs_without_webview_on_chapter_url_still_warns 红
+#         （M25 与 M26 是一对：只做 M25 会以为「扫得越全越好」，
+#           M26 证明「全开」等于把功能删了——两个方向都得有断言）

@@ -19,8 +19,15 @@ def clean_source(s):
     for f in ('customButton', 'eventListener', 'enabled', 'enabledCookieJar', 'enabledExplore'):
         v = s.get(f)
         if v is not None and not isinstance(v, bool):
-            s[f] = bool(v) if isinstance(v, (int, str)) and v not in ('', [], {}, 'false') else False
-            if isinstance(v, list):
+            # 字符串**先归一大小写**再判。原来拿原值去比 ('', [], {}, 'false')，
+            # 于是 `"False"` / `"0"` 落进 `bool()` 变成 **True**——开关被反向打开，
+            # 而小写 `"false"` 恰好判对，纯属巧合。非 int / 非 str 一律 False
+            # （bool 已被上面那道 `not isinstance(v, bool)` 挡掉，这里的 int 是真 int）
+            if isinstance(v, int):
+                s[f] = bool(v)
+            elif isinstance(v, str):
+                s[f] = v.strip().lower() not in ('', '0', 'false')
+            else:
                 s[f] = False
     # int 字段
     for f in ('customOrder', 'respondTime', 'weight'):
@@ -70,6 +77,20 @@ def clean_source(s):
     # str 字段
     if not isinstance(s.get('variableComment'), str):
         s['variableComment'] = ''
+    # bookSourceType：**合法取值只有 Legado 的 0/1/2/3**
+    # （`BookSourceType.kt` 的 @IntDef）。这里原来根本不看它，于是导入外部源时
+    # 对方带个 4（或 99、字符串 "4"）会被原样收下、再原样导出回 App——
+    # 而 App 那边 `4` 不是任何类型，属于脏数据。实测库里有过 6 条 `4`。
+    # 归 0（文本）与 UI 保存时的口径一致（`SourceEditDialog.vue` 的 sanitize）
+    v = s.get('bookSourceType')
+    if v is None:
+        s['bookSourceType'] = 0
+    else:
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            n = 0
+        s['bookSourceType'] = n if n in (0, 1, 2, 3) else 0
     return s
 
 def main():

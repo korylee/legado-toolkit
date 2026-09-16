@@ -3,7 +3,7 @@
 
 全链路试跑：search → bookUrl → toc → content，并采集每一步的证据。
 
-设计依据见 docs/superpowers/specs/2026-09-15-rule-debug-and-dialog-hardening-design.md：
+设计要点（原设计文档已随实现完成删除，要点保留在此）：
 - 判定底线对齐 Legado 的调试（只判「非空 / 不报错」），见 core/quality.py
 - 证据含**提取值全文**，对齐 BookContent.kt:194-205 的「正文长度或全文」
 - steps[].ok 与 all_ok 保持旧语义（仅 fail → False），三个消费方零改动
@@ -17,9 +17,6 @@ from core.urls import abs_url as _abs_url
 from core.fetch import fetch, parse_source_header
 from core.rules.replayer import extract_all_nodes
 from core import quality as Q
-
-#: 旧的 apply_css_rule 兼容名（services/add_source.py 仍在用）
-from core.rules.replayer import extract_all as apply_css_rule
 
 
 #: 页面登记口径已提取到 ``quality.new_page``（「连 App 调试」共用同一份，见

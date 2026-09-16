@@ -2,12 +2,16 @@
 import { ref, computed, watch, onMounted, onUnmounted } from "vue";
 import { ElMessage } from "element-plus";
 import { api, subscribeJob } from "../api/client";
-import { describeChanges } from "../utils/health";
+import { describeChanges, healthLabel } from "../utils/health";
 
 // 「任务」抽屉：替代已删掉的「任务」页。
 // 打开时拉一次历史（GET /api/jobs），再对还没跑完的任务挂 SSE 实时进度。
 // 原「任务」页那个「跑 ping 冒烟」按钮是调试用的，按需求不再搬运。
-const props = defineProps({ modelValue: { type: Boolean, default: false } });
+const props = defineProps({
+  modelValue: { type: Boolean, default: false },
+  //: 打开时自动展开哪一条任务（结果条上的「查看」用）。空串 = 不展开
+  focusJobId: { type: String, default: "" },
+});
 const emit = defineEmits(["update:modelValue", "running-change"]);
 
 const visible = computed({
@@ -17,6 +21,7 @@ const visible = computed({
 
 const loading = ref(false);
 const jobs = ref([]);
+const tableRef = ref(null);
 // job_id -> 取消订阅函数。取消函数不需要响应式，用普通对象存即可，ref 包一层是多余的
 const stops = {};
 
@@ -48,7 +53,9 @@ function watchJob(jobId) {
     (data) => {
       delete stops[jobId];
       mergeJob(data);
-      ElMessage.success("任务完成: " + (data && data.status));
+      // **不弹「任务完成」的 toast**：那一行的状态标签本来就会实时变，
+      // 而校验任务的结果另有 SourcesView 的结果条——再来一条浮层只是噪音。
+      // status === "unknown" 是 SSE 重连到上限的兜底，mergeJob 会安全地忽略它
     },
   );
 }
@@ -75,7 +82,12 @@ function buildDetail(r) {
     const warns = [];
     if (r.save_failures) warns.push(r.save_failures + " 条结果没能写入管理库，列表状态不会更新");
     if (r.hit_downgrades) warns.push(r.hit_downgrades + " 个源的命中判定降级（规则无法回放，已按「命中」处理）");
-    return { lines, warns };
+    // 变化**明细**。只有计数是不够的：摘要说「6 条变成失效」，用户下一步肯定是
+    // 问「哪 6 条」——而列表里那 3800 行没法一眼找出这几个。
+    // 后端只带前 N 条（`CHANGED_ITEMS_LIMIT`），用计数和条数一比就知道有没有截断
+    const changedItems = r.changed_items || [];
+    const changedTotal = Object.values(t.changed || {}).reduce((a, b) => a + b, 0);
+    return { lines, warns, changedItems, changedTotal };
 }
 
 async function loadDetail(row) {
@@ -107,7 +119,15 @@ async function load() {
   }
 }
 
-watch(() => props.modelValue, (v) => { if (v && !loading.value) load(); });
+// 打开抽屉时自动展开 focusJobId 那条。**要等 load() 完**：列表还没数据时
+// 表格里没有这一行，toggleRowExpansion 会静默什么都不做
+watch(() => [props.modelValue, props.focusJobId], async ([open, id]) => {
+  if (!open) return;
+  if (!loading.value) await load();
+  if (!id) return;
+  const row = jobs.value.find((j) => j.id === id);
+  if (row && tableRef.value) tableRef.value.toggleRowExpansion(row, true);
+}, { immediate: true });
 
 // 挂载即拉一次：徽标要在没打开过抽屉时就正确，光靠「打开时拉」拿不到
 onMounted(load);
@@ -126,16 +146,29 @@ defineExpose({ refresh: load });
       <el-button size="small" :loading="loading" @click="load">刷新</el-button>
     </div>
 
-    <el-table :data="jobs" v-loading="loading" border size="small" style="margin-top: 10px"
+    <el-table ref="tableRef" :data="jobs" v-loading="loading" border size="small"
+              style="margin-top: 10px"
               @expand-change="loadDetail">
-      <!-- 展开看结果摘要。**校验结果目前只有一句 toast，错过就没了**，这里是
-           唯一能回看「这次校验改变了什么」的地方 -->
+      <!-- 展开看结果摘要与**变化明细**。列表页那条结果条只报计数，
+           「哪几条变了」要看这里 -->
       <el-table-column type="expand" width="34">
         <template #default="{ row }">
           <div class="job-detail">
             <template v-if="details[row.id]">
               <div v-for="(line, i) in details[row.id].lines" :key="i">{{ line }}</div>
               <div v-for="(w, i) in details[row.id].warns" :key="'w' + i" class="warn">{{ w }}</div>
+              <!-- 变化明细：光有「6 条变成失效」这个计数，下一步必然是问「哪 6 条」 -->
+              <div v-if="details[row.id].changedItems.length" class="changes">
+                <div class="muted head">
+                  状态变化（{{ details[row.id].changedItems.length }} / {{ details[row.id].changedTotal }} 条）：
+                </div>
+                <div v-for="(c, i) in details[row.id].changedItems" :key="'c' + i" class="chg">
+                  <span class="nm" :title="c.url">{{ c.name }}</span>
+                  <span class="muted">{{ healthLabel(c.from) }}</span>
+                  <span class="muted">→</span>
+                  <span :class="'to-' + c.to">{{ healthLabel(c.to) }}</span>
+                </div>
+              </div>
             </template>
             <span v-else-if="details[row.id] === null" class="muted">没有可展示的结果</span>
           </div>
@@ -172,4 +205,31 @@ defineExpose({ refresh: load });
 .job-detail .warn {
   color: var(--el-color-danger);
 }
+/* 变化明细：最多 200 条，给个高度上限免得把抽屉撑到几屏 */
+.job-detail .changes {
+  margin-top: 6px;
+  max-height: 220px;
+  overflow-y: auto;
+  border-top: 1px dashed var(--el-border-color-lighter);
+  padding-top: 4px;
+}
+.job-detail .changes .head { font-size: 12px; }
+.job-detail .changes .chg {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  font-size: 12px;
+  line-height: 1.7;
+}
+.job-detail .changes .chg .nm {
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 300px;
+}
+.job-detail .changes .chg .to-ok { color: var(--el-color-success); }
+.job-detail .changes .chg .to-dead,
+.job-detail .changes .chg .to-gfw { color: var(--el-color-danger); }
+.job-detail .changes .chg .to-auth { color: var(--el-color-warning); }
 </style>
