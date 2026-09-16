@@ -1377,6 +1377,12 @@ class AsyncChecker:
         if self.use_store or self.cache_dir:
             for r in results:
                 self.save_cache_append(r)
+        if self.use_store:
+            # 每源只留最近一条（见 Store.sweep_checks）。放在这里是因为**所有写入
+            # 路径都经过本函数**（Web 任务与 CLI 都走 run），一处收口就不会有
+            # 哪个入口漏了清理。不清理的后果是 checks 随每次校验单调增长——
+            # 历史行没有任何读者，全部调用点要的都是"每源最新一条"
+            self._store().sweep_checks()
         self.close()
         if self.save_failures:
             print("警告: %d 条校验结果没能写进缓存（状态不会更新）"

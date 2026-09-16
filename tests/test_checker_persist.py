@@ -410,6 +410,115 @@ class CacheReuseTests(unittest.TestCase):
         self.assertEqual(sent, ["https://a.example/"])
 
 
+class ChecksRetentionTests(unittest.TestCase):
+    """`checks` 每个源只留**最近一条**。
+
+    它原来只增不减——`jobs`/`exports` 都有 TTL 清理，它一条都没有，而**全部读者
+    都只取每源最新一条**（`checks_map`、`last_check`、`v_sources` 视图），历史行
+    没有任何读者。实测库里 3861 条源攒到 6626 行 / 26.6 MB；而瞬时网络的结论现在
+    也会落库（`save_cache_append`），于是每次全量稳定追加约 1000 行。
+
+    **最关键的一条断言是"留下的那条 = checks_map 会返回的那条"**：两边口径一旦
+    不一致，列表上显示的结论会被清理悄悄删掉，而界面上看不出任何异常。
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory(dir=_TMP_ROOT)
+        self._old = os.environ.get("LEGADO_DATA_DIR")
+        os.environ["LEGADO_DATA_DIR"] = self.tmp.name
+
+    def tearDown(self) -> None:
+        if self._old is None:
+            os.environ.pop("LEGADO_DATA_DIR", None)
+        else:
+            os.environ["LEGADO_DATA_DIR"] = self._old
+        self.tmp.cleanup()
+
+    @staticmethod
+    def _write(rows) -> None:
+        with Store() as st:
+            st.save_checks(rows)
+
+    def _healths(self):
+        with Store() as st:
+            return [dict(r) for r in st.conn.execute(
+                "SELECT source_url, health FROM checks ORDER BY source_url, id")]
+
+    def _map_healths(self):
+        with Store() as st:
+            return {u: i["health"] for u, i in st.checks_map().items()}
+
+    def test_each_source_keeps_only_its_latest(self) -> None:
+        self._write([
+            {"url": "https://a.example/", "health": "dead",
+             "checked_at": "2026-09-16 10:00:00"},
+            {"url": "https://a.example/", "health": "ok",
+             "checked_at": "2026-09-16 12:00:00"},
+            {"url": "https://b.example/", "health": "auth",
+             "checked_at": "2026-09-16 11:00:00"},
+        ])
+        with Store() as st:
+            self.assertEqual(st.sweep_checks(), 1)      # 只删多余的（3 行 → 2 行）
+        # 键用规范化后的 URL：save_checks 存的就是规范化过的（去尾斜杠）
+        self.assertEqual({_normalize_url(r["source_url"]): r["health"]
+                          for r in self._healths()},
+                         {_normalize_url("https://a.example/"): "ok",
+                          _normalize_url("https://b.example/"): "auth"})
+
+    def test_the_row_kept_is_the_one_checks_map_returns(self) -> None:
+        """留的必须是 `checks_map` 认的那条——**两种排序都要覆盖**。
+
+        - 同一秒两条（`checked_at` 只到秒）→ 谁 id 大谁是"最新"（`checks_map` 的兜底）
+        - `checked_at` **倒着来**（系统时钟被校正过）→ 认的是时间大的那条，不是后写的
+
+        第二种是"用 `max(id)` 代替 `ORDER BY checked_at DESC`"这种写法唯一会露馅的
+        输入；只测第一种的话，那种实现照样全绿。
+        """
+        self._write([
+            {"url": "https://same.example/", "health": "ok",
+             "checked_at": "2026-09-16 12:00:00"},
+            {"url": "https://same.example/", "health": "timeout",
+             "checked_at": "2026-09-16 12:00:00"},
+            {"url": "https://back.example/", "health": "ok",
+             "checked_at": "2026-09-16 12:00:00"},
+            {"url": "https://back.example/", "health": "dead",
+             "checked_at": "2026-09-16 09:00:00"},     # 后写，但时间更早
+        ])
+        expected = self._map_healths()
+        with Store() as st:
+            self.assertEqual(st.sweep_checks(), 2)
+        self.assertEqual(self._map_healths(), expected, "清理把列表要显示的那条删了")
+
+    def test_sweeping_twice_is_a_no_op(self) -> None:
+        self._write([{"url": "https://a.example/", "health": "ok",
+                      "checked_at": "2026-09-16 12:00:00"}])
+        with Store() as st:
+            self.assertEqual(st.sweep_checks(), 0)
+
+    def test_a_check_run_sweeps_after_saving(self) -> None:
+        """**接线**：跑完一次校验后库里每源只剩一条。
+
+        只测 `sweep_checks` 本身的话，把它从 `AsyncChecker.run()` 里拿掉照样全绿
+        ——而增长就是这么回来的。
+        """
+        ck = AsyncChecker(concurrency=1, use_store=True)
+
+        async def fake_check_one(session, record):
+            record.health = "ok"
+            record.checked_at = _just_checked()
+            return record
+
+        ck.check_one = fake_check_one
+        records = [build_record(make_source(), 0)]
+        for _ in range(3):
+            ck.refresh_cache = True          # 每轮都真写一条
+            asyncio.run(ck.run(records))
+        ck.close()
+        with Store() as st:
+            n = st.conn.execute("SELECT COUNT(*) AS c FROM checks").fetchone()["c"]
+        self.assertEqual(n, 1, "跑三轮就攒了三行——清理没接上")
+
+
 # ---------------------------------------------------------------- 变异记录
 # 以下为实测（改坏 → `python -B -m unittest tests.test_checker_persist` → 确认变红 → 还原）。
 #
@@ -459,3 +568,14 @@ class CacheReuseTests(unittest.TestCase):
 #         （还原没匹配上注释），而当时**整个测试文件仍然全绿**——因为上面两条结构性
 #         断言用的是**全新的库**（DDL 直接建出列），根本走不到 NEW_COLUMNS 那条路径。
 #         真实用户的库是旧 schema，靠的正是那条路径。
+
+# ChecksRetentionTests 的变异（2026-09-16，每源只留最近一条）：
+#
+#  M36  把 `AsyncChecker.run()` 里的 `sweep_checks()` 拿掉（改成 `if False:`）
+#         → test_a_check_run_sweeps_after_saving 红（跑三轮攒了三行）
+#         只测 `sweep_checks` 本身的用例**照样全绿**——增长就是这么回来的，
+#         所以调用点必须单独守一条
+#  M37  保留规则从「checks_map 那套 checked_at DESC, id DESC」改成 `max(id)`
+#         → test_the_row_kept_is_the_one_checks_map_returns 红
+#         露馅的是**时间倒着写**那组数据（后写的一条 checked_at 更早）。只测
+#         「同一秒两条、看 id」的话这条变异照样全绿——两种排序各要一组输入

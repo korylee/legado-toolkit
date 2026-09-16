@@ -1023,6 +1023,31 @@ class Store:
             self.conn.executemany(sql, out)
         return len(out)
 
+    def sweep_checks(self) -> int:
+        """每个源只留**最近一条**校验结果，返回删掉几行。
+
+        `checks` 原来只增不减（`jobs`/`exports` 都有 TTL 清理，它一条都没有），
+        而**全部读者都只取每源最新一条**（`checks_map`、`last_check`、`v_sources`
+        视图）——历史行没有任何读者。不清理的后果是随每次校验单调增长：实测库里
+        3861 条源攒到 6626 行 / 26.6 MB，而瞬时网络的结论现在也会落库（见
+        `checker.save_cache_append`），于是每次全量会稳定追加约 1000 行。
+
+        **保留的必须是 `checks_map` 会返回的那一条**（同样是
+        `checked_at DESC, id DESC`）。两边口径一旦不一致，就会出现"列表上显示的是
+        A 行、而它刚被这次清理删掉"——表现是健康度莫名其妙变回上一条，且不报错。
+
+        调用点是 `AsyncChecker.run()` 存完之后（**所有写入路径的唯一收口**，
+        Web 任务与 CLI 都走它），不另开定时器；`jobs`/`exports` 那两套是"建新任务
+        时顺带扫"，这里没有对应的时机。
+        """
+        with self.conn:
+            cur = self.conn.execute(
+                "DELETE FROM checks WHERE id NOT IN ("
+                " SELECT id FROM checks c WHERE c.id = ("
+                "  SELECT id FROM checks WHERE source_url = c.source_url"
+                "  ORDER BY checked_at DESC, id DESC LIMIT 1))")
+        return cur.rowcount or 0
+
     def last_check(self, url: str) -> Optional[Dict[str, Any]]:
         row = self.conn.execute(
             # id DESC 的兜底理由同 checks_map()
