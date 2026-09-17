@@ -711,8 +711,8 @@ async function copyMatched() {
            验过的才显示条数样本，验不了的**显式标『只能连 App 试』**，不许伪装成已验证 -->
       <div class="ai-block">
         <div class="cand-head">
-          <b>哪条候选对</b>
-          <span class="muted">（先拿 App 实测值对一遍，对不上再问 AI）</span>
+          <b>候选规则</b>
+          <span class="muted">（先自动挑，挑不出来再问 AI）</span>
           <span class="grow" />
           <!-- 显示的是**这一步**、这一页不是登录墙、**且配了模型**时才给点 -->
           <el-button size="small" type="primary" plain :loading="aiLoading"
@@ -725,21 +725,21 @@ async function copyMatched() {
              结果一起藏掉，而程序挑候选不依赖模型，那恰恰是没配模型的人唯一能用的 -->
         <p v-if="canSuggest && !loginWall && !llmReady" class="muted"
            style="margin: 4px 0 0">
-          还没配模型，去「设置 → 模型」加一个。下面那趟不花模型，照样跑。
+          没配模型，无法使用 AI 提议。到「设置 → 模型」添加。
         </p>
         <p v-if="!canSuggest" class="muted" style="margin: 4px 0 0">
-          这一步没抓到页面，或者没有能试的字段
+          这一步没抓到页面
         </p>
         <!-- 登录墙：模型看到的是登录页，不是 App 那份（App 带登录态）——先说清楚，
              别让用户点完才发现「提了也验不了」 -->
         <el-alert v-else-if="loginWall" type="warning" :closable="false" show-icon
                   style="margin: 6px 0 0"
-                  title="这页是登录页或反爬页。我们抓到的页面和 App 看到的不一样，改规则得连 App 试。" />
-        <p v-else-if="preselLoading" class="muted" style="margin: 4px 0 0">正在拿 App 实测值对…</p>
+                  title="登录页：抓到的内容与 App 不同，改规则请用「连 App 调试」" />
+        <p v-else-if="preselLoading" class="muted" style="margin: 4px 0 0">正在自动挑…</p>
         <!-- 程序挑出来了：直接把结论和依据摆出来 -->
         <template v-else-if="preselRes && preselRes.preselect && preselRes.preselect.picked">
           <div class="cand">
-            <el-tag size="small" type="success">程序挑的</el-tag>
+            <el-tag size="small" type="success">自动挑的</el-tag>
             <span class="mono rule">{{ preselRes.preselect.picked.rule }}</span>
             <span class="muted samples">{{ preselRes.preselect.reason }}</span>
             <span class="grow" />
@@ -749,16 +749,16 @@ async function copyMatched() {
         </template>
         <!-- 挑不出来：说清是哪种挑不出来（没有基准 / 分不出高下），用户才知道该不该点 AI -->
         <p v-else-if="preselRes && preselRes.preselect" class="muted" style="margin: 6px 0 0">
-          没挑出来：{{ preselRes.preselect.reason }}
+          无法自动挑选：{{ preselRes.preselect.reason }}
         </p>
         <p v-if="aiRes && aiRes.error" class="muted ai-err">{{ aiRes.error }}</p>
         <p v-if="aiRes && aiRes.reason" class="muted" style="margin: 6px 0 0">
-          模型判断：{{ aiRes.reason }}
+          AI 判断：{{ aiRes.reason }}
         </p>
         <!-- token 用量：一眼看出这次花了多少、前缀缓存吃到没有。
              「缓存命中」那一项只有服务端支持并返回时才显示 -->
         <p v-if="aiUsage" class="muted" style="margin: 6px 0 0">
-          本次 {{ aiUsage.prompt_tokens }} tokens<template
+          本次消耗 {{ aiUsage.prompt_tokens }} tokens<template
             v-if="aiUsage.prompt_cache_hit_tokens"> · 缓存命中 {{ aiUsage.prompt_cache_hit_tokens }}</template><template
             v-else-if="aiUsage.completion_tokens"> · 输出 {{ aiUsage.completion_tokens }}</template>
         </p>
