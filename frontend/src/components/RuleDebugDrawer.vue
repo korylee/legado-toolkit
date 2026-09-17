@@ -12,6 +12,8 @@ import { ElMessage } from "element-plus";
 import { replayStep } from "../api/rules";
 // 步骤名 → 中文的**唯一**一份（编辑弹窗共用），别再在本组件里写第二份
 import { STEP_LABELS } from "../utils/steps";
+// 第 1 层「在页面上找目标」：候选规则从补抓的 HTML 里算出来（纯函数，不发请求）
+import { FIELD_OF_STEP, findCandidates } from "../utils/ruleCandidates";
 
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
@@ -221,11 +223,156 @@ const matchedHint = computed(() => {
   return "正在读取…";
 });
 
-//: 进这个 tab 就自动回放一次：空着的 tab 让人以为功能坏了（原来就是这样）
-watch([subTab, activeStep], () => {
-  if (subTab.value !== "matched") return;
-  if ((current.value || {}).matched_html) return;   // 本地试跑的结果里已经有了
+//: 打开抽屉 / 换步骤就自动回放一次：**诊断与「命中源码」都要它的结果**。
+//: 用的是表单里的当前规则，所以改完规则点「用本页重放」就能刷新。
+watch([() => props.modelValue, activeStep], () => {
+  if (!props.modelValue) return;
   if (canReplay.value) doReplay();
+});
+
+// ---------------------------------------------------------------- 第 0 层：诊断
+// 把「这一步为什么取不到」分成**下一步动作不同**的几类，而不是笼统一句「失败」。
+// 全部由前端从已有数据算出（规则字符串、step.url/page_id、notes、本地回放结果、
+// 补抓页面的节点统计），不新增后端接口。
+//
+// 为什么先要有这一层：**取不到有五种成因，动作完全不同**。最坑的是「连页面都没有」——
+// 正文规则为空时 App 不会发请求（退回拿章节链接当正文），而补抓只从 `≡获取成功:` 那行
+// 取 URL，于是静默跳过：抽屉里整页源码一片空白、也没有一句解释，用户根本不知道该改什么
+// （实测口袋漫画就是这样）。
+
+//: 每一步「要拿到什么」。诊断要拿它当对照物，不然「取不到」没有判据
+const STEP_WANT = {
+  search: { kind: "list", label: "书目列表" },
+  explore: { kind: "list", label: "发现列表" },
+  bookUrl: { kind: "link", label: "详情页链接" },
+  toc: { kind: "link", label: "章节链接" },
+  content: { kind: "text", label: "正文内容" },
+};
+const want = computed(() => {
+  const name = (current.value || {}).name || "";
+  const w = STEP_WANT[name];
+  if (!w) return null;
+  // 漫画 / 听书的正文是图片或音频，要的东西不一样，判据也得跟着变
+  if (name === "content" && [1, 2, 3].includes(Number(props.sourceType))) {
+    return { kind: "media", label: "正文图片/音频" };
+  }
+  return w;
+});
+
+//: 补抓页面上的节点统计。「你要的东西这页上到底有没有」全靠它——
+//: 没有的话，选择器改多少遍都取不到
+const pageStats = computed(() => {
+  const html = (currentPage.value || {}).html || "";
+  if (!html) return null;
+  const low = html.toLowerCase();
+  return {
+    links: (low.match(/<a[\s>][^>]*href=/g) || []).length,
+    images: (low.match(/<img[\s/>]/g) || []).length,
+    // 只有「有值的 src」才算真能取到的图：`<img src="">` 是 JS 注入留下的占位
+    imagesWithSrc: (html.match(/<img[\s>][^>]*src=["'](?!["'])/gi) || []).length,
+    textLen: html.replace(/<[^>]+>/g, "").replace(/\s+/g, "").length,
+  };
+});
+
+//: 这一页上有没有「你要的那个东西」。
+//: 门槛取粗一点没关系——它只用来挡住「怎么改选择器都取不到」这一种死路
+const hasWanted = computed(() => {
+  const st = pageStats.value;
+  if (!st || !want.value) return null;
+  if (want.value.kind === "media") return st.imagesWithSrc > 1;   // >1：排除只有 logo 的情况
+  if (want.value.kind === "link") return st.links > 0;
+  if (want.value.kind === "list") return st.links > 0 || st.images > 0;
+  return st.textLen > 200;
+});
+
+// —— 第 1 层：在页面上找目标 ——
+const candidates = ref([]);
+const tryResult = ref(null);
+const testing = ref(-1);
+
+watch([() => props.modelValue, activeStep, currentPage], () => {
+  tryResult.value = null;
+  testing.value = -1;
+  candidates.value = (currentPage.value && want.value)
+    ? findCandidates(currentPage.value.html, want.value.kind)
+    : [];
+}, { immediate: true });
+
+//: 「试」：拿这条候选就地回放，看它到底取到什么。**不写表单**——
+//: 先看清楚再决定用不用，和「用这条」分开
+async function tryCandidate(c, i) {
+  if (!currentPage.value) return;
+  testing.value = i;
+  tryResult.value = null;
+  try {
+    const res = await replayStep(currentPage.value.html, c.rule,
+                                 (current.value || {}).name, props.sourceType);
+    tryResult.value = { rule: c.rule, values: res.values || [], rule_error: res.rule_error || "" };
+  } catch (e) {
+    ElMessage.error("试跑失败: " + e.message);
+  } finally {
+    testing.value = -1;
+  }
+}
+
+//: 「用这条」：只是把规则**填进表单**，不落库——保存由用户自己在弹窗里决定
+function useCandidate(c) {
+  const field = FIELD_OF_STEP[(current.value || {}).name];
+  if (!field) return;
+  emit("applyRule", { field, rule: c.rule });
+}
+
+const diagnosis = computed(() => {
+  const out = [];
+  const s = current.value || {};
+  const w = want.value;
+  const label = (w && w.label) || s.name || "";
+  const push = (level, why, todo) => out.push({ level, why, todo });
+  if (!s.name) return out;
+
+  if (!s.page_id) {
+    push("warn", "这一步没有可抓的页面（App 的事件里没有页面标记）",
+         "这步没法本地复盘，只能看 App 的事件流");
+  } else if (!s.url) {
+    push("warn", "App 在这一步没有发起页面请求，所以本地没有页面可看",
+         s.name === "content"
+           ? "正文规则为空时，App 会退回「拿章节链接当正文」，不请求新页面——"
+             + "先给正文配上规则，再连 App 重跑"
+           : "先确认这一步的规则是否为空；补上后重跑");
+  } else if (!currentPage.value) {
+    const note = (s.notes || []).find((n) => String(n).includes("页面抓取失败"));
+    push("warn", note || "这一步的页面没抓回来", "没有页面就无法本地复盘，先按 App 的结果判断");
+  } else if (hasWanted.value === false) {
+    const st = pageStats.value || {};
+    push("warn",
+         "这一页里没有「" + label + "」这类节点（链接 " + st.links + " 个、img "
+         + st.images + " 个，其中有 src 的只有 " + st.imagesWithSrc + " 个）",
+         "改选择器没用：内容多半是 JS 动态注入的，得用 webView + webJs"
+         + "（或 @js: 调站点接口）——本地和 CSS 规则都取不到");
+  }
+
+  if (!currentRule.value.trim()) {
+    push("warn", "这条源没配「" + label + "」规则",
+         s.name === "content" && Number(props.sourceType) === 0
+           ? "小说源没配正文规则时，App 会把章节链接当正文——必须补一条"
+           : "补一条规则再重跑");
+  } else if (replayResult.value && replayResult.value.rule_error) {
+    push("info", "规则本地回放不了：" + replayResult.value.rule_error,
+         "只能连 App 验——本地引擎跑不了 JS / 模板 / xpath 这类语法");
+  } else if (replayResult.value) {
+    const vals = replayResult.value.values || [];
+    if (!vals.length) {
+      const st = pageStats.value || {};
+      push("warn", "规则在这份页面上一条都没选中",
+           w && w.kind === "link"
+             ? "页面里有 " + st.links + " 个链接，可对照「整页源码」里的真实 class/id 改选择器"
+             : "对照「整页源码」里的真实 class/id 改选择器");
+    } else if (s.verdict === "fail") {
+      push("info", "取到了 " + vals.length + " 条，但判定不达标：" + (s.detail || ""),
+           "问题在取到的内容而不是选择器，别在这里反复改选择器");
+    }
+  }
+  return out;
 });
 
 async function doReplay() {
@@ -337,6 +484,43 @@ async function copyMatched() {
         </li>
       </ul>
 
+      <!-- 诊断（第 0 层）：**取不到有好几种成因，动作完全不同**，混成一句「失败」
+           用户只能瞎试。这里先说清是哪一种、下一步该改什么 -->
+      <div v-if="diagnosis.length" class="diagnosis">
+        <div v-for="(d, i) in diagnosis" :key="i" class="diag-line">
+          <el-tag size="small" :type="d.level === 'warn' ? 'warning' : 'info'">
+            {{ d.level === "warn" ? "问题" : "提示" }}
+          </el-tag>
+          <span class="why">{{ d.why }}</span>
+          <span class="muted todo">{{ d.todo }}</span>
+        </div>
+      </div>
+
+      <!-- 第 1 层：**在页面上找目标**。候选取自我们补抓的那份 HTML（与本地回放器
+           能跑的、以及 App 会看到的东西一致），每条都标出「选到几条 + 前几个值」——
+           不给样本等于让用户再猜一次。确定性的一层：不调模型、不发请求 -->
+      <div v-if="candidates.length" class="candidates">
+        <div class="cand-head">
+          <b>在页面上找「{{ (want && want.label) || "目标" }}」</b>
+          <span class="muted">（点「试」就地回放看它取到什么，再决定用不用）</span>
+        </div>
+        <div v-for="(c, i) in candidates" :key="i" class="cand">
+          <span class="mono rule">{{ c.rule }}</span>
+          <el-tag size="small" :type="c.count ? 'success' : 'info'">{{ c.count }} 条</el-tag>
+          <span class="muted samples">{{ (c.samples || []).join("  |  ") || "（无样本）" }}</span>
+          <span class="grow" />
+          <el-button size="small" link :loading="testing === i"
+                     @click="tryCandidate(c, i)">试</el-button>
+          <el-button size="small" type="primary" plain @click="useCandidate(c)">用这条</el-button>
+        </div>
+        <p v-if="tryResult" class="muted" style="margin: 6px 0 0">
+          试「<span class="mono">{{ tryResult.rule }}</span>」→
+          取到 {{ tryResult.values.length }} 条：
+          {{ tryResult.values.slice(0, 3).join("  |  ") }}
+          <span v-if="tryResult.rule_error">（本地回放不了：{{ tryResult.rule_error }}）</span>
+        </p>
+      </div>
+
       <el-tabs v-model="subTab">
         <!-- App 事件排第一，且 App 结果下不显示「提取结果」：
              App 实测的 values 就是事件原文去掉耗时前缀，两个 tab 说的是同一件事；
@@ -441,6 +625,27 @@ async function copyMatched() {
 </template>
 
 <style scoped>
+.candidates {
+  margin: 8px 0;
+  padding: 8px 10px;
+  background: #f4f8ff;
+  border: 1px solid #d9ecff;
+  border-radius: 4px;
+}
+.cand-head { margin-bottom: 4px; }
+.cand { display: flex; align-items: baseline; gap: 6px; padding: 2px 0; }
+.cand .rule { flex: 0 0 auto; }
+.cand .samples { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.diagnosis {
+  margin: 8px 0;
+  padding: 8px 10px;
+  background: #fff9f0;
+  border: 1px solid #faecd8;
+  border-radius: 4px;
+}
+.diag-line { display: flex; align-items: baseline; gap: 6px; padding: 2px 0; }
+.diag-line .why { flex: 0 1 auto; }
+.diag-line .todo { flex: 1 1 auto; min-width: 0; }
 .debug-step-tabs { display: flex; gap: 4px; margin-bottom: 12px; flex-wrap: wrap; }
 .debug-step-tab {
   display: inline-flex; align-items: center; gap: 6px;

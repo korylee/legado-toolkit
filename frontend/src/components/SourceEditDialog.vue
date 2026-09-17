@@ -709,6 +709,17 @@ function confirmPush(state) {
   }).then(() => true).catch(() => false);
 }
 
+//: 调试抽屉里点「用这条」→ 写进表单对应字段。
+//:
+//: **只改表单、不落库**：保存仍由用户自己决定（那个按钮在弹窗底部）。
+//: 路径形如 `ruleSearch.bookList`，与 `utils/ruleCandidates.FIELD_OF_STEP` 同源
+function onApplyRule({ field, rule }) {
+  const [group, key] = String(field || "").split(".");
+  if (!group || !key || !form.value[group]) return;
+  form.value[group][key] = rule;
+  ElMessage.success("已填入 " + field + "，在抽屉里点「用本页重放」看效果");
+}
+
 function openDebug(step) {
   debugStep.value = step || "";
   debugVisible.value = true;
@@ -1246,7 +1257,7 @@ async function doSave(s) {
     <RuleDebugDrawer v-model="debugVisible" :result="testResult"
                      :initial-step="debugStep" :rules="ruleByStep"
                      :source-type="Number(form.bookSourceType) || 0"
-                     @goto="onDebugGoto" />
+                     @goto="onDebugGoto" @apply-rule="onApplyRule" />
   </el-dialog>
 </template>
 
