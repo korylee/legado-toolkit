@@ -382,7 +382,9 @@ class Store:
             明确勾的标签」，不该被这里的白名单管，所以覆盖是对的
           - ``core/store_migrate.py`` 用默认值，而那时库是空的 →
             `allow_unknown` 必为 True，根本走不到过滤那一支
-        见 `TODO.md`。
+
+        这条是**已决**的（2026-09-17），不再有后续动作——原来这里写着「见 TODO.md」，
+        而那条待办在整理时按惯例删掉了（已完成的事项不留），指针就悬空了。
         """
         from core.loader import _normalize_url, fingerprint as fp_of
 
