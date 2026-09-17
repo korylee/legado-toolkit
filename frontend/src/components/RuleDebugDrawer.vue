@@ -10,6 +10,7 @@ import { ref, computed, watch, nextTick } from "vue";
 import { ElMessage } from "element-plus";
 
 import { replayStep, suggestRule } from "../api/rules";
+import { getLLMStatus } from "../api/llm";
 // 步骤名 → 中文的**唯一**一份（编辑弹窗共用），别再在本组件里写第二份
 import { STEP_LABELS } from "../utils/steps";
 // 第 1 层「在页面上找目标」：候选规则从补抓的 HTML 里算出来（纯函数，不发请求）
@@ -158,6 +159,8 @@ const segments = computed(() => {
 
 watch(() => props.modelValue, (show) => {
   if (!show) return;
+  // 每次打开都重拉：用户可能刚在「设置 → 模型」里配好，不该还看着上一次的结论
+  refreshLLMStatus();
   activeStep.value = props.initialStep || (steps.value[0] && steps.value[0].name) || "";
   subTab.value = defaultSubTab.value;
   renderLimit.value = RENDER_CHUNK;
@@ -335,6 +338,26 @@ const aiRes = ref(null);
 
 const aiField = computed(() => FIELD_OF_STEP[(current.value || {}).name] || "");
 const canSuggest = computed(() => !!currentPage.value && !!aiField.value);
+
+//: 「有没有可用的模型」。**必须与 canSuggest 分开**：程序挑候选那趟（preselect）
+//: 不依赖模型，两者合成一个会让没配模型的用户连免费那趟都拿不到（`runPreselect`
+//: 正是拿 canSuggest 当门槛的）。
+//:
+//: 判据用 `active.api_key_set` 而不是 `active` 非空——profile 存在但 key 为空时
+//: 后端 `LLMConfig.enabled` 仍是假（它等于 `bool(api_key)`），只看非空会漏掉这一档，
+//: 用户点下去还是拿到「没有可用的模型」。
+//:
+//: 默认 true（拉到之前按可用算）：默认 false 会让按钮先灰一下，比晚一步发现更糟。
+//: 拉取失败也维持 true——点了后端会给明确文案，比误禁用强。
+const llmReady = ref(true);
+const canAskAI = computed(() => canSuggest.value && llmReady.value);
+
+async function refreshLLMStatus() {
+  try {
+    const s = await getLLMStatus();
+    llmReady.value = !!(s && s.active && s.active.api_key_set);
+  } catch (e) { /* 见上：保持"可用" */ }
+}
 //: 本次调用的 token 用量。**空对象要当没有**（`{}` 在 JS 里是真值，
 //: 直接判 `v-if="aiRes.usage"` 会在没拿到用量时显示「0 tokens」）
 const aiUsage = computed(() => {
@@ -646,12 +669,20 @@ async function copyMatched() {
           <b>哪条候选对</b>
           <span class="muted">（先用 App 实测值挑，挑不出来才让 AI 看）</span>
           <span class="grow" />
-          <!-- 显示的是**这一步**、且这一页不是登录墙时才给点 -->
+          <!-- 显示的是**这一步**、这一页不是登录墙、**且配了模型**时才给点 -->
           <el-button size="small" type="primary" plain :loading="aiLoading"
-                     :disabled="!canSuggest || loginWall" @click="askAI">
+                     :disabled="!canAskAI || loginWall" @click="askAI">
             让 AI 提规则
           </el-button>
         </div>
+        <!-- 没配模型：只说明**按钮**为什么点不了。
+             **必须独立于下面那条 v-if / v-else-if 链**——插进链里会把「程序挑的」
+             结果一起藏掉，而程序挑候选不依赖模型，那恰恰是没配模型的人唯一能用的 -->
+        <p v-if="canSuggest && !loginWall && !llmReady" class="muted"
+           style="margin: 4px 0 0">
+          还没配模型，「让 AI 提规则」用不了 —— 到「设置 → 模型」配一个。
+          <b>下面按 App 实测值挑的那趟不受影响</b>，照常显示。
+        </p>
         <p v-if="!canSuggest" class="muted" style="margin: 4px 0 0">
           这一步没有页面，或没有可回放的字段
         </p>
