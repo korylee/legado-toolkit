@@ -1,6 +1,6 @@
 <script setup>
 // 回收站：软删除的源在这里，可恢复。
-// 彻底删除不提供 UI —— 快照已写到 data/backups/deleted_<时间戳>.json，
+// 彻底删除不提供 UI —— 快照已追加到 data/backups/deleted.jsonl（一行一次删除操作），
 // 需要真正清掉时由使用者在该文件层面处理。
 import { ref, computed, watch } from "vue";
 import { ElMessage } from "element-plus";
@@ -65,8 +65,8 @@ async function restoreSelected() {
   <el-drawer v-model="visible" title="回收站" size="760px" destroy-on-close>
     <el-alert type="warning" :closable="false" show-icon style="margin-bottom: 12px">
       <template #title>
-        回收站里的源<b>不会被导出到 App</b>。删除时的完整快照已写入
-        <code>data/backups/deleted_&lt;时间戳&gt;.json</code>——
+        回收站里的源<b>不会被导出到 App</b>。删除时的完整快照已追加写入
+        <code>data/backups/deleted.jsonl</code>（一行一次删除操作，含完整 raw_json）——
         需要彻底清掉时请在该文件层面处理，UI 不提供硬删除。
       </template>
     </el-alert>

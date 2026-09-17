@@ -427,10 +427,11 @@ def cmd_dups(args: argparse.Namespace) -> int:
     groups = find_dup_groups(sources, checks)
     report = render_report(groups, len(sources), source_label=label)
     s = summarize(groups, len(sources))
-    headline = ("重复 %d 组 / 涉及 %d 条：同域名可精简 %d 条，"
-                "跨域名 %d 组需逐个看（可能是镜像站）"
-                % (s["groups"], s["same_host_rows"] + s["cross_host_rows"],
-                   s["same_host_redundant"], s["cross_host_groups"]))
+    # 键名对齐 `dups.summarize`：边界是**站点**（host + 有效端口），不是裸域名
+    headline = ("重复 %d 组 / 涉及 %d 条：同站点可精简 %d 条，"
+                "跨站点 %d 组需逐个看（可能是镜像站）"
+                % (s["groups"], s["same_site_rows"] + s["cross_site_rows"],
+                   s["same_site_redundant"], s["cross_site_groups"]))
     if args.output:
         with open(args.output, "w", encoding="utf-8", newline="\n") as f:
             f.write(report)

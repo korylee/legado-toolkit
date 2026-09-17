@@ -218,3 +218,20 @@ class NameApplyIn(BaseModel):
 
 class NameUndoIn(BaseModel):
     prev: List[NameChange] = Field(default_factory=list)
+
+
+class MergeIn(BaseModel):
+    """合并一组重复源。判据由后端重算（跨站点 / 规则不同一律拒绝）。"""
+    keep: str
+    drop: List[str] = Field(default_factory=list)
+    merge_tags: bool = True
+    merge_comment: bool = False
+    dry_run: bool = False
+
+
+class MergeUndoIn(BaseModel):
+    """撤销一次合并——四个字段全部来自 merge 的返回体，不需要调用方自己推算。"""
+    keep: str
+    restore_urls: List[str] = Field(default_factory=list)
+    tags_added: List[str] = Field(default_factory=list)
+    prev_comment: str = ""

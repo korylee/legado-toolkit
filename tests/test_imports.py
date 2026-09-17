@@ -65,19 +65,29 @@ class ImportApiTests(_ImportCase):
         source = self.store.get_source("https://new.example")
         self.assertIn("待验证", source.get("bookSourceGroup", ""))
 
-    def test_import_preserves_health_status_and_user_tags(self) -> None:
-        # 先种一个源让库非空，触发用户标签过滤分支
-        self.store.upsert_sources([make_source("https://seed.example")])
+    def test_import_keeps_defaults_and_drops_unknown_tags(self) -> None:
+        # 空库第一次导入也要过滤：默认标签 R18 / 正版 保留，陌生标签直接清。
         source = make_source("https://tagged.example")
-        source["bookSourceGroup"] = "📖小说,✅可用,精排,R18"
+        source["bookSourceGroup"] = "📖小说,✅可用,R18,正版,陌生标签"
         result = self._import([source])
         self.assertEqual(result["new_count"], 1)
-        stored = self.store.get_source("https://tagged.example")
-        group = stored.get("bookSourceGroup", "")
+        group = self.store.get_source("https://tagged.example").get("bookSourceGroup", "")
         self.assertIn("可用", group)
+        self.assertIn("R18", group)
+        self.assertIn("正版", group)
+        self.assertNotIn("陌生标签", group)
+
+    def test_import_keeps_tags_the_user_already_created(self) -> None:
+        # 用户主动建过的标签算「已知」；导入不能把它一起清掉。
+        self.store.upsert_sources([make_source("https://seed.example")])
+        self.store.set_user_tags(["https://seed.example"], ["精排"])
+        source = make_source("https://tagged.example")
+        source["bookSourceGroup"] = "📖小说,✅可用,精排,R18,陌生标签"
+        self._import([source])
+        group = self.store.get_source("https://tagged.example").get("bookSourceGroup", "")
         self.assertIn("精排", group)
         self.assertIn("R18", group)
-
+        self.assertNotIn("陌生标签", group)
     def test_same_url_same_rule_is_duplicate(self) -> None:
         self._import([make_source("https://same.example")])
         result = self._import([make_source("https://same.example")])

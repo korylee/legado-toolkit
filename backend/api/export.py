@@ -48,6 +48,10 @@ def create_export(body: dict, st=Depends(get_store)):
             q=str(filt.get("q") or ""),
             only_enabled=bool(filt.get("only_enabled")),
             user_tag=str(filt.get("tag") or ""),
+            # 前端「导出选中」走的是 filter.urls（ExportDrawer 会带上）。不转发的话
+            # 这个字段被无声丢掉，导出的就不是那几条而是**全部筛选结果**，
+            # 而界面照样显示「已生成 N 条的链接」
+            urls=filt.get("urls") or [],
         )
     else:
         # 模式三：全量

@@ -23,15 +23,18 @@ from core.tags import extract_user_tags_from_group, merge_group
 router = APIRouter()
 
 
-def _normalize_group(source):
+def _normalize_group(source, allowed_user_tags):
     """为导入的新源规范系统标签：按原分组推断健康状态，无信号默认「待验证」。
 
-    保留外部源的健康状态（可用/失效/需代理复检等），用户标签原样保留。
+    保留外部源的健康状态（可用/失效/需代理复检等）；用户标签只保留白名单里的
+    （``Store.known_user_tags()``：默认 R18 / 正版 + 库里已有的用户标签），
+    其余直接清掉——决策见 lessons §三十二。
     """
     source_type = int(source.get("bookSourceType", 0) or 0)
     type_tag = BOOK_SOURCE_TYPE_NAMES.get(source_type, "")
     raw_group = str(source.get("bookSourceGroup", "") or "")
-    user_tags = extract_user_tags_from_group(raw_group)
+    user_tags = [t for t in extract_user_tags_from_group(raw_group)
+                 if t in allowed_user_tags]
     status_tag = STATUS_GROUP_NAMES.get(infer_health_from_group(raw_group), "待验证")
     source["bookSourceGroup"] = merge_group([type_tag, status_tag], user_tags)
     return source
@@ -66,6 +69,10 @@ def import_sources(body: ImportBody, st=Depends(get_store)):
     conflict_urls = []
     conflict_sources = []
 
+    # 导入边界的用户标签白名单：默认标签 + 库里已有标签。
+    # 同一份名单在 Store.upsert_sources 里是第二道防线。
+    allowed_user_tags = st.known_user_tags()
+
     for item in data:
         if not isinstance(item, dict):
             invalid_count += 1
@@ -78,8 +85,8 @@ def import_sources(body: ImportBody, st=Depends(get_store)):
 
         existing_fp, is_deleted = st.get_source_fingerprint(url)
         if existing_fp is None:
-            _normalize_group(item)
-            st.upsert_sources([item], allow_new_tags=True)
+            _normalize_group(item, allowed_user_tags)
+            st.upsert_sources([item])
             if is_deleted:
                 st.restore([url])
             new_count += 1

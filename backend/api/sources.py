@@ -5,9 +5,9 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from backend.deps import get_store
-from backend.schemas import (NameApplyIn, NamePreviewIn, NameUndoIn, SourceDeleteIn,
-                             SourcePage, SourceSave, TagDelete, TagMerge, TagPatch,
-                             TagRename)
+from backend.schemas import (MergeIn, MergeUndoIn, NameApplyIn, NamePreviewIn, NameUndoIn,
+                             SourceDeleteIn, SourcePage, SourceSave, TagDelete, TagMerge,
+                             TagPatch, TagRename)
 
 router = APIRouter()
 
@@ -279,3 +279,58 @@ def undo_names(body: NameUndoIn, st=Depends(get_store)):
         else:
             restored += 1
     return {"restored": restored, "missing": missing}
+
+
+# ---------------------------------------------------------------- 合并重复源
+# 判据（同站点 + 行为指纹相同）在 services/merge_sources 里**重算**，不信前端传来的
+# 分组：前端只是入口，而这一步是删源。跨站点 / 规则不同 → 400 并说明原因。
+
+
+@router.post("/merge")
+def merge_sources(body: MergeIn, st=Depends(get_store)):
+    """合并一组重复源。`dry_run=true` 时只返回「将发生的三件事」，不写库。"""
+    from services.merge_sources import MergeRejected, merge
+
+    try:
+        return merge(st, body.keep, body.drop, merge_tags=body.merge_tags,
+                     merge_comment=body.merge_comment, dry_run=body.dry_run)
+    except MergeRejected as e:
+        raise HTTPException(400, str(e))
+
+
+@router.post("/merge/undo")
+def merge_undo(body: MergeUndoIn, st=Depends(get_store)):
+    """撤销一次合并。四个字段全部来自 merge 的返回体，别让调用方自己推算。"""
+    from services.merge_sources import undo
+
+    return undo(st, body.keep, body.restore_urls, body.tags_added, body.prev_comment)
+
+
+@router.get("/dups")
+def list_dups(
+    kinds: str = Query("mergeable", description="rules/mergeable/mirror/host/name，逗号分隔"),
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    st=Depends(get_store),
+):
+    """重复源分组（**只读**）。
+
+    只有 `mergeable`（同站点 + 行为指纹相同）带动作，其余四档是给人判断的线索。
+    分组与判据全部来自 `core.dups`——CLI 的 `dups` 命令用同一份，**不在前端重算**。
+
+    每次请求都重算全库（实测 mergeable 档约 0.1s，加读库共半秒上下）：这类清单是
+    「翻一遍做决定」用的，不值得为它加缓存层，而缓存一旦与实际库不同步，用户会照着
+    过期的分组删源。
+    """
+    from core.dups import DUP_KINDS, find_groups, summarize_by_kind
+
+    want = tuple(k.strip() for k in str(kinds or "").split(",") if k.strip())
+    if not want:
+        want = ("mergeable",)
+    unknown = [k for k in want if k not in DUP_KINDS]
+    if unknown:
+        raise HTTPException(400, "未知的分组类型：%s（可选 %s）"
+                            % ("、".join(unknown), "、".join(DUP_KINDS)))
+    groups = find_groups(st.export_sources(), checks=st.checks_map(), kinds=want)
+    return {"summary": summarize_by_kind(groups), "total": len(groups),
+            "offset": offset, "groups": groups[offset:offset + limit]}

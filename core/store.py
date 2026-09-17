@@ -587,6 +587,31 @@ class Store:
                 (group, json.dumps(src, ensure_ascii=False), now(), key))
         return True
 
+    def set_source_comment(self, url: str, comment: str) -> Optional[str]:
+        """改备注：只更新 `raw_json["bookSourceComment"]`（没有对应的列）。
+
+        返回**旧备注**（源不存在返回 None），给撤销用。
+
+        与 `set_source_name` 不同，这里**不需要重算 fingerprint**：
+        `loader.fingerprint` 的字段表里没有备注（见 core/loader.py），
+        改它不会让校验缓存失效。
+        """
+        from core.loader import _normalize_url
+
+        key = _normalize_url(url)
+        row = self.conn.execute(
+            "SELECT raw_json FROM sources WHERE source_url = ?", (key,)).fetchone()
+        if not row:
+            return None
+        src = json.loads(row["raw_json"])
+        old = str(src.get("bookSourceComment") or "")
+        src["bookSourceComment"] = comment
+        with self.conn:
+            self.conn.execute(
+                "UPDATE sources SET raw_json = ?, updated_at = ? WHERE source_url = ?",
+                (json.dumps(src, ensure_ascii=False), now(), key))
+        return old
+
     def name_pairs(self, urls: Optional[Sequence[str]] = None) -> List[Dict[str, str]]:
         """`[{"url", "name"}]`——「只看名字与地址」的批量操作的输入。
 

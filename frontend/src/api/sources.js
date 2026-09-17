@@ -42,6 +42,18 @@ export const normalizeTags = () => api.post("/sources/tags/normalize");
 // 批量软删除。**走 POST body**：旧写法把 URL 列表拼进查询串，实测约 1600 条 / 57KB
 // 通过、2000 条 / 72KB 被服务端拒绝，而全库 3850 条约 139KB——「全选全部」正好撞上，
 // 表现是请求失败而界面上看不出原因
+// 重复源分组（只读）。判据全在后端 core/dups，前端不重算。
+export const listDups = (params = {}) => {
+  const q = new URLSearchParams();
+  Object.entries(params).forEach(([k, v]) => { if (v !== "" && v != null) q.append(k, v); });
+  return api.get("/sources/dups?" + q.toString());
+};
+
+// 合并一组重复源。dry_run=true 时只返回「将发生的三件事」，不写库。
+export const mergeSources = (body) => api.post("/sources/merge", body);
+// 撤销：四个字段全部来自 merge 的返回体，不自己推算
+export const undoMerge = (body) => api.post("/sources/merge/undo", body);
+
 // 名称清洗三步：preview 只读出建议 → apply 改名并**返回旧名** → undo 拿旧名回写。
 // 撤销不需要另存快照：apply 的返回体本身就是回滚信息（一次会话内有效，刷新即失效）。
 export const previewNames = (urls = []) => api.post("/sources/names/preview", { urls });

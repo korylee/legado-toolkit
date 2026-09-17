@@ -36,7 +36,8 @@ const tabs = ref("");
 
 const hasFilter = computed(() => {
   const f = props.filter || {};
-  return !!(f.q || f.health || f.group || f.tag || (f.type !== null && f.type !== undefined && f.type !== ""));
+  return !!(f.q || f.health || f.group || f.tag || (f.urls && f.urls.length)
+    || (f.type !== null && f.type !== undefined && f.type !== ""));
 });
 const link = computed(() => {
   if (!generated.value) return "";
@@ -78,7 +79,10 @@ async function doExport(mode) {
     body.urls = [...props.selected];
   } else if (mode === "filter") {
     const f = props.filter || {};
-    body.filter = { type: f.type, health: f.health, group: f.group, tag: f.tag, q: f.q };
+    body.filter = {
+      type: f.type, health: f.health, group: f.group, tag: f.tag, q: f.q,
+      urls: f.urls || [],
+    };
   }
   busy.value = true;
   try {

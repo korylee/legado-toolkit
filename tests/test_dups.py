@@ -15,7 +15,10 @@ from __future__ import annotations
 
 import unittest
 
-from core.dups import find_dup_groups, host_of, render_report, rule_signature, summarize
+from core.dups import (find_dup_groups, find_groups, find_host_groups,
+                       find_mergeable_groups, find_mirror_groups,
+                       find_name_groups, host_of, render_report,
+                       rule_signature, same_site, site_key, summarize)
 
 
 def src(url: str, name: str = "站", **extra) -> dict:
@@ -31,12 +34,14 @@ class SignatureTests(unittest.TestCase):
     """哪些字段参与比较——这是整套判据的地基。"""
 
     def test_only_non_behavioral_fields_are_excluded(self) -> None:
-        a = src("https://a.com#x", customOrder=1, lastUpdateTime=1, respondTime=9,
+        a = src("https://a.com#x", bookSourceName="名字一", customOrder=1,
+                lastUpdateTime=1, respondTime=9,
                 bookSourceGroup="📖小说", bookSourceComment="来自某某分享")
-        b = src("https://a.com#y", customOrder=2, lastUpdateTime=2, respondTime=8,
+        b = src("https://a.com#y", bookSourceName="名字二", customOrder=2,
+                lastUpdateTime=2, respondTime=8,
                 bookSourceGroup="别的组", bookSourceComment="")
         self.assertEqual(rule_signature(a), rule_signature(b),
-                         "地址/排序/时间/耗时/分组/备注都不该参与比较")
+                         "地址/名称/排序/时间/耗时/分组/备注都不该参与比较")
 
     def test_rule_change_makes_it_a_different_source(self) -> None:
         a = src("https://a.com")
@@ -70,6 +75,20 @@ class GroupingTests(unittest.TestCase):
         self.assertTrue(groups[0]["same_host"])
         self.assertEqual(groups[0]["redundant"], 3)
         self.assertEqual(len(groups[0]["members"]), 4)
+
+    def test_name_difference_still_groups(self) -> None:
+        """改名不等于换源：同规则、不同名称也要成组（A 档名称不参与比较）。"""
+        groups = find_dup_groups([src("https://a.com", "名字一"),
+                                  src("https://a.com#x", "名字二")])
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(groups[0]["redundant"], 1)
+        self.assertEqual(len(groups[0]["members"]), 2)
+
+    def test_different_port_is_cross_site(self) -> None:
+        groups = find_dup_groups([src("http://a.com:8080/x"), src("http://a.com/y")])
+        self.assertEqual(len(groups), 1)
+        self.assertTrue(groups[0]["same_host"])
+        self.assertFalse(groups[0]["same_site"])
 
     def test_single_source_is_not_a_group(self) -> None:
         self.assertEqual(find_dup_groups([src("https://a.com")]), [])
@@ -123,12 +142,99 @@ class ReportTests(unittest.TestCase):
         groups = find_dup_groups(sources)
         text = render_report(groups, len(sources), source_label="测试")
         self.assertIn("只读", text)
-        self.assertIn("同一域名", text)
-        self.assertIn("跨域名", text)
+        self.assertIn("同一站点", text)
+        self.assertIn("跨站点", text)
         self.assertIn("不改任何数据", text)
         s = summarize(groups, len(sources))
-        self.assertEqual(s["same_host_redundant"], 1)
-        self.assertEqual(s["cross_host_groups"], 1)
+        self.assertEqual(s["same_site_redundant"], 1)
+        self.assertEqual(s["cross_site_groups"], 1)
+
+
+class HostAndNameGroupTests(unittest.TestCase):
+    """B/C 两档只做归并；规则是否相同、怎么处理由 API/前端决定。"""
+
+    def test_rule_groups_expose_kind_and_key(self) -> None:
+        groups = find_dup_groups([src("https://a.com"), src("https://a.com#x")])
+        self.assertEqual(groups[0]["kind"], "rules")
+        self.assertEqual(groups[0]["key"], groups[0]["signature"])
+
+    def test_host_groups_merge_different_rules_by_host(self) -> None:
+        a = src("https://a.com", name="A")
+        b = src("https://a.com/x", name="B", searchUrl="/other?q={{key}}")
+        groups = find_host_groups([a, b])
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(groups[0]["kind"], "host")
+        self.assertEqual(groups[0]["key"], "a.com")
+        self.assertEqual(len(groups[0]["members"]), 2)
+
+    def test_host_groups_ignore_empty_host(self) -> None:
+        # 没有 URL 的源不该因为 host="" 被并成一组
+        self.assertEqual(find_host_groups([src(""), src("")]), [])
+
+    def test_name_groups_merge_across_hosts(self) -> None:
+        groups = find_name_groups([src("https://a.com", name="同名"),
+                                   src("https://b.net", name="同名")])
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(groups[0]["kind"], "name")
+        self.assertEqual(groups[0]["key"], "同名")
+        self.assertEqual(sorted(groups[0]["hosts"]), ["a.com", "b.net"])
+
+    def test_name_groups_ignore_empty_or_whitespace_names(self) -> None:
+        self.assertEqual(
+            find_name_groups([src("https://a.com", name=""),
+                              src("https://b.net", name="   ")]), [])
+
+    def test_find_groups_combines_requested_kinds(self) -> None:
+        a = src("https://a.com", name="孤儿名")
+        b = src("https://a.com", name="另一名", searchUrl="/b?q={{key}}")
+        host_only = find_groups([a, b], kinds=("host",))
+        self.assertTrue(host_only)
+        self.assertTrue(all(g["kind"] == "host" for g in host_only))
+        self.assertEqual(find_groups([a, b], kinds=("rules",)), [])
+
+
+class SiteKeyTests(unittest.TestCase):
+    def test_default_ports_and_empty_port_are_normalized(self):
+        self.assertEqual(site_key("http://a.com:"), "a.com")
+        self.assertEqual(site_key("HTTP://A.com:80"), "a.com")
+        self.assertEqual(site_key("https://a.com:443"), "a.com")
+        self.assertEqual(site_key("http://a.com:8080"), "a.com:8080")
+
+    def test_scheme_is_not_part_of_site_key(self):
+        self.assertTrue(same_site("http://a.com", "https://a.com"))
+
+    def test_non_default_port_or_host_is_a_different_site(self):
+        self.assertFalse(same_site("http://a.com", "http://a.com:8080"))
+        self.assertFalse(same_site("http://a.com", "http://b.com"))
+
+
+class MergeableMirrorGroupTests(unittest.TestCase):
+    def test_mergeable_requires_same_site_and_same_rules(self):
+        groups = find_mergeable_groups([src("https://a.com/x"), src("https://a.com/y")])
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(groups[0]["kind"], "mergeable")
+        self.assertTrue(groups[0]["same_host"])
+        self.assertEqual(
+            find_mergeable_groups([src("https://a.com"), src("https://b.net")]), [])
+
+    def test_non_default_port_splits_mergeable(self):
+        self.assertEqual(len(find_mergeable_groups([
+            src("http://a.com:8080/x"), src("http://a.com:8080/y")])), 1)
+        self.assertEqual(find_mergeable_groups([
+            src("http://a.com:8080/x"), src("http://a.com/y")]), [])
+
+    def test_mirror_is_cross_site_only(self):
+        groups = find_mirror_groups([src("https://a.com"), src("https://b.net")])
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(groups[0]["kind"], "mirror")
+        self.assertFalse(groups[0]["same_host"])
+        self.assertEqual(find_mirror_groups([
+            src("https://a.com/x"), src("https://a.com/y")]), [])
+
+    def test_find_groups_can_request_mergeable_and_mirror(self):
+        sources = [src("https://a.com/x"), src("https://a.com/y"), src("https://b.net/z")]
+        got = find_groups(sources, kinds=("mergeable", "mirror"))
+        self.assertEqual(sorted(g["kind"] for g in got), ["mergeable", "mirror"])
 
 
 if __name__ == "__main__":
