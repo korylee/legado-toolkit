@@ -210,7 +210,15 @@ def soft_delete_sources(body: SourceDeleteIn, st=Depends(get_store)):
 
 @router.post("/restore")
 def restore_sources(body: dict, st=Depends(get_store)):
-    return {"restored": st.restore(body.get("urls") or [])}
+    """按**行 id** 恢复回收站里的行。
+
+    粒度是行 id 而不是 URL：同一个 URL 在回收站里可以有多份历史版本（见
+    `Store.migrate_sources_url_scope_once`），按 URL 恢复会含糊——恢复哪一份？
+
+    返回体带 `blocked`：那些行对应的 URL 已经有**在用**的版本，得先删掉在用的
+    那条才能恢复。不静默顶替。
+    """
+    return st.restore(body.get("ids") or [])
 
 
 @router.get("/deleted")

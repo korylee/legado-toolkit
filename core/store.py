@@ -529,20 +529,29 @@ class Store:
             return None
         return self._source_view(row["raw_json"], row["group_name"], row["user_tags"])
 
-    def get_source_fingerprint(self, url: str):
-        """返回 (fingerprint, is_deleted)，供导入比对。
+    def get_source_fingerprint(self, url: str) -> Optional[str]:
+        """返回**在用那行**的 fingerprint；没有在用的行则为 None。供导入比对。
 
-        fingerprint 为 None 表示 URL 不存在；is_deleted 表示该 URL 是否在回收站。
+        「在用」= ``deleted_at = ''``。**回收站里的同 URL 行不参与**：它们是历史
+        版本，不是「已存在」——正是这一点让「删了再导入」成立（旧版留在回收站，
+        新版成为在用的那一行）。见 ``migrate_sources_url_scope_once``。
+
+        以前这里不过滤 ``deleted_at``，回收站的行也返回指纹，于是调用方那句
+        ``if is_deleted: restore(...)`` 永远不可达：删了再导入被判「重复」，
+        既不恢复也不新建，用户看到的是一整批「重复」。
+
+        返回值从 ``(fp, is_deleted)`` 元组改成标量是**故意的**：新模型下导入
+        不需要知道"回收站里有没有"，那个布尔只会诱导出上一版那种分支。
         """
         from core.loader import _normalize_url
 
         row = self.conn.execute(
-            "SELECT fingerprint, deleted_at FROM sources WHERE source_url = ?",
+            "SELECT fingerprint FROM sources "
+            "WHERE source_url = ? AND deleted_at = ''",
             (_normalize_url(url),)).fetchone()
         if not row:
-            return None, False
-        fp = str(row["fingerprint"] or "").strip()
-        return (fp or None), bool(row["deleted_at"])
+            return None
+        return str(row["fingerprint"] or "").strip() or None
 
     def export_sources(self) -> List[Dict[str, Any]]:
         """导出全部书源（保持入库顺序），用于重新生成给 Legado 的 JSON。"""
@@ -1534,19 +1543,63 @@ class Store:
                 [now(), now()] + keys)
         return len(rows), path
 
-    def restore(self, urls) -> int:
+    def trashed_ids(self, urls) -> List[int]:
+        """回收站里这些 URL 的行 id。供「按 URL 恢复」的调用方用（如合并撤销）。
+
+        同一个 URL 在回收站里可能有多份历史版本，这里取**最近删除的那份**——
+        调用方的语义都是"把我刚删的那条放回来"。
+        （`MAX(deleted_at)` 配裸列是 SQLite 的既定行为：返回取到最大值的**那一行**。）
+        """
         from core.loader import _normalize_url
 
         keys = [_normalize_url(u) for u in (urls or []) if u]
         if not keys:
-            return 0
+            return []
         marks = ",".join("?" * len(keys))
+        return [int(r["id"]) for r in self.conn.execute(
+            "SELECT id, MAX(deleted_at) FROM sources "
+            "WHERE deleted_at <> '' AND source_url IN (%s) "
+            "GROUP BY source_url" % marks, keys)]
+
+    def restore(self, ids) -> Dict[str, Any]:
+        """按**行 id** 把回收站里的行恢复成在用。
+
+        返回 ``{"restored": n, "blocked": [{id, url, name}, ...]}``。
+
+        粒度必须是行 id：同一个 URL 在回收站里可以有多份历史版本（见
+        ``migrate_sources_url_scope_once``），按 URL 恢复会含糊——恢复哪一份？
+
+        **已有在用版本时拒绝，而不是顶替**：在用唯一性由部分唯一索引保证，
+        硬恢复会撞约束；更重要的是顶替会把用户看不见的那行悄悄换掉。被挡下的行
+        连名字一起返回，让用户知道要先删哪一条。
+        """
+        wanted = []
+        for i in (ids or []):
+            try:
+                wanted.append(int(i))
+            except (TypeError, ValueError):
+                continue
+        if not wanted:
+            return {"restored": 0, "blocked": []}
+        marks = ",".join("?" * len(wanted))
+        rows = list(self.conn.execute(
+            "SELECT id, source_url, name FROM sources "
+            "WHERE deleted_at <> '' AND id IN (%s)" % marks, wanted))
+        restored, blocked = 0, []
         with self.conn:
-            cur = self.conn.execute(
-                "UPDATE sources SET deleted_at = '', updated_at = ? "
-                "WHERE deleted_at <> '' AND source_url IN (%s)" % marks,
-                [now()] + keys)
-        return cur.rowcount or 0
+            for r in rows:
+                live = self.conn.execute(
+                    "SELECT id FROM sources WHERE source_url = ? AND deleted_at = ''",
+                    (r["source_url"],)).fetchone()
+                if live:
+                    blocked.append({"id": int(r["id"]), "url": r["source_url"],
+                                    "name": r["name"]})
+                    continue
+                self.conn.execute(
+                    "UPDATE sources SET deleted_at = '', updated_at = ? WHERE id = ?",
+                    (now(), r["id"]))
+                restored += 1
+        return {"restored": restored, "blocked": blocked}
 
     def list_deleted(self, limit: int = 200, offset: int = 0):
         return [dict(r) for r in self.conn.execute(

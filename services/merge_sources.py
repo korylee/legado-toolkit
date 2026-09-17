@@ -139,7 +139,10 @@ def undo(store, keep: str, restore_urls: Sequence[str], tags_added: Sequence[str
     `prev_comment` 只在当时确实改过备注时才有值。
     """
     keep_key = _normalize_url(keep)
-    restored = store.restore([_normalize_url(u) for u in restore_urls or []])
+    # 撤销是"把我刚删的那几条放回来"，而 merge 只记了 URL —— 先换成行 id
+    # （restore 的粒度是 id：同一个 URL 在回收站里可能有多份历史版本）
+    ids = store.trashed_ids([_normalize_url(u) for u in restore_urls or []])
+    restored = store.restore(ids)["restored"]
     removed = 0
     if tags_added:
         # 一次调用即可：`remove_user_tags` 的语义是「从集合里移掉这些」，

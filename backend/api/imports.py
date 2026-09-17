@@ -65,7 +65,8 @@ def import_sources(body: ImportBody, st=Depends(get_store)):
     if not isinstance(data, list):
         raise HTTPException(400, "内容不是书源数组（应为 JSON 数组）")
 
-    new_count = duplicate_count = conflict_count = invalid_count = 0
+    new_count = duplicate_count = conflict_count = invalid_count = updated_count = 0
+    overwrite = str(getattr(body, "conflict_strategy", "keep") or "keep") == "overwrite"
     conflict_urls = []
     conflict_sources = []
 
@@ -83,15 +84,22 @@ def import_sources(body: ImportBody, st=Depends(get_store)):
             invalid_count += 1
             continue
 
-        existing_fp, is_deleted = st.get_source_fingerprint(url)
+        # 只比「在用」的那行。回收站里同 URL 的历史版本**不参与**——它们不在用，
+        # 不构成「已存在」，于是「删了再导入」会直接新建一行在用的（旧版留在回收站
+        # 可回滚），而不是被判冲突挡在门外。
+        existing_fp = st.get_source_fingerprint(url)
         if existing_fp is None:
             _normalize_group(item, allowed_user_tags)
             st.upsert_sources([item])
-            if is_deleted:
-                st.restore([url])
             new_count += 1
         elif fingerprint(item) == existing_fp:
             duplicate_count += 1
+        elif overwrite:
+            # 用户选了「用导入的覆盖」。用户标签不受影响：upsert 的 DO UPDATE
+            # 不含 user_tags（那是用户在界面上勾的，不该被外部源改写）
+            _normalize_group(item, allowed_user_tags)
+            st.upsert_sources([item])
+            updated_count += 1
         else:
             conflict_count += 1
             conflict_urls.append(url)
@@ -100,6 +108,7 @@ def import_sources(body: ImportBody, st=Depends(get_store)):
     return {
         "new_count": new_count,
         "duplicate_count": duplicate_count,
+        "updated_count": updated_count,
         "conflict_count": conflict_count,
         "invalid_count": invalid_count,
         "total": len(data),
