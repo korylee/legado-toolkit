@@ -44,13 +44,19 @@ class FakeChecker:
     async def run(self, records, on_progress=None):
         # 签名必须与 AsyncChecker.run 一致（含 on_progress）——ops.run_check_job
         # 是按关键字传的，桩漏改会直接 TypeError
-        return []
+        #
+        # 原样返回：真实 AsyncChecker 返回的也是这一批（校验后的）记录。
+        # 返回空列表的话 rebuild_system_tags 会收到 []，就测不到"传了哪些 url"
+        return list(records)
 
     def close(self):
         pass
 
 
 class FakeStore:
+    #: 最近一次 rebuild_system_tags 收到的 urls（None = 全库重建）
+    rebuilt = None
+
     def export_sources(self):
         return [{"bookSourceUrl": "https://a.com", "bookSourceName": "a",
                  "bookSourceType": 0}]
@@ -66,8 +72,10 @@ class FakeStore:
     def update_job(self, *args, **kwargs):
         pass
 
-    def rebuild_system_tags(self):
-        pass
+    def rebuild_system_tags(self, urls=None):
+        # 签名必须跟真 Store 一致（`urls=None` = 全库重建）。替身少一个参数的话，
+        # 调用方传了 urls 会直接 TypeError——那是替身与实现脱节，不是被测代码的问题
+        FakeStore.rebuilt = urls
 
 
 class CheckJobSettingsTests(unittest.TestCase):
@@ -81,6 +89,7 @@ class CheckJobSettingsTests(unittest.TestCase):
         core.checker.AsyncChecker = FakeChecker
         FakeChecker.last = {}
         FakeChecker.instance = None
+        FakeStore.rebuilt = None
 
     def tearDown(self) -> None:
         import core.checker
@@ -160,6 +169,16 @@ class CheckJobSettingsTests(unittest.TestCase):
         self.assertTrue(FakeChecker.instance.refresh_cache)   # 构造后赋值
         self._run({})
         self.assertFalse(FakeChecker.instance.refresh_cache)
+
+    def test_rebuild_targets_only_the_checked_urls(self) -> None:
+        """分组重建只针对**这次校验过的**源。
+
+        分组只由该源自身的 (类型, 健康度, 星级) 决定，没被重算的源不可能变——
+        而全库重建实测 0.55 秒（3774 条）。只校验一条源时传 None 就是白花 0.55 秒。
+        """
+        self._run({})
+        self.assertIsNotNone(FakeStore.rebuilt, "不该用 urls=None 走全库重建")
+        self.assertEqual(FakeStore.rebuilt, ["https://a.com"])
 
     def test_keyword_stays_out_of_settings(self) -> None:
         """keyword 是「测哪个书名」，不是随环境变的参数，本轮不进设置。"""

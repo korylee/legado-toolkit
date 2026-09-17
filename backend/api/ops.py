@@ -112,7 +112,10 @@ async def run_check_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict
         checker.close()
 
     st.update_job(job_id, progress=len(results))
-    st.rebuild_system_tags()
+    # 只重建**这次校验过**的那些源的分组标签。分组只由该源自身的
+    # (类型, 健康度, 星级) 决定，没被重算的源不可能变——而全库重建实测 0.55 秒，
+    # 只校验一条源时那 0.55 秒全是白花的
+    st.rebuild_system_tags([r.url for r in results])
     items = [{
         # **url 必须归一化后再下发**：前端拿它当 key 回填列表，而列表里的
         # `source_url` 是 Store 归一化后存的（去空白/尾斜杠/转小写）。

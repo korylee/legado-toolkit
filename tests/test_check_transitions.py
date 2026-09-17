@@ -151,8 +151,9 @@ class FakeStore:
     def update_job(self, *args, **kwargs):
         pass
 
-    def rebuild_system_tags(self):
-        pass
+    def rebuild_system_tags(self, urls=None):
+        # 签名必须跟真 Store 一致（`urls=None` = 全库重建）
+        self.rebuilt = urls
 
 
 class CheckJobTransitionsTests(unittest.TestCase):
