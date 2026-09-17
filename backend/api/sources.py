@@ -221,6 +221,17 @@ def restore_sources(body: dict, st=Depends(get_store)):
     return st.restore(body.get("ids") or [])
 
 
+@router.post("/purge")
+def purge_deleted(st=Depends(get_store)):
+    """清空回收站——把里面的行**彻底删掉**（全仓唯一的硬删除路径）。
+
+    删之前由 `Store.purge_deleted` 先落一份快照（含 group_name / user_tags 等，
+    只存 raw_json 会丢这两样）。快照路径随返回体给出，界面上要显示出来——
+    **这是不可逆操作，用户得知道回滚点在哪**。
+    """
+    return st.purge_deleted()
+
+
 @router.get("/deleted")
 def list_deleted(limit: int = Query(200, ge=1, le=1000),
                  offset: int = Query(0, ge=0), st=Depends(get_store)):

@@ -67,7 +67,14 @@ export const deleteSources = (urls, reason = "") =>
 
 export const listDeleted = (limit = 200, offset = 0) =>
   api.get("/sources/deleted?limit=" + limit + "&offset=" + offset);
-export const restoreSources = (urls) => api.post("/sources/restore", { urls });
+// 恢复的粒度是**行 id**，不是 URL：同一个 URL 在回收站里可以有多份历史版本
+// （删了再导入时旧版会留在回收站），按 URL 恢复会含糊——恢复哪一份？
+// 返回体带 blocked：那些行的 URL 已有在用的版本，要先删掉才能恢复
+export const restoreSources = (ids) => api.post("/sources/restore", { ids });
+
+// 清空回收站——**不可逆**（全仓唯一的硬删除路径）。删之前后端会先落一份快照，
+// 快照路径随返回体给出，界面上要显示出来
+export const purgeTrash = () => api.post("/sources/purge", {});
 
 // 新建书源保存前探测域名是否已存在，避免 upsert_sources 静默覆盖原源规则。
 // 必须 encodeURIComponent：域名可能带路径或查询串（如 https://a.com/blog），

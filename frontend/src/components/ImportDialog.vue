@@ -25,6 +25,11 @@ function onFileChange(f) {
 }
 function beforeUpload() { return false; }   // 手动解析，不自动上传
 
+//: 同 URL 但规则不同时怎么办。**只对「在用」的那行有意义**——回收站里的同 URL
+//: 历史版本不构成冲突，导入会直接新建一行在用的（所以「先删掉旧的再导入新版」
+//: 这条路现在也通）。默认 keep：外部源默认不该覆盖你已经在用的规则。
+const strategy = ref("keep");
+
 async function parseLocal() {
   if (!file.value) return ElMessage.warning("先选文件");
   loading.value = true;
@@ -60,9 +65,11 @@ async function doImport() {
     const r = await api.post("/import", {
       content: rawText.value,
       source: file.value ? file.value.name : "",
+      conflict_strategy: strategy.value,
     });
     result.value = r;
-    ElMessage.success("新增 " + r.new_count + " / 重复 " + r.duplicate_count
+    ElMessage.success("新增 " + r.new_count + " / 更新 " + (r.updated_count || 0)
+                      + " / 重复 " + r.duplicate_count
                       + " / 冲突 " + r.conflict_count);
     emit("imported");
   } catch (e) {
@@ -77,7 +84,20 @@ async function doImport() {
 <template>
   <el-dialog v-model="visible" title="导入书源" width="620px" destroy-on-close>
     <el-alert type="info" :closable="false" show-icon style="margin-bottom: 12px"
-              title="走安全导入：新 URL 进待校验；同 URL 规则冲突进待审队列，不会自动覆盖候选主库。" />
+              title="走安全导入：新 URL 进待校验；同 URL 规则冲突按下面的策略处理。" />
+
+    <el-form label-width="104px" size="small" style="margin-bottom: 4px">
+      <el-form-item label="同 URL 不同规则">
+        <el-radio-group v-model="strategy">
+          <el-radio value="keep">保留现有的，导入的进待审</el-radio>
+          <el-radio value="overwrite">用导入的覆盖</el-radio>
+        </el-radio-group>
+        <div class="muted">
+          覆盖只换规则，**不会清掉你打的用户标签**；被替换掉的那份会留在
+          <code>data/imports/conflicts/</code> 里可回查。
+        </div>
+      </el-form-item>
+    </el-form>
 
     <el-upload drag :auto-upload="false" :limit="1" accept=".json"
                :on-change="onFileChange" :before-upload="beforeUpload">
@@ -101,9 +121,10 @@ async function doImport() {
       <el-descriptions-item label="类型分布">{{ JSON.stringify(preview.types) }}</el-descriptions-item>
     </el-descriptions>
 
-    <el-descriptions v-if="result && !result.error" :column="3" border size="small"
+    <el-descriptions v-if="result && !result.error" :column="4" border size="small"
                      style="margin-top: 12px">
       <el-descriptions-item label="新增">{{ result.new_count }}</el-descriptions-item>
+      <el-descriptions-item label="已更新">{{ result.updated_count || 0 }}</el-descriptions-item>
       <el-descriptions-item label="重复">{{ result.duplicate_count }}</el-descriptions-item>
       <el-descriptions-item label="冲突待审">{{ result.conflict_count }}</el-descriptions-item>
     </el-descriptions>

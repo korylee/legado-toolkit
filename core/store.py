@@ -1543,6 +1543,47 @@ class Store:
                 [now(), now()] + keys)
         return len(rows), path
 
+    def purge_deleted(self) -> Dict[str, Any]:
+        """清空回收站：把 ``deleted_at != ''`` 的行**彻底删掉**。
+
+        返回 ``{"purged": n, "snapshot": path}``。这是全仓**唯一**的硬删除路径。
+
+        为什么要有它：界面上写着"UI 永不硬删"，但**没有出口同样不行**——回收站会
+        无限增长，而且用户想"删干净重来"时没有干净状态可用（实测踩过：3861 条全在
+        回收站，既不能清、又不能靠导入覆盖）。
+
+        **先落快照，再删**（沿用 ``soft_delete`` 的纪律：写失败就不删）。快照必须
+        **连 group_name / user_tags / system_tags_locked / fingerprint 一起存**：
+        只存 ``raw_json`` 会丢掉用户标签与分组——外发时 ``bookSourceGroup`` 是由
+        ``group_name`` + ``user_tags`` **合成**的（见 ``_source_view``），
+        raw_json 里那份会被覆盖掉，而这两样在表之外没有第二份。
+        """
+        from core.paths import data_path
+
+        rows = list(self.conn.execute(
+            "SELECT source_url, raw_json, group_name, user_tags, system_tags_locked, "
+            "enabled, fingerprint, deleted_at FROM sources WHERE deleted_at <> ''"))
+        if not rows:
+            return {"purged": 0, "snapshot": ""}
+        path = data_path("backups", "purged_%s.json" % time.strftime("%Y%m%d_%H%M%S"))
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        payload = {
+            "purged_at": now(),
+            "reason": "清空回收站",
+            "count": len(rows),
+            "sources": [{
+                "raw": json.loads(r["raw_json"]),
+                "group_name": r["group_name"], "user_tags": r["user_tags"],
+                "system_tags_locked": r["system_tags_locked"], "enabled": r["enabled"],
+                "fingerprint": r["fingerprint"], "deleted_at": r["deleted_at"],
+            } for r in rows],
+        }
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=1)
+        with self.conn:
+            cur = self.conn.execute("DELETE FROM sources WHERE deleted_at <> ''")
+        return {"purged": cur.rowcount or 0, "snapshot": path}
+
     def trashed_ids(self, urls) -> List[int]:
         """回收站里这些 URL 的行 id。供「按 URL 恢复」的调用方用（如合并撤销）。
 
