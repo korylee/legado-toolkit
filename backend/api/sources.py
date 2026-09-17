@@ -1,11 +1,13 @@
 # -*- coding: utf-8 -*-
+import collections
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from backend.deps import get_store
-from backend.schemas import (SourceDeleteIn, SourcePage, SourceSave, TagDelete,
-                             TagMerge, TagPatch, TagRename)
+from backend.schemas import (NameApplyIn, NamePreviewIn, NameUndoIn, SourceDeleteIn,
+                             SourcePage, SourceSave, TagDelete, TagMerge, TagPatch,
+                             TagRename)
 
 router = APIRouter()
 
@@ -215,3 +217,65 @@ def restore_sources(body: dict, st=Depends(get_store)):
 def list_deleted(limit: int = Query(200, ge=1, le=1000),
                  offset: int = Query(0, ge=0), st=Depends(get_store)):
     return {"total": st.count_deleted(), "items": st.list_deleted(limit, offset)}
+
+
+# ---------------------------------------------------------------- 名称清洗
+# 三步走：preview（只读建议）→ apply（改名，返回旧名）→ undo（回写旧名）。
+# 写路径**不共用 `save_source`**：那条会 `set_user_tags` 整组覆盖，漏传就把标签
+# 清空（lessons §三十五 记过）。改名会同时更新 raw_json 与 fingerprint 列，
+# 见 `Store.set_source_name`。
+
+
+@router.post("/names/preview")
+def preview_names(body: NamePreviewIn, st=Depends(get_store)):
+    """名称清洗预演：**只读**，返回「会变成什么」的清单。
+
+    一次算全库而不是逐条问后端：`clean_source_name` 要拿「库里已有哪些名字」判
+    「去掉后缀后会不会与已有名字撞车」，逐条问的话每条的判据都不一样。
+    """
+    from core.name_clean import REASON_LABELS, clean_sources
+
+    rows = st.name_pairs(body.urls)
+    items = clean_sources([{"bookSourceUrl": r["url"], "bookSourceName": r["name"]}
+                           for r in rows])
+    changed = [i for i in items if i["changed"]]
+    # 「撞车」提示：改完之后这个新名字是否与**别的源**重名（用清洗后的名字算）。
+    # 那正是下一步「同名档」要摊开的东西，提前标出来，免得到时候一片同名还看不出因果。
+    final = collections.Counter(str(i["new_name"]).strip() for i in items)
+    for i in changed:
+        i["collides"] = final[str(i["new_name"]).strip()] > 1
+    return {"items": changed, "total": len(rows), "changed": len(changed),
+            "reason_labels": REASON_LABELS}
+
+
+@router.post("/names/apply")
+def apply_names(body: NameApplyIn, st=Depends(get_store)):
+    """应用改名，返回 `prev`（旧名 + 地址）供撤销原样回写。
+
+    名称为空的一律跳过：那会让列表上出现一条没有名字的源，而这是不可逆的观感损失。
+    """
+    prev, applied, missing = [], 0, 0
+    for ch in body.changes:
+        name = str(ch.name or "").strip()
+        if not name:
+            continue
+        old = st.set_source_name(ch.url, name)
+        if old is None:
+            missing += 1
+            continue
+        prev.append({"url": ch.url, "name": old})
+        applied += 1
+    return {"applied": applied, "missing": missing, "prev": prev}
+
+
+@router.post("/names/undo")
+def undo_names(body: NameUndoIn, st=Depends(get_store)):
+    """撤销改名：拿 `apply` 返回的 `prev` 回写旧名。只还原名字，不碰标签/备注。"""
+    restored, missing = 0, 0
+    for ch in body.prev:
+        old = st.set_source_name(ch.url, str(ch.name or ""))
+        if old is None:
+            missing += 1
+        else:
+            restored += 1
+    return {"restored": restored, "missing": missing}

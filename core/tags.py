@@ -13,7 +13,15 @@ SYSTEM_TYPE_TAGS = {"📖小说", "🎧听书", "🎨漫画", "📥下载"}
 #: 状态标签的顺序。**「需验证」是 AUTH 的标签**：站点拒绝了我们的请求
 #: （403/401/429/503、验证码页、登录墙），它有结论，与「待验证」（我们没结论）
 #: 是两回事。故意排在「需代理复检」旁边，两个都是「有结论、要人工处理」。
-SYSTEM_STATUS_TAG_ORDER: Tuple[str, ...] = ("可用", "待验证", "已失效", "需验证", "需代理复检")
+#: 「证书问题」同理（站点可达、只是证书不被信任）——**排在最后是为了不动已有顺序**。
+#:
+#: ⚠️ **它是判定表，不只是展示表**：`is_system_tag` 直接查它的派生 set，漏一个的
+#: 后果不是"少显示一个标签"，而是那个标签被当成**用户标签**写进 `user_tags`
+#: （用户可见、可编辑，且源修好之后不会自动清掉，导出分组会变成
+#: 「📖小说,可用,证书问题」这种自相矛盾的状态）。`organizer.STATUS_GROUP_NAMES`
+#: 是写出去的那一侧，两张表必须同集合——`tests/test_tags.py` 有一致性用例钉着。
+SYSTEM_STATUS_TAG_ORDER: Tuple[str, ...] = ("可用", "待验证", "已失效", "需验证",
+                                            "需代理复检", "证书问题")
 SYSTEM_QUALITY_TAG_ORDER: Tuple[str, ...] = ("规则完整",)
 SYSTEM_STATUS_TAGS = set(SYSTEM_STATUS_TAG_ORDER)
 SYSTEM_QUALITY_TAGS = set(SYSTEM_QUALITY_TAG_ORDER)
@@ -33,6 +41,12 @@ USER_TAG_ALIASES = {
     "精品排版": "精排",
     "排版好": "精排",
 }
+
+#: 系统默认用户标签：不依赖库内容就成立的用户标签白名单。
+#: 外部导入只保留「这些 + 库里已有的用户标签（Store.known_user_tags()）」，
+#: 其余直接清掉（决策与理由见 lessons §三十二）。用户手动编辑不受此限。
+#: 顺序即默认展示顺序；增删要同步导入过滤的测试。
+DEFAULT_USER_TAGS: Tuple[str, ...] = ("R18", "正版")
 
 # 用户标签分隔符：逗号、分号、竖线
 _USER_SPLIT_RE = re.compile(r"[,，;；|]+")

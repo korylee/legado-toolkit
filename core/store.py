@@ -20,6 +20,7 @@ import time
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence
 
 from core.tags import (
+    DEFAULT_USER_TAGS as _DEFAULT_USER_TAGS,
     SYSTEM_QUALITY_TAGS as _SYSTEM_QUALITY_TAGS,
     SYSTEM_STATUS_TAGS as _SYSTEM_STATUS_TAGS,
     SYSTEM_TYPE_TAGS as _SYSTEM_TYPE_TAGS,
@@ -349,9 +350,19 @@ class Store:
         src["bookSourceGroup"] = _merge_group(_parse_group(group_name), _normalize_tags(user_tags))
         return src
 
-    def _known_user_tags(self) -> set:
-        """当前库里已经存在的用户标签集合，用于过滤新源标签。"""
-        out = set()
+    def known_user_tags(self) -> set:
+        """**已知**用户标签 = 默认标签（`core.tags.DEFAULT_USER_TAGS`）+ 库里已有的。
+
+        导入外部源时用它当白名单（`backend/api/imports.py` 与 `upsert_sources`
+        两道，同一份名单）。默认标签**不依赖库内容就成立**：空库也要认 R18/正版，
+        否则「第一次导入的源带 R18」会被当成陌生标签丢掉——而这条正是设计里
+        唯一确定要保留的那类标签。
+
+        名字是公开的（原来叫 `_known_user_tags`）：它现在有库外的调用方
+        （导入接口），私有名会把「白名单到底包含什么」变成一个只有本类知道的
+        事实——而 lessons §三十四/三十五 已经把它写成对外契约。
+        """
+        out = set(_DEFAULT_USER_TAGS)
         for row in self.conn.execute(
                 "SELECT user_tags FROM sources WHERE deleted_at = ''"):
             out.update(t for t in _normalize_tags(row["user_tags"]) if not _is_system_tag(t))
@@ -360,28 +371,23 @@ class Store:
     def upsert_sources(self, sources, with_fingerprint: bool = True, allow_new_tags: bool = False) -> int:
         """批量写入/更新书源。同 URL 更新规则和系统标签，用户标签永久保留。
 
-        ``allow_new_tags`` 控制「库里还没见过的标签要不要收」——**但它当前没有任何
-        活调用者需要它**，写在这里是为了不让下一个人误以为它在生效：
+        ``allow_new_tags`` 控制「库里还没见过的标签要不要收」。**默认不收**，
+        白名单是 `known_user_tags()`（`core.tags.DEFAULT_USER_TAGS` + 库里已有的）：
 
-          - ``backend/api/imports.py`` 传的是 **True**（外部源带来的标签全收）
-          - ``backend/api/sources.py`` 的 `save_source` 用默认值，但它**紧接着**就调
-            `set_user_tags([url], body.user_tags)` 整组覆盖——上面过滤掉的东西
-            立刻被写回来
+          - ``backend/api/imports.py`` 用默认值——外部源带来的陌生标签一律丢掉，
+            同一个白名单在导入接口里还先过一遍（`_normalize_group`），两道防线
+          - ``backend/api/sources.py`` 的 `save_source` 也用默认值，但它**紧接着**就调
+            `set_user_tags([url], body.user_tags)` 整组覆盖——那条链路是「用户在界面上
+            明确勾的标签」，不该被这里的白名单管，所以覆盖是对的
           - ``core/store_migrate.py`` 用默认值，而那时库是空的 →
             `allow_unknown` 必为 True，根本走不到过滤那一支
-
-        也就是说 `else` 那支（按 `known_tags` 过滤）**目前不会被执行**。它是一次
-        有意的设计（防外部源污染标签体系，`tests/test_store_tags.py` 的
-        `test_new_source_unknown_tags_are_filtered_after_aliases` 钉着它），
-        不是意外死代码——**所以没有删**。要动它得先回答一个产品问题：
-        「导入外部源时，它带来的陌生标签该不该进我们的标签表？」
         见 `TODO.md`。
         """
         from core.loader import _normalize_url, fingerprint as fp_of
 
         ts = now()
         rows = []
-        known_tags = self._known_user_tags()
+        known_tags = self.known_user_tags()
         allow_unknown = allow_new_tags or self.count_sources(include_deleted=True) == 0
         for src in sources or []:
             if not isinstance(src, dict):
@@ -476,12 +482,12 @@ class Store:
 
     def query(self, source_type: Optional[int] = None, group: str = "",
               health: str = "", q: str = "", only_enabled: bool = False,
-              user_tag: str = "",
+              user_tag: str = "", urls: Optional[Sequence[str]] = None,
               limit: int = 50, offset: int = 0, order: str = "id",
               include_deleted: bool = False) -> List[Dict[str, Any]]:
         """前端列表页用：服务端筛选 + 排序 + 分页（不要全量传给浏览器）。"""
         where, args = self._where(source_type, group, health, q, only_enabled,
-                                 include_deleted, user_tag)
+                                 include_deleted, user_tag, urls)
         allowed = ("id", "name", "source_type", "group_name", "stars",
                    "checked_at", "updated_at")
         key = (order or "id").lstrip("-")
@@ -494,15 +500,16 @@ class Store:
 
     def count_query(self, source_type: Optional[int] = None, group: str = "",
                     health: str = "", q: str = "", only_enabled: bool = False,
-                    include_deleted: bool = False, user_tag: str = "") -> int:
+                    include_deleted: bool = False, user_tag: str = "",
+                    urls: Optional[Sequence[str]] = None) -> int:
         where, args = self._where(source_type, group, health, q, only_enabled,
-                                  include_deleted, user_tag)
+                                  include_deleted, user_tag, urls)
         sql = "SELECT COUNT(*) AS c FROM v_sources %s" % where
         return self.conn.execute(sql, args).fetchone()["c"]
 
     def query_urls(self, source_type: Optional[int] = None, group: str = "",
                    health: str = "", q: str = "", only_enabled: bool = False,
-                   user_tag: str = "") -> List[str]:
+                   user_tag: str = "", urls: Optional[Sequence[str]] = None) -> List[str]:
         """只取 source_url 一列，供「选中全部 N 条筛选结果」。
 
         **筛选口径必须与 query/count_query 共用 _where**：这个列表的下一步通常是
@@ -513,12 +520,13 @@ class Store:
         有人顺手透传，回收站里的源会被一起选进来，而它们是用户特意删掉的。
         """
         where, args = self._where(source_type, group, health, q, only_enabled,
-                                  False, user_tag)
+                                  False, user_tag, urls)
         sql = "SELECT source_url FROM v_sources %s" % where
         return [r["source_url"] for r in self.conn.execute(sql, args)]
 
     def _where(self, source_type, group, health, q, only_enabled,
-               include_deleted: bool = False, user_tag: str = ""):
+               include_deleted: bool = False, user_tag: str = "",
+               urls: Optional[Sequence[str]] = None):
         sql, args = ["WHERE 1=1"], []
         if not include_deleted:
             sql.append("AND deleted_at = ''")
@@ -545,6 +553,20 @@ class Store:
         if q:
             sql.append("AND (name LIKE ? OR source_url LIKE ?)")
             args += ["%" + q + "%", "%" + q + "%"]
+        if urls:
+            # 显式 URL 子集（「选中的这几条」）。两侧都要归一：列表里的 source_url
+            # 与库里的列是同一套规范化，少一侧就一条都对不上（AGENTS #5）。
+            from core.loader import _normalize_url
+
+            keys = [_normalize_url(u) for u in urls if str(u or "").strip()]
+            if keys:
+                sql.append("AND source_url IN (%s)" % ",".join("?" * len(keys)))
+                args += keys
+            else:
+                # 传了非空的 urls，却一条都归一不出来（全是空串之类）→ **一条都不返回**。
+                # 这里绝不能退化成「不筛」：那会把「导出这几条」悄悄变成「导出全库」，
+                # 而界面上显示的还是「已生成 N 条的链接」
+                sql.append("AND 1 = 0")
         return " ".join(sql), args
 
     def set_group(self, url: str, group: str) -> bool:
@@ -564,6 +586,49 @@ class Store:
                 "WHERE source_url = ?",
                 (group, json.dumps(src, ensure_ascii=False), now(), key))
         return True
+
+    def name_pairs(self, urls: Optional[Sequence[str]] = None) -> List[Dict[str, str]]:
+        """`[{"url", "name"}]`——「只看名字与地址」的批量操作的输入。
+
+        比 `export_sources()` 轻得多：不解析 raw_json、不重建分组与标签。
+        筛选复用 `_where`，所以 `urls=` 的含义与其它入口一致。
+        """
+        where, args = self._where(None, "", "", "", False, False, "", urls)
+        return [dict(r) for r in self.conn.execute(
+            "SELECT source_url AS url, name FROM sources %s" % where, args)]
+
+    def set_source_name(self, url: str, name: str) -> Optional[str]:
+        """改展示名：同时更新 `sources.name` 与 `raw_json["bookSourceName"]`。
+
+        返回**旧名**（源不存在返回 None），给撤销用。
+
+        两处必须一起改：`name` 列是列表与筛选用，`raw_json` 是导出与校验读的
+        ——只改一处的话，界面上改了名、导出的 JSON 里还是旧的。
+
+        **顺手重算 `fingerprint` 列**：`loader.fingerprint` 把 `bookSourceName`
+        算在内（见 core/loader.py 的 core 字段表），不重算的话导入去重会拿旧指纹
+        比对，同一个源再导入一次会被判成「规则冲突」——而原因只是改过名字。
+
+        **不走 `save_source`**：那条路径会 `set_user_tags([url], body.user_tags)`
+        整组覆盖，漏传就把标签清空（lessons §三十五 记过）。
+        """
+        from core.loader import _normalize_url
+        from core.loader import fingerprint as fp_of
+
+        key = _normalize_url(url)
+        row = self.conn.execute(
+            "SELECT raw_json, name FROM sources WHERE source_url = ?", (key,)).fetchone()
+        if not row:
+            return None
+        old = str(row["name"] or "")
+        src = json.loads(row["raw_json"])
+        src["bookSourceName"] = name
+        with self.conn:
+            self.conn.execute(
+                "UPDATE sources SET name = ?, raw_json = ?, fingerprint = ?, updated_at = ? "
+                "WHERE source_url = ?",
+                (name, json.dumps(src, ensure_ascii=False), fp_of(src), now(), key))
+        return old
 
     def groups(self) -> List[tuple]:
         return [(r["group_name"], r["c"]) for r in self.conn.execute(
@@ -1256,11 +1321,12 @@ class Store:
 
 
     def export_by_filter(self, source_type=None, group: str = "", health: str = "",
-                         q: str = "", only_enabled: bool = False, user_tag: str = ""):
+                         q: str = "", only_enabled: bool = False, user_tag: str = "",
+                         urls: Optional[Sequence[str]] = None):
         # 按筛选条件导出全部命中源（不分页）。
         # 走 v_sources 视图，这样 health 等只有视图才有的列也能筛。
         where, args = self._where(source_type, group, health, q, only_enabled,
-                                  user_tag=user_tag)
+                                  user_tag=user_tag, urls=urls)
         # 不能 JOIN sources：两表都有 deleted_at/name/source_url 等列，
         # _where 生成的是不带表名的条件，SQLite 会报 ambiguous column name。
         # 用子查询取 raw_json，_where 里的列在 v_sources 里全都有。

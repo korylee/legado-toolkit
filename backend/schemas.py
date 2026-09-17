@@ -196,3 +196,25 @@ class JobOut(BaseModel):
     created_at: str = ""
     updated_at: str = ""
     result_json: str = ""
+
+
+class NamePreviewIn(BaseModel):
+    """名称清洗的预演请求。
+
+    urls 为空 = 全库未删除的源。**只读**：预演不改任何数据。
+    """
+    urls: List[str] = Field(default_factory=list)
+
+
+class NameChange(BaseModel):
+    """一对待应用的改名（apply 传"新名"，undo 传"旧名"）。"""
+    url: str
+    name: str
+
+
+class NameApplyIn(BaseModel):
+    changes: List[NameChange] = Field(default_factory=list)
+
+
+class NameUndoIn(BaseModel):
+    prev: List[NameChange] = Field(default_factory=list)

@@ -242,6 +242,18 @@ class StoreTagTests(unittest.TestCase):
             self.assertEqual(len(st.query(user_tag="原创")), 1)
             self.assertEqual(len(st.query(user_tag="精排")), 0)
 
+    def test_known_user_tags_include_defaults(self) -> None:
+        """默认标签（R18 / 正版）不依赖库内容就成立，是导入过滤的白名单底座。"""
+        with Store(self.db) as st:
+            tags = st.known_user_tags()
+            self.assertIn("R18", tags)
+            self.assertIn("正版", tags)
+            # 系统标签永远不进用户标签白名单
+            self.assertNotIn("📖小说", tags)
+            # 库里已有的用户标签也在名单里（空库 seed 允许任意标签）
+            st.upsert_sources([make_source("原创")])
+            self.assertIn("原创", st.known_user_tags())
+
     def test_new_source_unknown_tags_are_filtered_after_aliases(self) -> None:
         with Store(self.db) as st:
             st.upsert_sources([make_source("R18,精排,原创", url="https://old.example")])

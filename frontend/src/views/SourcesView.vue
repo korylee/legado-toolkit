@@ -1,7 +1,7 @@
 <script setup>
 import { ref, reactive, computed, nextTick, watch, onMounted, onUnmounted } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { Search, Plus, Upload, Download, Delete, Filter, Refresh, Monitor } from "@element-plus/icons-vue";
+import { Search, Plus, Upload, Download, Delete, Filter, Refresh, Monitor, MagicStick } from "@element-plus/icons-vue";
 import { listSources, listSourceUrls, listGroups, patchTags, deleteSources, listTags, getStats } from "../api/sources";
 import { api, subscribeJob } from "../api/client";
 import { ensureTagMeta, isQualityTag, splitTags, tagOfType, sourceTypes } from "../utils/tags";
@@ -9,6 +9,7 @@ import { HEALTH_LABELS, describeChanges, healthLabel, starBasisLabel } from "../
 import { useMobile } from "../composables/useMobile";
 import SourceEditDialog from "../components/SourceEditDialog.vue";
 import TrashDrawer from "../components/TrashDrawer.vue";
+import TidyDrawer from "../components/TidyDrawer.vue";
 import ExportDrawer from "../components/ExportDrawer.vue";
 import ImportDialog from "../components/ImportDialog.vue";
 import GroupManagerDrawer from "../components/GroupManagerDrawer.vue";
@@ -26,6 +27,7 @@ const tableRef = ref(null);
 const dlgVisible = ref(false);
 const dlgUrl = ref("");
 const trashVisible = ref(false);
+const tidyVisible = ref(false);
 const exportVisible = ref(false);
 const importVisible = ref(false);
 const filterVisible = ref(false);
@@ -602,6 +604,7 @@ onUnmounted(() => {
         <el-button size="small" :icon="Download" @click="importVisible = true">导入</el-button>
         <el-button size="small" :icon="Delete" @click="trashVisible = true">回收站</el-button>
         <el-button size="small" @click="tagManagerVisible = true">标签管理</el-button>
+        <el-button size="small" :icon="MagicStick" @click="tidyVisible = true">整理源</el-button>
       </div>
     </div>
 
@@ -861,6 +864,9 @@ onUnmounted(() => {
             回收站
           </el-button>
           <el-button @click="tagManagerVisible = true; filterVisible = false">标签管理</el-button>
+          <el-button :icon="MagicStick" @click="tidyVisible = true; filterVisible = false">
+            整理源
+          </el-button>
         </div>
       </div>
     </el-drawer>
@@ -868,6 +874,7 @@ onUnmounted(() => {
     <GroupManagerDrawer v-model="tagManagerVisible" @changed="onTagsChanged" />
     <SourceEditDialog v-model="dlgVisible" :source-url="dlgUrl" @saved="onSaved" />
     <TrashDrawer v-model="trashVisible" @changed="load" />
+    <TidyDrawer v-model="tidyVisible" @changed="load" />
     <ExportDrawer v-model="exportVisible" :selected="selected"
                   :filter="query" :filtered-total="total" />
     <ImportDialog v-model="importVisible" @imported="load" />

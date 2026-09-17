@@ -181,6 +181,29 @@ class QueryUrlsTests(unittest.TestCase):
                     sorted(r["source_url"] for r in st.query(limit=100, **params)),
                     "口径不一致: %r" % (params,))
 
+    def test_export_by_filter_honors_url_subset(self):
+        with self._seed() as st:
+            picked = ["https://ok.com", "https://never.com"]
+            srcs = st.export_by_filter(urls=picked)
+            self.assertEqual(sorted(s["bookSourceUrl"] for s in srcs), sorted(picked))
+
+    def test_url_list_filter_matches_query_and_count(self):
+        with self._seed() as st:
+            picked = ["https://ok.com", "https://never.com"]
+            self.assertEqual(sorted(st.query_urls(urls=picked)), sorted(picked))
+            self.assertEqual(st.count_query(urls=picked), 2)
+            self.assertEqual(
+                sorted(r["source_url"] for r in st.query(urls=picked, limit=100)),
+                sorted(picked))
+
+    def test_url_list_filter_normalizes_like_source_url(self):
+        with self._seed() as st:
+            self.assertEqual(st.query_urls(urls=[" https://OK.com/ "]), ["https://ok.com"])
+
+    def test_empty_url_list_means_no_filter(self):
+        with self._seed() as st:
+            self.assertEqual(len(st.query_urls(urls=[])), 3)
+
     def test_deleted_sources_are_excluded(self):
         with self._seed() as st:
             st.soft_delete(["https://dead.com"])
