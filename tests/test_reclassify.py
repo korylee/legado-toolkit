@@ -486,6 +486,45 @@ class OnlyDeadFilterTests(unittest.TestCase):
         self.assertEqual(len(urls), 3)
 
 
+class TransportCodeParityTests(unittest.TestCase):
+    """传输层错误码：校验链路产出的，归因链路必须认。
+
+    `checker._request` 与 `reclassify._get` 是同一条链路的两个入口，码表不一致的
+    代价是「同一个源，校验说🔐证书、归因说可能是临时故障」——而用户是照着归因
+    报告决定删源的。
+
+    实测过的现场：`ClientConnectorCertificateError` 没被 `_get` 单独接住。它与
+    `ClientConnectorSSLError` 是**兄弟**（都继承 `ClientSSLError`，不是父子），
+    于是落到 `except Exception` 变成 "other"，
+    `_transport_attribution` 里那句证书建议成了死代码。
+    """
+
+    def test_certificate_error_is_not_swallowed_as_other(self):
+        import ssl
+
+        import aiohttp
+        from aiohttp.client_reqrep import ConnectionKey
+
+        from core import reclassify as R
+
+        key = ConnectionKey("a.com", 443, True, False, None, None, None)
+
+        class Session:
+            def request(self, *a, **kw):       # 实现走的是 session.request
+                raise aiohttp.ClientConnectorCertificateError(
+                    key, ssl.SSLCertVerificationError("bad cert"))
+
+        status, text, err = asyncio.run(R._get(Session(), "https://a.com"))
+        self.assertEqual(err, "cert")
+
+    def test_cert_code_gets_a_specific_attribution(self):
+        """证书那一档必须有专属建议，不能掉进「可能是临时故障」兜底。"""
+        from core import reclassify as R
+        bucket, why = asyncio.run(R._transport_attribution("cert", "a.com"))
+        self.assertIn("证书", why)
+        self.assertNotIn("临时故障", why)
+
+
 # ---------------------------------------------------------------- 变异记录
 #
 # DiagnoseWiringTests（2026-09-16 收拢状态码判定表）：
@@ -515,6 +554,9 @@ class OnlyDeadFilterTests(unittest.TestCase):
 #        → SystemGroupFeedbackTests 的那三条红（反向断言那条仍绿——它守的是
 #           「别修过头」，两种口径下都该通过）
 #  M7  `_text_of` 把 group 整个丢掉（**修过头**）
+#  M8  `_get` 去掉 ClientConnectorCertificateError 那一支
+#        → TransportCodeParityTests.test_certificate_error_is_not_swallowed_as_other 红
+#          （证书错误与 ClientConnectorSSLError 是兄弟不是父子，漏了会落进 "other"）
 #        → SystemGroupFeedbackTests.test_user_tags_still_count 红
 #        （M6 与 M7 是一对：只做 M6 会以为「全丢」也行，M7 证明用户标签得留着）
 #

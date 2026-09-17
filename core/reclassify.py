@@ -167,6 +167,13 @@ async def _get(session, url, timeout=8.0, method="GET", headers=None, body=""):
         return None, "", "timeout"
     except aiohttp.ClientConnectorDNSError:
         return None, "", "dns"
+    except aiohttp.ClientConnectorCertificateError:
+        # **证书错误与 TLS 握手错误是两个类，而且不是父子**（都继承
+        # `ClientSSLError`）：所以这一支必须单独列，否则它会落到下面的
+        # `except Exception` 变成 "other"，归因给出「可能是临时故障」——
+        # 而同一个源在校验链路里已经被判成「🔐证书（关掉校验就能用）」。
+        # 两侧码表不一致正是 lessons 里「同一件事两个入口、结论相反」那一类。
+        return None, "", "cert"
     except aiohttp.ClientConnectorSSLError:
         return None, "", "tls"
     except aiohttp.ClientConnectionResetError:
