@@ -17,12 +17,9 @@ import {
   applyNames, listDups, mergeSources, previewNames, undoNames, undoMerge,
 } from "../api/sources";
 import { HEALTH_LABELS } from "../utils/health";
-import { useMobile } from "../composables/useMobile";
-
 const props = defineProps({ modelValue: { type: Boolean, default: false } });
 const emit = defineEmits(["update:modelValue", "changed", "requestCheck"]);
 
-const isMobile = useMobile();
 const visible = computed({
   get: () => props.modelValue,
   set: (v) => emit("update:modelValue", v),
@@ -45,7 +42,6 @@ const showAll = ref(false);
 const nameResult = ref(null);
 const nameUndone = ref(false);
 
-const showHeight = computed(() => (isMobile.value ? "46vh" : "calc(100vh - 430px)"));
 
 //: 默认只看高置信那一档：1651 条一次性铺开会把「我到底在批什么」淹掉
 const listRows = computed(() => showAll.value
@@ -274,7 +270,8 @@ watch(() => props.modelValue, (v) => {
 </script>
 
 <template>
-  <el-drawer v-model="visible" title="整理源" size="900px" destroy-on-close>
+  <el-drawer v-model="visible" title="整理源" size="900px" destroy-on-close
+             class="tidy-drawer">
     <el-steps :active="stepIndex" simple style="margin-bottom: 12px">
       <el-step title="1 名称清洗" @click.native="goStep('names')" />
       <el-step title="2 重复梳理" @click.native="goStep('dups')" />
@@ -301,7 +298,7 @@ watch(() => props.modelValue, (v) => {
         </span>
       </div>
 
-      <div v-loading="loading" class="list" :style="{ height: showHeight }">
+      <div v-loading="loading" class="list">
         <div v-for="r in listRows" :key="r.url" class="row"
              :class="{ on: checked.has(r.url) }" @click="toggle(r)">
           <el-checkbox :model-value="checked.has(r.url)" @click.prevent.stop="toggle(r)" />
@@ -361,7 +358,7 @@ watch(() => props.modelValue, (v) => {
         </span>
       </div>
 
-      <div v-loading="dupsLoading" class="list" :style="{ height: showHeight }">
+      <div v-loading="dupsLoading" class="list">
         <div v-for="g in dupGroups" :key="g.key" class="card" :class="{ on: selected.has(g.key) }">
           <div class="card-head">
             <el-checkbox :model-value="selected.has(g.key)"
@@ -432,7 +429,14 @@ watch(() => props.modelValue, (v) => {
 </template>
 
 <style scoped>
-.list { overflow: auto; border: 1px solid #ebeef5; border-radius: 4px; }
+/* 抽屉主体做成 flex 列，列表吃满剩余高度。
+   原来列表高度写死成 `calc(100vh - 430px)`（移动端 46vh）——那个 430 是猜的数，
+   与抽屉真实可用高度对不上：步骤条/提示条/底部按钮一多就留白，少一点就溢出 */
+.tidy-drawer :deep(.el-drawer__body) { display: flex; flex-direction: column; }
+.list {
+  flex: 1 1 auto; min-height: 0;
+  overflow: auto; border: 1px solid #ebeef5; border-radius: 4px;
+}
 .row {
   display: flex; align-items: center; gap: 8px;
   padding: 6px 10px; border-bottom: 1px solid #f5f7fa; cursor: pointer;

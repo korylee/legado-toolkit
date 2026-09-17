@@ -169,7 +169,10 @@ defineExpose({ refresh: load });
                   状态变化（{{ details[row.id].changedItems.length }} / {{ details[row.id].changedTotal }} 条）：
                 </div>
                 <div v-for="(c, i) in details[row.id].changedItems" :key="'c' + i" class="chg">
-                  <span class="nm" :title="c.url">{{ c.name }}</span>
+                  <!-- 名字可能重复、也可能为空，**地址才是源的身份**——所以它直接
+                       显示出来而不是塞进 tooltip（原来只有悬停才看得到，等于没给） -->
+                  <span class="nm" :title="c.name">{{ c.name || "(无名)" }}</span>
+                  <span class="muted url" :title="c.url">{{ c.url }}</span>
                   <span class="muted">{{ healthLabel(c.from) }}</span>
                   <span class="muted">→</span>
                   <span :class="'to-' + c.to">{{ healthLabel(c.to) }}</span>
@@ -233,6 +236,13 @@ defineExpose({ refresh: load });
   text-overflow: ellipsis;
   white-space: nowrap;
   max-width: 300px;
+}
+.job-detail .changes .chg .url {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .job-detail .changes .chg .to-ok { color: var(--el-color-success); }
 .job-detail .changes .chg .to-dead,

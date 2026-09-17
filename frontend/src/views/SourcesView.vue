@@ -147,7 +147,7 @@ function openJobDetail() {
 
 const query = reactive({
   q: "", type: null, health: "", group: "", tag: "",
-  order: "-probe_depth", limit: 50, offset: 0,
+  order: "-verified", limit: 50, offset: 0,
 });
 
 const healthType = { ok: "success", dead: "danger", auth: "warning", gfw: "info" };
@@ -261,14 +261,24 @@ function onHealthChip(value) {
 
 function search() { query.offset = 0; load(); }
 function reset() {
-  Object.assign(query, { q: "", type: null, health: "", group: "", tag: "", order: "-probe_depth", offset: 0 });
+  Object.assign(query, { q: "", type: null, health: "", group: "", tag: "", order: "-verified", offset: 0 });
   load();
 }
 function onPage(p) { query.offset = (p - 1) * query.limit; load(); }
 
+//: 程序化改表格勾选时置位。
+//:
+//: `toggleRowSelection` / `clearSelection` 都会触发 `selection-change`，而那个事件
+//: 处理**拿"当前表格状态"重算 selected** —— 不挡掉的话，同步过程会被自己的事件
+//: 反过来覆盖：点「选中全部 N 条」后表格一格都不勾、翻页回来也全丢，而批量条上的
+//: 数字还停在 N（selected 里有 URL，表格里没有）。
+let syncingSelection = false;
+
 function clearSelection() {
   selected.value = [];
-  if (tableRef.value) tableRef.value.clearSelection();
+  if (!tableRef.value) return;
+  syncingSelection = true;
+  try { tableRef.value.clearSelection(); } finally { syncingSelection = false; }
 }
 function isSelected(row) { return selectedUrls.value.has(row.source_url); }
 function toggleCard(row) {
@@ -282,6 +292,7 @@ function toggleCard(row) {
 //: 写成 `selected = v.map((r) => r.source_url)` 的话，「选中全部 800 条」之后
 //: 取消勾选一行，会变成「已选 49 条」——其余 750 条无声消失，界面上看不出丢过东西
 function onTableSelect(picked) {
+  if (syncingSelection) return;      // 这是程序设的，不是用户勾的
   const onPage = new Set(rows.value.map((r) => r.source_url));
   const kept = selected.value.filter((u) => !onPage.has(u));
   selected.value = [...kept, ...picked.map((r) => r.source_url)];
@@ -292,9 +303,14 @@ function onTableSelect(picked) {
 function syncTableSelection() {
   const t = tableRef.value;
   if (!t || !selected.value.length) return;   // 常态（没选任何行）直接跳过
-  rows.value.forEach((row) => {
-    t.toggleRowSelection(row, selectedUrls.value.has(row.source_url));
-  });
+  syncingSelection = true;
+  try {
+    rows.value.forEach((row) => {
+      t.toggleRowSelection(row, selectedUrls.value.has(row.source_url));
+    });
+  } finally {
+    syncingSelection = false;
+  }
 }
 
 //: 「选中全部 N 条筛选结果」，N 取 total（后端与列表同一套筛选口径）。
@@ -508,7 +524,7 @@ async function checkSources(urls = []) {
             // 过期**：退回全量刷新的话列表就是刚查的，没有过期问题。
             // 排序过期只在按星级排时才成立（别的排序键不会因校验而变）
             summary.stale = backfilled
-              && (filterCount.value > 0 || /probe_depth/.test(query.order));
+              && (filterCount.value > 0 || /verified/.test(query.order));
             // **把 job_id 存进摘要**：resetCheckState() 刚把 checkJobId 清空了，
             // 不存的话结果条上的「查看」点开抽屉不知道要看哪一条
             summary.jobId = r.job_id;
@@ -641,9 +657,10 @@ onUnmounted(() => {
         </el-select>
         <el-select class="w-order" v-model="query.order" size="small">
           <!-- 「验证深度」是列表那一列；星级降为可选排序（列不再显示它） -->
-          <!-- 星级不再是可排项：列表里没有那一列了，按看不见的字段排会让人困惑 -->
-          <el-option value="-probe_depth" label="验证深度 ↓" />
-          <el-option value="probe_depth" label="验证深度 ↑" />
+          <!-- 排序键必须与列里显示的东西一致：列里显示的是**结果**（正文 ✓ / 目录 ✗），
+               所以排序也是按结果（验过且通过 → 验了没过 → 还没验到），而不是按深度 -->
+          <el-option value="-verified" label="验证结果 ↓" />
+          <el-option value="verified" label="验证结果 ↑" />
           <el-option value="-checked_at" label="校验时间 ↓" />
           <el-option value="name" label="名称 ↑" />
         </el-select>
@@ -813,7 +830,7 @@ onUnmounted(() => {
             <span v-else class="muted">未校验</span>
           </template>
         </el-table-column>
-        <el-table-column label="验证深度" width="104" align="center">
+        <el-table-column label="验证" width="96" align="center">
           <template #default="{ row }">
             <!-- 悬停看明细：原来有一列「目录/正文」专门显示这些，但它和
                  「实测 / 仅规则」是同一件事的明细与摘要，两列并排是重复的。
@@ -907,8 +924,8 @@ onUnmounted(() => {
         <div class="fld">
           <label>排序</label>
           <el-select v-model="query.order" style="width: 100%">
-            <el-option value="-probe_depth" label="验证深度 ↓" />
-            <el-option value="probe_depth" label="验证深度 ↑" />
+            <el-option value="-verified" label="验证结果 ↓" />
+            <el-option value="verified" label="验证结果 ↑" />
             <el-option value="-checked_at" label="校验时间 ↓" />
             <el-option value="name" label="名称 ↑" />
           </el-select>

@@ -480,6 +480,24 @@ class Store:
             sql += " WHERE deleted_at = ''"
         return self.conn.execute(sql).fetchone()["c"]
 
+    #: 复合排序键：**列里显示什么，就按什么排**。
+    #:
+    #: 「验证结果」= 验过且通过 → 验了没过 → 还没验到（同级按深度深→浅）。
+    #: 不做这个的话就会出现「按深度排、列里显示结果」：数据是对的，但看起来**完全
+    #: 没排序**（实测前十行是 正文✓/目录✗/目录✗/正文✗…，因为 depth=4 里既有通过的
+    #: 也有没过、还有只拿到目录结论的）。
+    #: 复合键里的 ``%s`` 是方向（DESC/ASC），**必须落在主键上**。拼在整串末尾
+    #: 会落到末尾那个 tie-breaker 上，主键反而按默认 ASC 排——实测结果就是
+    #: 「按结果排序」看起来完全没排（第一条永远是没验到的）。
+    COMPOSITE_ORDERS = {
+        #: **优先级必须与列里显示的完全一致**（`depthVerdict`：正文优先、其次目录）。
+        #: 写成 `content_ok = 1 OR toc_complete = 1` 的话，`目录完整但正文不可用`
+        #: 那种会被算成「通过」，而列里显示的是「正文 ✗」——排序与看到的又对不上。
+        "verified": ("CASE WHEN content_ok = 1 THEN 2 WHEN content_ok = 0 THEN 1 "
+                     "WHEN toc_complete = 1 THEN 2 WHEN toc_complete = 0 THEN 1 "
+                     "ELSE 0 END %s, probe_depth DESC, id"),
+    }
+
     def query(self, source_type: Optional[int] = None, group: str = "",
               health: str = "", q: str = "", only_enabled: bool = False,
               user_tag: str = "", urls: Optional[Sequence[str]] = None,
@@ -491,11 +509,15 @@ class Store:
         allowed = ("id", "name", "source_type", "group_name", "stars",
                    "probe_depth", "checked_at", "updated_at")
         key = (order or "id").lstrip("-")
-        if key not in allowed:
-            key, order = "id", "id"
         direction = "DESC" if str(order).startswith("-") else "ASC"
-        sql = ("SELECT * FROM v_sources %s ORDER BY %s %s LIMIT ? OFFSET ?"
-               % (where, key, direction))
+        if key in self.COMPOSITE_ORDERS:
+            order_by = self.COMPOSITE_ORDERS[key] % direction
+        else:
+            if key not in allowed:
+                key, direction = "id", "ASC"
+            order_by = "%s %s" % (key, direction)
+        sql = ("SELECT * FROM v_sources %s ORDER BY %s LIMIT ? OFFSET ?"
+               % (where, order_by))
         return [dict(r) for r in self.conn.execute(sql, args + [int(limit), int(offset)])]
 
     def count_query(self, source_type: Optional[int] = None, group: str = "",

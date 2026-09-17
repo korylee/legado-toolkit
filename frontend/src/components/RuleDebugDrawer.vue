@@ -194,6 +194,40 @@ const canReplay = computed(
     && !!STEP_RULE_TAB[(current.value || {}).name],
 );
 
+//: 「命中源码」要显示的那段 DOM。两个来源：
+//:   - 本地试跑（`/rules/chain`）：结果里直接带 `matched_html`
+//:   - **连 App 调试**：App 只推文本、不给 DOM（`core/app_debug.py` 里根本没有
+//:     hits），所以拿**我们补抓的页面本地回放一遍**算出来。
+//:
+//: 原来这个 tab 只读 `current.matched_html`，于是它在唯一的调试入口下**永远是空的**，
+//: 而旁边的文案还写着「规则选中的那块 DOM」——那是句假话。
+//:
+//: 顺带说一句用途：本地回放结果正是「让 AI 改规则」要喂给模型的东西（规则 + 它
+//: 选中的 DOM），所以两者摆在同一屏上。
+const matchedFrom = computed(() => {
+  if ((current.value || {}).matched_html) return "本地试跑";
+  return replayResult.value ? "本地回放" : "";
+});
+const matchedHtml = computed(() => (current.value || {}).matched_html
+  || (replayResult.value || {}).matched_html || "");
+const matchedHint = computed(() => {
+  if (!currentPage.value) return "这一步没抓到页面（App 只推文本，页面是补抓来的）";
+  if (!canReplay.value) return "这一步没有可回放的规则";
+  if (replayResult.value) {
+    // 回放不了（JS / xpath 等）时 `rule_error` 就是原因，别笼统说「没有命中」
+    return (replayResult.value.rule_error || replayResult.value.detail
+            || "这条规则在这份页面上没有选中任何 DOM");
+  }
+  return "正在读取…";
+});
+
+//: 进这个 tab 就自动回放一次：空着的 tab 让人以为功能坏了（原来就是这样）
+watch([subTab, activeStep], () => {
+  if (subTab.value !== "matched") return;
+  if ((current.value || {}).matched_html) return;   // 本地试跑的结果里已经有了
+  if (canReplay.value) doReplay();
+});
+
 async function doReplay() {
   if (!canReplay.value) return;
   replaying.value = true;
@@ -227,7 +261,7 @@ function formatRatio(value) {
 }
 
 async function copyMatched() {
-  const text = (current.value && current.value.matched_html) || "";
+  const text = matchedHtml.value;
   try {
     // navigator.clipboard 只在安全上下文（https / localhost）存在。
     // 本前端开了 server.host，用户会从局域网 IP 用 http 打开——
@@ -341,17 +375,27 @@ async function copyMatched() {
 
         <el-tab-pane label="命中源码" name="matched">
           <p class="muted" style="margin: 6px 0">
-            规则<b>选中的那块 DOM</b> 的 outerHTML——改规则时看这个，
+            当前规则在这份页面上<b>选中了哪块 DOM</b>——改规则时看这个，
             比在整页里猜要快得多。
+          </p>
+          <p v-if="matchedFrom" class="muted" style="margin: 6px 0">
+            <el-tag size="small" :type="matchedFrom === '本地试跑' ? 'success' : 'warning'">
+              {{ matchedFrom }}
+            </el-tag>
+            <span v-if="matchedFrom === '本地回放'" style="margin-left: 6px">
+              跑不了 JS 规则，可能与 App 的实际命中不同
+            </span>
           </p>
           <!-- 没有命中片段时按钮禁用，避免「点一下复制了空串」 -->
           <div class="toolbar">
-            <el-button size="small" :disabled="!(current && current.matched_html)"
-                       @click="copyMatched">复制</el-button>
+            <el-button size="small" :loading="replaying" :disabled="!canReplay"
+                       @click="doReplay">重新提取</el-button>
+            <el-button size="small" :disabled="!matchedHtml" @click="copyMatched">
+              复制
+            </el-button>
           </div>
-          <pre v-if="current && current.matched_html"
-               class="debug-pre debug-pre-wrap">{{ current.matched_html }}</pre>
-          <el-empty v-else description="没有命中片段" :image-size="60" />
+          <pre v-if="matchedHtml" class="debug-pre debug-pre-wrap">{{ matchedHtml }}</pre>
+          <el-empty v-else :description="matchedHint" :image-size="60" />
         </el-tab-pane>
 
         <el-tab-pane label="整页源码" name="page">
