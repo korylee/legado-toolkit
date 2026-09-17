@@ -529,6 +529,18 @@ class Store:
             return None
         return self._source_view(row["raw_json"], row["group_name"], row["user_tags"])
 
+    def live_fingerprints(self) -> Dict[str, str]:
+        """``{source_url: fingerprint}``，只含**在用**的行。
+
+        给批量导入用。逐条 ``SELECT`` 的代价在导入这种场景下是致命的：实测
+        3000 条要走 3000 次查询 + 3000 次提交（每条一次事务），60 秒。
+        一次全捞回来是 3800 行的小表，可以忽略。
+        """
+        return {r["source_url"]: (str(r["fingerprint"] or "").strip())
+                for r in self.conn.execute(
+                    "SELECT source_url, fingerprint FROM sources "
+                    "WHERE deleted_at = ''")}
+
     def get_source_fingerprint(self, url: str) -> Optional[str]:
         """返回**在用那行**的 fingerprint；没有在用的行则为 None。供导入比对。
 
