@@ -1285,6 +1285,7 @@ async function doSave(s) {
     <RuleDebugDrawer v-model="debugVisible" :result="testResult"
                      :initial-step="debugStep" :rules="ruleByStep"
                      :source-type="Number(form.bookSourceType) || 0"
+                     :enabled-cookie-jar="!!form.enabledCookieJar"
                      @goto="onDebugGoto" @apply-rule="onApplyRule" />
   </el-dialog>
 </template>

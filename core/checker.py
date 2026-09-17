@@ -161,6 +161,19 @@ def classify_http_status(status: Optional[int], text: str,
     return Health.DEAD
 
 
+def is_login_wall(text: str, enabled_cookie_jar: bool = False) -> bool:
+    """这一页是不是登录墙 / 反爬挑战页。
+
+    判定**完全交给 ``classify_http_status``**（全仓唯一的判定表），这里只回答
+    「算不算 AUTH」——状态码固定传 200，因为这是给「已经拿到 HTML 的人」用的：
+    403 那类在抓取时就抛了，走不到这里；真正骗人的恰恰是 **200 + 登录页**。
+
+    ``enabled_cookie_jar`` 必须传源自己的：那一档「200 + 登录词」以它为前提
+    （「请登录」在正常页面的导航栏里太常见，不声明 cookie 的源不算登录墙）。
+    """
+    return classify_http_status(200, text, enabled_cookie_jar) == Health.AUTH
+
+
 def is_transient(health: str) -> bool:
     """这次失败是「瞬时网络错误」吗（超时 / 网络异常）。
 

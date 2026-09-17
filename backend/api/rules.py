@@ -10,6 +10,7 @@ from backend.schemas import (
     AppHostRequest,
     ReplayStepRequest,
     RuleChainTest,
+    SuggestRuleRequest,
 )
 
 router = APIRouter()
@@ -116,6 +117,37 @@ async def app_push(body: AppHostRequest):
         return {"ok": False, "error": "没有填 App 的 IP"}
     ok, err = await asyncio.to_thread(push_source, host, source, body.port or None)
     return {"ok": ok, "error": err}
+
+
+@router.post("/suggest-rule")
+async def suggest_rule(body: SuggestRuleRequest):
+    """让 AI 给某一步提候选规则。**只提议，每条都要过本地回放器**（AGENTS #3）。
+
+    **这是个花钱的动作，只能由用户显式触发**（同 `/app-push` 那条边界）：
+    前端只在一颗按钮的点击回调里调它，任何流程都不得自动调用。
+    免费的那部分（`dry_run=true`：程序先挑一遍 + 登录墙判断）不在此列，
+    它不发任何模型请求，可以在换步骤时自动跑。
+
+    「没配模型」「模型输出不是 JSON」都**不是 HTTP 错误**：结果体里带 `llm`
+    三态（ok / off / error / dry_run）与 `error` 文案，前端就地说明。做成 4xx/5xx
+    只会让抽屉里冒出一个没有上下文的红 toast，而这几种情况用户都能自己处理。
+    """
+    from core.repair.suggest import suggest
+
+    if not (body.html or "").strip():
+        # 没页面就没有可分析的东西，这是调用方的错（抽屉该把按钮禁掉）
+        raise HTTPException(400, "这一步没有页面 HTML，先抓到页面再让 AI 提议")
+    try:
+        return await suggest({
+            "html": body.html, "step": body.step, "rule": body.rule,
+            "step_label": body.step_label, "want_label": body.want_label,
+            "field": body.field, "focus": body.focus, "source_type": body.source_type,
+            "replay_note": body.replay_note, "app_values": body.app_values,
+            "diagnosis": body.diagnosis, "candidates": body.candidates,
+            "enabled_cookie_jar": body.enabled_cookie_jar,
+        }, dry_run=body.dry_run)
+    except Exception as e:
+        raise HTTPException(400, "AI 提议失败: %s: %s" % (type(e).__name__, e))
 
 
 @router.post("/replay-step")

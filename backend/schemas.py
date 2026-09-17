@@ -125,6 +125,38 @@ class ReplayStepRequest(BaseModel):
     source_type: int = 0
 
 
+class SuggestRuleRequest(BaseModel):
+    """让 AI 给某一步提几条候选规则。
+
+    提示词拼装用的 ``step_label`` / ``want_label`` / ``field`` 由前端给——步骤与
+    字段的对应关系只在 `frontend/src/utils/ruleCandidates.js` 定义，这里不抄第二份。
+    """
+
+    html: str = ""
+    step: str = ""
+    rule: str = ""
+    step_label: str = ""
+    want_label: str = ""
+    field: str = ""
+    #: DOM 大纲的**起点**（Legado 规则的首段，如 `class.book-list`）。
+    #: 从命中容器起而不是从 `<html>` 起：深于 6 层的容器在大纲里根本到不了，
+    #: 而提示词又要求「class 必须真实存在于大纲里」。缺省时退回整篇
+    focus: str = ""
+    source_type: int = 0
+    #: 第 1 层算出的候选规则：**先让程序拿它们挑一遍**（免费），挑不出来才问模型
+    candidates: List[str] = []
+    #: App 实测取到的值样本：既是给模型的锚点，也是「程序先挑」用来比对的基准
+    app_values: List[str] = []
+    #: 只跑免费的那一趟（本地挑选 + 登录墙判断），**一个模型请求都不发**
+    dry_run: bool = False
+    #: 源有没有声明 cookie jar——登录墙判定要用（「200 + 登录词」那一档以它为前提）
+    enabled_cookie_jar: bool = False
+    #: 当前规则的本地回放结论（前端算好的一句话，进提示词当「现在的表现」）
+    replay_note: str = ""
+    #: 前端诊断（第 0 层）那几行文字，直接透传给模型
+    diagnosis: List[str] = []
+
+
 class LLMProfileIn(BaseModel):
     id: str = ""
     name: str = ""

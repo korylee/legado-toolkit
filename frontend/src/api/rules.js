@@ -37,3 +37,13 @@ export const replayStep = (html, rule, step, sourceType) =>
 // 离线回放整条链（本地粗验，跑不了 JS 规则）
 export const chainTest = (source, keyword, detailUrl, pick) =>
   api.post("/rules/chain", { source, keyword, detail_url: detailUrl, pick });
+
+// 让 AI 给**某一步**提候选规则。模型只提议：后端会把每条候选拿本地回放器验一遍，
+// 结果里带 verified / count / samples / rule_error——「本地回放不了」的那类
+// （@js: 等）只能连 App 试，前端必须分开显示，不能混进「已验证」。
+// 没配模型 / 模型输出不是 JSON 都从 llm 三态（ok|off|error|dry_run）+ error 里读。
+//
+// **这是一个会花钱的动作，必须由用户显式触发**（同 appPush 那条边界）：
+// 只在按钮的点击回调里调，不得自动调用。唯一的例外是 dry_run=true——它只跑本地的
+// 「程序先挑一遍」与登录墙判断，一个模型请求都不发，所以换步骤时可以自动跑。
+export const suggestRule = (body) => api.post("/rules/suggest-rule", body);

@@ -63,6 +63,11 @@ class LLMClient:
 
     def __init__(self, config: Optional[LLMConfig] = None, profile_id: str = ""):
         self.config = config or build_llm_config(profile_id)
+        #: 最近一次调用的 ``usage``（含 ``prompt_cache_hit_tokens`` 这类字段，
+        #: 用来判断前缀缓存有没有吃到）。**不动 chat() 的返回签名**：三个既有
+        #: 调用方（修复循环 / CLI / 设置页的测试按钮）要的都是字符串，
+        #: 为一个可选字段改签名不值当。失败时清空，别让上一次的数字留在那儿。
+        self.last_usage: Dict[str, Any] = {}
 
     @property
     def enabled(self) -> bool:
@@ -72,6 +77,7 @@ class LLMClient:
                    temperature: Optional[float] = None) -> Optional[str]:
         if not self.config.enabled:
             return None
+        self.last_usage = {}
         import aiohttp
 
         payload: Dict[str, Any] = {
@@ -101,6 +107,7 @@ class LLMClient:
                 if resp.status >= 400:
                     raise RuntimeError("LLM HTTP %s: %s" % (resp.status, body[:300]))
                 data = json.loads(body)
+                self.last_usage = data.get("usage") or {}
                 return data["choices"][0]["message"]["content"]
         finally:
             if own:

@@ -9,7 +9,7 @@
 import { ref, computed, watch, nextTick } from "vue";
 import { ElMessage } from "element-plus";
 
-import { replayStep } from "../api/rules";
+import { replayStep, suggestRule } from "../api/rules";
 // 步骤名 → 中文的**唯一**一份（编辑弹窗共用），别再在本组件里写第二份
 import { STEP_LABELS } from "../utils/steps";
 // 第 1 层「在页面上找目标」：候选规则从补抓的 HTML 里算出来（纯函数，不发请求）
@@ -22,6 +22,9 @@ const props = defineProps({
   //: 当前表单里每一步的规则（steps[].name → 规则字符串），用于「重放本步」
   rules: { type: Object, default: () => ({}) },
   sourceType: { type: Number, default: 0 },
+  //: 源有没有声明 cookie jar。登录墙判定要用它：那一档「200 + 登录词」以它为前提
+  //: （「请登录」在正常页面的导航栏里太常见）
+  enabledCookieJar: { type: Boolean, default: false },
 });
 const emit = defineEmits(["update:modelValue", "goto"]);
 
@@ -322,6 +325,116 @@ function useCandidate(c) {
   emit("applyRule", { field, rule: c.rule });
 }
 
+// —— 第 2 层：**AI 提议 + 回放验证** ——
+// 与第 1 层的分工：第 1 层是确定性扫描（页面上的候选结构、零模型成本），但它
+// 覆盖不了「**页面上没有目标节点**」——那种情况模型能给 `@js:` 调接口的路子，
+// 而那条我们本地验不了。所以这里每条候选**都由后端用回放器验过**，验不了的单
+// 独标出「只能连 App 试」，不许和「已验证」混在一起。
+const aiLoading = ref(false);
+const aiRes = ref(null);
+
+const aiField = computed(() => FIELD_OF_STEP[(current.value || {}).name] || "");
+const canSuggest = computed(() => !!currentPage.value && !!aiField.value);
+//: 本次调用的 token 用量。**空对象要当没有**（`{}` 在 JS 里是真值，
+//: 直接判 `v-if="aiRes.usage"` 会在没拿到用量时显示「0 tokens」）
+const aiUsage = computed(() => {
+  const u = (aiRes.value && aiRes.value.usage) || {};
+  return u.prompt_tokens ? u : null;
+});
+
+//: 当前表现的**一句话**，进提示词——模型得知道现在错成什么样
+const replayNote = computed(() => {
+  if (!currentPage.value) return "这一步没有页面";
+  const r = replayResult.value;
+  if (!r) return "";
+  if (r.rule_error) return "本地回放不了（" + r.rule_error + "）";
+  return "本地回放取到 " + (r.values || []).length + " 条"
+    + (r.reason ? "（" + r.reason + "）" : "");
+});
+//: App 实测取到的值 = 「正确的规则应当取到形似的东西」。行首的 ┌└◇ 是事件流的
+//: 结构符号、不是内容，喂模型前先剥掉
+const appValues = computed(() => ((current.value || {}).values || [])
+  .map((v) => String(v).replace(/^[┌└◇≡⇒︾︽\s]+/, "").trim())
+  .filter(Boolean).slice(0, 8));
+
+//: DOM 大纲的起点：拿第 1 层第一个候选的首段（列表步是容器、链接步是条目，
+//: 两种都能让模型看见目标附近的结构）。**留空等于从 `<html>` 起**——深于 6 层的
+//: 容器那样根本走不到，而提示词要求 class 必须真实存在于大纲里。
+//: 后端负责 class./id./tag. → CSS 的转换（那是回放器的活，前端不抄一份）
+const focusRule = computed(
+  () => String((candidates.value[0] || {}).rule || currentRule.value || "").split("@")[0],
+);
+
+//: 「程序先挑」的结果（免费那趟）。与 aiRes 分开存：一个是本地挑选的结论，
+//: 一个是模型给的候选，混在一起会分不清哪条花了钱、哪条没花
+const preselRes = ref(null);
+const preselFor = ref("");     //: 这份结论是给哪一步算的（换步骤时的过期保护）
+const preselLoading = ref(false);
+
+function suggestBody(step) {
+  return {
+    html: currentPage.value.html,
+    step,
+    rule: currentRule.value,
+    step_label: STEP_LABELS[step] || step,
+    want_label: (want.value && want.value.label) || "",
+    field: aiField.value,
+    focus: focusRule.value,
+    source_type: props.sourceType,
+    replay_note: replayNote.value,
+    app_values: appValues.value,
+    candidates: candidates.value.map((c) => c.rule),
+    enabled_cookie_jar: !!props.enabledCookieJar,
+    diagnosis: diagnosis.value.map((d) => d.why + "（" + d.todo + "）"),
+  };
+}
+
+//: 换步骤就自动跑**免费**那趟：程序先在候选里挑一遍（拿 App 实测值当基准）。
+//: 它不发模型请求、不花钱，所以可以自动；付费的那趟见 askAI
+async function runPreselect() {
+  if (!canSuggest.value) return;
+  const step = (current.value || {}).name || "";
+  preselLoading.value = true;
+  preselRes.value = null;
+  preselFor.value = step;
+  try {
+    const r = await suggestRule(Object.assign(suggestBody(step), { dry_run: true }));
+    // 过期保护：等回来时用户可能已经切到别的步骤了
+    if (preselFor.value === step) preselRes.value = r;
+  } catch (e) {
+    if (preselFor.value === step) {
+      preselRes.value = { preselect: null, login_wall: false, error: "请求失败：" + e.message };
+    }
+  } finally {
+    preselLoading.value = false;
+  }
+}
+
+async function askAI() {
+  if (!canSuggest.value) return;
+  aiLoading.value = true;
+  aiRes.value = null;
+  const step = (current.value || {}).name || "";
+  try {
+    aiRes.value = await suggestRule(suggestBody(step));
+  } catch (e) {
+    aiRes.value = { candidates: [], llm: "error", error: "请求失败：" + e.message };
+  } finally {
+    aiLoading.value = false;
+  }
+}
+
+//: 这一页是不是登录墙（后端判的，判定表在 core/checker）。是的话**不让点**：
+//: 模型看到的不是 App 看到的那份（App 带登录态），提了也验不了、也修不对
+const loginWall = computed(() => !!(preselRes.value || {}).login_wall);
+
+// 换步骤 / 换页面就自动跑那趟**免费的**（程序先挑 + 登录墙判断）。它不发模型请求，
+// 所以可以自动跑；付费的那趟只有 askAI 里有，且只由按钮点击触发
+watch([() => props.modelValue, activeStep, currentPage], () => {
+  preselRes.value = null;
+  aiRes.value = null;
+  if (props.modelValue) runPreselect();
+});
 
 const diagnosis = computed(() => {
   const out = [];
@@ -522,6 +635,77 @@ async function copyMatched() {
         </p>
       </div>
 
+      <!-- 第 2 层：**先让程序挑，挑不出来再问 AI**。
+           程序那趟免费：拿 App 实测到的值当基准，看哪条候选取到的就是那批（多数情况
+           一次就对上了，不用花钱）。剩下两种情况才需要模型：没有基准（不是 App 实测、
+           或 App 那步本来就没取到值）与多条候选分不出高下。
+           模型那趟**必须用户点**——它会花钱；而且每条候选回来都要过一遍回放器：
+           验过的才显示条数样本，验不了的**显式标『只能连 App 试』**，不许伪装成已验证 -->
+      <div class="ai-block">
+        <div class="cand-head">
+          <b>哪条候选对</b>
+          <span class="muted">（先用 App 实测值挑，挑不出来才让 AI 看）</span>
+          <span class="grow" />
+          <!-- 显示的是**这一步**、且这一页不是登录墙时才给点 -->
+          <el-button size="small" type="primary" plain :loading="aiLoading"
+                     :disabled="!canSuggest || loginWall" @click="askAI">
+            让 AI 提规则
+          </el-button>
+        </div>
+        <p v-if="!canSuggest" class="muted" style="margin: 4px 0 0">
+          这一步没有页面，或没有可回放的字段
+        </p>
+        <!-- 登录墙：模型看到的是登录页，不是 App 那份（App 带登录态）——先说清楚，
+             别让用户点完才发现「提了也验不了」 -->
+        <el-alert v-else-if="loginWall" type="warning" :closable="false" show-icon
+                  style="margin: 6px 0 0"
+                  title="这一页是登录页 / 反爬页：App 里带登录态、我们抓不到同样的页面。本地能提的建议价值有限，改这条规则要连 App 试。" />
+        <p v-else-if="preselLoading" class="muted" style="margin: 4px 0 0">正在按 App 实测值挑…</p>
+        <!-- 程序挑出来了：直接把结论和依据摆出来 -->
+        <template v-else-if="preselRes && preselRes.preselect && preselRes.preselect.picked">
+          <div class="cand">
+            <el-tag size="small" type="success">程序挑的</el-tag>
+            <span class="mono rule">{{ preselRes.preselect.picked.rule }}</span>
+            <span class="muted samples">{{ preselRes.preselect.reason }}</span>
+            <span class="grow" />
+            <el-button size="small" type="primary" plain
+                       @click="useCandidate(preselRes.preselect.picked)">用这条</el-button>
+          </div>
+        </template>
+        <!-- 挑不出来：说清是哪种挑不出来（没有基准 / 分不出高下），用户才知道该不该点 AI -->
+        <p v-else-if="preselRes && preselRes.preselect" class="muted" style="margin: 6px 0 0">
+          程序挑不出来：{{ preselRes.preselect.reason }}
+        </p>
+        <p v-if="aiRes && aiRes.error" class="muted ai-err">{{ aiRes.error }}</p>
+        <p v-if="aiRes && aiRes.reason" class="muted" style="margin: 6px 0 0">
+          模型判断：{{ aiRes.reason }}
+        </p>
+        <!-- token 用量：一眼看出这次花了多少、前缀缓存吃到没有。
+             「缓存命中」那一项只有服务端支持并返回时才显示 -->
+        <p v-if="aiUsage" class="muted" style="margin: 6px 0 0">
+          本次 {{ aiUsage.prompt_tokens }} tokens
+          <template v-if="aiUsage.prompt_cache_hit_tokens">
+            （缓存命中 {{ aiUsage.prompt_cache_hit_tokens }}）
+          </template>
+          <template v-else-if="aiUsage.completion_tokens">
+            （输出 {{ aiUsage.completion_tokens }}）
+          </template>
+        </p>
+        <div v-for="(c, i) in (aiRes ? aiRes.candidates : [])" :key="i" class="cand">
+          <span class="mono rule">{{ c.rule }}</span>
+          <el-tag size="small" :type="c.verified ? 'success' : 'warning'">
+            {{ c.verified ? "本地验过 " + c.count + " 条"
+                          : (c.rule_error ? "本地验不了" : "取不到值") }}
+          </el-tag>
+          <span class="muted samples">
+            {{ c.verified ? (c.samples || []).join("  |  ") : (c.note || "（无样本）") }}
+          </span>
+          <span class="grow" />
+          <el-button size="small" type="primary" plain
+                     @click="useCandidate(c)">用这条</el-button>
+        </div>
+      </div>
+
       <el-tabs v-model="subTab">
         <!-- App 事件排第一，且 App 结果下不显示「提取结果」：
              App 实测的 values 就是事件原文去掉耗时前缀，两个 tab 说的是同一件事；
@@ -643,6 +827,16 @@ async function copyMatched() {
   border: 1px solid #d9ecff;
   border-radius: 4px;
 }
+/* AI 那块与「在页面上找目标」同构，但底色分得开：一个是确定性扫描，
+   一个是模型提议（而且**验不了的会出现在这里**） */
+.ai-block {
+  margin: 8px 0;
+  padding: 8px 10px;
+  background: #f7f4ff;
+  border: 1px solid #e2d9ff;
+  border-radius: 4px;
+}
+.ai-err { margin: 6px 0 0; color: #b88230; }
 .cand-head { margin-bottom: 4px; }
 .cand { display: flex; align-items: baseline; gap: 6px; padding: 2px 0; }
 .cand .rule { flex: 0 0 auto; }
