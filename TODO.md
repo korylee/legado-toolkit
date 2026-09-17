@@ -7,8 +7,17 @@
 > ⚠️ 行号是 **2026-09-16 的快照**，代码一改就会漂，引用前先核对；
 > 本文件**不写行号**的地方（如「见 `core/store.py` 的某函数」）按函数名找。
 >
-> **最近已修**（2026-09-16 ~ 09-17；机制见 `skills/legado-source-lessons`
-> §十八/§十九/§二十七～§四十三，**细节看 `git log`，这里不再逐项列**）：
+> **最近已修**（2026-09-16 ~ 09-18；机制见 `skills/legado-source-lessons`
+> §十八/§十九/§二十七～§四十七，**细节看 `git log`，这里不再逐项列**）：
+> 「导入从 O(n²) 降到线性」（3000 条 60s → 0.14s：逐条一次 SELECT + 一次事务，
+> 且 `upsert_sources` 每次调用内部还全表扫一遍 `known_user_tags`）、
+> `source_url` 的唯一性从「全表」放宽到「**仅在用**」（删除不再原地打标记挡住
+> 导入；回收站可留同 URL 的多个历史版本）、回收站可**清空**（唯一硬删除路径，
+> 先落快照）、「选中全部 N 条筛选结果」+ 批量删除改 POST body、
+> 校验按行显示进度并可取消、校验结果报出相对上次的变化（`transitions`）、
+> 缓存复用加「**验过搜索**」这一维、校验参数并入弹框并去掉工具栏独立按钮、
+> 「试」出来的相对链接可直接打开（含 `/manhua/xxx/1.html` 这类根相对路径）、
+> 调试 AI 区块文案按中文应用惯例重写（§四十六）。
 > 并发下的两处随机 500（SQLite 连接跨线程 / 每个请求重建 schema）、后端直接托管
 > 前端产物（含 Windows 的 MIME 与缓存头）、探测深度合并成一根四档轴、删除备份改单文件
 > JSONL、`证书问题` 进系统标签表、reclassify 的证书分档、名称清洗全链路、
@@ -35,7 +44,84 @@
 
 ## 明确该做，需排期
 
-### 1. 修复循环：撞上登录墙要停下（不管它返回的是 200）
+> 排序：**已知的误判**优先（它现在就在错判源）→ 需要实测的大改动 →
+> 有触发条件的预防性工作 → 按需。
+
+### 1. 目录验证的三个 bug（纯本地，不依赖 App；**先修 C**）
+
+2026-09-18 查《SF轻小说》《中文书城》"调试能抓到正文、校验说不行"时挖出来的。
+**三条全在 `_probe_toc` / 目录那一步**，且**互相独立**：
+
+| # | bug | 证据 |
+|---|---|---|
+| **C** | **`text.` / `children.` 简写没实现，却判成「可回放」** | App 的 `AnalyzeByJSoup.kt:313-320`：`"text" -> temp.getElementsContainingOwnText(rules[1])`；我们落到 `else -> temp.select(...)` 那一支，必然为空。**而 `parse_rule` 报 `supported=True`**，于是报「解析结果为空」＝**判源失效**，不是"无法判定" |
+| **B** | **`_probe_toc` 完全不用 `ruleBookInfo.tocUrl`** | 全库 **1617/3774（42.8%）**配了它。而 `tocUrl` 非空意味着目录在**独立页**上，详情页里根本没有章节列表 |
+| **A** | **`bookUrl` 少了 bookList 作用域** | 实测 `book.sfacg.com`：现状把 `tag.a@href` 作用于**整页** → 解出 33 条（全是导航栏），取第一条 = `https://www.sfacg.com`（漫画首页）；按 Legado 语义先在 `tag.form@tag.table.-2@tag.ul` 节点内取 → `https://book.sfacg.com/Novel/249775`（对的书） |
+
+**C 是最该先修的**：它是**确定性语法**（App 的语义就在眼前），而且 **B 修了也白修**——
+用到 `tocUrl` 的源里，`text.查看完整目录@href` / `text.章节目录@href` 这种写法占绝大多数
+（12.3% 的源用到 `text.`/`children.`，样例几乎全是 tocUrl）。
+
+**修 C 时必须同时改判定**：`parse_rule` 对不认识的简写要报 `unknown`，
+**不能再报 fail**——这正是 lessons §四十四 那条「把工具的欠缺说成源的问题」。
+
+**附带**：`core/verify.py:238-240` 把 `tocUrl` 当 **URL 字符串**用
+（`_abs_url(book_url, "text.点击阅读@href")` → 拼出垃圾地址），而它在 Legado 里是**规则**。
+
+**每一步都会改变目录判定结果 → 每步都要 `CACHE_VERSION` 加一。**
+
+### 2. 让 App 承担搜索档校验（`WS /searchBook`）
+
+**动机**：本地回放覆盖不了全部语法（JS 448 条规则、模板 457 条、加上 §1-C 那类**我们没实现的**
+——合计影响 1334 条源的深度验证）。而 App 里 **Rhino + JSoup + 完整规则引擎都在**，
+我们正在**重新发明它已经有的东西**，还发明不全。
+
+**依据（2026-09-18 读 `legado-with-MD3` 源码）**：`web/socket/BookSearchWebSocket.kt`
+开着一个我们从未用过的 WS：
+
+    ws://<App IP>:1123/searchBook
+    输入   {"key": "<关键词>"}
+    行为   SearchBooksUseCase.execute(keyword, scope=<App 的 SEARCH_SCOPE 偏好>,
+                                      concurrency=<App 的线程数设置>)
+    输出   流式推回每次**新命中**的 SearchBook：
+           { bookUrl, origin ← 书源 URL, originName, name, author, ... }
+    结束   "Search finish"
+
+**一次连接、App 并发搜全部源、每条结果带 `origin`** → 直接得出"每条源的搜索通不通"，
+且**一条语法都不用我们实现**。
+
+**已从源码定下的两条**：
+
+- **范围 = App 全部 `enabled` 源**（`SearchRepository.kt:96-115`：`scope.isAll -> allEnabledPart`，
+  且 `selectedSources` 为空时兜底也是 `allEnabledPart`）。`SEARCH_SCOPE` 空串即 `isAll`。
+  **但 scope 读自 App 偏好，`/searchBook` 不接受请求参数**——用户设过「搜索范围」就只能跟着那个范围。
+- **App 里没有的源不会被搜**。要覆盖全库得先批量推——顺带纠正：**推送有批量接口**
+  （`POST /saveBookSources` 吃 JSON 数组，`KtorServer.kt:58`），
+  **一个请求就够**，不是 N 个。（同样有 `/getBookSources`、`/deleteBookSources` 批量；
+  我们 `core/app_debug.py` 只用过单数的 `/saveBookSource`。）
+
+**待实测（需要一台连着 App 的环境）**：
+
+1. 3000+ 条一次搜索的实际耗时，以及会不会被 App 主动断连
+2. `SearchBook` 推回来的真实 JSON：字段名、以及 **`origin` 是导入原文还是规范化过**——
+   这决定能不能对上我们库里的键（lessons §五 记过 20.7% 的不一致）
+3. 一条都搜不到的源，在流里是什么表现（不出现 / 别的 event）
+4. App 里**未启用**的源是否被排除
+
+**待设计**：**「没结果」的二义性**——源码里只推**新命中**，所以"某源没出现"
+既可能是源坏了、也可能是它没这本书。本地 `_probe_search` 至少有"请求失败 vs 响应里没这个词"
+的区分。可能的缓解：多用几个关键词，某源全不命中才判坏。
+
+**分工建议（待实测后定稿）**：
+
+| 档位 | 谁跑 | 理由 |
+|---|---|---|
+| 搜索 | **App**（`/searchBook`，一次连接） | App 有完整规则引擎；本地那 618 条判不了的直接归零 |
+| 目录 / 正文 | 本地回放（并修 §1 的三个 bug） | App 的 `getChapterList` / `getBookContent` 是**书架维度**（`BookController.kt:132` 明写「未在数据库找到对应书籍，请先添加」），要用它得往用户书架加书——比推书源敏感 |
+
+**明确不做**：不把 `getChapterList`/`getBookContent` 接进校验（动用户书架），
+除非将来单独立项。
+### 3. 修复循环：撞上登录墙要停下（不管它返回的是 200）
 
 **2026-09-17 量过规模**（存活 3775 条）：`loginUrl` 非空 **491 条（13.0%）**、
 `enabledCookieJar` 为真 **2004 条（53.1%）**；校验出的 `health=auth` 共 **1051 条**，
@@ -83,7 +169,7 @@ App 那份（App 带登录态），提的建议既验不了也修不对，而且
 **规模参考**（按 `verify_chain` 真正评估的 5 个字段分类）：全可回放 2171 /
 混合 1561 / 全不可回放 43（共 3775）。
 
-### 2. ⚠️ **P0/P1 已落地，只剩 P2**：「合并重复源」
+### 4. 「合并重复源」剩 P2
 
 **已实现**（2026-09-17）：`整理源` 抽屉（`TidyDrawer.vue`）第 1 步名称清洗、第 2 步
 重复梳理与合并；后端 `GET /api/sources/dups`、`POST /api/sources/merge`（含 `dry_run`）、
@@ -106,6 +192,7 @@ App 那份（App 带登录态），提的建议既验不了也修不对，而且
 口径与写路径（同站点 + 行为指纹、`tags_added` 只回真增、软删除放最后）见
 lessons §三十四；「明确不做」的五条也在那一节（不自动合并、不按域名批量去重、
 不改地址、不做逐组向导、不把忽略放设置）。
+
 
 ---
 
