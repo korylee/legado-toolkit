@@ -397,8 +397,8 @@ class StarBasisTests(unittest.TestCase):
 
         现有的阶梯就是这样的——`calc_stars` 的注释写着「None=无法验证→回退静态」。
         5★ 的含义是「正文可用」，可这个 5★ 里没有一格正文是实测的。
-        标成 `static` 是如实呈现；**要不要连星级本身也收紧，是另一个问题**
-        （见 `TODO.md`：本项只做呈现，不改判定）。
+        标成 `static` 是如实呈现；**要不要连星级本身也收紧**已于 2026-09-17
+        定案为「不收紧」（理由见 `skills/legado-source-lessons` §二十六）。
         """
         stars, basis = evaluate_stars(**self._args(search_hit="斗破苍穹",
                                                    toc_complete=None,

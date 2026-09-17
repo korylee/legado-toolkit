@@ -35,7 +35,12 @@ Legado（阅读）书源管理工具链：CLI + FastAPI + SQLite + Vue 3。
 - **诊断与 AI 修复**
   - 失效归因：死站 / 规则漂移 / 站点转型 / 需验证
   - AI 只负责提议规则，必须通过规则回放器验证
+  - 调试抽屉里改不动某一步时，**先用 App 实测到的值在候选里挑一遍**（免费，多数情况
+    一次就对上了）；挑不出来才让 AI 按这一步的 DOM 大纲提规则。AI 提的每条都由回放器
+    验过才显示「验过几条」，`@js:` 这类本地跑不了的会标明**只能连 App 试**
   - 支持 OpenAI 兼容接口及多种本地/云端模型配置
+  - **调试的页面缓存**：补抓的页面 5 分钟内不重复联网（单页 0.8 秒 → 毫秒级），
+    调试卡片上可选「用缓存 / 只读缓存 / 忽略缓存重抓」，抽屉里每页都标着抓取时刻
 
 - **导出与订阅**
   - 临时导出快照：适合生成二维码/链接分享
@@ -94,7 +99,7 @@ Legado（阅读）书源管理工具链：CLI + FastAPI + SQLite + Vue 3。
 ├─ README.md               本文件：功能、用法、API
 ├─ AGENTS.md               硬性约定（**改代码前必读**）
 ├─ WORKFLOW.md             书源「新增/导入 → 校验 → 整理 → 报告」完整链路
-├─ TODO.md                 待办 / 待决策 / 需先调研
+├─ TODO.md                 待办 / 需先调研
 └─ pyproject.toml
 ```
 
@@ -304,10 +309,11 @@ python cli/main.py merge -i a.json -i b.json -o merged.json --mode replace
 | GET /api/feed/ok.json | 固定订阅：仅可用源 |
 | GET /api/feed/all.json | 固定订阅：全部启用源 |
 | POST /api/rules/chain | 规则离线回放（本地粗略验证，跑不了 JS 规则） |
-| POST /api/rules/app-debug | 连 App 调试：借 App 的调试 WS 跑完整链路，含 JS 规则 |
+| POST /api/rules/app-debug | 连 App 调试：借 App 的调试 WS 跑完整链路，含 JS 规则。`cache` 选 auto / only / refresh（只影响我们补抓的页面） |
 | POST /api/rules/app-preflight | 调试前预检：连不上 / App 里没有这个源 / 可以调试 |
 | POST /api/rules/app-push | 把源推送到 App（幂等，会改动 App 数据，需显式触发） |
 | POST /api/rules/replay-step | 用已抓到的 HTML 重放一步规则（不联网） |
+| POST /api/rules/suggest-rule | 让 AI 给某一步提候选规则（只提议；每条都过本地回放器，验不了的单独标「只能连 App 试」） |
 | GET /api/llm/profiles | LLM 模型配置 |
 | GET /api/settings | 全局设置（校验参数的默认值），同时下发 defaults 与 limits |
 | PATCH /api/settings | 修改全局设置（只改传了的键，未传的保持原值） |

@@ -225,7 +225,8 @@ class Store:
         ("search_probed", "INTEGER DEFAULT 0"),
         # 星级旁边那个「实测 / 仅规则」。不落这一列的话，列表只能显示星级，
         # 用户分不出「5★ 是验出来的」还是「5★ 只是规则写齐了」——实测库里
-        # 489 条 5★ 全是后者（probe_depth 默认 1，目录/正文一次都没验）。
+        # 180 条 5★ 有 170 条是后者（2026-09-17 全量；probe_depth 默认 1，
+        # 目录/正文一次都没验）。
         ("star_basis", "TEXT DEFAULT ''"),
     ], "jobs": [
         # 任务保留：对齐 exports（expires_at + pinned + sweep），**原来完全没有**——
