@@ -197,13 +197,78 @@ class RepairLoopStripEvidenceTests(unittest.TestCase):
 
 class MergeTests(unittest.TestCase):
     def test_keeps_metadata_and_ignores_empty_values(self):
-        out = R.merge_proposal(SOURCE, {"ruleSearch": {"bookList": "NEW", "bookUrl": ""},
-                                        "bookSourceType": 2, "reason": "x"})
+        out, skipped = R.merge_proposal(SOURCE, {"ruleSearch": {"bookList": "NEW",
+                                                               "bookUrl": ""},
+                                                 "bookSourceType": 2, "reason": "x"})
         self.assertEqual(out["bookSourceName"], "测试站")
         self.assertEqual(out["bookSourceUrl"], "http://x")
         self.assertEqual(out["ruleSearch"]["bookList"], "NEW")
         self.assertEqual(out["ruleSearch"]["bookUrl"], "a@href")
         self.assertEqual(out["bookSourceType"], 2)
+        self.assertEqual(skipped, [])
+
+
+#: 「混合」源：搜索段可回放（对，但规则已失效），目录/正文段是 JS（本地回放不了）。
+#: 这是护栏真正起作用的形状——全不可回放的源在 verify_chain 那里就是 all_ok
+#: （unknown 算 ok），修复循环根本不会启动。
+MIXED_SOURCE = {
+    "bookSourceName": "混合站", "bookSourceUrl": "http://y", "bookSourceType": 0,
+    "searchUrl": "/s?q={{key}}",
+    "ruleSearch": {"bookList": ".old-list", "bookUrl": "a@href"},
+    "ruleToc": {"chapterList": ".old-chap",
+                "chapterUrl": "<js>return baseUrl + '/c/' + id</js>"},
+    "ruleContent": {"content": "id.content@text"},
+}
+
+
+class MergeGuardTests(unittest.TestCase):
+    """本地回放不了的字段：不许覆盖、不许采纳，但**要报出来**（口径同 quality：
+    unknown = 我们不判，不是「没问题」）。两道拦各挡一种把源改坏的方式。"""
+
+    def test_unreplayable_current_is_not_overwritten(self):
+        """模型会把 App 里能用的 JS 规则换成 CSS 规则——那等于把好的改坏，
+        而 all_ok 只看回放结果，没有别的检查会拦。"""
+        merged, skipped = R.merge_proposal(
+            MIXED_SOURCE, {"ruleToc": {"chapterUrl": ".new a@href"}})
+        self.assertEqual(merged["ruleToc"]["chapterUrl"],
+                         "<js>return baseUrl + '/c/' + id</js>")
+        self.assertEqual([s["field"] for s in skipped], ["ruleToc.chapterUrl"])
+        self.assertIn("当前规则本地回放不了", skipped[0]["why"])
+
+    def test_unreplayable_proposal_is_not_adopted(self):
+        """提议本身回放不了时不能落地：落地了本地验不了它，而 verify_chain 对
+        「回放不了」判 unknown（ok=True）——它会假装成修好了。"""
+        merged, skipped = R.merge_proposal(
+            SOURCE, {"ruleSearch": {"bookList": "@js:return doc.select('.x')"}})
+        self.assertEqual(merged["ruleSearch"]["bookList"], ".old-list")
+        self.assertIn("提议的规则本地回放不了", skipped[0]["why"])
+
+    def test_replayable_field_is_still_updated(self):
+        """反向保护：能回放的字段必须照常覆盖，否则护栏把修复本身也挡住了。"""
+        merged, skipped = R.merge_proposal(
+            MIXED_SOURCE, {"ruleSearch": {"bookList": ".new-list"}})
+        self.assertEqual(merged["ruleSearch"]["bookList"], ".new-list")
+        self.assertEqual(skipped, [])
+
+    def test_skipped_reaches_result_and_report(self):
+        """跳过清单必须走到结果与报告里——静默丢弃等于「模型修好了」的错觉。"""
+        llm = FakeLLM(["{\"ruleSearch\":{\"bookList\":\".new-list\"},"
+                       "\"ruleToc\":{\"chapterUrl\":\".new a@href\"}}"])
+        res = asyncio.run(R.repair_one(None, llm, MIXED_SOURCE, "k", max_rounds=1,
+                                       evidence=EVIDENCE,
+                                       verifier=make_verifier(".new-list")))
+        self.assertEqual(res["status"], "fixed")
+        self.assertEqual([s["field"] for s in res["skipped"]], ["ruleToc.chapterUrl"])
+        report = R.build_report([res])
+        self.assertIn("未改动 `ruleToc.chapterUrl`", report)
+        self.assertIn("本地回放不了", report)
+
+    def test_skipped_is_an_empty_list_when_clean(self):
+        """键必须常在（消费方按它判断有没有留下验不了的部分），哪怕是空的。"""
+        llm = FakeLLM(["{\"ruleSearch\":{\"bookList\":\"GOOD\"}}"])
+        res = asyncio.run(R.repair_one(None, llm, SOURCE, "k", max_rounds=1,
+                                       evidence=EVIDENCE, verifier=make_verifier("GOOD")))
+        self.assertEqual(res["skipped"], [])
 
 
 class PromptTests(unittest.TestCase):
@@ -216,6 +281,19 @@ class PromptTests(unittest.TestCase):
         self.assertIn("无结果", p)
         self.assertIn("image", p)
 
+
+# ---------------------------------------------------------------- 变异记录
+# 以下为实测（改坏 → `python -B -m unittest tests.test_repair` → 确认变红 → 还原）。
+# 前六条是剥离点（见 RepairLoopStripEvidenceTests 上方），后四条是合并护栏：
+#
+#  M1  merge_proposal 不拦「当前值回放不了」（照覆盖）
+#        → MergeGuardTests.test_unreplayable_current_is_not_overwritten 红
+#  M2  merge_proposal 不拦「提议值回放不了」（照采纳）
+#        → MergeGuardTests.test_unreplayable_proposal_is_not_adopted 红
+#  M3  repair_one 不把跳过清单写进结果
+#        → MergeGuardTests.test_skipped_reaches_result_and_report 红
+#  M4  build_report 不列跳过清单
+#        → MergeGuardTests.test_skipped_reaches_result_and_report 红
 
 if __name__ == "__main__":
     unittest.main()

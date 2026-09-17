@@ -98,20 +98,54 @@ def build_user_prompt(ev: Dict[str, Any], current: Dict[str, Any],
 RULE_KEYS = ("ruleSearch", "ruleToc", "ruleContent", "ruleExplore", "ruleBookInfo")
 
 
-def merge_proposal(current: Dict[str, Any], proposal: Dict[str, Any]) -> Dict[str, Any]:
-    """把模型提议合并进原书源：只覆盖规则字段，保留 name/url 等元数据。"""
+def merge_proposal(current: Dict[str, Any], proposal: Dict[str, Any]
+                   ) -> Tuple[Dict[str, Any], List[Dict[str, str]]]:
+    """把模型提议合并进原书源：只覆盖规则字段，保留 name/url 等元数据。
+
+    返回 ``(合并后的源, 跳过清单)``，跳过清单是 ``[{field, rule, why}]``。它**要进
+    报告**：本地回放不了的东西我们不碰，但不能不说（口径同 ``core/quality``——
+    unknown 是「我们不判」，不是「没问题」）。两道拦各挡一种把源改坏的方式：
+
+      - **当前值回放不了**（JS / 模板 / XPath）→ 不许覆盖。SYSTEM_PROMPT 禁止模型写
+        ``@js:``，于是它会把一条**在 App 里正常工作的 JS 规则换成 CSS**；而
+        ``all_ok`` 只看回放结果、不看改了哪些字段，没有别的检查会拦。
+      - **提议值回放不了** → 不许落地。落地了本地就验不了它，而 ``verify_chain`` 对
+        「回放不了」判 unknown（``ok=True``）——它会**假装成修好了**。
+
+    判定只用 ``rule_supported``（回放器自己那份能力边界），不在这里另写一份。
+    """
+    # 惰性导入：与本函数内其余项目内导入一致，别在顶层拖上 replayer 那条依赖链
+    from core.rules.replayer import rule_supported
+
     out = dict(current)
+    skipped: List[Dict[str, str]] = []
     for key in RULE_KEYS:
         if isinstance(proposal.get(key), dict) and proposal[key]:
             base = dict(current.get(key) or {})
             for k, v in proposal[key].items():
-                if isinstance(v, str) and v.strip():
-                    base[k] = v.strip()
+                if not (isinstance(v, str) and v.strip()):
+                    continue
+                new_rule = v.strip()
+                old_rule = str(base.get(k) or "").strip()
+                if old_rule:
+                    ok_old, why_old = rule_supported(old_rule)
+                    if not ok_old:
+                        skipped.append({
+                            "field": "%s.%s" % (key, k), "rule": old_rule,
+                            "why": "当前规则本地回放不了（%s），未改动" % why_old})
+                        continue
+                ok_new, why_new = rule_supported(new_rule)
+                if not ok_new:
+                    skipped.append({
+                        "field": "%s.%s" % (key, k), "rule": new_rule,
+                        "why": "提议的规则本地回放不了（%s），未采纳" % why_new})
+                    continue
+                base[k] = new_rule
             out[key] = base
     t = proposal.get("bookSourceType")
     if isinstance(t, int) and t in (0, 1, 2, 3):
         out["bookSourceType"] = t
-    return out
+    return out, skipped
 
 
 
@@ -155,6 +189,9 @@ async def repair_one(session, client, source: Dict[str, Any], keyword: str,
         "status": "", "rounds": 0, "error": "",
         "before": before, "after": None, "source": None,
         "history": [], "evidence": ev,
+        #: 本地回放不了、因此**没动**的字段（见 merge_proposal）。空列表是常态，
+        #: 但键必须在：报告与消费方按它判断「这次修复有没有留下验不了的部分」
+        "skipped": [],
     }
     if before.get("all_ok"):
         out["status"] = "already_ok"
@@ -170,6 +207,8 @@ async def repair_one(session, client, source: Dict[str, Any], keyword: str,
     current = source
     cur_verify = before
     status = "failed"
+    #: 同一字段在多轮里被跳过多次时按字段去重，留最后一轮的说法
+    skipped: Dict[str, Dict[str, str]] = {}
     for r in range(1, max_rounds + 1):
         prompt = build_user_prompt(ev, current, cur_verify, history)
         try:
@@ -183,7 +222,9 @@ async def repair_one(session, client, source: Dict[str, Any], keyword: str,
             history.append({"round": r, "reason": "模型输出不是合法 JSON",
                             "raw": str(text)[:200]})
             continue
-        merged = merge_proposal(current, proposal)
+        merged, skip = merge_proposal(current, proposal)
+        for s in skip:
+            skipped[s["field"]] = s
         # 剥离点 2/2：v 会被塞进 history[].verify（最多 3 轮）、out["after"] 与
         # cur_verify 三处长期持有，所以在**存进 history 之前**这一处就剥掉，
         # 而不是等组装 out["after"] 时再剥——那时 history 里已经留了一份完整的。
@@ -198,6 +239,7 @@ async def repair_one(session, client, source: Dict[str, Any], keyword: str,
             out["source"] = merged
             out["after"] = v
             out["history"] = history
+            out["skipped"] = list(skipped.values())
             return out
         current = merged
         cur_verify = v
@@ -206,6 +248,7 @@ async def repair_one(session, client, source: Dict[str, Any], keyword: str,
     out["rounds"] = len(history)
     out["after"] = cur_verify
     out["history"] = history
+    out["skipped"] = list(skipped.values())
     return out
 
 
@@ -252,6 +295,11 @@ def build_report(results: List[Dict[str, Any]]) -> str:
          "| 结果 | 数量 |", "|---|---:|"]
     for k, n in cnt.most_common():
         L.append("| %s | %d |" % (labels.get(k, k), n))
+    n_skip = sum(1 for r in results if r.get("skipped"))
+    if n_skip:
+        # 「修好了」和「有字段根本没敢动」必须分开看：后者可能是真正坏掉的那部分
+        L += ["", "> **%d 个源有「本地回放不了、因此没动」的字段**——它们可能正是坏掉的"
+              "那部分，只能连 App 验。" % n_skip]
     L += ["", "## 明细", ""]
     for r in results:
         if r.get("status") not in ("fixed", "failed"):
@@ -263,6 +311,8 @@ def build_report(results: List[Dict[str, Any]]) -> str:
             L.append("- 最后失败原因：%s" % _fail_brief(r.get("after")))
         for h in r.get("history") or []:
             L.append("- 第%d轮：%s" % (h.get("round", 0), h.get("reason", "")))
+        for s in r.get("skipped") or []:
+            L.append("- 未改动 `%s`：%s" % (s.get("field", ""), s.get("why", "")))
         if r.get("status") == "fixed" and r.get("source"):
             L.append("")
             L.append("```json")
