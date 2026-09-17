@@ -28,6 +28,7 @@ import aiohttp
 
 from core.models import (
     Health, BookSourceRecord, ANTI_BOT_MARKERS, LOGIN_MARKERS,
+    anti_bot_marker_of, login_marker_of,
     NOVEL_TEST_KEYWORDS, MANGA_TEST_KEYWORDS, TEST_TITLES, TOC_COMPLETE_THRESHOLD,
 )
 from core.urls import abs_url as _abs_url
@@ -72,6 +73,10 @@ from core.constants import DEFAULT_UA
 # （实测库里 91 条是 ok+4xx）。口径变了：原来判 ok 的现在判 dead，
 # 旧缓存的 health 是旧逻辑的产物，必须整体作废——理由同 v7，
 # **不作废就是「修了等于没修」**（结论会在 TTL 内一直命中旧缓存）。
+# 缓存版本 11：登录词表删掉裸 `login` / `sign in`（它们匹配的是页面里的登录**入口**，
+# 实测 `m.cread.com` 的首页零反爬词、唯一命中的是 `<a href="/user/login.aspx">`，
+# 797 条带 cookieJar 的源因此被判「需验证」），并给「200 + 登录词」判出来的 auth
+# 一个短 TTL。口径变了 → 旧缓存里的 auth 是旧逻辑的产物，必须整体作废。
 # 缓存版本 10：探测深度从「1/2/3 + 独立的搜索开关」合并成「1/2/3/4 一根轴」，
 # 缓存里的 `probe_depth` 是**实际执行到的深度**，所以整列的含义随编号一起平移了
 # （旧 1 档 = 域名+搜索 = 新 2 档，旧 2/3 = 新 3/4）。
@@ -80,7 +85,7 @@ from core.constants import DEFAULT_UA
 # 重验）。但「深度 1 + 搜索开」这档旧行在新口径下必然判「深度不够」，等于整体重跑
 # 一遍——把这件事标成版本变化，比让它以「我什么都没改，怎么全量又跑了」的样子
 # 出现要好。
-CACHE_VERSION = 10
+CACHE_VERSION = 11
 
 #: 缓存有效期（天）：可用源留久一点，其余状态一律短 TTL——「待验证」「需代理复检」
 #: 长期停在旧结论上，比多校验几次更糟。
@@ -90,6 +95,8 @@ CACHE_VERSION = 10
 #: 走这里的默认值。
 DEFAULT_TTL_OK = _SETTINGS_DEFAULTS["check"]["cache_ttl_ok"]
 DEFAULT_TTL_OTHER = _SETTINGS_DEFAULTS["check"]["cache_ttl_other"]
+#: 「200 + 登录词」判出来的「需验证」单独一个短 TTL，见 is_cache_item_valid
+DEFAULT_TTL_AUTH = _SETTINGS_DEFAULTS["check"]["cache_ttl_auth"]
 
 
 def classify_transport_error(error: str) -> str:
@@ -367,6 +374,7 @@ def is_cache_item_valid(
     min_depth: int = DEPTH_HOME,
     ttl_ok: int = DEFAULT_TTL_OK,
     ttl_other: int = DEFAULT_TTL_OTHER,
+    ttl_auth: int = DEFAULT_TTL_AUTH,
 ) -> bool:
     """判断缓存是否仍可用于该书源。
 
@@ -409,6 +417,12 @@ def is_cache_item_valid(
         return False
     health = str(item.get("health", ""))
     ttl_days = ttl_ok if health == Health.OK else ttl_other
+    # 「200 + 登录词」判出来的 auth 只是**启发式**（页面里有个登录入口、WAF 挑战页、
+    # 临时登录页都会命中），与 403/401/429 那种站点明确拒绝不是一回事。前者短 TTL：
+    # 它常常随页面一起消失，锁久了用户点「重新校验」只会看到「复用缓存」，
+    # 而同一个源在调试里明明是好的（实测卡住 800 条的那种）。
+    if health == Health.AUTH and item.get("status_code") == 200:
+        ttl_days = min(ttl_days, ttl_auth)
     if current_time - checked_time > timedelta(days=ttl_days):
         return False
     # 深度不够必须重验。缓存里的 probe_depth 是**实际执行到的深度**
@@ -608,6 +622,7 @@ class AsyncChecker:
         store_path: Optional[str] = None,
         cache_ttl_ok: int = DEFAULT_TTL_OK,
         cache_ttl_other: int = DEFAULT_TTL_OTHER,
+        cache_ttl_auth: int = DEFAULT_TTL_AUTH,
     ):
         self.concurrency = concurrency
         self.timeout = timeout
@@ -630,6 +645,7 @@ class AsyncChecker:
         # 这里不再自己读设置——checker 不该隐式依赖用户配置
         self.cache_ttl_ok = cache_ttl_ok
         self.cache_ttl_other = cache_ttl_other
+        self.cache_ttl_auth = cache_ttl_auth
         # 目录完整度参考表：{作品名: {"type": "novel|manga", "chapters": N}}，缺省内置 TEST_TITLES
         self.test_titles = test_titles or TEST_TITLES
         self._sem: Optional[asyncio.Semaphore] = None
@@ -909,13 +925,29 @@ class AsyncChecker:
                 err = "timeout"
         return None, b"", (time.perf_counter() - t0) * 1000, err, detail
 
-    def _classify(self, status: Optional[int], body: bytes, rec: BookSourceRecord) -> str:
-        """根据 HTTP 状态与响应体判定健康状态。
+    def _classify(self, status: Optional[int], body: bytes,
+                  rec: BookSourceRecord) -> Tuple[str, str]:
+        """根据 HTTP 状态与响应体判定健康状态，并给出**判定的依据**。
 
         判定表只有一份，见模块级的 :func:`classify_http_status`——**不要在这里
         另写一遍**（那正是原来三处分叉的成因）。
+
+        返回 ``(健康态, 依据文案)``。依据只对「需验证」这一档有内容：它是唯一
+        **由词表启发式**判出来的状态，不说清命中了哪个词，用户看到「需验证」
+        就只能怀疑程序（实测就是这么误判了 797 条）。
         """
-        return classify_http_status(status, _decode_body(body), rec.enabled_cookie_jar)
+        text = _decode_body(body)
+        health = classify_http_status(status, text, rec.enabled_cookie_jar)
+        if health != Health.AUTH:
+            return health, ""
+        anti = anti_bot_marker_of(text)
+        if anti:
+            return health, "页面出现「%s」（反爬特征）→ 需验证" % anti
+        login = login_marker_of(text)
+        if login:
+            return health, "页面出现「%s」，且源声明了 cookieJar → 需验证" % login
+        return health, "站点返回 %s，判为需验证" % status
+
 
     async def _classify_dns(self, record: BookSourceRecord,
                             domain_url: str) -> Tuple[str, str]:
@@ -960,7 +992,9 @@ class AsyncChecker:
             record.status_code = status or 0
             record.response_time_ms = int(cost)
             record.checked_at = time.strftime("%Y-%m-%d %H:%M:%S")
-            health = self._classify(status, body, record)
+            health, why = self._classify(status, body, record)
+            if why:
+                record.error = why
             if health == Health.DEAD:
                 # 细分失败原因：被墙特征（连接重置/TLS阻断）→ 需翻墙
                 # 传输层失败统一走保守分类；只有明确 HTTP 失败才保留 DEAD。
@@ -1301,7 +1335,8 @@ class AsyncChecker:
             # 深度到「搜索」档就是要验，两根轴能配出没有意义的组合
             if item and is_cache_item_valid(r, item, min_depth=self.probe_depth,
                                             ttl_ok=self.cache_ttl_ok,
-                                            ttl_other=self.cache_ttl_other):
+                                            ttl_other=self.cache_ttl_other,
+                                            ttl_auth=self.cache_ttl_auth):
                 restore_from_cache(r, item)
             else:
                 pending.append(r)

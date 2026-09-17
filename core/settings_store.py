@@ -63,6 +63,11 @@ DEFAULTS: Dict[str, Dict[str, Any]] = {
         #: 这两个数是**唯一权威**，core/checker.py 从这里引用默认值。
         "cache_ttl_ok": 14,
         "cache_ttl_other": 7,
+        #: 「200 + 登录词」判出来的「需验证」单独给一天。它与 403/401 那种
+        #: 站点明确拒绝不是一回事：触发它的常常是**当时的页面**（WAF 挑战页、
+        #: 临时登录页、页头一个登录链接），而它会随页面一起消失。锁 7 天的话，
+        #: 用户点「重新校验」只会看到「复用缓存」，而调试里明明是好的。
+        "cache_ttl_auth": 1,
     },
 }
 
@@ -75,6 +80,7 @@ LIMITS: Dict[str, tuple] = {
     "probe_depth": PROBE_DEPTHS,
     "cache_ttl_ok": (1, 365),
     "cache_ttl_other": (1, 365),
+    "cache_ttl_auth": (0, 365),
 }
 
 #: 代理只认 http/https。**故意不含 socks5**：aiohttp 原生不支持（要 ``aiohttp_socks``，
@@ -207,6 +213,8 @@ _SPECS: Dict[tuple, Any] = {
         v, DEFAULTS["check"]["cache_ttl_ok"], *LIMITS["cache_ttl_ok"]),
     ("check", "cache_ttl_other"): lambda v: _to_int(
         v, DEFAULTS["check"]["cache_ttl_other"], *LIMITS["cache_ttl_other"]),
+    ("check", "cache_ttl_auth"): lambda v: _to_int(
+        v, DEFAULTS["check"]["cache_ttl_auth"], *LIMITS["cache_ttl_auth"]),
 }
 
 

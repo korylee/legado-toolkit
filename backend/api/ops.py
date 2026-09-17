@@ -96,6 +96,7 @@ async def run_check_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict
         proxy=cfg["proxy"] or None,
         cache_ttl_ok=cfg["cache_ttl_ok"],
         cache_ttl_other=cfg["cache_ttl_other"],
+        cache_ttl_auth=cfg["cache_ttl_auth"],
         use_store=True,
     )
     checker.refresh_cache = bool(payload.get("refresh_cache"))

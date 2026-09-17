@@ -132,7 +132,7 @@ class CacheVersionTests(unittest.TestCase):
         v7：反爬词表删掉裸 "cloudflare"——原来判 auth 的源现在判 ok，
         不作废的话那条 auth 会在 TTL 内一直命中缓存，看起来像修复失效。
         """
-        self.assertEqual(checker.CACHE_VERSION, 10)
+        self.assertEqual(checker.CACHE_VERSION, 11)
 
     def test_old_cache_item_rejected(self):
         raw = {"bookSourceUrl": "https://a.com", "bookSourceName": "x",
@@ -875,7 +875,7 @@ class ClassifyHttpStatusTests(unittest.TestCase):
         ck = _StubChecker({})
         with mock.patch.object(checker, "classify_http_status",
                                return_value=Health.AUTH):
-            self.assertEqual(ck._classify(200, b"", make_record(make_raw())),
+            self.assertEqual(ck._classify(200, b"", make_record(make_raw()))[0],
                              Health.AUTH)
 
     def test_other_4xx_are_dead(self):
@@ -905,7 +905,7 @@ class HttpStatusClassifyTests(unittest.TestCase):
 
     def _classify(self, status, body=""):
         ck = _StubChecker({})
-        return ck._classify(status, body.encode("utf-8"), make_record(make_raw()))
+        return ck._classify(status, body.encode("utf-8"), make_record(make_raw()))[0]
 
     def test_not_found_is_not_available(self):
         self.assertNotEqual(self._classify(404), Health.OK)
@@ -957,7 +957,7 @@ class AntiBotMarkerTests(unittest.TestCase):
 
     def _classify(self, status, body):
         ck = _StubChecker({})
-        return ck._classify(status, body.encode("utf-8"), make_record(make_raw()))
+        return ck._classify(status, body.encode("utf-8"), make_record(make_raw()))[0]
 
     def test_cf_email_decode_script_is_not_anti_bot(self) -> None:
         """Cloudflare 的邮箱保护脚本出现在正常页面里，不能被当成反爬。
@@ -994,6 +994,62 @@ class AntiBotMarkerTests(unittest.TestCase):
         self.assertEqual(rec.search_hit, "测试书")
         self.assertNotEqual(rec.health, Health.AUTH,
                             "邮箱保护脚本不该触发反爬降级")
+
+
+class LoginWallTests(unittest.TestCase):
+    """登录墙判据：**页面里有登录入口 ≠ 要登录**。
+
+    原来词表里有裸的 `login` / `sign in`，它们匹配的是登录**入口**。实测
+    `m.cread.com`（中文书城）的 33KB 首页零反爬词，唯一命中的是
+    `<a href="/user/login.aspx">` —— 配上有 cookieJar 的源，**797 条**被判「需验证」，
+    而它们在校验里本该是 ok。这与 v7 删掉裸 `cloudflare` 是同一类错。
+    """
+
+    def _c(self, body, cookie_jar=True):
+        from core.checker import classify_http_status
+        return classify_http_status(200, body, cookie_jar)
+
+    def test_login_link_is_not_a_login_wall(self):
+        self.assertEqual(self._c('<a href="/user/login.aspx">登录</a>'), Health.OK)
+        self.assertEqual(self._c("<p>sign in</p>"), Health.OK)
+        self.assertEqual(self._c('<a href="/login">Login</a>'), Health.OK)
+
+    def test_real_wall_phrases_still_trigger(self):
+        """收紧不能收过头：真正的登录墙仍要判出来（中文与英文短语）。"""
+        self.assertEqual(self._c("<p>请登录后使用</p>"), Health.AUTH)
+        self.assertEqual(self._c("<p>sign in to continue</p>"), Health.AUTH)
+        self.assertEqual(self._c("<p>Login required</p>"), Health.AUTH)
+
+    def test_auth_verdict_records_the_matched_word(self):
+        """判「需验证」时必须留下**命中了哪个词**。
+
+        实测教训：797 条源被判「需验证」而用户完全不知道为什么（那时依据没留痕），
+        只能怀疑程序。依据进 `record.error`，界面上就看得见。
+        """
+        ck = _StubChecker({})
+        rec = make_record(make_raw())
+        health, why = ck._classify(200, "<p>请完成验证码</p>".encode("utf-8"), rec)
+        self.assertEqual(health, Health.AUTH)
+        self.assertIn("验证码", why)
+
+        # 登录墙判据要求源声明了 cookieJar（没声明时「请登录」在导航栏里太常见）。
+        # **这里必须走 `build_record`**：本文件那个 `make_record` 是直接构造
+        # `BookSourceRecord`，而 `enabled_cookie_jar` 是 build_record 从 raw 里填的。
+        from core.models import build_record
+
+        raw = make_raw()
+        raw["enabledCookieJar"] = True
+        health, why = ck._classify(200, "<p>请登录后使用</p>".encode("utf-8"),
+                                   build_record(raw, 0))
+        self.assertEqual(health, Health.AUTH)
+        self.assertIn("请登录", why)
+
+    def test_non_auth_verdict_has_no_reason(self):
+        ck = _StubChecker({})
+        health, why = ck._classify(200, "<html>正常页</html>".encode("utf-8"),
+                                   make_record(make_raw()))
+        self.assertEqual(health, Health.OK)
+        self.assertEqual(why, "")
 
 
 if __name__ == "__main__":
@@ -1046,6 +1102,11 @@ if __name__ == "__main__":
 #           3★ 处的另一个分支，直接硬编码返回 "static"，不经过 `_basis`。
 #           这意味着「static」有两处来源，两处都得有断言，别只看 `_basis`）
 #  M21  回退过就算「推的」（`used_static = True` 提到判断静态回退**成功**之前）
+#  M22  LOGIN_MARKERS 加回裸 "login"
+#        → LoginWallTests.test_login_link_is_not_a_login_wall 红
+#          （页头一个 /user/login.aspx 链接就把 797 条判成「需验证」）
+#  M23  `_classify` 不再返回判定依据（reason 恒空串）
+#        → LoginWallTests.test_auth_verdict_records_the_matched_word 红
 #         → test_three_stars_when_toc_is_unverifiable_and_rules_are_incomplete 红
 #         ⚠️ **这条变异还原的就是实现时的第一版写法**。当时是先被
 #         `test_three_stars_from_a_real_hit_is_measured` 的 `5 != 3` 引过去的——

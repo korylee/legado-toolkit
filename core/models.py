@@ -81,10 +81,36 @@ ANTI_BOT_MARKERS: List[str] = [
 #: 以及 403/503 状态码已经够用。
 #: （回归护栏见 tests/test_checker_judge.py::TestAntiBotMarkers）
 
-#: 响应体中出现的"需要登录"特征
+#: 响应体中出现的「需要登录」特征。**与上面的反爬词表同一条纪律：不要放裸的英文词。**
+#:
+#: 原来这里有裸的 `login` / `sign in`，它们匹配的是页面里的登录**入口**而不是登录墙：
+#: 实测 `m.cread.com` 的 33KB 首页零反爬词，唯一命中的是
+#: `<a href="/user/login.aspx">` —— 配上有 cookieJar 的源，**797 条**被判「需验证」，
+#: 而它们在 App 里是好的。这与 v7 删掉裸 `cloudflare` 是同一类错。
+#:
+#: 英文要留就留**只在登录墙上出现的短语**（下面的三个），别再用单词。
 LOGIN_MARKERS: List[str] = [
-    "请登录", "需要登录", "登录后", "未登录", "login", "sign in",
+    "请登录", "需要登录", "登录后", "未登录",
+    "please log in", "please login", "login required", "sign in to continue",
 ]
+
+
+def anti_bot_marker_of(text: str) -> str:
+    """命中的反爬特征词（没有则空串）。给「为什么判需验证/异常」留痕用。"""
+    low = str(text or "").lower()
+    for m in ANTI_BOT_MARKERS:
+        if m in low:
+            return m
+    return ""
+
+
+def login_marker_of(text: str) -> str:
+    """命中的登录特征词（没有则空串）。同上，给留痕用。"""
+    low = str(text or "").lower()
+    for m in LOGIN_MARKERS:
+        if m in low:
+            return m
+    return ""
 
 #: 内置优质度检测测试集：按书源类型选择使用的作品名
 #: 小说源/听书源使用 NOVEL_TEST_KEYWORDS，漫画源使用 MANGA_TEST_KEYWORDS

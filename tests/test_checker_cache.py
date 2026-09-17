@@ -86,6 +86,27 @@ class CacheValidityTests(unittest.TestCase):
 
         self.assertTrue(is_cache_item_valid(build_record(source, 0), item, now=NOW))
 
+    def test_probe_auth_gets_the_short_ttl(self) -> None:
+        """「200 + 登录词」判出来的 auth 只留短 TTL；403 那种真拒绝照旧。
+
+        前者是启发式结论（页面里有个登录入口、WAF 挑战页、临时登录页都会命中），
+        它会随页面一起消失；锁 7 天的话用户点「重新校验」只会看到「复用缓存」，
+        而同一个源在调试里明明是好的（实测卡住约 800 条）。
+        """
+        source = make_source()
+        item = make_cache_item(source, Health.AUTH, "2026-08-15 12:00:00")
+        item["status_code"] = 200
+        self.assertFalse(
+            is_cache_item_valid(build_record(source, 0), item, now=NOW,
+                                ttl_other=7, ttl_auth=1),
+            "6 天前的「200 判 auth」超过了 1 天的短 TTL")
+
+        item["status_code"] = 403
+        self.assertTrue(
+            is_cache_item_valid(build_record(source, 0), item, now=NOW,
+                                ttl_other=7, ttl_auth=1),
+            "403 是站点明确拒绝，照旧按 7 天")
+
     # ------------------------------------------------------ 探测深度（本轮新增）
 
     def test_shallow_cache_is_not_reused_when_depth_raised(self) -> None:

@@ -110,6 +110,9 @@ body {
 
 /* 批量操作条：仅勾选时出现 */
 .batch-bar {
+  /* flex: 0 0 auto 与 .result-tip 同理：它是 `.page-flex` 的直接子项，不排除在收缩
+     之外的话，列表一高就被压扁、内容被自己的 overflow 裁掉 */
+  flex: 0 0 auto;
   display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
   padding: 8px 12px;
   background: #ecf5ff;

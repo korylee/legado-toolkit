@@ -174,6 +174,7 @@ class CheckSettingsPatch(BaseModel):
     proxy: Optional[str] = None
     cache_ttl_ok: Optional[int] = None
     cache_ttl_other: Optional[int] = None
+    cache_ttl_auth: Optional[int] = None
 
 
 class SettingsPatch(BaseModel):

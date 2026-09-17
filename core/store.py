@@ -489,7 +489,7 @@ class Store:
         where, args = self._where(source_type, group, health, q, only_enabled,
                                  include_deleted, user_tag, urls)
         allowed = ("id", "name", "source_type", "group_name", "stars",
-                   "checked_at", "updated_at")
+                   "probe_depth", "checked_at", "updated_at")
         key = (order or "id").lstrip("-")
         if key not in allowed:
             key, order = "id", "id"

@@ -4,8 +4,9 @@ import { ElMessage, ElMessageBox } from "element-plus";
 import { Search, Plus, Upload, Download, Delete, Filter, Refresh, Monitor, MagicStick } from "@element-plus/icons-vue";
 import { listSources, listSourceUrls, listGroups, patchTags, deleteSources, listTags, getStats } from "../api/sources";
 import { api, subscribeJob } from "../api/client";
-import { ensureTagMeta, isQualityTag, splitTags, tagOfType, sourceTypes } from "../utils/tags";
+import { ensureTagMeta, isQualityTag, isStatusTag, splitTags, tagOfType, sourceTypes } from "../utils/tags";
 import { HEALTH_LABELS, describeChanges, healthLabel, starBasisLabel } from "../utils/health";
+import { DEPTH_SHORT } from "../utils/checkFields";
 import { useMobile } from "../composables/useMobile";
 import SourceEditDialog from "../components/SourceEditDialog.vue";
 import TrashDrawer from "../components/TrashDrawer.vue";
@@ -91,6 +92,24 @@ watch(checkDialog, (v) => {
   if (v) nextTick(() => { if (checkDialogRef.value) checkDialogRef.value.reload(); });
 });
 
+//: 结果条上那一行字。**行内与 tooltip 共用同一份**——各写一遍必然漂成两句不同的话。
+//: 顺序按「用户最关心的先看」：本次跑了多少 → 变化 → 首次有结论 → 过期提醒 → 异常。
+const checkTipText = computed(() => {
+  const c = checkResult.value;
+  if (!c) return "";
+  const bits = ["本次校验 " + c.checked + " 条：新校验 " + c.fetched
+                + "、复用缓存 " + c.cached];
+  if (c.changes.length) bits.push(c.changes.join("、"));
+  else if (!c.firstChecked) bits.push("无状态变化");
+  if (c.firstChecked) bits.push(c.firstChecked + " 条首次有结论");
+  if (c.stale) bits.push("排序/筛选项可能已过期");
+  if (c.saveFailures) bits.push(c.saveFailures + " 条结果没能写入管理库，列表状态不会更新");
+  if (c.hitDowngrades) {
+    bits.push(c.hitDowngrades + " 个源命中判定降级（规则无法回放，已按「命中」处理）");
+  }
+  return bits.join(" · ");
+});
+
 const checkDialogTitle = computed(
   () => (pendingCheckUrls.value.length ? "校验选中" : "全量校验"));
 const checkDialogHint = computed(() => {
@@ -128,7 +147,7 @@ function openJobDetail() {
 
 const query = reactive({
   q: "", type: null, health: "", group: "", tag: "",
-  order: "-stars", limit: 50, offset: 0,
+  order: "-probe_depth", limit: 50, offset: 0,
 });
 
 const healthType = { ok: "success", dead: "danger", auth: "warning", gfw: "info" };
@@ -242,7 +261,7 @@ function onHealthChip(value) {
 
 function search() { query.offset = 0; load(); }
 function reset() {
-  Object.assign(query, { q: "", type: null, health: "", group: "", tag: "", order: "-stars", offset: 0 });
+  Object.assign(query, { q: "", type: null, health: "", group: "", tag: "", order: "-probe_depth", offset: 0 });
   load();
 }
 function onPage(p) { query.offset = (p - 1) * query.limit; load(); }
@@ -291,6 +310,44 @@ async function selectAllFiltered() {
   } catch (e) {
     ElMessage.error("获取全部筛选结果失败: " + e.message);
   }
+}
+
+//: 用户**手动锁定**的健康状态（`system_tags_locked`）。
+//:
+//: 锁定只改了 `group_name` 里的状态标签，而「健康」这一列读的是 `checks` 的实测
+//: 结论——于是同一屏上标签说「可用」、列说「失效」，两个来源打架。锁定的意思就是
+//: 「这条以我为准」，所以列里要显示锁定的值，**实测值进 tooltip 不丢**。
+//: 深度列上的**结果**标记。深度只说「验到哪」，而 4★/5★ 依赖的是 toc/content 的
+//: 实测结果——depth≥3 里约一半是「验了但没过」（实测：depth 3 有 118 条目录不完整，
+//: depth 4 有 8 条正文不可用）。取**最深的那个有结论的**：正文优先、其次目录；
+//: 两者都没结论就不标——不能把「没验到」说成「没过」。
+function depthVerdict(row) {
+  if (row.content_ok != null) return { label: "正文", ok: row.content_ok === 1 };
+  if (row.toc_complete != null) return { label: "目录", ok: row.toc_complete === 1 };
+  return null;
+}
+
+//: 深度列显示的那行字：**结果优先，深度兜底**。
+//:
+//: 有结论就显示「正文 ✗」「目录 ✓」——那才是「验得怎么样」；没有结论才显示验到
+//: 哪一步（主页/搜索/…）。**不要拼成「正文 目录 ✗」**：depth 恰好等于结果所在那步时
+//: 会写成「目录 目录 ✗」（实测 125 条），读起来像重复；而那种情况下深度信息
+//: 由 tooltip 兜住，代价可以忽略（实测只有 38 条落在"深度比结论更深"的形态）。
+function depthText(row) {
+  const v = depthVerdict(row);
+  if (v) return v.label + (v.ok ? " ✓" : " ✗");
+  return DEPTH_SHORT[row.probe_depth] || "";
+}
+
+//: 结果好坏的着色（**没有结论就不着色**）：一眼扫过去，绿=验过且通过、红=验了没过
+function depthClass(row) {
+  const v = depthVerdict(row);
+  return v ? (v.ok ? "v-ok" : "v-bad") : "";
+}
+
+function lockedStatus(row) {
+  if (!row.system_tags_locked) return "";
+  return splitTags(row.group_name || "").find((t) => isStatusTag(t)) || "";
 }
 
 function userTagsOf(row) {
@@ -451,7 +508,7 @@ async function checkSources(urls = []) {
             // 过期**：退回全量刷新的话列表就是刚查的，没有过期问题。
             // 排序过期只在按星级排时才成立（别的排序键不会因校验而变）
             summary.stale = backfilled
-              && (filterCount.value > 0 || /stars/.test(query.order));
+              && (filterCount.value > 0 || /probe_depth/.test(query.order));
             // **把 job_id 存进摘要**：resetCheckState() 刚把 checkJobId 清空了，
             // 不存的话结果条上的「查看」点开抽屉不知道要看哪一条
             summary.jobId = r.job_id;
@@ -583,8 +640,10 @@ onUnmounted(() => {
                      :label="t.tag + ' (' + t.count + ')'" />
         </el-select>
         <el-select class="w-order" v-model="query.order" size="small">
-          <el-option value="-stars" label="星级 ↓" />
-          <el-option value="stars" label="星级 ↑" />
+          <!-- 「验证深度」是列表那一列；星级降为可选排序（列不再显示它） -->
+          <!-- 星级不再是可排项：列表里没有那一列了，按看不见的字段排会让人困惑 -->
+          <el-option value="-probe_depth" label="验证深度 ↓" />
+          <el-option value="probe_depth" label="验证深度 ↑" />
           <el-option value="-checked_at" label="校验时间 ↓" />
           <el-option value="name" label="名称 ↑" />
         </el-select>
@@ -661,23 +720,18 @@ onUnmounted(() => {
     <el-alert v-if="checkResult" class="result-tip" show-icon
               :type="checkResult.changes.length ? 'warning' : 'success'"
               @close="checkResult = null">
+      <!-- **整条只有一行**：数字多的时候会很长，交给省略号 + tooltip 兜住。
+           换行的话高度会随内容变，把下面的列表挤来挤去 -->
       <template #title>
-        <span>本次校验 {{ checkResult.checked }} 条：新校验 {{ checkResult.fetched }}、复用缓存 {{ checkResult.cached }}</span>
-        <span v-if="checkResult.changes.length"> · {{ checkResult.changes.join("、") }}</span>
-        <span v-else-if="!checkResult.firstChecked"> · 无状态变化</span>
-        <span v-if="checkResult.firstChecked"> · {{ checkResult.firstChecked }} 条首次有结论</span>
-        <span v-if="checkResult.stale" class="stale"> · 排序/筛选项可能已过期</span>
-      </template>
-      <template #default>
-        <el-button link type="primary" size="small" @click="openJobDetail">查看</el-button>
-        <el-button v-if="checkResult.stale" link type="primary" size="small"
-                   @click="checkResult = null; load()">刷新列表</el-button>
-        <span v-if="checkResult.saveFailures" class="warn">
-          {{ checkResult.saveFailures }} 条结果没能写入管理库，列表状态不会更新
-        </span>
-        <span v-if="checkResult.hitDowngrades" class="warn">
-          {{ checkResult.hitDowngrades }} 个源的命中判定降级（规则无法回放，已按「命中」处理）
-        </span>
+        <div class="tip-line">
+          <el-tooltip :content="checkTipText" placement="top" :show-after="300">
+            <span class="tip-text">{{ checkTipText }}</span>
+          </el-tooltip>
+          <span class="grow" />
+          <el-button link type="primary" size="small" @click="openJobDetail">查看</el-button>
+          <el-button v-if="checkResult.stale" link type="primary" size="small"
+                     @click="checkResult = null; load()">刷新列表</el-button>
+        </div>
       </template>
     </el-alert>
 
@@ -692,15 +746,18 @@ onUnmounted(() => {
           <div class="main">
             <div class="row1">
               <span class="nm">{{ row.name || "(无名)" }}</span>
-              <span class="stars" v-if="row.stars">{{ "★".repeat(row.stars) }}</span>
-              <!-- 这一级是实测来的还是按规则推的。空串（0★）不渲染 -->
-              <span v-if="starBasisLabel(row.star_basis)" class="basis"
-                    :class="row.star_basis">{{ starBasisLabel(row.star_basis) }}</span>
+              <!-- 与表格同口径：显示验到哪一步（星级里大部分是推的） -->
+              <span class="stars" v-if="row.probe_depth" :class="depthClass(row)">
+                验到{{ depthText(row) }}
+              </span>
             </div>
             <div class="host mono">{{ row.source_url }}</div>
             <div class="meta">
               <el-tag size="small">{{ typeLabel(row.source_type) }}</el-tag>
-              <el-tag v-if="row.health" size="small" :type="healthType[row.health] || 'info'">
+              <el-tag v-if="lockedStatus(row)" size="small" type="warning">
+                {{ lockedStatus(row) }} · 手动
+              </el-tag>
+              <el-tag v-else-if="row.health" size="small" :type="healthType[row.health] || 'info'">
                 {{ healthLabel(row.health) }}
               </el-tag>
               <span class="muted nowrap" v-if="row.toc_complete !== null || row.content_ok !== null">
@@ -741,31 +798,39 @@ onUnmounted(() => {
         <el-table-column label="类型" width="88" align="center">
           <template #default="{ row }">{{ typeLabel(row.source_type) }}</template>
         </el-table-column>
-        <el-table-column label="健康" width="92" align="center">
+        <el-table-column label="健康" width="112" align="center">
           <template #default="{ row }">
-            <el-tag v-if="row.health" size="small" :type="healthType[row.health] || 'info'">
+            <el-tooltip v-if="lockedStatus(row)" placement="top" :show-after="200">
+              <template #content>
+                <div>手动锁定为「{{ lockedStatus(row) }}」</div>
+                <div>实测：{{ row.health ? healthLabel(row.health) : "未校验" }}{{ row.checked_at ? " · " + row.checked_at : "" }}</div>
+              </template>
+              <el-tag size="small" type="warning">{{ lockedStatus(row) }} · 手动</el-tag>
+            </el-tooltip>
+            <el-tag v-else-if="row.health" size="small" :type="healthType[row.health] || 'info'">
               {{ healthLabel(row.health) }}
             </el-tag>
             <span v-else class="muted">未校验</span>
           </template>
         </el-table-column>
-        <el-table-column label="★" width="92" align="center">
+        <el-table-column label="验证深度" width="104" align="center">
           <template #default="{ row }">
             <!-- 悬停看明细：原来有一列「目录/正文」专门显示这些，但它和
                  「实测 / 仅规则」是同一件事的明细与摘要，两列并排是重复的。
                  留下摘要（一眼看可信度），明细收进 tooltip -->
             <el-tooltip placement="top" :show-after="200">
               <template #content>
-                <div>域名：{{ row.health ? healthLabel(row.health) : "未校验" }}</div>
+                <div>健康：{{ lockedStatus(row) ? lockedStatus(row) + "（手动）" : (row.health ? healthLabel(row.health) : "未校验") }}</div>
                 <div>搜索：{{ row.search_hit ? "命中《" + row.search_hit + "》" : "未命中" }}</div>
                 <div>目录：{{ row.toc_complete === 1 ? "完整 ✓" : row.toc_complete === 0 ? "不完整 ✗" : "未验证" }}</div>
                 <div>正文：{{ row.content_ok === 1 ? "可用 ✓" : row.content_ok === 0 ? "不可用 ✗" : "未验证" }}</div>
+                <div v-if="row.stars">星级：{{ row.stars }}★ {{ starBasisLabel(row.star_basis) }}</div>
               </template>
-              <span>
-                <span>{{ row.stars }}★</span>
-                <span v-if="starBasisLabel(row.star_basis)" class="basis"
-                      :class="row.star_basis">{{ starBasisLabel(row.star_basis) }}</span>
-              </span>
+              <!-- 显示**验到哪一步**而不是星级：星级里大部分是「按规则推的」
+                   （实测 static 占多数），而「验到哪一步」是用户真正能据此判断的东西；
+                   星级与「实测/仅规则」收进同一个 tooltip，信息不丢 -->
+              <span v-if="row.probe_depth" :class="depthClass(row)">{{ depthText(row) }}</span>
+              <span v-else class="muted">未校验</span>
             </el-tooltip>
           </template>
         </el-table-column>
@@ -842,8 +907,8 @@ onUnmounted(() => {
         <div class="fld">
           <label>排序</label>
           <el-select v-model="query.order" style="width: 100%">
-            <el-option value="-stars" label="星级 ↓" />
-            <el-option value="stars" label="星级 ↑" />
+            <el-option value="-probe_depth" label="验证深度 ↓" />
+            <el-option value="probe_depth" label="验证深度 ↑" />
             <el-option value="-checked_at" label="校验时间 ↓" />
             <el-option value="name" label="名称 ↑" />
           </el-select>
@@ -915,10 +980,21 @@ onUnmounted(() => {
 .basis.measured { color: #67c23a; background: #f0f9eb; }
 .basis.static { color: #e6a23c; background: #fdf6ec; }
 
-/* 校验结果条：不挤占列表高度，只在需要时出现 */
-.result-tip { margin: 0 0 8px; }
-.result-tip .stale { color: #e6a23c; }
-.result-tip .warn { color: var(--el-color-danger); margin-left: 8px; }
+/* 校验结果条。
+   **flex: 0 0 auto 是必须的**：`.page-flex` 是 `height:100% + overflow:hidden` 的纵向
+   flex，而它的子项里只有 .page-toolbar / .page-footer 被排除在收缩之外——这条两样都
+   不是，于是列表一高它就被压扁，内容被自身的 overflow:hidden 裁掉，表现就是
+   「结果条上的字被遮挡」。
+   高度固定成一行：数字多了靠省略号 + tooltip，不让它换行把列表高度挤来挤去 */
+.result-tip { flex: 0 0 auto; margin: 0 0 8px; }
+/* 给 el-alert 绝对定位的关闭按钮留出位置，免得它压住右边的按钮 */
+.result-tip :deep(.el-alert__title) { padding-right: 6px; }
+.tip-line { display: flex; align-items: center; gap: 8px; min-width: 0; }
+/* 验证深度列的结果着色：绿=验过且通过、红=验了没过、不着色=还没验到那一步 */
+.v-ok { color: var(--el-color-success); }
+.v-bad { color: var(--el-color-danger); }
+.tip-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tip-line .grow { flex: 1 1 auto; }
 
 /* 统计条：与工具栏同一套底色/描边，夹在页面顶部 */
 .stats-bar {

@@ -23,6 +23,10 @@ export const DEPTH_LABELS = {
   4: "4 · 正文（+1 次 → 5★ 实测正文）",
 };
 
+//: 深度的**短标签**，给列表那一列用（`DEPTH_LABELS` 是设置表单里的长文案，
+//: 两者都对着后端的 `PROBE_DEPTHS`，改档位时一起改）。
+export const DEPTH_SHORT = { 1: "主页", 2: "搜索", 3: "目录", 4: "正文" };
+
 export const CHECK_FIELDS = [
   {
     key: "concurrency", label: "并发数", type: "number", perRun: true,
@@ -49,6 +53,12 @@ export const CHECK_FIELDS = [
     key: "cache_ttl_ok", label: "可用源缓存有效期", type: "number", perRun: false,
     suffix: "天",
     hint: "有效期内直接复用校验结果、不重新请求。",
+  },
+  {
+    key: "cache_ttl_auth", label: "「需验证」缓存有效期", type: "number", perRun: false,
+    suffix: "天",
+    hint: "它是由页面里的登录/反爬特征**推断**出来的状态（不像 403 那样是站点明确拒绝），"
+        + "而触发它的常常是当时的临时页面。设 0 = 每次校验都重测这一档。",
   },
   {
     key: "cache_ttl_other", label: "其他状态缓存有效期", type: "number", perRun: false,
