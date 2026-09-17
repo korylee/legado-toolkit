@@ -322,6 +322,7 @@ function useCandidate(c) {
   emit("applyRule", { field, rule: c.rule });
 }
 
+
 const diagnosis = computed(() => {
   const out = [];
   const s = current.value || {};
@@ -601,6 +602,16 @@ async function copyMatched() {
               <!-- 用 trim 后的值判断，与 hitOffsets 保持一致：纯空格不算搜过 -->
               <span v-else-if="searchKey.trim()" class="muted">未找到</span>
             </div>
+            <!-- 页面来源：调试默认吃缓存，这一份 HTML 可能是**几分钟前**抓的。
+                 不标出来的话，用户会把它当成刚抓的——那正是「看着正常、答的不是
+                 你问的那件事」那一类问题 -->
+            <p v-if="currentPage.fetched_at" style="margin: 0 0 8px">
+              <span class="muted">页面抓取于 {{ currentPage.fetched_at }}</span>
+              <el-tag size="small" style="margin-left: 6px"
+                      :type="currentPage.cached ? 'warning' : 'success'">
+                {{ currentPage.cached ? "来自缓存" : "本次新抓" }}
+              </el-tag>
+            </p>
             <el-alert v-if="currentPage.truncated" type="warning" :closable="false"
                       show-icon style="margin-bottom: 8px"
                       :title="'原文 ' + currentPage.len + ' 字符，已截断到前 '

@@ -21,6 +21,7 @@ from core.app_debug import (
     MAX_PAGES, PAGE_IDS, build_steps, collect_debug_events, fetch_debug_pages,
     run_app_debug,
 )
+from core.fetch import CacheMiss, Fetched
 
 #: 实测样本：关键字模式，走完 搜索 → 详情 → 目录 → 正文
 SAMPLE = [
@@ -94,8 +95,10 @@ PAGES = {
 }
 
 
-def fake_fetch(url, timeout=15, headers=None, charset="", proxy="", source=None):
-    return PAGES.get(url, "")
+def fake_fetch(url, timeout=15, headers=None, charset="", proxy="", source=None,
+               cache="auto"):
+    # 返回 Fetched 而不是字符串：补抓现在要拿「刚抓的还是缓存里的」填 pages[]
+    return Fetched(PAGES.get(url, ""), False, "")
 
 
 def step_of(steps, name):
@@ -367,12 +370,13 @@ class TestFetchPages(unittest.TestCase):
 
     def test_pages_have_verify_chain_shape(self):
         steps = self._steps()
-        with patch("core.app_debug.fetch", side_effect=fake_fetch):
+        with patch("core.app_debug.fetch_ex", side_effect=fake_fetch):
             pages = fetch_debug_pages(steps)
         self.assertEqual([p["id"] for p in pages], ["search", "detail", "chapter"])
         self.assertEqual(len(pages), MAX_PAGES)
         for p in pages:
-            for key in ("id", "url", "status", "charset", "html", "len", "truncated"):
+            for key in ("id", "url", "status", "charset", "html", "len", "truncated",
+                        "fetched_at", "cached"):
                 self.assertIn(key, p)
         self.assertEqual(pages[1]["url"], TOC_URL)
         self.assertEqual(pages[2]["html"], "<html>正文页</html>")
@@ -382,14 +386,15 @@ class TestFetchPages(unittest.TestCase):
         steps = self._steps()
         seen = {}
 
-        def spy(url, timeout=15, headers=None, charset="", proxy="", source=None):
+        def spy(url, timeout=15, headers=None, charset="", proxy="", source=None,
+                   cache="auto"):
             seen["headers"] = headers
             seen["charset"] = charset
             seen["source"] = source
-            return "<html>x</html>"
+            return Fetched("<html>x</html>", False, "")
 
         src = {"header": '{"Referer":"https://a.com/"}', "charset": "gbk"}
-        with patch("core.app_debug.fetch", side_effect=spy):
+        with patch("core.app_debug.fetch_ex", side_effect=spy):
             fetch_debug_pages(steps, src)
         self.assertEqual(seen["headers"], {"Referer": "https://a.com/"})
         self.assertEqual(seen["charset"], "gbk")
@@ -398,11 +403,12 @@ class TestFetchPages(unittest.TestCase):
 
     def test_fetch_failure_is_noted_not_raised(self):
         """抓不到页面：该页不进 pages，在对应 step 的 notes 里说明，判定不受影响。"""
-        def boom(url, timeout=15, headers=None, charset="", proxy="", source=None):
+        def boom(url, timeout=15, headers=None, charset="", proxy="", source=None,
+                   cache="auto"):
             raise OSError("连接超时")
 
         steps = self._steps()
-        with patch("core.app_debug.fetch", side_effect=boom):
+        with patch("core.app_debug.fetch_ex", side_effect=boom):
             pages = fetch_debug_pages(steps)
         self.assertEqual(pages, [])
         search = step_of(steps, "search")
@@ -413,7 +419,7 @@ class TestFetchPages(unittest.TestCase):
 
     def test_empty_html_is_not_registered(self):
         """抓回空 HTML 不登记（new_page 的口径），但不报错。"""
-        with patch("core.app_debug.fetch", side_effect=lambda *a, **k: ""):
+        with patch("core.app_debug.fetch_ex", side_effect=lambda *a, **k: Fetched("", False, "")):
             self.assertEqual(fetch_debug_pages(self._steps()), [])
 
     def test_explore_chain_keeps_four_steps_to_three_pages(self):
@@ -425,7 +431,7 @@ class TestFetchPages(unittest.TestCase):
         也最不该丢的正文页。所以「4 个段 → 3 个 id」这件事必须有用例守着。
         """
         steps = build_steps(EXPLORE_SAMPLE)
-        with patch("core.app_debug.fetch", side_effect=fake_fetch):
+        with patch("core.app_debug.fetch_ex", side_effect=fake_fetch):
             pages = fetch_debug_pages(steps)
         self.assertEqual([p["id"] for p in pages], ["explore", "detail", "chapter"])
         self.assertEqual(len(pages), MAX_PAGES)
@@ -436,13 +442,54 @@ class TestFetchPages(unittest.TestCase):
         self.assertEqual(pages[2]["html"], "<html>正文页</html>")
         self.assertEqual(step_of(steps, "content")["url"], CONTENT_URL)
 
+    def test_cache_mode_reaches_fetch(self):
+        """接线验证：只断言签名的话，把 ``cache=cache`` 那行删掉也照样全绿。"""
+        seen = {}
+
+        def spy(url, timeout=15, headers=None, charset="", proxy="", source=None,
+                cache="auto"):
+            seen["cache"] = cache
+            return Fetched("<html>x</html>", False, "")
+
+        with patch("core.app_debug.fetch_ex", side_effect=spy):
+            fetch_debug_pages(self._steps(), cache="only")
+        self.assertEqual(seen["cache"], "only")
+
+    def test_cache_miss_is_noted_as_such(self):
+        """「我们没去抓」≠「抓不到」：notes 要说清是只读模式，不能报成抓取失败。
+
+        混成一句「页面抓取失败」，用户会去查站点——而问题出在他自己刚选的那档。
+        """
+        def miss(url, timeout=15, headers=None, charset="", proxy="", source=None,
+                 cache="auto"):
+            raise CacheMiss("这一页没有缓存")
+
+        steps = self._steps()
+        with patch("core.app_debug.fetch_ex", side_effect=miss):
+            pages = fetch_debug_pages(steps, cache="only")
+        self.assertEqual(pages, [])
+        note = step_of(steps, "search")["notes"][-1]
+        self.assertIn("只读缓存", note)
+        self.assertNotIn("抓取失败", note)
+
+    def test_pages_carry_the_html_source(self):
+        """命中缓存时页面要带上「抓取时刻 + 来自缓存」——抽屉据此标出来。"""
+        def hit(url, timeout=15, headers=None, charset="", proxy="", source=None,
+                cache="auto"):
+            return Fetched("<html>x</html>", True, "2026-09-17 16:20:11")
+
+        with patch("core.app_debug.fetch_ex", side_effect=hit):
+            pages = fetch_debug_pages(self._steps())
+        self.assertIs(pages[0]["cached"], True)
+        self.assertEqual(pages[0]["fetched_at"], "2026-09-17 16:20:11")
+
     def test_toc_page_shares_detail_id_so_content_is_not_dropped(self):
         """目录页与详情页共用 detail id：3 页上限下正文页不会被挤掉。"""
         steps = build_steps(SAMPLE + [])
         for s in steps:
             if s["name"] == "toc":
                 s["url"] = "https://www.52shuku.net/toc.html"
-        with patch("core.app_debug.fetch", side_effect=fake_fetch):
+        with patch("core.app_debug.fetch_ex", side_effect=fake_fetch):
             pages = fetch_debug_pages(steps)
         self.assertEqual([p["id"] for p in pages], ["search", "detail", "chapter"])
 
@@ -588,7 +635,7 @@ class TestRunAppDebug(unittest.TestCase):
         """run_app_debug 端到端：形状与 verify_chain 一致 + 抓到页面。"""
         server = FakeDebugServer(SAMPLE)
         try:
-            with patch("core.app_debug.fetch", side_effect=fake_fetch):
+            with patch("core.app_debug.fetch_ex", side_effect=fake_fetch):
                 out = run_app_debug("127.0.0.1", "https://www.52shuku.net/", "我",
                                     port=server.port, timeout=10,
                                     source={"header": '{"Referer":"https://a.com/"}'})

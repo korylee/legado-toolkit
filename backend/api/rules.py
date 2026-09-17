@@ -43,6 +43,7 @@ async def app_debug(body: AppDebugRequest):
     规范化（尤其不要 ``rstrip("/")`` / ``lower()``）。
     """
     from core.app_debug import run_app_debug
+    from core.fetch import CACHE_MODES
 
     source = dict(body.source or {})
     tag = str(source.get("bookSourceUrl", "") or "").strip()
@@ -51,6 +52,14 @@ async def app_debug(body: AppDebugRequest):
     host = str(body.host or "").strip()
     if not host:
         raise HTTPException(400, "缺少 App 的 IP（App 通知栏里有）")
+    # 严格按枚举比，**不做大小写/空白归一**：这个值来自我们自己的前端，
+    # 对不上就是 bug，宽松一点只会让枚举多出第二份（更松的）定义。取值不合法
+    # 一律 400，**不退回默认**——用户选了「只补解析不重抓」却因为拼错而每次都在
+    # 联网，界面上分辨不出来
+    cache = str(body.cache or "")
+    if cache not in CACHE_MODES:
+        raise HTTPException(400, "未知的缓存策略：%s（只能是 %s）"
+                                 % (body.cache, " / ".join(CACHE_MODES)))
     if body.push:
         # 调试 WS 的 tag 是拿去 App 库里精确匹配的，库里没有这个源就静默无响应。
         # 先推一次（App 侧是 REPLACE，幂等），新源/改过还没保存的源就都能调试了。
@@ -65,7 +74,7 @@ async def app_debug(body: AppDebugRequest):
         # 这里兜的是脏端口之类的入参异常——同样给 400，不给 500。
         return await asyncio.to_thread(
             run_app_debug, host, tag, body.key or "我",
-            body.port or None, 60, source,
+            body.port or None, 60, source, cache=cache,
         )
     except Exception as e:
         raise HTTPException(400, "连 App 调试失败: %s: %s" % (type(e).__name__, e))

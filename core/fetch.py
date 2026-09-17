@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """由 services/add_source.py 拆分而来。"""
 
+import collections
+import hashlib
 import threading
 import time
 from typing import Any, Dict, Optional, Tuple
@@ -114,10 +116,131 @@ def parse_source_header(raw: str) -> tuple:
     return headers, ""
 
 
+# ------------------------------------------------------------------ 页面缓存
+# 「改一次选择器试一次」的反馈环原来是**重新联网**：实测单页 p50 805ms、一条链
+# （搜索/详情/正文）2.4 秒上下，而**解析本身是毫秒级**。缓存只加在本模块唯一的
+# 同步抓取出口上，所以 analyzer / App 调试的补抓 / verify_chain / AI 修复的证据 /
+# 快速新增源这几条链路**自动**受益，不必逐个改。
+#
+# **与「结论缓存」是两件事**，名字与量级都必须分得开，否则会让人以为调了它就能
+# 少校验：
+#   本模块   **页面**：进程内、5 分钟、不落盘，与源是否已保存无关
+#   checker  **结论**：落盘、14 / 7 / 1 天，按 fingerprint + probe_depth 比有效性
+PAGE_CACHE_TTL = 300                 # 秒
+PAGE_CACHE_MAX_PAGES = 200           # 按页数计的 LRU 上限
+PAGE_CACHE_MAX_BYTES = 1024 * 1024   # 单页上限；**超出的不缓存**（理由见 _cache_put）
+
+#: 每次抓取用哪种缓存策略（``fetch_ex(cache=...)``）
+CACHE_AUTO = "auto"        # 命中就用，缺失/过期就抓（默认）
+CACHE_ONLY = "only"        # **完全不发请求**，缺失就抛 CacheMiss
+CACHE_REFRESH = "refresh"  # 忽略已有缓存，重抓并回填
+CACHE_MODES = (CACHE_AUTO, CACHE_ONLY, CACHE_REFRESH)
+
+#: ``fetch_ex`` 的返回。``cached`` 为真表示这份来自缓存，``fetched_at`` 是它
+#: **实际被抓到**的时刻（命中缓存时不是现在）——页面证据要据此标出「你看到的
+#: 不是我刚抓的」，这是默认开着缓存时唯一的线索。
+Fetched = collections.namedtuple("Fetched", "html cached fetched_at")
+
+
+class CacheMiss(Exception):
+    """只读缓存（``CACHE_ONLY``）下这一页不在缓存里。
+
+    **不是抓取失败**：「我们没去抓」和「抓不到」必须分开呈现，否则用户会把它读成
+    站点坏了。调用方要给它自己的话术（见 ``core/verify.py`` / ``core/app_debug.py``）。
+    """
+
+
+_page_cache: "collections.OrderedDict" = collections.OrderedDict()
+#: fetch 是同步函数，修复循环里会被多个线程同时调用（同文件头的「限速」一节）
+_page_cache_lock = threading.RLock()
+
+
+def _now_str() -> str:
+    """缓存记录用的时间戳。格式与 ``core.store.now()`` 一致（都是给人看的），
+    但**不 import store**——fetch 是抓取层，不该为一行时间格式把 SQLite 拖进来。"""
+    return time.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _charset_key(charset: Any) -> str:
+    """charset 进缓存键的形态。它和 header 同源（来自书源 JSON），可能是脏值：
+    非字符串一律当「没传」——下面的解码分支本来也只认字符串，两处口径必须一致，
+    否则会出现「键相同、行为不同」。"""
+    return charset.strip().lower() if isinstance(charset, str) else ""
+
+
+def _cache_key(url: str, headers: dict, charset: Any, proxy: str) -> str:
+    """缓存键 = **请求身份**（URL + 请求头 + charset + 代理）。
+
+    只按 URL 做键会把两种身份的内容串在一起（同一类坑见 lessons §五）：带登录态
+    与不带登录态的源、换过 UA 的源，抓回来的不是同一份页面。代理也进键——换了
+    出口 IP，同一个 URL 可能给出另一个地区的页面。
+
+    用哈希而不是把身份本身当键：URL 与请求头都可能很长，而键会常驻 200 份。
+    ``url`` 传的是**编码后**的那份（见下面的 quote）：`?q=我` 与 `?q=%E6%88%91`
+    是同一个请求，不该各占一格。
+    """
+    ident = "\x00".join([
+        url,
+        "\x01".join("%s=%s" % (str(k).lower(), v) for k, v in sorted(headers.items())),
+        _charset_key(charset),
+        str(proxy or "").strip(),
+    ])
+    return hashlib.sha1(ident.encode("utf-8")).hexdigest()
+
+
+def _cache_get(key: str):
+    with _page_cache_lock:
+        item = _page_cache.get(key)
+        if item is None:
+            return None
+        html, stamp, at = item
+        if time.time() - at > PAGE_CACHE_TTL:
+            del _page_cache[key]      # 过期即删：TTL 一到就必须回源，留着只占内存
+            return None
+        _page_cache.move_to_end(key)
+        return html, stamp
+
+
+def _cache_put(key: str, html: str, stamp: str) -> None:
+    # **超上限的页面不缓存**，而不是截断后缓存：命中缓存必须与重新抓取**等价**。
+    # 截断会让解析看到半页 HTML——同一个源两次试跑给出不同判定，而界面上没有任何
+    # 东西说明为什么。宁可这一页每次都重抓（代价只是它一直显示「本次新抓」）。
+    if len(html) > PAGE_CACHE_MAX_BYTES:
+        return
+    with _page_cache_lock:
+        _page_cache[key] = (html, stamp, time.time())
+        _page_cache.move_to_end(key)
+        while len(_page_cache) > PAGE_CACHE_MAX_PAGES:
+            _page_cache.popitem(last=False)      # LRU：最久没用过的先走
+
+
+def page_cache_clear() -> None:
+    """清空页面缓存。测试要它——模块级状态会跨用例串味（同 ``_rate_last``）。"""
+    with _page_cache_lock:
+        _page_cache.clear()
+
+
+def page_cache_size() -> int:
+    with _page_cache_lock:
+        return len(_page_cache)
+
+
 def fetch(url: str, timeout: int = 15,
           headers: dict = None, charset: str = "", proxy: str = "",
           source: Optional[Dict[str, Any]] = None) -> str:
-    """抓取页面 HTML。
+    """抓取页面 HTML——``fetch_ex`` 的薄包装，只把 HTML 本身交出去。
+
+    **缓存默认生效**（``CACHE_AUTO``）：同一份请求 5 分钟内不会再联网。需要知道
+    「这份是刚抓的还是缓存里的」时用 ``fetch_ex``。
+    """
+    return fetch_ex(url, timeout, headers, charset, proxy, source).html
+
+
+def fetch_ex(url: str, timeout: int = 15,
+             headers: dict = None, charset: str = "", proxy: str = "",
+             source: Optional[Dict[str, Any]] = None,
+             cache: str = CACHE_AUTO) -> Fetched:
+    """抓取页面，返回 ``Fetched(html, cached, fetched_at)``。
 
     与 Legado 的 ``AnalyzeUrl`` 对齐的部分：
       - ``headers``：书源自身的 header；缺 User-Agent 时补默认 UA
@@ -131,7 +254,15 @@ def fetch(url: str, timeout: int = 15,
       - ``source``：完整的书源 dict。传了才会遵守它自己声明的 ``concurrentRate``
         限速（见文件头的「限速」一节）。**调用方应当传**——不传不会报错，只是
         那条链路不受限速约束，而这是静默的。
+      - ``cache``：见上面的 ``CACHE_*``。**只缓存抓成功的**——失败页缓存下来
+        会让「站点恢复了」看不见（urllib 对 4xx/5xx 直接抛，失败根本走不到写入
+        那一步）。也不落盘：重启即失效，调试场景够用。
     """
+    if cache not in CACHE_MODES:
+        # 不认识的策略要显式报错，别静默退回默认：用户以为在「只读不联网」，
+        # 实际每次都在联网，而界面上看不出任何区别
+        raise ValueError("未知的缓存策略：%r（只能是 %s）"
+                         % (cache, " / ".join(CACHE_MODES)))
     h = {"User-Agent": DEFAULT_UA,
          "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
          "Accept-Language": "zh-CN,zh;q=0.9"}
@@ -149,6 +280,18 @@ def fetch(url: str, timeout: int = 15,
     # safe 保留全部 URL 结构字符**以及 `%`**：这样已经编码好的 `%E6%88%91`
     # 不会被二次编码成 `%25E6...`，对纯 ASCII 的 URL 完全幂等。
     url = urllib.parse.quote(url, safe=":/?#[]@!$&'()*+,;=%~")
+
+    key = _cache_key(url, h, charset, proxy)
+    # 缓存查询放在**限速之前**：命中缓存根本没发请求，不该占掉一个限速名额
+    # （否则「快了」的收益会被源自己声明的间隔吃掉大半）
+    if cache != CACHE_REFRESH:
+        hit = _cache_get(key)
+        if hit is not None:
+            return Fetched(hit[0], True, hit[1])
+    if cache == CACHE_ONLY:
+        # **绝不偷偷去抓**：置位「只重解析不重抓」的用户以为看到的是缓存里的东西，
+        # 一旦这里退回联网，他看到的就是刚抓的——而这正是他要排除的
+        raise CacheMiss("本次只读缓存（不联网），这一页没有缓存：%s" % url)
 
     # 遵守源自己声明的限速。紧挨着真正的网络调用放，别提到函数开头——
     # 那样参数校验失败也会白白占掉一个限速名额
@@ -175,12 +318,21 @@ def fetch(url: str, timeout: int = 15,
     if isinstance(charset, str) and charset.strip():
         order.append(charset.strip().lower())
     order += ["utf-8", "gbk", "gb2312", "big5"]
+    html = ""
     for enc in order:
         try:
-            return raw.decode(enc)
+            html = raw.decode(enc)
+            break
         except (UnicodeDecodeError, LookupError):
             continue
-    return raw.decode("utf-8", errors="replace")
+    else:
+        html = raw.decode("utf-8", errors="replace")
+
+    stamp = _now_str()
+    # 回填缓存（CACHE_REFRESH 也走这里——它正是「重抓并把新的写回去」）。
+    # 走到这一行说明请求已经成功：4xx/5xx 由 urllib 抛异常，不会到这里
+    _cache_put(key, html, stamp)
+    return Fetched(html, False, stamp)
 def extract_keyword(url: str) -> str:
     """从搜索 URL 中解出真实关键词（优先 q/keyboard 等常见参数）。"""
     parsed = urllib.parse.urlparse(url)

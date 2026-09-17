@@ -12,8 +12,12 @@ import { api } from "./client";
 //
 // push=true 时后端会先把源推进 App 再调试（App 侧是 REPLACE，幂等）。
 // 这会**改动 App 里的书源数据**，所以只在用户显式点「推送并调试」时传。
-export const appDebug = (source, key, host, port, push = false) =>
-  api.post("/rules/app-debug", { source, key, host, port, push });
+//
+// cache 是**页面缓存**策略，只管我们补抓的那几页（跑链本身还得联网，是 App 在跑）：
+//   "auto"（默认）命中就用，缺失就抓 · "only" 一页都不补抓 · "refresh" 忽略缓存重抓。
+// 取值就是后端 core.fetch 的那三个常量（后端按同一份枚举校验，对不上给 400）。
+export const appDebug = (source, key, host, port, push = false, cache = "auto") =>
+  api.post("/rules/app-debug", { source, key, host, port, push, cache });
 
 // 调试前预检：把「静默无响应」拆成 unreachable / missing / ready 三种状态。
 export const appPreflight = (source, host, port) =>

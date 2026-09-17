@@ -102,6 +102,10 @@ class AppDebugRequest(BaseModel):
     #: 调试前先把源推送到 App。**会改动用户 App 里的书源数据**（新增或覆盖），
     #: 所以必须由用户显式触发，不要在流程里默认打开
     push: bool = False
+    #: 页面缓存策略（``core.fetch`` 的 ``CACHE_*``）。只管**我们补抓的那几页**：
+    #: auto 命中就用 / only 一页都不补抓 / refresh 忽略缓存重抓。
+    #: 取值校验在路由里做（不合法要 400，不能静默退回默认）
+    cache: str = "auto"
 
 
 class AppHostRequest(BaseModel):

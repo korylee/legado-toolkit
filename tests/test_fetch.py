@@ -1,11 +1,23 @@
 # -*- coding: utf-8 -*-
 """fetch 的请求头 / 编码 / 代理支持。"""
 
+import io
 import unittest
+from urllib.error import HTTPError
 from unittest.mock import patch
 
 from core.fetch import parse_source_header
 from core import fetch as F
+
+
+def setUpModule():
+    """页面缓存是**模块级**状态，会跨用例、跨文件串味（同 ``_rate_last``）。
+    进本模块先清一次，走的时候再清一次，别把实抓的页面留给后面的模块。"""
+    F.page_cache_clear()
+
+
+def tearDownModule():
+    F.page_cache_clear()
 
 
 class ParseSourceHeaderTests(unittest.TestCase):
@@ -123,7 +135,20 @@ class FetchSignatureTests(unittest.TestCase):
         self.assertIsNone(sig.parameters["source"].default)
 
 
-class FetchBehaviorTests(unittest.TestCase):
+class CacheIsolatedTestCase(unittest.TestCase):
+    """页面缓存是**模块级**状态，每条用例都从空缓存开始。
+
+    不清的话，前一条用例抓过的页面会让后一条用例**不再发请求**——`urlopen 被
+    调用` 这类断言随即失效，而失效原因与它要验的行为毫无关系（实测：本文件里
+    `test_no_proxy_uses_urlopen_directly` 等 8 处会因此变红）。
+    """
+
+    def setUp(self):
+        F.page_cache_clear()
+        self.addCleanup(F.page_cache_clear)
+
+
+class FetchBehaviorTests(CacheIsolatedTestCase):
     """三个卖点的行为覆盖。没有这些用例，整段实现删空也不会有人发现。"""
 
     def _capture(self, **kw):
@@ -207,6 +232,9 @@ class FetchBehaviorTests(unittest.TestCase):
         结果服务端收到空 UA。"""
         for empty in ("", "   ", None):
             with self.subTest(empty=repr(empty)):
+                # 三轮是**同一个请求身份**（空 UA 被丢掉 → 都等于默认 UA），
+                # 不清缓存的话第二、三轮直接命中，Request 压根不会被构造出来
+                F.page_cache_clear()
                 req = self._capture(headers={"User-Agent": empty})
                 self.assertEqual(req.headers["User-agent"], F.DEFAULT_UA)
 
@@ -226,6 +254,9 @@ class FetchBehaviorTests(unittest.TestCase):
         """charset 与 header 同源，都是书源 JSON 里的脏值。"""
         for bad in (123, ["gbk"], {"a": 1}, "no-such-codec"):
             with self.subTest(bad=repr(bad)):
+                # 非字符串的几种在缓存键里都算「没传」（解码分支也只认字符串），
+                # 所以要各自从空缓存起跑——否则后几轮直接命中，走不到解码那一步
+                F.page_cache_clear()
                 html = None
                 class FakeResp:
                     def read(self): return "x".encode("utf-8")
@@ -267,7 +298,7 @@ class FetchBehaviorTests(unittest.TestCase):
         self.assertFalse(bo.called, "不该建 opener")
 
 
-class RateLimitTests(unittest.TestCase):
+class RateLimitTests(CacheIsolatedTestCase):
     """fetch 侧的限速：源声明了 concurrentRate，每条抓取链路都得遵守。
 
     checker 走异步 aiohttp、其余三条（全链路试跑 / 连 App 调试补抓 / 快速新增源）
@@ -275,6 +306,7 @@ class RateLimitTests(unittest.TestCase):
     """
 
     def setUp(self):
+        super().setUp()          # 页面缓存同为空（见 CacheIsolatedTestCase）
         # 模块级状态，用例之间必须清干净，否则会互相插间隔
         F._rate_last.clear()
         self.addCleanup(F._rate_last.clear)
@@ -362,6 +394,183 @@ class RateLimitTests(unittest.TestCase):
         self.assertEqual(slept, [])
 
 
+class PageCacheTests(CacheIsolatedTestCase):
+    """页面缓存：命中/回源、键的身份、TTL、LRU、单页上限与三种策略。
+
+    「改一次选择器试一次」的反馈环原来是重新联网（一条链 2.4 秒），缓存把它压到
+    毫秒级——但**代价是「你看到的可能不是刚抓的」**，所以每条边界都要有用例守着：
+    只缓存成功的、超大页不缓存、只读模式绝不偷偷联网。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.calls = []
+
+    def _fake_urlopen(self, body=None):
+        """假响应：正文里带上 URL、UA 与**第几次抓取**。
+
+        带上序号是为了让「这份到底是缓存里的旧内容、还是刚抓的新内容」可直接
+        断言——只按 URL 生成正文的话，两份内容一模一样，「重抓后有没有回填」
+        根本区分不出来。
+        """
+        calls = self.calls
+
+        class FakeResp:
+            def read(self): return payload
+
+            def __enter__(self): return self
+
+            def __exit__(self, *exc): return False
+
+        def fake_urlopen(req, timeout=None):
+            calls.append(req.full_url)
+            nonlocal payload
+            payload = (body if body is not None else
+                       ("BODY:%s|UA=%s|n=%d" % (req.full_url,
+                                                req.headers.get("User-agent", ""),
+                                                len(calls)))).encode("utf-8")
+            return FakeResp()
+
+        payload = b""
+        return fake_urlopen
+
+    def _fetch(self, url, **kw):
+        with patch("urllib.request.urlopen", side_effect=self._fake_urlopen()):
+            return F.fetch_ex(url, **kw)
+
+    def test_second_call_is_served_from_cache(self):
+        first = self._fetch("https://a.com/x")
+        again = self._fetch("https://a.com/x")
+        self.assertIs(first.cached, False)
+        self.assertIs(again.cached, True)
+        self.assertEqual(again.html, first.html)      # 内容必须是同一份
+        self.assertEqual(len(self.calls), 1)          # 只发了一次请求
+        self.assertTrue(again.fetched_at)             # 抓取时刻要带出来（抽屉要标）
+
+    def test_key_includes_request_identity(self):
+        """换 UA / 换 charset 就是另一次请求：抓到的不是同一份页面。
+
+        只按 URL 做键会把两种身份的内容串在一起——带登录态与不带登录态的源、
+        换过 UA 的源，缓存互相污染（同一类坑见 lessons §五）。
+        """
+        self._fetch("https://a.com/x")
+        self._fetch("https://a.com/x", headers={"Referer": "https://b.com"})
+        self.assertEqual(len(self.calls), 2)
+        self._fetch("https://a.com/x", charset="gbk")
+        self.assertEqual(len(self.calls), 3)
+
+    def test_key_normalizes_url_encoding(self):
+        """未编码与已编码的中文是**同一个请求**：不该各占一格。
+
+        `?q=我` 这种原样 URL 是真实来源（连 App 调试时 App 给的就是这个形态），
+        而 fetch 内部会先 quote 再发——键必须跟着用编码后的那份。
+        """
+        self._fetch("https://a.com/so?q=我")
+        self._fetch("https://a.com/so?q=%E6%88%91")
+        self.assertEqual(len(self.calls), 1)
+
+    def test_key_includes_proxy_and_charset(self):
+        """键直接断言：proxy / charset 进键，而 URL 只有编码差异时**不进两次**。"""
+        base = ("https://a.com/x", {"User-Agent": "UA"}, "", "")
+        self.assertEqual(F._cache_key(*base),
+                         F._cache_key("https://a.com/x", {"user-agent": "UA"}, "", ""))
+        self.assertNotEqual(F._cache_key(*base),
+                            F._cache_key("https://a.com/x", {"User-Agent": "UA"}, "", "http://127.0.0.1:7890"))
+        self.assertNotEqual(F._cache_key(*base),
+                            F._cache_key("https://a.com/x", {"User-Agent": "UA"}, "gbk", ""))
+        # 非字符串 charset 一律当「没传」——解码分支本来也只认字符串
+        self.assertEqual(F._cache_key("https://a.com/x", {"User-Agent": "UA"}, 123, ""),
+                         F._cache_key(*base))
+
+    def test_expired_entry_is_refetched(self):
+        clock = [1000.0]
+        with patch.object(F.time, "time", side_effect=lambda: clock[0]):
+            self._fetch("https://a.com/x")
+            self.assertIs(self._fetch("https://a.com/x").cached, True)
+            clock[0] += F.PAGE_CACHE_TTL + 1
+            stale = self._fetch("https://a.com/x")
+        self.assertIs(stale.cached, False)
+        self.assertEqual(len(self.calls), 2)
+
+    def test_oversized_page_is_not_cached(self):
+        """超上限的页面**不缓存**，而不是截断后缓存。
+
+        截断会让解析看到半页 HTML——同一个源两次试跑给出不同判定，而界面上没有
+        任何东西说明为什么。宁可每次都重抓。
+        """
+        with patch.object(F, "PAGE_CACHE_MAX_BYTES", 8):
+            self._fetch("https://a.com/x")
+            second = self._fetch("https://a.com/x")
+        self.assertIs(second.cached, False)
+        self.assertEqual(len(self.calls), 2)
+
+    def test_lru_evicts_least_recently_used(self):
+        with patch.object(F, "PAGE_CACHE_MAX_PAGES", 2):
+            self._fetch("https://a.com/1")
+            self._fetch("https://a.com/2")
+            self._fetch("https://a.com/3")
+            self.assertEqual(F.page_cache_size(), 2)   # 上限真的生效
+            self._fetch("https://a.com/1")             # 最久没用过的已被逐出
+        self.assertEqual(len(self.calls), 4)
+
+    def test_failed_fetch_is_not_cached(self):
+        """只缓存抓成功的：失败页缓存下来会让「站点恢复了」看不见。"""
+        def flaky(req, timeout=None):
+            if len(self.calls) == 0:
+                self.calls.append(req.full_url)
+                # fp 给 BytesIO 而不是 None：None 会让 HTTPError 自己开临时文件，
+                # 被 GC 时在用例输出里留下一串 ResourceWarning
+                raise HTTPError(req.full_url, 403, "Forbidden", {}, io.BytesIO(b""))
+            return self._fake_urlopen()(req, timeout)
+
+        with patch("urllib.request.urlopen", side_effect=flaky):
+            with self.assertRaises(HTTPError):
+                F.fetch_ex("https://a.com/x")
+            ok = F.fetch_ex("https://a.com/x")
+        self.assertIs(ok.cached, False)
+        self.assertEqual(len(self.calls), 2)
+
+    def test_cache_only_never_touches_the_network(self):
+        with patch("urllib.request.urlopen") as uo:
+            with self.assertRaises(F.CacheMiss):
+                F.fetch_ex("https://a.com/x", cache=F.CACHE_ONLY)
+        self.assertFalse(uo.called, "只读缓存必须一个请求都不发")
+
+    def test_cache_only_serves_cached_copy(self):
+        self._fetch("https://a.com/x")
+        with patch("urllib.request.urlopen") as uo:
+            hit = F.fetch_ex("https://a.com/x", cache=F.CACHE_ONLY)
+        self.assertIs(hit.cached, True)
+        self.assertFalse(uo.called)
+
+    def test_refresh_bypasses_and_refills(self):
+        first = self._fetch("https://a.com/x")
+        fresh = self._fetch("https://a.com/x", cache=F.CACHE_REFRESH)
+        self.assertIs(fresh.cached, False)
+        self.assertEqual(len(self.calls), 2)
+        # 重抓的那份要**写回去**：否则「忽略缓存」变成「这一页从此不再缓存」。
+        # 断言内容而不只是 cached 标志——旧条目还在缓存里时，标志看上去也是对的
+        again = self._fetch("https://a.com/x")
+        self.assertIs(again.cached, True)
+        self.assertNotEqual(again.html, first.html)
+        self.assertEqual(again.html, fresh.html)
+        self.assertEqual(len(self.calls), 2)
+
+    def test_unknown_mode_raises_instead_of_falling_back(self):
+        """拼错/未知的策略必须显式报错：静默退回默认等于「用户以为不联网、其实在联网」。"""
+        with patch("urllib.request.urlopen") as uo:
+            with self.assertRaises(ValueError):
+                F.fetch_ex("https://a.com/x", cache="cached")
+        self.assertFalse(uo.called)
+
+    def test_fetch_wrapper_still_returns_plain_html(self):
+        """既有 13 个调用点读的是字符串——包装层不能把它们变成 Fetched。"""
+        with patch("urllib.request.urlopen", side_effect=self._fake_urlopen()):
+            html = F.fetch("https://a.com/x")
+        self.assertIsInstance(html, str)
+        self.assertIn("BODY:https://a.com/x", html)
+
+
 # ---------------------------------------------------------------- 变异记录
 # 以下为实测（改坏 → `python -B -m unittest tests.test_fetch` → 确认变红 → 还原）。
 #
@@ -375,9 +584,36 @@ class RateLimitTests(unittest.TestCase):
 #        → test_rate_key_keeps_the_raw_url
 #          test_fetch_hands_the_source_to_the_throttle 红
 #
-#  **没覆盖的**：`_rate_lock` 的并发正确性。本文件的用例都是单线程的，把锁去掉
-#  或把 sleep 挪进锁里都不会变红——这类行为要写并发用例才能守，而那种用例容易
-#  抖动。这里明确记下来，免得下次以为"有测试守着"。
+#  页面缓存（PageCacheTests）：
+#  M4  fetch_ex 里整段缓存查询删掉（不再命中）
+#        → test_second_call_is_served_from_cache 红
+#  M5  _cache_key 不再把请求头算进去
+#        → test_key_includes_request_identity 红
+#  M6  _cache_get 的 TTL 判断恒假（永不过期）
+#        → test_expired_entry_is_refetched 红
+#  M7  超上限页面改成「截断后缓存」
+#        → test_oversized_page_is_not_cached 红
+#  M8  CACHE_ONLY 的 miss 分支从 raise 改成 pass（退回联网）
+#        → test_cache_only_never_touches_the_network 红
+#  M9  CACHE_REFRESH 抓完直接返回、不回填
+#        → test_refresh_bypasses_and_refills 红
+#
+#  接线（改的是别的模块，把 cache 那一层摘掉）：
+#  M10 fetch_debug_pages 不把 cache 透传给 fetch_ex
+#        → test_app_debug.test_cache_mode_reaches_fetch 红
+#  M11 fetch_debug_pages 不再单独接 CacheMiss（并与抓取失败合流）
+#        → test_app_debug.test_cache_miss_is_noted_as_such 红
+#  M12 verify_chain 调 _new_page 时不传 fetched_at / cached
+#        → test_verify_chain.test_pages_carry_the_html_source 红
+#  M13 quality.new_page 不把这两个字段写进页面字典
+#        → test_verify_chain.test_pages_carry_the_html_source 红
+#
+#  **没覆盖的**：
+#    - ``_rate_lock`` 与 ``_page_cache_lock`` 的并发正确性：本文件的用例都是单线程的，
+#      把锁去掉、或把 sleep 挪进锁里都不会变红——这类行为要写并发用例才能守，而那种
+#      用例容易抖动。这里明确记下来，免得下次以为"有测试守着"。
+#    - 「真去抓一次站点、确认缓存回的是同一份页面」：要联网，不适合放在回归测试里。
+#      本地验的是**同一段逻辑**（命中即返回、不重发请求），真机验证得手工做。
 
 if __name__ == "__main__":
     unittest.main()

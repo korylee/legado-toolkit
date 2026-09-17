@@ -14,7 +14,8 @@
 
 from core.constants import *
 from core.urls import abs_url as _abs_url
-from core.fetch import fetch, parse_source_header
+# fetch_ex 而不是 fetch：页面证据要标出「这份 HTML 是刚抓的还是缓存里的」
+from core.fetch import Fetched, fetch_ex, parse_source_header
 from core.rules.replayer import extract_all_nodes
 from core import quality as Q
 
@@ -129,11 +130,13 @@ def verify_chain(source: dict, keyword: str, detail_url: str = "",
     headers, header_why = parse_source_header(str(src.get("header", "") or ""))
     charset = str(src.get("charset", "") or "").strip()
 
-    def _fetch(url: str) -> str:
+    def _fetch(url: str) -> Fetched:
         # 传 source：本链路一步要发 3 个请求（搜索 → 详情/目录 → 章节），
-        # 而 repair_many 会按 4 并发批量跑它，不遵守 concurrentRate 就是连打
-        return fetch(url, headers=headers, charset=charset, proxy=proxy,
-                     source=src)
+        # 而 repair_many 会按 4 并发批量跑它，不遵守 concurrentRate 就是连打。
+        # 也正因为修复循环**每一轮都要重跑本链路**（最多 3 轮 = 9 次抓取），
+        # 页面缓存对这条链路的收益最大：命中缓存就是毫秒级
+        return fetch_ex(url, headers=headers, charset=charset, proxy=proxy,
+                        source=src)
 
     # 静态错配（webJs 未生效 / bookSourceType==4）与 header 不可用的原因，
     # **在任何抓取之前**就能算出来。必须在每个 return 点都带上——失败链全都
@@ -193,12 +196,14 @@ def verify_chain(source: dict, keyword: str, detail_url: str = "",
     else:
         search_url = search_tpl.replace("{{key}}", urllib.parse.quote(keyword))
         try:
-            s_html = _fetch(search_url)
+            f = _fetch(search_url)
+            s_html = f.html
             book_list_rule = (src.get("ruleSearch") or {}).get("bookList", "")
             vals, hits, rule_error = _extract(s_html, book_list_rule)
             j = Q.judge_list_step("search", vals, "".join(hits), rule_error,
                                   source_type, rule=book_list_rule)
-            page_id = _new_page(pages, "search", search_url, s_html, charset=charset)
+            page_id = _new_page(pages, "search", search_url, s_html, charset=charset,
+                                fetched_at=f.fetched_at, cached=f.cached)
             st = _step("search", j, search_url, page_id, vals, "".join(hits), rule_error)
             st["detail"] = j.reason or ("%d 条结果" % len(vals))
             steps.append(st)
@@ -236,13 +241,15 @@ def verify_chain(source: dict, keyword: str, detail_url: str = "",
 
     t_html = ""
     try:
-        t_html = _fetch(book_url)
+        f = _fetch(book_url)
+        t_html = f.html
         toc = src.get("ruleToc") or {}
         chapter_list_rule = toc.get("chapterList", "")
         chapters, hits, rule_error = _extract(t_html, chapter_list_rule)
         j = Q.judge_list_step("toc", chapters, "".join(hits), rule_error,
                               source_type, rule=chapter_list_rule)
-        page_id = _new_page(pages, "detail", book_url, t_html, charset=charset)
+        page_id = _new_page(pages, "detail", book_url, t_html, charset=charset,
+                            fetched_at=f.fetched_at, cached=f.cached)
         st = _step("toc", j, book_url, page_id, chapters, "".join(hits), rule_error)
         st["detail"] = j.reason or ("%d 章" % len(chapters))
         steps.append(st)
@@ -266,11 +273,13 @@ def verify_chain(source: dict, keyword: str, detail_url: str = "",
             return _done()
         first_ch = ch_urls[0]
         ch_url = _abs_url(book_url, first_ch) if not first_ch.startswith("http") else first_ch
-        c_html = _fetch(ch_url)
+        f = _fetch(ch_url)
+        c_html = f.html
         content_rule = (src.get("ruleContent") or {}).get("content", "")
         texts, hits, rule_error = _extract(c_html, content_rule)
         j = Q.judge_content(source_type, texts, content_rule, "".join(hits), rule_error)
-        page_id = _new_page(pages, "chapter", ch_url, c_html, charset=charset)
+        page_id = _new_page(pages, "chapter", ch_url, c_html, charset=charset,
+                            fetched_at=f.fetched_at, cached=f.cached)
         st = _step("content", j, ch_url, page_id, texts, "".join(hits), rule_error)
         st["detail"] = j.reason or ("%d 字符" % j.evidence.get("chars", 0))
         steps.append(st)

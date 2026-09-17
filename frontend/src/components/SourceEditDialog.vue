@@ -43,6 +43,26 @@ function readAppHost() {
 const loading = ref(false);
 const appHost = ref(readAppHost());  // App 的 IP（连 App 调试用）
 const appDebugging = ref(false);
+
+//: 页面缓存策略（每次调试选，不落 localStorage）。
+//
+// 不记住是有意的：「只读不补抓」是**针对这一次**的怀疑（比如「我想确认抽屉里
+// 那份 HTML 就是刚才那份」），记住它会让下一次调试莫名其妙没有页面。
+// 三个值对应 core.fetch 的 CACHE_*，后端按同一份枚举校验。
+const DEBUG_CACHE_MODES = [
+  { value: "auto", label: "用缓存",
+    tip: "同一次请求 5 分钟内不再联网：页面几分钟内改动的可能性很小，而抓一次要 0.8 秒上下" },
+  { value: "only", label: "只读缓存",
+    tip: "补抓一页都不发。缓存里没有的页面会明说「本次没有抓它」，绝不偷偷去抓。注意 App 那边仍会联网跑链" },
+  { value: "refresh", label: "忽略缓存",
+    tip: "这几页全部重新抓一遍（站点刚更新、或怀疑手里的页面是旧的时用）" },
+];
+const appCacheMode = ref("auto");
+//: 当前口径的说明。下拉选项里的解释在弹层里，选完就看不见了，而这三档的差别
+//: 恰恰是「用户以为在看什么」的问题——必须留在界面上
+const debugCacheTip = computed(
+  () => (DEBUG_CACHE_MODES.find((m) => m.value === appCacheMode.value) || {}).tip || "",
+);
 // 预检结果：null=还没测过 / {state: ready|missing|unreachable, error}
 const appPreflightState = ref(null);
 const appChecking = ref(false);
@@ -607,7 +627,7 @@ async function appDebugRun() {
     }
     // 传 form.value（当前编辑中的源）：它的 bookSourceUrl 来自详情接口，是
     // 导入原文——后端要拿它当 tag，规范化过的 URL 会让 App 静默无响应
-    const r = await appDebug(form.value, key, host, 0, needPush);
+    const r = await appDebug(form.value, key, host, 0, needPush, appCacheMode.value);
     // 连不上时后端返回的是 {source:"app", error:"..."}，不是 HTTP 错误；
     // 这里翻成卡片认得的形状（卡片读 testResult.error）
     testResult.value = r && r.error ? { error: r.error } : r;
@@ -1157,6 +1177,13 @@ async function doSave(s) {
             <el-input v-model="appHost" size="small" placeholder="App 的 IP，如 192.168.1.5"
                       style="flex: 1 1 150px"
                       @blur="appPreflightRun" @keyup.enter="appPreflightRun" />
+            <!-- 页面缓存策略：只管**我们补抓的那几页**（链路本身是 App 在跑）。
+                 默认「用缓存」——调试的反馈环原来是重新联网（一条链 2.4 秒），
+                 而解析本身是毫秒级 -->
+            <el-select v-model="appCacheMode" size="small" style="width: 112px">
+              <el-option v-for="m in DEBUG_CACHE_MODES" :key="m.value"
+                         :value="m.value" :label="m.label" />
+            </el-select>
             <!-- 唯一的按钮：该不该先推送由预检的三态决定（App 里没有 / 是旧版本 /
                  一致），用户不必知道这一层。推送走 App 的 HTTP 接口，幂等 -->
             <el-button type="primary" size="small" :loading="appDebugging"
@@ -1164,6 +1191,7 @@ async function doSave(s) {
               连 App 调试
             </el-button>
           </div>
+          <p class="muted" style="margin: 6px 0 0">{{ debugCacheTip }}</p>
           <!-- 预检结果就地显示。以前只有一个「连」按钮：连不上或缺源都要干等
                60 秒超时，而且两者表现完全一样，没法对症下药。「检测中」得留一格：
                预检现在是失焦触发的，不给在途状态就成了「点完什么也没发生」 -->

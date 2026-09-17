@@ -9,6 +9,7 @@ import unittest
 from unittest.mock import patch
 
 from core import quality as Q
+from core.fetch import Fetched
 from core.verify import _cap_evidence, verify_chain
 
 SEARCH_HTML = """
@@ -52,11 +53,13 @@ SOURCE = {
 
 
 def fake_fetch(url, timeout=15, headers=None, charset="", proxy="", source=None):
-    return PAGES.get(url, "")
+    # 返回 Fetched 而不是字符串：verify_chain 现在要拿「这份页面是刚抓的还是
+    # 缓存里的」去填 pages[]（core.fetch.fetch_ex 的返回值）
+    return Fetched(PAGES.get(url, ""), False, "")
 
 
 def run_chain(source=None, **kw):
-    with patch("core.verify.fetch", side_effect=fake_fetch):
+    with patch("core.verify.fetch_ex", side_effect=fake_fetch):
         return verify_chain(source or dict(SOURCE), "我", **kw)
 
 
@@ -108,8 +111,8 @@ class StructureTests(unittest.TestCase):
         huge = SEARCH_HTML + ("x" * (Q.MAX_PAGE_HTML_CHARS + 16))
         pages = dict(PAGES)
         pages[SEARCH_URL] = huge
-        with patch("core.verify.fetch",
-                   side_effect=lambda url, **kw: pages.get(url, "")):
+        with patch("core.verify.fetch_ex",
+                   side_effect=lambda url, **kw: Fetched(pages.get(url, ""), False, "")):
             r = verify_chain(dict(SOURCE), "我")
         search_page = [p for p in r["pages"] if p["id"] == "search"][0]
         self.assertIs(search_page["truncated"], True)
@@ -121,6 +124,21 @@ class StructureTests(unittest.TestCase):
             if p["id"] != "search":
                 self.assertIs(p["truncated"], False)
                 self.assertEqual(p["len"], len(p["html"]))
+
+    def test_pages_carry_the_html_source(self):
+        """页面要带上「抓取时刻 + 是否来自缓存」——抽屉靠它标出「你看到的不是我刚抓的」。
+
+        不接线（``new_page`` 收到 meta 却丢掉）时这条变红；而只测 ``new_page``
+        本身的话，把 verify 里那两个参数删掉也照样全绿。
+        """
+        stamp = "2026-09-17 16:20:11"
+        with patch("core.verify.fetch_ex",
+                   side_effect=lambda url, **kw: Fetched(PAGES.get(url, ""), True, stamp)):
+            r = verify_chain(dict(SOURCE), "我")
+        self.assertTrue(r["pages"])
+        for p in r["pages"]:
+            self.assertIs(p["cached"], True)
+            self.assertEqual(p["fetched_at"], stamp)
 
     def test_content_values_are_full_text(self):
         """对齐 BookContent.kt:194-205：正文全文要能拿到。
@@ -270,7 +288,7 @@ class EarlyExitShapeTests(unittest.TestCase):
         def boom(url, timeout=15, headers=None, charset="", proxy=""):
             raise OSError("连接被拒绝")
 
-        with patch("core.verify.fetch", side_effect=boom):
+        with patch("core.verify.fetch_ex", side_effect=boom):
             r = verify_chain(dict(SOURCE), "我")
         search = step_of(r, "search")
         self.assertEqual(search["verdict"], Q.VERDICT_FAIL)
@@ -304,7 +322,7 @@ class LocalApproxFlagTests(unittest.TestCase):
         def boom(url, timeout=15, headers=None, charset="", proxy=""):
             raise OSError("连接被拒绝")
 
-        with patch("core.verify.fetch", side_effect=boom):
+        with patch("core.verify.fetch_ex", side_effect=boom):
             r_fetch_fail = verify_chain(dict(SOURCE), "我")      # 抓取异常早退
         self.assertIs(r_fetch_fail["local_approx"], True)
         # 仅发现模式且没给 detail_url：bookUrl 步直接判失败后早退
@@ -334,10 +352,10 @@ class FetchPassthroughTests(unittest.TestCase):
         def spy(url, timeout=15, headers=None, charset="", proxy="", source=None):
             seen.append({"url": url, "headers": headers,
                          "charset": charset, "proxy": proxy, "source": source})
-            return PAGES.get(url, "")
+            return Fetched(PAGES.get(url, ""), False, "")
 
         src = source_with(header='{"User-Agent":"UA/1.0"}', charset="gbk")
-        with patch("core.verify.fetch", side_effect=spy):
+        with patch("core.verify.fetch_ex", side_effect=spy):
             verify_chain(src, "我", proxy="http://127.0.0.1:7890")
 
         self.assertEqual([c["url"] for c in seen], next_url)
@@ -380,7 +398,7 @@ class MisconfigNoteTests(unittest.TestCase):
         def boom(url, timeout=15, headers=None, charset="", proxy=""):
             raise OSError("连接被拒绝")
 
-        with patch("core.verify.fetch", side_effect=boom):
+        with patch("core.verify.fetch_ex", side_effect=boom):
             r = verify_chain(self.misconfigured(), "我")
         self.assertTrue(any("webJs" in n for n in step_of(r, "search")["notes"]))
 
@@ -451,8 +469,8 @@ class CapEvidenceTests(unittest.TestCase):
         pages = dict(PAGES)
         pages[SEARCH_URL] = SEARCH_HTML + ("x" * 5000)
         with patch.object(Q, "MAX_EVIDENCE_TOTAL_CHARS", 10):
-            with patch("core.verify.fetch",
-                       side_effect=lambda url, **kw: pages.get(url, "")):
+            with patch("core.verify.fetch_ex",
+                       side_effect=lambda url, **kw: Fetched(pages.get(url, ""), False, "")):
                 r = verify_chain(dict(SOURCE), "我")
         self.assertEqual(step_of(r, "content")["values"], [])
         self.assertEqual(step_of(r, "content")["matched_html"], "")

@@ -253,7 +253,8 @@ def build_evidence(values: Sequence[str], matched_html: str = "") -> Dict[str, A
 # ------------------------------------------------------------------ 证据页面登记
 
 def new_page(pages: Dict[str, Dict[str, Any]], page_id: str, url: str, html: str,
-             status: int = 200, charset: str = "") -> str:
+             status: int = 200, charset: str = "",
+             fetched_at: str = "", cached: bool = False) -> str:
     """把抓到的页面登记进 ``pages``（按 id 去重），返回实际可用的 page_id。
 
     原先这是 ``core/verify.py`` 的私有函数 ``_new_page``。提到这里是因为
@@ -267,6 +268,8 @@ def new_page(pages: Dict[str, Dict[str, Any]], page_id: str, url: str, html: str
       - ``page_id`` 已存在 → 返回该 id，**保留先登记的那份**（搜索页与详情页
         可能是同一个 URL 但语义不同，先到先得）
       - ``truncated`` 按原始长度判定，``html`` 只存前 ``MAX_PAGE_HTML_CHARS`` 个字符
+      - ``fetched_at`` / ``cached`` 由调用方从 ``fetch_ex()`` 的返回值透传，
+        缺省是空串 / False（页面来源未知，不谎称它是刚抓的）
     """
     if not html:
         return ""
@@ -278,6 +281,10 @@ def new_page(pages: Dict[str, Dict[str, Any]], page_id: str, url: str, html: str
         "url": url,
         "status": status,
         "charset": charset,
+        # 页面缓存（core.fetch）命中时这两项说明「这份 HTML 是几分钟前抓的」。
+        # 默认开着缓存，不标出来的话用户会把它当成刚抓的页面
+        "fetched_at": fetched_at,
+        "cached": cached,
         "html": html[:MAX_PAGE_HTML_CHARS],
         "len": len(html),
         "truncated": truncated,

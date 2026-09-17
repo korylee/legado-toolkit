@@ -48,7 +48,7 @@ import urllib.request
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from core import quality as Q
-from core.fetch import fetch, parse_source_header
+from core.fetch import CACHE_AUTO, CacheMiss, fetch_ex, parse_source_header
 
 # ------------------------------------------------------------------ 常量
 
@@ -567,7 +567,8 @@ def _first_url(values: Sequence[str]) -> str:
 # ------------------------------------------------------------------ 页面抓取
 
 def fetch_debug_pages(steps: Sequence[Dict[str, Any]], source: Optional[Dict[str, Any]] = None,
-                      proxy: str = "", timeout: int = 15) -> List[Dict[str, Any]]:
+                      proxy: str = "", timeout: int = 15,
+                      cache: str = CACHE_AUTO) -> List[Dict[str, Any]]:
     """按 steps 抓页面，返回 ``pages[]``（与 verify_chain 同形状）。
 
     只抓「搜索页 / 详情页 / 正文页 / 发现页」各一个——按 ``page_id`` 去重后
@@ -579,6 +580,10 @@ def fetch_debug_pages(steps: Sequence[Dict[str, Any]], source: Optional[Dict[str
 
     **抓失败不抛**：App 那边的链路已经跑完了，一份页面抓不回来只该在对应 step
     的 notes 里说明，不能让整次调试的结果崩掉（用户要看的判定仍然是有效的）。
+
+    ``cache`` 见 ``core.fetch`` 的 ``CACHE_*``：默认命中缓存就用（同一份页面
+    几分钟内不再联网），置 ``CACHE_ONLY`` 时**一个请求都不发**。后者会抛
+    ``CacheMiss``——那类失败与「抓不到」不同，单独给话术。
     """
     src = source or {}
     headers, header_why = parse_source_header(str(src.get("header", "") or ""))
@@ -610,12 +615,18 @@ def fetch_debug_pages(steps: Sequence[Dict[str, Any]], source: Optional[Dict[str
         tried.add(url)
         try:
             # 传 source：最多补抓 3 页，也该遵守源声明的 concurrentRate
-            html = fetch(url, headers=headers, charset=charset, proxy=proxy,
-                         source=source)
+            f = fetch_ex(url, headers=headers, charset=charset, proxy=proxy,
+                         source=source, cache=cache)
+        except CacheMiss:
+            # **不是「抓不到」**：这是我们按要求没去抓。混成一句「抓取失败」
+            # 会让用户去查站点，而问题出在他自己刚选的模式下
+            _note(step, "只读缓存模式下这一页不在缓存里，本次没有抓它（%s）" % url)
+            continue
         except Exception as e:
             _note(step, "页面抓取失败（%s），本步判定不受影响" % e)
             continue
-        Q.new_page(pages, page_id, url, html, charset=charset)
+        Q.new_page(pages, page_id, url, f.html, charset=charset,
+                   fetched_at=f.fetched_at, cached=f.cached)
     return list(pages.values())
 
 
@@ -624,7 +635,8 @@ def fetch_debug_pages(steps: Sequence[Dict[str, Any]], source: Optional[Dict[str
 def run_app_debug(host: str, source_url_raw: str, key: str,
                   port: Optional[int] = None, timeout: int = 60,
                   source: Optional[Dict[str, Any]] = None,
-                  proxy: str = "") -> Dict[str, Any]:
+                  proxy: str = "",
+                  cache: str = CACHE_AUTO) -> Dict[str, Any]:
     """连 App 跑一次调试，返回与 ``verify_chain`` 同形状的结果，供前端抽屉直接消费。
 
     返回 ``{"source": "app", "steps": [...], "pages": [...], "all_ok": bool,
@@ -633,6 +645,9 @@ def run_app_debug(host: str, source_url_raw: str, key: str,
     ``source_url_raw`` 必须是**导入原文** ``bookSourceUrl``（理由见模块头注释）；
     ``source`` 传完整书源 dict 时才会用上它自己的 header / charset 抓页面，
     不传也能跑（页面用默认头抓，可能与 App 看到的略有差异）。
+
+    ``cache`` 只管**我们补抓的那几页**：跑这条链本身必须联网（是 App 在跑），
+    所以 ``CACHE_ONLY`` 的准确含义是「补抓不联网」，不是「整次调试离线」。
     """
     out: Dict[str, Any] = {
         "source": "app",
@@ -664,7 +679,7 @@ def run_app_debug(host: str, source_url_raw: str, key: str,
 
     steps = build_steps(events)
     try:
-        pages = fetch_debug_pages(steps, source, proxy=proxy)
+        pages = fetch_debug_pages(steps, source, proxy=proxy, cache=cache)
     except Exception as e:
         # 抓页面本就被设计成不抛（逐页 try）；这里是最后一道保险——
         # 绝不能因为「补证据」失败而把已经拿到的判定结果丢掉

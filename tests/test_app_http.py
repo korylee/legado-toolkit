@@ -18,6 +18,7 @@ import socket
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
 
 from core.app_debug import (
@@ -251,6 +252,74 @@ class AppHttpTests(unittest.TestCase):
             preflight("127.0.0.1", make_source("https://t.example/"),
                       self.app.ws_port)["state"],
             "missing")
+
+
+class AppDebugRouteCacheTests(unittest.TestCase):
+    """``/rules/app-debug`` 的 cache 参数：校验与透传。
+
+    直接调端点函数（本仓库没有 TestClient 的先例，见 tests/test_settings_api.py）。
+    两条都必须有：只测 ``fetch_ex(unknown)`` 会抛，测不到端点有没有校验；只测
+    端点校验，测不到它有没有把值传到补抓那一层。
+    """
+
+    def _body(self, **kw):
+        from backend.schemas import AppDebugRequest
+
+        payload = {"source": {"bookSourceUrl": "https://a.example",
+                              "bookSourceName": "测试源"},
+                   "key": "我", "host": "127.0.0.1"}
+        payload.update(kw)
+        return AppDebugRequest(**payload)
+
+    def test_unknown_cache_is_rejected(self):
+        import asyncio
+
+        from fastapi import HTTPException
+
+        from backend.api.rules import app_debug
+
+        for bad in ("cached", "AUTO ", "Auto"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(HTTPException) as ctx:
+                    asyncio.run(app_debug(self._body(cache=bad)))
+                self.assertEqual(ctx.exception.status_code, 400)
+                # 400 里要列出合法取值，否则用户只知道错了、不知道填什么
+                self.assertIn("refresh", ctx.exception.detail)
+
+    def test_cache_reaches_run_app_debug(self):
+        import asyncio
+
+        from backend.api.rules import app_debug
+
+        seen = {}
+
+        def fake_run(host, tag, key, port=None, timeout=60, source=None,
+                     proxy="", cache="auto"):
+            seen["cache"] = cache
+            return {"source": "app", "steps": [], "pages": [], "all_ok": True,
+                    "events": [], "error": ""}
+
+        with patch("core.app_debug.run_app_debug", side_effect=fake_run):
+            asyncio.run(app_debug(self._body(cache="only")))
+        self.assertEqual(seen["cache"], "only")
+
+    def test_default_cache_is_auto(self):
+        import asyncio
+
+        from backend.api.rules import app_debug
+
+        seen = {}
+
+        def fake_run(host, tag, key, port=None, timeout=60, source=None,
+                     proxy="", cache="auto"):
+            seen["cache"] = cache
+            return {"source": "app", "steps": [], "pages": [], "all_ok": True,
+                    "events": [], "error": ""}
+
+        with patch("core.app_debug.run_app_debug", side_effect=fake_run):
+            asyncio.run(app_debug(self._body()))
+        # 前端不传时是「用缓存」——这是默认口径，别让它悄悄变成不缓存
+        self.assertEqual(seen["cache"], "auto")
 
 
 class ReplayStepTests(unittest.TestCase):
