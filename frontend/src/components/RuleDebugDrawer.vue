@@ -321,6 +321,34 @@ async function tryCandidate(c, i) {
   }
 }
 
+/** 试出来的值能不能当链接打开，返回可打开的绝对地址（空串 = 打不开）。
+ *
+ *  **不能只认 `http(s)://`**：书源的 URL 规则取到的**大量是站内相对路径**
+ *  （实测形态如 `/manhua/xxx-5QBQX/1.html`），那反而是最常见的。
+ *  相对路径按 HTML 的规矩相对**这一页的 URL** 解析（`currentPage.url` 就是当初
+ *  抓这页用的地址）。
+ *
+ *  只认这三种形态，别的**一律当普通文本**：把「第一章」这类标题拿去 `new URL()`
+ *  会拼出一个看着像链接、点开 404 的地址，比不给按钮更糟。
+ */
+function openableUrl(v) {
+  const s = String(v || "").trim();
+  if (!s || /\s/.test(s)) return "";
+  const base = (currentPage.value && currentPage.value.url) || "";
+  if (/^https?:\/\//i.test(s)) return s;
+  if (s.startsWith("//")) return "https:" + s;      // 协议相对
+  if (s.startsWith("/") && base) {
+    try { return new URL(s, base).href; } catch (e) { return ""; }
+  }
+  return "";
+}
+
+//: 试出来要展示的那几条（最多 3 条），顺带算好能不能打开
+const tryValues = computed(() => {
+  const vals = (tryResult.value ? tryResult.value.values : []).slice(0, 3);
+  return vals.map((v) => ({ text: v, href: openableUrl(v) }));
+});
+
 //: 「用这条」：只是把规则**填进表单**，不落库——保存由用户自己在弹窗里决定
 function useCandidate(c) {
   const field = FIELD_OF_STEP[(current.value || {}).name];
@@ -650,12 +678,29 @@ async function copyMatched() {
                      @click="tryCandidate(c, i)">试</el-button>
           <el-button size="small" type="primary" plain @click="useCandidate(c)">用这条</el-button>
         </div>
-        <p v-if="tryResult" class="muted" style="margin: 6px 0 0">
-          试「<span class="mono">{{ tryResult.rule }}</span>」→
-          取到 {{ tryResult.values.length }} 条：
-          {{ tryResult.values.slice(0, 3).join("  |  ") }}
-          <span v-if="tryResult.rule_error">（本地回放不了：{{ tryResult.rule_error }}）</span>
-        </p>
+        <!-- 「试」的结果：**取到几条是判断这条候选行不行的唯一依据**，所以整块
+             独立成有底色的区域、条数做成彩签（0 条直接红），值用正常字重——
+             原来是灰色小字一行，正好把最该看见的东西做成了最不显眼的 -->
+        <div v-if="tryResult" class="try-result">
+          <div class="try-head">
+            <span class="mono">{{ tryResult.rule }}</span>
+            <el-tag v-if="tryResult.rule_error" size="small" type="warning">本地回放不了</el-tag>
+            <el-tag v-else size="small" :type="tryResult.values.length ? 'success' : 'danger'">
+              取到 {{ tryResult.values.length }} 条
+            </el-tag>
+            <span v-if="tryResult.rule_error" class="muted">{{ tryResult.rule_error }}</span>
+          </div>
+          <div v-for="(v, i) in tryValues" :key="i" class="try-value">
+            <span class="mono">{{ v.text }}</span>
+            <!-- 值是链接时给一个直接打开的入口。用 <a> 而不是 window.open：
+                 中键、右键复制链接这些原生行为都能用 -->
+            <a v-if="v.href" :href="v.href" target="_blank" rel="noopener noreferrer"
+               class="try-open">打开</a>
+          </div>
+          <div v-if="tryResult.values.length > 3" class="muted">
+            还有 {{ tryResult.values.length - 3 }} 条…
+          </div>
+        </div>
       </div>
 
       <!-- 第 2 层：**先让程序挑，挑不出来再问 AI**。
@@ -667,7 +712,7 @@ async function copyMatched() {
       <div class="ai-block">
         <div class="cand-head">
           <b>哪条候选对</b>
-          <span class="muted">（先用 App 实测值挑，挑不出来才让 AI 看）</span>
+          <span class="muted">（先拿 App 实测值对一遍，对不上再问 AI）</span>
           <span class="grow" />
           <!-- 显示的是**这一步**、这一页不是登录墙、**且配了模型**时才给点 -->
           <el-button size="small" type="primary" plain :loading="aiLoading"
@@ -680,18 +725,17 @@ async function copyMatched() {
              结果一起藏掉，而程序挑候选不依赖模型，那恰恰是没配模型的人唯一能用的 -->
         <p v-if="canSuggest && !loginWall && !llmReady" class="muted"
            style="margin: 4px 0 0">
-          还没配模型，「让 AI 提规则」用不了 —— 到「设置 → 模型」配一个。
-          <b>下面按 App 实测值挑的那趟不受影响</b>，照常显示。
+          还没配模型，去「设置 → 模型」加一个。下面那趟不花模型，照样跑。
         </p>
         <p v-if="!canSuggest" class="muted" style="margin: 4px 0 0">
-          这一步没有页面，或没有可回放的字段
+          这一步没抓到页面，或者没有能试的字段
         </p>
         <!-- 登录墙：模型看到的是登录页，不是 App 那份（App 带登录态）——先说清楚，
              别让用户点完才发现「提了也验不了」 -->
         <el-alert v-else-if="loginWall" type="warning" :closable="false" show-icon
                   style="margin: 6px 0 0"
-                  title="这一页是登录页 / 反爬页：App 里带登录态、我们抓不到同样的页面。本地能提的建议价值有限，改这条规则要连 App 试。" />
-        <p v-else-if="preselLoading" class="muted" style="margin: 4px 0 0">正在按 App 实测值挑…</p>
+                  title="这页是登录页或反爬页。我们抓到的页面和 App 看到的不一样，改规则得连 App 试。" />
+        <p v-else-if="preselLoading" class="muted" style="margin: 4px 0 0">正在拿 App 实测值对…</p>
         <!-- 程序挑出来了：直接把结论和依据摆出来 -->
         <template v-else-if="preselRes && preselRes.preselect && preselRes.preselect.picked">
           <div class="cand">
@@ -705,7 +749,7 @@ async function copyMatched() {
         </template>
         <!-- 挑不出来：说清是哪种挑不出来（没有基准 / 分不出高下），用户才知道该不该点 AI -->
         <p v-else-if="preselRes && preselRes.preselect" class="muted" style="margin: 6px 0 0">
-          程序挑不出来：{{ preselRes.preselect.reason }}
+          没挑出来：{{ preselRes.preselect.reason }}
         </p>
         <p v-if="aiRes && aiRes.error" class="muted ai-err">{{ aiRes.error }}</p>
         <p v-if="aiRes && aiRes.reason" class="muted" style="margin: 6px 0 0">
@@ -714,13 +758,9 @@ async function copyMatched() {
         <!-- token 用量：一眼看出这次花了多少、前缀缓存吃到没有。
              「缓存命中」那一项只有服务端支持并返回时才显示 -->
         <p v-if="aiUsage" class="muted" style="margin: 6px 0 0">
-          本次 {{ aiUsage.prompt_tokens }} tokens
-          <template v-if="aiUsage.prompt_cache_hit_tokens">
-            （缓存命中 {{ aiUsage.prompt_cache_hit_tokens }}）
-          </template>
-          <template v-else-if="aiUsage.completion_tokens">
-            （输出 {{ aiUsage.completion_tokens }}）
-          </template>
+          本次 {{ aiUsage.prompt_tokens }} tokens<template
+            v-if="aiUsage.prompt_cache_hit_tokens"> · 缓存命中 {{ aiUsage.prompt_cache_hit_tokens }}</template><template
+            v-else-if="aiUsage.completion_tokens"> · 输出 {{ aiUsage.completion_tokens }}</template>
         </p>
         <div v-for="(c, i) in (aiRes ? aiRes.candidates : [])" :key="i" class="cand">
           <span class="mono rule">{{ c.rule }}</span>
@@ -872,6 +912,16 @@ async function copyMatched() {
 .cand { display: flex; align-items: baseline; gap: 6px; padding: 2px 0; }
 .cand .rule { flex: 0 0 auto; }
 .cand .samples { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 「试」的结果：独立底色 + 正常字重，别混进上面那排候选里 */
+.try-result {
+  margin: 8px 0 0; padding: 8px 10px;
+  background: #f5f7fa; border: 1px solid #e4e7ed; border-radius: 4px;
+}
+.try-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.try-head .mono { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.try-value { display: flex; align-items: baseline; gap: 8px; margin-top: 6px; }
+.try-value .mono { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.try-open { flex: 0 0 auto; font-size: 12px; }
 .diagnosis {
   margin: 8px 0;
   padding: 8px 10px;
