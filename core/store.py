@@ -34,7 +34,7 @@ from core.tags import (
     split_system_user as _split_group,
 )
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 #: 本进程内已经建过 schema 的库（绝对路径）。
 #:
@@ -64,11 +64,14 @@ PRAGMAS = (
     "PRAGMA temp_store=MEMORY",
 )
 
-DDL = [
-    "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)",
-    """CREATE TABLE IF NOT EXISTS sources (
+#: `sources` 的表结构。**只有这一份**：建表（`DDL` 列表）与
+#: `migrate_sources_url_scope_once` 的重建都引用它——抄两份必然漂移。
+#:
+#: `source_url` **故意不带表级 UNIQUE**：唯一性由 `idx_sources_live_url` 这个
+#: 部分唯一索引表达（只约束在用的行）。差别见迁移方法的注释。
+SOURCES_DDL = """CREATE TABLE IF NOT EXISTS sources (
         id           INTEGER PRIMARY KEY,
-        source_url   TEXT NOT NULL UNIQUE,
+        source_url   TEXT NOT NULL,
         name         TEXT NOT NULL DEFAULT '',
         source_type  INTEGER NOT NULL DEFAULT 0,
         group_name   TEXT NOT NULL DEFAULT '',
@@ -80,10 +83,21 @@ DDL = [
         deleted_at   TEXT NOT NULL DEFAULT '',
         created_at   TEXT NOT NULL,
         updated_at   TEXT NOT NULL
-    )""",
+    )"""
+
+DDL = [
+    "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)",
+    SOURCES_DDL,
     "CREATE INDEX IF NOT EXISTS idx_sources_type  ON sources(source_type)",
     "CREATE INDEX IF NOT EXISTS idx_sources_group ON sources(group_name)",
     "CREATE INDEX IF NOT EXISTS idx_sources_name  ON sources(name)",
+    # 「在用」的源每个 URL 至多一行；回收站可以留同一 URL 的多个历史版本。
+    # 原来是表级 UNIQUE(source_url)，那会把回收站和在用的逼到同一个位置上——
+    # 删除只是原地打标记、没有腾出 URL，于是「删了再导入」必然撞车判冲突。
+    # 为什么「在用」的唯一性必须保住、迁移怎么做，见
+    # `Store.migrate_sources_url_scope_once` 的注释。
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_sources_live_url "
+    "ON sources(source_url) WHERE deleted_at = ''",
     """CREATE TABLE IF NOT EXISTS checks (
         id                  INTEGER PRIMARY KEY,
         source_url          TEXT NOT NULL,
@@ -285,6 +299,9 @@ class Store:
             for name, decl in cols:
                 if name not in have:
                     self.conn.execute("ALTER TABLE %s ADD COLUMN %s %s" % (table, name, decl))
+        # 表结构迁移要在建视图**之前**：它会重建 sources，而重建过程必须先
+        # DROP VIEW（否则 RENAME 会改写视图定义）
+        self.migrate_sources_url_scope_once()
         self._backfill_job_expiry()
         self.conn.execute("DROP VIEW IF EXISTS v_sources")
         self.conn.execute(self.VIEW_DDL)
@@ -311,6 +328,70 @@ class Store:
         self.close()
 
     # ------------------------------------------------------------ meta
+    def migrate_sources_url_scope_once(self) -> bool:
+        """Once-off：把 source_url 的「全表唯一」放宽成「仅在用唯一」。
+
+        **要解决的问题**：原先 ``source_url TEXT NOT NULL UNIQUE``，而删除只是
+        **原地打标记**、没有腾出 URL。于是「先删掉旧的、再导入新版」这条最自然的
+        路径必然撞上回收站里那一行，被判成「同 URL 不同规则」→ 冲突 → 留存到一个
+        谁也没法采纳的文件里。实测：导入 2 条源、2 条全进冲突；而用户既不能更新、
+        也不能清空回收站——三条路同时堵死。
+
+        **改法**：表级 UNIQUE 换成部分唯一索引 ——
+
+          - 在用（``deleted_at = ''``）：每个 URL 至多一行。**这条必须保住**：
+            App 存书源是 ``@Insert(onConflict = REPLACE)``、键是 bookSourceUrl
+            （``BookSourceController.kt:33``），两条同 URL 的源导出过去只会留最后
+            一条，另一条**静默消失**。
+          - 回收站：同一 URL 可以留多个历史版本。于是「删了再导入」天然成立，
+            旧版还留在回收站里可回滚。
+
+        **SQLite 不能直接删约束**，只能重建表。老结构的标志是
+        ``sqlite_autoindex_sources_1``（表级 UNIQUE 自动建的那个索引）。
+
+        **必须先 DROP VIEW**：SQLite 3.25 起 ``ALTER TABLE ... RENAME`` 会**改写**
+        引用该表的视图定义，不先删掉的话 ``v_sources`` 会被改写成指向临时表名。
+        （``_init_schema`` 后面本来就会重建它，所以这里删掉是安全的。）
+
+        口径同其它 ``*_once``：进程级幂等，标记 ``sources_url_scope_v2``。
+        """
+        if self.get_meta("sources_url_scope_v2"):
+            return False
+        idx = {r["name"] for r in self.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='sources'")}
+        if "sqlite_autoindex_sources_1" not in idx:
+            # 全新库（DDL 已按新结构建表）或已经迁过
+            self.set_meta("sources_url_scope_v2", now())
+            return False
+        old_cols = [r["name"] for r in self.conn.execute("PRAGMA table_info(sources)")]
+        with self.conn:
+            self.conn.execute("DROP VIEW IF EXISTS v_sources")
+            self.conn.execute("ALTER TABLE sources RENAME TO sources_old_migrate")
+            self.conn.execute(SOURCES_DDL)
+            new_cols = [r["name"] for r in self.conn.execute("PRAGMA table_info(sources)")]
+            # 只拷两边都有的列：老库可能有新结构没有的列（迁移的目标就是对齐结构，
+            # 不是保留一切）。反过来新结构新增的列由 DDL 的默认值兜。
+            common = [c for c in new_cols if c in old_cols]
+            # **NOT NULL 列必须兜底**：老库的列可以是可空的（例如更早的结构里
+            # `fingerprint TEXT` 没有 NOT NULL，实测就是这样），直接拷会整体
+            # 失败在 "NOT NULL constraint failed: sources.fingerprint"。
+            # `source_url` / `raw_json` 不兜底——它们是行的身份与本体，为 NULL 说明
+            # 这行本来就没法用；这时**应该**报错，而不是静默编一个空值糊过去。
+            fill = {"name": "''", "source_type": "0", "group_name": "''",
+                    "user_tags": "''", "system_tags_locked": "0", "enabled": "1",
+                    "fingerprint": "''", "deleted_at": "''",
+                    "created_at": "''", "updated_at": "''"}
+            sel = ", ".join("COALESCE(%s, %s)" % (c, fill[c]) if c in fill else c
+                            for c in common)
+            self.conn.execute("INSERT INTO sources(%s) SELECT %s FROM sources_old_migrate"
+                              % (", ".join(common), sel))
+            self.conn.execute("DROP TABLE sources_old_migrate")
+            self.conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_sources_live_url "
+                "ON sources(source_url) WHERE deleted_at = ''")
+        self.set_meta("sources_url_scope_v2", now())
+        return True
+
     def get_meta(self, key: str, default: str = "") -> str:
         row = self.conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
         return row["value"] if row else default
@@ -424,7 +505,11 @@ class Store:
         sql = (
             "INSERT INTO sources(source_url,name,source_type,group_name,user_tags,enabled,"
             "raw_json,fingerprint,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?) "
-            "ON CONFLICT(source_url) DO UPDATE SET name=excluded.name, "
+            # 冲突目标必须是**部分唯一索引**（只在用的行），不能只写 (source_url)：
+            # 表级 UNIQUE 已经换成 `idx_sources_live_url ... WHERE deleted_at = ''`。
+            # 语义正是想要的——回收站里的同 URL 行**不构成冲突**，于是「删了再导入」
+            # 会新开一行在用的（旧版仍留在回收站），而不是覆盖或报错。
+            "ON CONFLICT(source_url) WHERE deleted_at = '' DO UPDATE SET name=excluded.name, "
             "source_type=excluded.source_type, "
             "group_name=CASE WHEN system_tags_locked=1 THEN group_name "
             "ELSE excluded.group_name END, "
