@@ -114,6 +114,39 @@ class OrganizerTests(unittest.TestCase):
                          "📖小说,可用,规则完整,番茄,正版,原创")
 
 
+class HealthTableCoverageTests(unittest.TestCase):
+    """三张「按健康态分支」的表必须覆盖 `HEALTH_NAMES` 的每个键。
+
+    它们都走 `.get(key, 默认)` 兜底，**漏一个键不报错**，只是静默给出错误分类：
+
+      - `HEALTH_ORDER`：漏了 → 排序落到 9（最后）。CERT 就这样排到了 SKIPPED 之后
+      - `STATUS_GROUP_NAMES`：漏了 → 落进「待验证」。CERT 也犯过（见那张表的注释）
+      - `HEALTH_NAMES` 本身是权威，前两张表由它派生
+
+    新增健康态时，这条用例会红——比在生产里发现「这个档位的源被排到最后」便宜得多。
+    """
+
+    def test_order_covers_every_health(self) -> None:
+        from core.models import HEALTH_NAMES
+        from core.organizer import HEALTH_ORDER
+
+        self.assertEqual(set(HEALTH_ORDER), set(HEALTH_NAMES),
+                         "HEALTH_ORDER 与 HEALTH_NAMES 的键集必须一致")
+
+    def test_group_names_cover_every_health(self) -> None:
+        from core.models import HEALTH_NAMES
+        from core.organizer import STATUS_GROUP_NAMES
+
+        self.assertEqual(set(STATUS_GROUP_NAMES), set(HEALTH_NAMES),
+                         "STATUS_GROUP_NAMES 与 HEALTH_NAMES 的键集必须一致")
+
+    def test_cert_sorts_before_skipped(self) -> None:
+        """CERT 是「可达、有结论、能自己处理」的档，不该排在 SKIPPED 之后。"""
+        from core.organizer import HEALTH_ORDER
+
+        self.assertLess(HEALTH_ORDER[Health.CERT], HEALTH_ORDER[Health.SKIPPED])
+
+
 # ---------------------------------------------------------------- 变异记录
 # 实测（改坏 → python -B -m unittest tests.test_organizer → 确认变红 → 还原）：
 #
@@ -123,6 +156,11 @@ class OrganizerTests(unittest.TestCase):
 #        → test_unrecognizable_group_is_pending_not_auth 红
 #  M3  去掉「需代理复检」的识别
 #        → test_status_tag_round_trips_through_inference 红
+#  M4  HEALTH_ORDER 删掉 CERT
+#        → HealthTableCoverageTests.test_order_covers_every_health 红
+#        （三张按健康态分支的表都走 `.get(key, 默认)` 兜底，**漏一个键不报错**，
+#          只是静默给错分类——CERT 就在 HEALTH_ORDER 与 STATUS_GROUP_NAMES 里
+#          各漏过一次）
 #
 # M3 撞出的是一个**既有 bug**，与本轮改动无关：group_title 写出去的是
 # 「需代理复检」，而 infer_health_from_group 只认「需翻墙/被墙/🌐」，GFW 的往返

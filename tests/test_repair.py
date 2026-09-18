@@ -3,6 +3,7 @@
 
 import asyncio
 import unittest
+from unittest.mock import patch
 
 from core.repair import loop as R
 
@@ -282,6 +283,68 @@ class PromptTests(unittest.TestCase):
         self.assertIn("image", p)
 
 
+class LoginWallTests(unittest.TestCase):
+    """抓到的是登录页时**不许修**。
+
+    修复循环最贵的一种失败不是「修不好」，是「**看着修好了**」：登录墙返回的是
+    200 + 登录页，那是「抓取成功」，于是登录页的 DOM 会被当成证据喂给模型，
+    模型只能盲改；而本地回放对着登录页跑，还可能判「通过」。
+    """
+
+    WALL = "<html><body>请先登录后查看内容<input type='password'></body></html>"
+    LIST_PAGE = '<div class="list"><a href="/b/1">斗破苍穹</a></div>'
+    #: 声明了 cookie jar 的源：登录墙判定那一档（200 + 登录词）以它为前提。
+    #: 不声明的源**故意不判**——「请登录」在正常页面的导航栏里太常见
+    #: （实测：裸 login 误伤过 797 条）。
+    WALL_SOURCE = dict(SOURCE, enabledCookieJar=True)
+
+    def _evidence(self, source, pages):
+        from core.repair import evidence as E
+
+        def fake_fetch(url, *a, **k):
+            return pages.get(url, pages.get("*", ""))
+
+        with patch("services.add_source.fetch", side_effect=fake_fetch):
+            return asyncio.run(E.build_evidence(source, "斗破苍穹"))
+
+    def test_wall_is_not_registered_as_evidence(self):
+        ev = self._evidence(self.WALL_SOURCE, {"*": self.WALL})
+        self.assertEqual(ev["pages"], {})              # 登录页不进证据
+        self.assertTrue(ev["login_wall"])              # 但要留痕（哪几页撞了）
+        self.assertIs(ev["ok"], False)                 # 不算「有证据」
+        self.assertTrue([f for f in ev["failures"] if "登录墙" in f])
+
+    def test_normal_page_is_untouched(self):
+        """反向保护：正常页不能被判成登录墙（判宽了等于把能修的源全挡掉）。"""
+        ev = self._evidence(self.WALL_SOURCE, {"*": self.LIST_PAGE})
+        self.assertEqual(ev["login_wall"], [])
+        self.assertTrue(ev["pages"])
+
+    def test_source_without_cookie_jar_keeps_working(self):
+        """没声明 cookie jar 的源不判登录墙（判定表的前提，别在这里再抄一份）。"""
+        ev = self._evidence(dict(SOURCE), {"*": self.WALL})
+        self.assertEqual(ev["login_wall"], [])
+
+    def test_repair_stops_with_its_own_status(self):
+        """撞墙要给独立 status：用户才知道该去 App 里试，而不是以为站点坏了。"""
+        ev = self._evidence(self.WALL_SOURCE, {"*": self.WALL})
+        llm = FakeLLM([])
+        res = asyncio.run(R.repair_one(None, llm, self.WALL_SOURCE, "k",
+                                       evidence=ev, verifier=make_verifier("GOOD")))
+        self.assertEqual(res["status"], "login_wall")
+        self.assertEqual(llm.calls, 0)                 # 一轮都不烧
+        report = R.build_report([res])
+        self.assertIn("撞登录墙", report)
+
+    def test_unreplayable_rule_is_not_called_broken(self):
+        """「本地跑不了」不能报成「规则已失效」——后者会让人去改一条没坏的规则。"""
+        src = dict(SOURCE, ruleSearch={"bookList": "@js:return doc.select('.x')",
+                                       "bookUrl": "a@href"})
+        ev = self._evidence(src, {"*": self.LIST_PAGE})
+        self.assertTrue([f for f in ev["failures"] if "无法回放" in f])
+        self.assertFalse([f for f in ev["failures"] if "搜索规则已失效" in f])
+
+
 # ---------------------------------------------------------------- 变异记录
 # 以下为实测（改坏 → `python -B -m unittest tests.test_repair` → 确认变红 → 还原）。
 # 前六条是剥离点（见 RepairLoopStripEvidenceTests 上方），后四条是合并护栏：
@@ -294,6 +357,15 @@ class PromptTests(unittest.TestCase):
 #        → MergeGuardTests.test_skipped_reaches_result_and_report 红
 #  M4  build_report 不列跳过清单
 #        → MergeGuardTests.test_skipped_reaches_result_and_report 红
+#
+#  修复循环接登录墙（2026-09-18）：
+#  M5  build_evidence 不判登录墙（登录页当证据收下）
+#        → LoginWallTests.test_wall_is_not_registered_as_evidence 红
+#  M6  撞墙时不给独立 status（落回 no_evidence）
+#        → LoginWallTests.test_repair_stops_with_its_own_status 红
+#  M7  本地跑不了的规则报成「搜索规则已失效」
+#        → LoginWallTests.test_unreplayable_rule_is_not_called_broken 红
+#        （M7 断的是**话术方向**：结论都对，但用户会去改一条没坏的规则）
 
 if __name__ == "__main__":
     unittest.main()

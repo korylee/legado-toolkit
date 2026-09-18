@@ -124,6 +124,30 @@ class JsonPathTests(unittest.TestCase):
     def test_nested_extract(self):
         self.assertEqual(R.extract_all(JSONTEXT, "$.data.list[*].name"), ["A", "B"])
 
+    def test_array_index_takes_effect(self):
+        """JSON 数组下标要**真的取到值**（`$.a.list[0].name`）。
+
+        这条守的是一个路由 bug：`_walk_hits` 里通用的 index 分支排在 JSON 分支
+        前面，于是下标作用在「中间结果列表」而不是「JSON 数组」上——
+        `$.data.list[0].name` 先 key data → key list（拿到整个 list）→ index 0
+        （取的是那个 list 自己）→ key name 落空。症状与「源取不到值」一模一样，
+        所以没有任何用例发现它，直到按条数去数「哪些写法被判成回放不了」。
+        """
+        self.assertEqual(R.extract_all(JSONTEXT, "$.data.list[0].name"), ["A"])
+        self.assertEqual(R.extract_all(JSONTEXT, "$.data.list[-1].name"), ["B"])
+        self.assertEqual(R.extract_all("[%s]" % JSONTEXT, "$[0].data.list[1].name"), ["B"])
+
+    def test_json_range_index_still_unsupported(self):
+        """区间下标我们没实现（`_parse_json_steps` 只认 `[*]` 与 `['键']`）。
+
+        要求报**JSONPath 那句**，不能报 CSS 的「点式的 .0 / .-1 支持」——
+        同一个 `[1:3]` 在两种规则里要改的地方完全不同。
+        """
+        ok, why = R.rule_supported("$.data.list[1:3].name")
+        self.assertFalse(ok)
+        self.assertIn("JSONPath", why)
+        self.assertNotIn("点式", why)
+
     def test_json_prefix(self):
         self.assertEqual(R.extract_all(JSONTEXT, "@json:$.data.list[*].url"), ["/a", "/b"])
 
@@ -156,6 +180,17 @@ class UnsupportedTests(unittest.TestCase):
             "tag.div[0:10:2]",              # 区间索引（带步长）
             "$.data.list$1",                # $n 取列表第 n 项
             "class.a@text@get:{name}",      # 变量读取
+            # 简写与索引式（2026-09-18 补）：它们不是 CSS，交给 BeautifulSoup
+            # 会「选不中」或直接抛语法错误 → 此前静默跑空 → **判源失效**
+            "text.查看完整目录@href",         # 取「自身文本包含 X」的元素
+            "children.目录@tag.a@href",      # children()（点后的名字被忽略）
+            "tag.div[-1]@href",             # 负索引
+            "class.item[0]@text",           # 正索引
+            "class.item[1,3]@text",         # 索引列表
+            "class.item[!0]@text",          # 排除索引
+            "li!0@tag.a@href",              # 排除索引（无括号写法）
+            "dd!0:1:2@text",                # 排除一串下标
+            "//div[@class=\"x\"]@text",      # XPath
         ]
         for rule in rules:
             ok, why = R.rule_supported(rule)
@@ -163,14 +198,73 @@ class UnsupportedTests(unittest.TestCase):
             self.assertTrue(why, "必须给出原因：%s" % rule)
 
     def test_supported_syntax_not_affected(self):
-        """反向断言：新检测不能误伤本来能跑通的规则。"""
+        r"""反向断言：新检测不能误伤本来能跑通的规则。
+
+        **方括号那两条是本节最重要的反向断言**：Legado 的索引式只在括号里放
+        数字 / `-` / `:` / `,` / `!`（`AnalyzeByJSoup.findIndexSet`），而
+        `a[href]` / `a[href^="http"]` 是**合法 CSS 属性选择器**——检测写宽一格
+        （比如 `\[.*\]`）就会把这 450 条源的规则一起判成「回放不了」。
+        """
         for rule in ("class.a@tag.b@text", "class.item@href", "@css:class.a@text",
                      "$.data.list[*].name", "id.content@text##广告##",
                      "id.content@text##广告##替换",
                      "id.content@text##广告##x###",   # ## 第四段：2026-09-16 起已实现
-                     "class.a@text", "text", "class.list@tag.li"):
+                     "class.a@text", "text", "class.list@tag.li",
+                     "a[href]@text", "a[href^=\"http\"]@href", "[data-x]@text",
+                     "class.item.0@text", "class.item.-1@href",
+                     # JSONPath 的数组下标是**我们实现了的**（`_json_walk` 的
+                     # index 分支）。索引式检测必须按 kind 让开，否则 json 源会被
+                     # 自己的下标判成「索引式未实现」——实测 22 条规则。
+                     "$.data[0].name", "$.data.list[-1].name", "$['k'][0].name"):
             ok, why = R.rule_supported(rule)
             self.assertTrue(ok, "被误伤：%s (%s)" % (rule, why))
+
+
+class UnsupportedSelectorTests(unittest.TestCase):
+    """解析期没拦住的非法选择器，执行期不能再静默当空（`_css_select` 的兜底）。
+
+    解析期只认**已知**的几类写法；这里守的是「其余交给 BeautifulSoup 直接抛」
+    那一类——吞掉异常就又是一次「我们解析不了」被说成「源取不到值」。
+    """
+
+    HTML = '<div class="a"><p>x</p></div>'
+
+    def test_bad_selector_becomes_rule_error(self):
+        vals, err = R.extract_all_ex(self.HTML, "class.a@div:foo@text")
+        self.assertEqual(vals, [])
+        self.assertIn("选择器无法解析", err)
+
+    def test_unclosed_bracket_becomes_rule_error(self):
+        _vals, err = R.extract_all_ex(self.HTML, "class.a@[bad@text")
+        self.assertIn("选择器无法解析", err)
+
+    def test_verdict_does_not_depend_on_node_count(self):
+        """同一个非法选择器，**上游有没有命中都得给同一个结论**。
+
+        只在 `select()` 抛异常时才算的话：节点列表为空时循环根本不执行 →
+        同一个规则因为「上游凑巧没选中」而变成 fail。这条就是守那个分支。
+        """
+        _v1, err_hit = R.extract_all_ex(self.HTML, "class.a@div:foo@text")
+        _v2, err_miss = R.extract_all_ex(self.HTML, "class.nothing@div:foo@text")
+        self.assertIn("选择器无法解析", err_hit)
+        self.assertIn("选择器无法解析", err_miss)
+
+    def test_index_forms_report_which_kind(self):
+        """索引类的几种写法要**各自说清是哪一种**。
+
+        理由与下面那条 JS 用例相同：它们最终都是 unknown，但用户看到的话决定他往哪改。
+        `li!0`（排除第 0 个）报成「选择器无法解析」，读者会以为是自己写错了规则——
+        而真相是**我们只实现了点式选择、没实现排除**（`AnalyzeByJSoup.findIndexSet`：
+        `.` 与 `!` 都是索引分隔符，语义相反）。
+        """
+        for rule, want in (("li!0@tag.a@href", "排除索引"),
+                           ("dd!0:1:2@text", "排除索引"),
+                           ("tag.div[-1]@href", "索引式"),
+                           ("text.查看完整目录@href", "简写"),
+                           ("//div[@class=\"x\"]@text", "XPath")):
+            ok, why = R.rule_supported(rule)
+            self.assertFalse(ok, rule)
+            self.assertIn(want, why, "%s 的原因指向错了：%s" % (rule, why))
 
     def test_js_in_middle_reports_js_reason(self):
         """`selector@js:code` 的 JS 体里出现 $1/&&/@get: 时，报的原因必须是 JS。
@@ -353,3 +447,31 @@ if __name__ == "__main__":
 #
 #  反向断言 `test_third_segment_still_replaces_all` 在 M8/M9/M10 下**全绿**——
 #  它守的是「别把三段式也改成只替第一处」，方向相反，本就不该被这三条变异触发。
+#
+#  **2026-09-18 补：回放边界（简写 / 索引 / 排除索引 / XPath）**
+#
+#  M29  删掉 `text.` / `children.` 简写检测（照旧当 CSS 跑）
+#        → UnsupportedTests.test_legado_only_syntax_reported 红
+#  M30  删掉方括号索引式检测
+#        → UnsupportedTests.test_legado_only_syntax_reported 红
+#  M31  **索引检测写宽**（`\[[\s\d,:!-]*\]` → `\[[^\]]*\]`）
+#        → UnsupportedTests.test_supported_syntax_not_affected 红
+#        （这条守的是反向：`a[href]` / `a[href^="http"]` 是**合法 CSS 属性选择器**，
+#          实测 450 条源在用；检测写宽一格就全部被误判成「回放不了」）
+#  M32  `_css_select` 退回 `except Exception: continue`（预校验也一并去掉）
+#        → UnsupportedSelectorTests.test_bad_selector_becomes_rule_error 红
+#  M33  去掉解析期的选择器预校验（只在 select() 抛异常时才报）
+#        → UnsupportedSelectorTests.test_verdict_does_not_depend_on_node_count 红
+#        （节点列表为空时循环体不执行 → 同一个非法选择器因为「上游凑巧没选中」
+#          而变成 fail；判定不该依赖这种偶然）
+#  M34  删掉排除索引 `!0` 检测   → UnsupportedTests.test_index_forms_report_which_kind 红
+#  M35  删掉 `//` 开头的 XPath 检测 → UnsupportedTests.test_index_forms_report_which_kind 红
+#        （M34/M35 断的是**原因内容**：退回执行期兜底后结论仍对，但话变成了
+#          「选择器无法解析」——读者会以为是自己写错了规则）
+#  M36  JSON 的 index 步不走 `_json_walk`（退回通用分支）
+#        → JsonPathTests.test_array_index_takes_effect 红
+#  M37  索引式检测不给 `pr.kind == "json"` 让路
+#        → UnsupportedTests.test_supported_syntax_not_affected 红
+#        （M36/M37 是一对：**JSON 的 `[0]` 是实现了的**，把 CSS 的索引检测套上去
+#          就把它判成「索引式未实现」；而修 M36 之前，「放行」同样错——会变成
+#          静默跑空＝判源失效。两条都钉着才算把这件事收干净。）

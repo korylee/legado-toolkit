@@ -6,11 +6,9 @@
 
 from __future__ import annotations
 
-import argparse
 import asyncio
 import json
 import os
-import sys
 from typing import Any, Dict, List, Optional, Tuple
 
 SYSTEM_PROMPT = """你是 Legado（阅读 App）书源的规则修复专家。只输出 JSON，不要解释。
@@ -196,6 +194,12 @@ async def repair_one(session, client, source: Dict[str, Any], keyword: str,
     if before.get("all_ok"):
         out["status"] = "already_ok"
         return out
+    if ev.get("login_wall"):
+        # 抓到了页面，但那是登录页 / 反爬页——App 里带登录态，我们看不到内容页。
+        # **不能修**：模型只能对着登录页盲改，而本地回放还会说「通过」。
+        # 与 no_evidence 分开报，用户才知道该去 App 里试，而不是以为站点坏了。
+        out["status"] = "login_wall"
+        return out
     if not ev.get("ok"):
         out["status"] = "no_evidence"
         return out
@@ -289,6 +293,7 @@ def build_report(results: List[Dict[str, Any]]) -> str:
 
     labels = {"fixed": "已修复", "already_ok": "本来就可用", "failed": "修复失败",
               "dry_run": "缺 API Key（仅抓了证据）", "no_evidence": "抓不到证据",
+              "login_wall": "撞登录墙（本地看不到内容页，只能连 App 试）",
               "llm_error": "LLM 调用失败", "error": "异常"}
     cnt = Counter(r.get("status", "?") for r in results)
     L = ["# AI 规则修复报告", "", "共 %d 个源。" % len(results), "",
@@ -302,11 +307,13 @@ def build_report(results: List[Dict[str, Any]]) -> str:
               "那部分，只能连 App 验。" % n_skip]
     L += ["", "## 明细", ""]
     for r in results:
-        if r.get("status") not in ("fixed", "failed"):
+        if r.get("status") not in ("fixed", "failed", "login_wall"):
             continue
         L.append("### %s  `%s`" % (r.get("name") or "(无名)", r.get("url") or ""))
         L.append("")
         L.append("- 结果：**%s**（%d 轮）" % (labels.get(r.get("status"), r.get("status")), r.get("rounds", 0)))
+        for page in (r.get("evidence") or {}).get("login_wall") or []:
+            L.append("- 登录墙页：`%s`" % page)
         if r.get("status") == "failed":
             L.append("- 最后失败原因：%s" % _fail_brief(r.get("after")))
         for h in r.get("history") or []:

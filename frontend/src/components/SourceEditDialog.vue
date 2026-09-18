@@ -1268,7 +1268,8 @@ async function doSave(s) {
           <p class="muted" v-pre style="margin: 10px 0 0; line-height: 1.7">
             <b>以下语法本地回放不了</b>，只能用「连 App 调试」验：<br>
             @js: / &lt;js&gt; / {{ }} / || / @xpath: / &amp;&amp; / %% / $n /
-            区间索引 [0:10] / @webjs: / @get:{ } / ## 第四段
+            区间索引 [0:10] / 索引式 [-1] [0] [1,3] [!0] / text. 与 children. 简写 /
+            @webjs: / @get:{ }
           </p>
         </el-card>
       </el-col>

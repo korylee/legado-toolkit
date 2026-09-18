@@ -345,8 +345,43 @@ def parse_rule(rule: str) -> ParsedRule:
     if "&&" in body or "%%" in body:
         pr.unsupported = "多规则合并（&& / %%）暂未支持"
         return pr
-    if re.search(r"\[\s*-?\d+(?:\s*:\s*-?\d+){1,2}\s*\]", body):
-        pr.unsupported = "区间索引（[start:end:step]）暂未支持"
+    # 下面三条只管 **CSS** 规则。`$.data[0].name` 里的方括号是 **JSONPath 下标**，
+    # 而 JSONPath 那条路（`_parse_json_steps`）本来就支持它——不设这道门，json 源
+    # 会被自己的下标判成「索引式未实现」（实测 49 条规则误伤，其中 7 条落在本地校验
+    # 真正评估的 5 个字段里）。判据用 `pr.kind`：它在第 2 步就定好了。
+    if pr.kind != "json":
+        if re.search(r"\[\s*-?\d+(?:\s*:\s*-?\d+){1,2}\s*\]", body):
+            pr.unsupported = "区间索引（[start:end:step]）暂未支持"
+            return pr
+        # 方括号索引式的其余形态（`[-1]` / `[0]` / `[1,3]` / `[!0]`）。Legado 的
+        # `AnalyzeByJSoup.findIndexSet` 只认数字 / `-` / `:` / `,` / `!` 与空格，所以
+        # **`a[href]` 这类 CSS 属性选择器（含字母）不会命中这里**——那些是合法 CSS，
+        # 一个字都不能动。点式的 `.0` / `.-1` 我们已经实现，方括号式没实现，而它交给
+        # BeautifulSoup 是**语法错误**（`div[-1]` 抛 SelectorSyntaxError）。
+        if re.search(r"\[[\s\d,:!-]*\]", body):
+            pr.unsupported = ("索引式（[-1] / [0] / [1,3] / [!0]）暂未支持；"
+                              "点式的 .0 / .-1 支持")
+            return pr
+    # 位置索引的**排除**写法：`li!0`（除第 0 个）/ `li!-1` / `dd!0:1:2`（一串下标）。
+    # 依据 `AnalyzeByJSoup.findIndexSet` 的无括号分支：`!` 与 `.` 都是索引分隔符，
+    # 但语义相反——`.` 是「留下这些下标」，`!` 是**排除**这些下标。我们只实现了 `.`。
+    # CSS 选择器里不会出现 `!数字`（`!important` 只在声明里、不进选择器），不会误伤。
+    if pr.kind != "json" and re.search(r"!\s*-?\d", body):
+        pr.unsupported = ("排除索引（!0 / !-1 / !0:1:2）暂未支持；"
+                          "选第几个用点式 .0 / .-1")
+        return pr
+    # XPath：Legado 认 `//` 开头的规则，我们只能连 App 试。
+    # 放在 `@xpath:` 那条之前没关系——两条给的是同一个结论与措辞。
+    if body.lstrip().startswith("//"):
+        pr.unsupported = "XPath 规则需要 Legado 引擎，无法离线回放"
+        return pr
+    # 段首的 `text.` / `children.` 简写。依据 `AnalyzeByJSoup.kt:310-322` 的分派表：
+    # `children` → `children()`（点后的名字被忽略）、`text.X` →
+    # `getElementsContainingOwnText(X)`。两个我们都没实现，而它们**不是 CSS**：
+    # `text.查看完整目录` 会被当成「标签 text、类名 查看完整目录」，永远选不中 →
+    # 静默跑空 → 判源失效。这条与上面那条是同一件事：没实现 ≠ 源坏了。
+    if re.search(r"(?:^|@)\s*(?:text|children)\s*\.", body):
+        pr.unsupported = "text. / children. 简写暂未实现（本地选不中节点）"
         return pr
     if re.search(r"\$\d{1,2}", body):
         pr.unsupported = "$n 取列表第 n 项暂未支持"
@@ -478,8 +513,38 @@ def _extract_value(node: Any, attr: str, kind: str) -> str:
     return val if isinstance(val, str) else ("" if val is None else str(val))
 
 
+class UnsupportedSelector(Exception):
+    """这个选择器交给 BeautifulSoup **解析不了**（如 Legado 的 `div[-1]` 索引式）。
+
+    **它不是「规则取不到值」**——我们根本没能力评估它。异常在这里被吞掉的话，
+    「我们解析不了」会一路表现成「这条规则跑出空」，最后判成**源失效**
+    （与 AGENTS #4 同一件事：不支持的语法必须显式返回原因，不能静默返回空）。
+    """
+
+
+def _assert_selector_supported(selector: str) -> None:
+    """先单独校验选择器**本身**，不依赖当前有几个节点。
+
+    只在 `select()` 抛异常时才报错是不够的：节点列表为空时循环体根本不执行，
+    同一个非法选择器会**因为上游有没有命中**而得出两种结论（unknown / fail）。
+    判定不该依赖这种偶然。
+
+    没装 soupsieve 时静默跳过（退回运行期兜底）——它不是我们的直接依赖，
+    但要防它缺失时这里变成新的抛异常点。
+    """
+    try:
+        import soupsieve
+    except Exception:
+        return
+    try:
+        soupsieve.compile(selector)
+    except Exception as e:
+        raise UnsupportedSelector("选择器无法解析：%s（%s）" % (selector, type(e).__name__)) from e
+
+
 def _css_select(nodes: Sequence[Any], selector: str) -> List[Any]:
     """在当前节点集合内做后代选择，按文档顺序去重。"""
+    _assert_selector_supported(selector)
     out: List[Any] = []
     seen = set()
     for n in nodes:
@@ -487,8 +552,10 @@ def _css_select(nodes: Sequence[Any], selector: str) -> List[Any]:
             continue
         try:
             matches = n.select(selector)
-        except Exception:
-            continue
+        except Exception as e:
+            # 不吞：交给 `_walk_hits` 变成 rule_error（unknown），别静默当空
+            raise UnsupportedSelector("选择器无法解析：%s（%s: %s）"
+                                      % (selector, type(e).__name__, e)) from e
         for m in matches:
             key = id(m)
             if key not in seen:
@@ -536,10 +603,21 @@ def _walk_hits(
         # **没有任何生产者**（`_parse_css_steps` 只产 select/attr/index，
         # `_parse_json_steps` 只产 key/wild/index），整段是死代码。
         if st == "select":
-            nodes = _css_select(nodes, val)
+            try:
+                nodes = _css_select(nodes, val)
+            except UnsupportedSelector as e:
+                # 交给调用方当 rule_error / unsupported（unknown），**不是**取不到值
+                return [], [], str(e), []
         elif st == "attr":
             # 取值动作发生前，当前 nodes 就是命中块
             return [], [_extract_value(n, val, kind) for n in nodes], "", list(nodes)
+        elif st == "index" and kind == "json":
+            # JSON 的数组下标要交给 `_json_walk`（它按「当前值是不是 list」取下标）。
+            # 通用那条分支是对**中间结果列表**取下标，用在 JSON 上等于「取第几个中间
+            # 结果」——`$.data.list[0].name` 会先 key data → key list → 拿到整个 list，
+            # 再 index 0（取的是那个 list 自己）→ key name 落空，**永远取不到值**。
+            # 这条路由一直没接上，于是 JSON 下标规则全被当成「源取不到值」。
+            nodes = _json_walk(nodes, st, val)
         elif st == "index":
             i = int(val)
             if -len(nodes) <= i < len(nodes):

@@ -16,7 +16,7 @@ from core.constants import *
 from core.urls import abs_url as _abs_url
 # fetch_ex 而不是 fetch：页面证据要标出「这份 HTML 是刚抓的还是缓存里的」
 from core.fetch import Fetched, fetch_ex, parse_source_header
-from core.rules.replayer import extract_all_nodes
+from core.rules.replayer import extract_all_nodes, rule_supported
 from core import quality as Q
 
 
@@ -24,6 +24,16 @@ from core import quality as Q
 #: core/app_debug.py）。这里保留 ``_new_page`` 这个名字与调用点形状——本模块
 #: 只做提取，不改行为，也不动既有的三个调用点。
 _new_page = Q.new_page
+
+
+#: 纯地址的 `tocUrl`（http/https、不含模板与规则语法）。实测库里 121 条是这种
+#: 写法、1496 条是规则——两者要分开处理：纯地址直接用，规则要在详情页上求值。
+_PLAIN_URL_RE = re.compile(r"^https?://\S+$")
+
+
+def _is_plain_url(value: str) -> bool:
+    v = str(value or "").strip()
+    return bool(_PLAIN_URL_RE.match(v)) and "{" not in v and "<js" not in v and "@js:" not in v
 
 
 def _extract(html: str, rule: str):
@@ -234,29 +244,49 @@ def verify_chain(source: dict, keyword: str, detail_url: str = "",
             book_url = detail_url
 
     # ---- Step 3: 目录 ----
-    # ruleBookInfo.tocUrl 非空时跳过详情页解析，直接抓目录页（对齐 Debug.kt:318-322）
+    # `ruleBookInfo.tocUrl` 是**规则**不是 URL：App 在**详情页**上求值取目录页地址
+    # （`BookInfo.kt:163` 的 `analyzeRule.getString(infoRule.tocUrl, isUrl = true)`），
+    # 求值为空则退回 `baseUrl`（详情页本身，`isUrl` 分支里的 blank → baseUrl）。
+    # 原先我们把它当 URL 字符串拼（`_abs_url(book_url, "text.查看完整目录@href")`），
+    # **规则形态的（实测 1496 条）会被拼成垃圾地址**——试跑/修复循环/快速新增全走这里。
     toc_url_rule = str((src.get("ruleBookInfo") or {}).get("tocUrl", "") or "").strip()
-    if toc_url_rule:
-        book_url = toc_url_rule if toc_url_rule.startswith("http") else _abs_url(book_url, toc_url_rule)
-
     t_html = ""
+    toc_page_url = book_url          # 默认：目录就在详情页上（App 的兜底口径）
     try:
-        f = _fetch(book_url)
+        if toc_url_rule:
+            # **先判纯地址**，再判规则：`https://site/toc.html` 这种字符串在
+            # parse_rule 眼里是「一个 CSS 选择器」（解析期看不出来），但它是地址。
+            if _is_plain_url(toc_url_rule):
+                toc_page_url = _abs_url(book_url, toc_url_rule)
+            else:
+                ok_rule, why_rule = rule_supported(toc_url_rule)
+                if not ok_rule:
+                    # 求值不了就**如实说**，不能退回详情页假装没事——App 是能求值的
+                    steps.append(_step(
+                        "toc",
+                        Q.Judgement("unknown", "tocUrl 规则本地无法回放：%s" % why_rule),
+                        book_url, ""))
+                    return _done()
+                d_html = _fetch(book_url).html      # 详情页：tocUrl 规则在它上面求值
+                vals, _h, _e = _extract(d_html, toc_url_rule)
+                picked = next((str(v).strip() for v in vals if str(v or "").strip()), "")
+                toc_page_url = _abs_url(book_url, picked) if picked else book_url
+        f = _fetch(toc_page_url)
         t_html = f.html
         toc = src.get("ruleToc") or {}
         chapter_list_rule = toc.get("chapterList", "")
         chapters, hits, rule_error = _extract(t_html, chapter_list_rule)
         j = Q.judge_list_step("toc", chapters, "".join(hits), rule_error,
                               source_type, rule=chapter_list_rule)
-        page_id = _new_page(pages, "detail", book_url, t_html, charset=charset,
+        page_id = _new_page(pages, "detail", toc_page_url, t_html, charset=charset,
                             fetched_at=f.fetched_at, cached=f.cached)
-        st = _step("toc", j, book_url, page_id, chapters, "".join(hits), rule_error)
+        st = _step("toc", j, toc_page_url, page_id, chapters, "".join(hits), rule_error)
         st["detail"] = j.reason or ("%d 章" % len(chapters))
         steps.append(st)
         if not j.ok:
             return _done()
     except Exception as e:
-        steps.append(_step("toc", Q.Judgement("fail", "抓取失败 %s" % e), book_url, ""))
+        steps.append(_step("toc", Q.Judgement("fail", "抓取失败 %s" % e), toc_page_url, ""))
         return _done()
 
     # ---- Step 4: 正文（抓第一章 URL） ----
@@ -272,7 +302,8 @@ def verify_chain(source: dict, keyword: str, detail_url: str = "",
             steps.append(_step("content", Q.Judgement("fail", "取不到章节URL"), book_url, ""))
             return _done()
         first_ch = ch_urls[0]
-        ch_url = _abs_url(book_url, first_ch) if not first_ch.startswith("http") else first_ch
+        # 相对章节链接要相对**目录页**补全（不是详情页——tocUrl 指向独立目录页时两者不同）
+        ch_url = _abs_url(toc_page_url, first_ch) if not first_ch.startswith("http") else first_ch
         f = _fetch(ch_url)
         c_html = f.html
         content_rule = (src.get("ruleContent") or {}).get("content", "")

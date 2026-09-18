@@ -21,11 +21,16 @@ HEALTH_ORDER = {
     Health.OK: 0,
     Health.AUTH: 1,
     Health.GFW: 2,
-    Health.NO_SEARCH: 3,
-    Health.TIMEOUT: 4,
-    Health.DEAD: 5,
-    Health.ERROR: 6,
-    Health.SKIPPED: 7,
+    # CERT 与 AUTH / GFW 同组：站点**可达**、有结论、而且**能自己处理**
+    # （关掉证书校验或换 http）。原来漏了它，`.get(..., 9)` 兜底让它排到
+    # SKIPPED 之后——「关掉校验就能用」的源被排在最后。
+    # **这张表必须覆盖 HEALTH_NAMES 的每个键**（tests/test_organizer.py 守着）。
+    Health.CERT: 3,
+    Health.NO_SEARCH: 4,
+    Health.TIMEOUT: 5,
+    Health.DEAD: 6,
+    Health.ERROR: 7,
+    Health.SKIPPED: 8,
 }
 
 

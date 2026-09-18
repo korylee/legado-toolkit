@@ -209,6 +209,85 @@ class TocUrlBranchTests(unittest.TestCase):
         self.assertEqual(len(detail), 1)
         self.assertEqual(detail[0]["url"], "https://site/toc-page")
 
+    #: 详情页：只有 tocUrl 规则要取的那个链接，没有章节列表
+    DETAIL_HTML = '<div class="info"><a class="toc-link" href="/toc/9.html">目录</a></div>'
+    #: 独立目录页：章节列表在这里
+    TOC_PAGE_HTML = '<div class="chapters"><a href="/read/1.html">第1章</a></div>'
+
+    def _pages(self):
+        pages = dict(PAGES)
+        pages["https://site/book/1"] = self.DETAIL_HTML
+        pages["https://site/toc/9.html"] = self.TOC_PAGE_HTML
+        return pages
+
+    def test_toc_url_rule_is_evaluated_on_the_detail_page(self):
+        """`tocUrl` 是**规则**不是 URL：在详情页上求值取目录页地址。
+
+        依据 `BookInfo.kt:163`：`analyzeRule.getString(infoRule.tocUrl, isUrl = true)`。
+        原先我们把它当 URL 字符串拼（`_abs_url(book_url, "class.toc-link@href")`
+        → 垃圾地址），而**规则形态的 tocUrl 实测有 1496 条**——试跑/修复循环/
+        快速新增全走这条路。
+
+        断言的是**目录页 URL 与判定的页面**：只断言「跳过详情页」的话，
+        把规则当 URL 拼也会「跳过详情页」，等于没测。
+        """
+        src = source_with(ruleBookInfo={"tocUrl": "class.toc-link@href"})
+        pages = self._pages()
+        with patch("core.verify.fetch_ex",
+                   side_effect=lambda url, **kw: Fetched(pages.get(url, ""), False, "")):
+            r = verify_chain(src, "我")
+        toc = step_of(r, "toc")
+        self.assertEqual(toc["url"], "https://site/toc/9.html")
+        self.assertEqual(toc["verdict"], "pass")
+        self.assertEqual(toc["detail"], "1 章")     # 章节列表来自**目录页**
+        detail = [p for p in r["pages"] if p["id"] == "detail"][0]
+        self.assertEqual(detail["url"], "https://site/toc/9.html")
+
+    def test_relative_chapter_url_resolves_against_the_toc_page(self):
+        """相对章节链接要相对**目录页**补全（详情页在另一层路径上）。
+
+        按详情页补全会得到 `https://site/book/read/1.html` 这种不存在的地址——
+        而它只在「tocUrl 指向独立目录页」时才会不同，正是这次修的那条路。
+        """
+        src = source_with(ruleBookInfo={"tocUrl": "class.toc-link@href"},
+                          ruleToc={"chapterList": "class.chapters@tag.a",
+                                   "chapterUrl": "tag.a@href"})
+        pages = self._pages()
+        # **不能写 `/read/1.html`**：那是根绝对路径，按哪个 base 补全都一样，
+        # 这条用例就测不出 base 是谁。要的是真正的相对链接。
+        pages["https://site/toc/9.html"] = (
+            '<div class="chapters"><a href="read/1.html">第1章</a></div>')
+        pages["https://site/toc/read/1.html"] = CONTENT_HTML
+        with patch("core.verify.fetch_ex",
+                   side_effect=lambda url, **kw: Fetched(pages.get(url, ""), False, "")):
+            r = verify_chain(src, "我")
+        self.assertEqual(step_of(r, "content")["url"], "https://site/toc/read/1.html")
+
+    def test_empty_rule_result_falls_back_to_the_detail_page(self):
+        """规则求值为空 → 退回详情页（App 的 `isUrl` 分支：blank → baseUrl）。"""
+        src = source_with(ruleBookInfo={"tocUrl": "class.nothing-here@href"})
+        pages = self._pages()
+        pages["https://site/book/1"] = self.TOC_PAGE_HTML     # 详情页上就有章节
+        with patch("core.verify.fetch_ex",
+                   side_effect=lambda url, **kw: Fetched(pages.get(url, ""), False, "")):
+            r = verify_chain(src, "我")
+        self.assertEqual(step_of(r, "toc")["url"], "https://site/book/1")
+        self.assertEqual(step_of(r, "toc")["verdict"], "pass")
+
+    def test_unreplayable_toc_url_rule_is_unknown_not_fallback(self):
+        """回放不了的 tocUrl 规则要判 unknown 并**停止**，不能退回详情页。
+
+        退回详情页看起来像 App 的「求值为空 → baseUrl」，但那不是一回事：
+        App 能求值，只是值恰好为空；我们是**根本跑不了这条规则**。
+        混起来会让「工具测不了」显示成「目录在详情页，正常」。
+        """
+        src = source_with(ruleBookInfo={"tocUrl": "@js:return baseUrl + '/toc'"})
+        r = run_chain(src)
+        toc = step_of(r, "toc")
+        self.assertEqual(toc["verdict"], "unknown")
+        self.assertIn("无法回放", toc["reason"])
+        self.assertEqual(toc["url"], "https://site/book/1")   # 没去抓目录页
+
 
 class FileTypeTests(unittest.TestCase):
     def test_file_type_toc_is_unknown(self):
@@ -546,6 +625,16 @@ class DirtySourceTypeTests(unittest.TestCase):
 #   M19（cap 漏 values）、M22 / M23（附注接线）  → 旧用例**全绿**
 # 只有 M4 被旧用例的 `assertIn("search", ids)` 抓住，但它的另一半
 # `len(ids) == len(set(ids))` 是结构性恒真的（pages 是 dict）。
+#
+#  **2026-09-18 补：`tocUrl` 是规则不是 URL**
+#
+#  M30 tocUrl 规则不求值（退回当 URL 拼）        | test_toc_url_rule_is_evaluated_on_the_detail_page
+#  M31 不判纯地址（一律当规则求值）              | test_toc_url_skips_detail_page
+#  M32 回放不了的 tocUrl 规则退回详情页（不判 unknown）
+#                                                | test_unreplayable_toc_url_rule_is_unknown_not_fallback
+#  M33 相对章节链接按详情页补全                  | test_relative_chapter_url_resolves_against_the_toc_page
+#        ↑ M33 那条的 fixture 有个坑：章节链接**不能写成 `/read/1.html`**——
+#          根绝对路径按哪个 base 补全都一样，用例就测不出 base 是谁（实测踩过）。
 #
 # 两条自我更正（记下来给后来人）：
 #  - 本文件早期版本的 test_cap_is_wired_into_the_return_path 断言

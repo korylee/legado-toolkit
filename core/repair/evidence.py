@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 
 MAX_OUTLINE_LINES = 90
 MAX_DEPTH = 6
@@ -107,7 +107,8 @@ async def build_evidence(source: Dict[str, Any], keyword: str,
     import urllib.parse
 
     from services import add_source as A
-    from core.rules.replayer import image_ratio, parse_field_first
+    from core.checker import is_login_wall
+    from core.rules.replayer import image_ratio, parse_field_first, rule_supported
 
     ev: Dict[str, Any] = {
         "ok": False,
@@ -119,15 +120,30 @@ async def build_evidence(source: Dict[str, Any], keyword: str,
         "failures": [],
         "notes": [],
         "heuristic": {},
+        #: 撞上登录墙/反爬页的 URL。App 里带登录态、我们抓不到同一份页面，
+        #: 所以**这些页不能当证据**（模型对着登录页改规则＝盲改）
+        "login_wall": [],
     }
     base = ev["url"]
+    #: 登录墙判定要用源自己声明的 cookie jar：`classify_http_status` 的
+    #: 「200 + 登录词」那一档以它为前提（「请登录」在正常页面导航栏里太常见）
+    cookie_jar = bool(source.get("enabledCookieJar"))
 
     async def fetch(u: str) -> str:
         try:
-            return await asyncio.to_thread(A.fetch, u, timeout)
+            html = await asyncio.to_thread(A.fetch, u, timeout)
         except Exception as e:
             ev["failures"].append("抓取失败 %s: %s" % (u, type(e).__name__))
             return ""
+        if is_login_wall(html, cookie_jar):
+            # 判定表只有一份（`checker.is_login_wall` → `classify_http_status`）。
+            # **不登记为证据**：留着它，模型就会对着登录页的 DOM 大纲改正文规则，
+            # 而本地回放还会说「通过」——那是「看着正常、答的不是你问的那件事」。
+            ev["login_wall"].append(u)
+            ev["failures"].append("这一页是登录墙 / 反爬页（%s）：App 里带登录态，"
+                                  "我们抓到的不是它看到的那份" % u)
+            return ""
+        return html
 
     # ---- 1) 搜索页 ----
     search_tpl = str(source.get("searchUrl", "") or "")
@@ -163,7 +179,15 @@ async def build_evidence(source: Dict[str, Any], keyword: str,
             book_url = _abs(s_url or base, href)
             ev["notes"].append("bookList 解析出 %d 条，取第一条进详情页" % len(nodes))
         else:
-            ev["failures"].append("bookList 解析为空 -> 搜索规则已失效")
+            # 「解析为空」有两种成因，**话要说对**：规则本地跑不了（JS/模板/
+            # 没实现的写法）是**我们的能力边界**，说成「规则已失效」会把用户
+            # 引去改一条其实没坏的规则（同 quality 的 unknown 口径）
+            ok_rule, why_rule = rule_supported(str(rule_search.get("bookList", "") or ""))
+            if not ok_rule:
+                ev["failures"].append("bookList 规则本地无法回放（%s），"
+                                      "不能据此判搜索规则失效" % why_rule)
+            else:
+                ev["failures"].append("bookList 解析为空 -> 搜索规则已失效")
             hs = ev["heuristic"].get("search") or {}
             for key in ("book_url", "first_book_url", "sample_book_url"):
                 if hs.get(key):
@@ -199,9 +223,17 @@ async def build_evidence(source: Dict[str, Any], keyword: str,
                 ev["chapter_kind"] = "image" if ratio >= 0.5 else ("text" if vals else "unknown")
                 ev["chapter_sample"] = vals[:3]
         else:
-            ev["failures"].append("chapterList 解析为空 -> 目录规则已失效")
+            ok_rule, why_rule = rule_supported(str(toc.get("chapterList", "") or ""))
+            if not ok_rule:
+                ev["failures"].append("chapterList 规则本地无法回放（%s），"
+                                      "不能据此判目录规则失效" % why_rule)
+            else:
+                ev["failures"].append("chapterList 解析为空 -> 目录规则已失效")
 
-    ev["ok"] = bool(ev["pages"])
+    # 撞过登录墙就不算「有证据」：`ok` 只表示**能不能让模型据此改规则**。
+    # 上层据此提前退出（不烧轮次），并给独立 status——原来只看 `bool(pages)`，
+    # 而登录页恰恰是「抓得到 HTML 的成功请求」。
+    ev["ok"] = bool(ev["pages"]) and not ev["login_wall"]
     return ev
 
 

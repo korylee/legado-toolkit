@@ -121,6 +121,11 @@ class CacheVersionTests(unittest.TestCase):
     def test_version_bumped(self):
         """判定逻辑变了，缓存必须整体作废，否则改了等于没改。
 
+        v12：回放器补了两类**本地回放不了**的写法（`text.` / `children.` 简写、
+        方括号索引式 `[-1]` / `[0]` / `[1,3]` / `[!0]`）。它们此前被判成
+        「解析为空」＝源失效（`toc_complete=False`），现在一律 unknown
+        （toc/content 判为「无法离线回放」）——结论方向变了，必须重验。
+        v11：登录特征收紧（裸 `login` 误伤 797 条）+ auth 缓存降到 1 天。
         v10：探测深度合并成一根四档轴，缓存里那一列的**编号含义**随之平移
         （旧 1 档 = 域名+搜索 = 新 2 档）。旧行不会放出错误结论（只会更保守地
         重验），但「旧 1 档 + 搜索开」在新口径下必然判深度不够、等于整体重跑——
@@ -132,7 +137,7 @@ class CacheVersionTests(unittest.TestCase):
         v7：反爬词表删掉裸 "cloudflare"——原来判 auth 的源现在判 ok，
         不作废的话那条 auth 会在 TTL 内一直命中缓存，看起来像修复失效。
         """
-        self.assertEqual(checker.CACHE_VERSION, 11)
+        self.assertEqual(checker.CACHE_VERSION, 12)
 
     def test_old_cache_item_rejected(self):
         raw = {"bookSourceUrl": "https://a.com", "bookSourceName": "x",
