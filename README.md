@@ -226,8 +226,6 @@ python cli/main.py
 | `dups` | 找重复源：规则相同、只有地址/署名不同的（**只读清单**，缺省读管理库） |
 | `sanitize` | 清洗字段类型，兼容 Legado/Gson 导入 |
 | `add` | 给搜索 URL 自动推断规则生成书源 |
-| `import-sources` | 安全导入外部书源，生成待校验/待审记录 |
-| `review-imports` | 查看或批准外部书源规则冲突 |
 | `reclassify` | 按实测信号重判书源类型 |
 | `diagnose` | 失效源归因 |
 | `repair` | AI 修复规则：证据 → 提议 → 回放验证 → 重试 |
@@ -348,7 +346,7 @@ python cli/main.py merge -i a.json -i b.json -o merged.json --mode replace
 | data/check_cache/ | 书源校验缓存 |
 | data/out/exports/ | 临时导出快照 |
 | data/backups/ | 软删除记录（`deleted.jsonl`，一行一次删除操作，含原因）/ 手动备份 |
-| data/imports/raw/ | 外部源原始文件 |
+| data/imports/conflicts/ | 导入时规则冲突的源（原样留存，可回查） |
 | data/config/llm_profiles.json | LLM 模型配置（含 API Key，勿提交） |
 | data/config/settings.json | 全局设置：校验参数默认值（并发/超时/探测深度/代理等） |
 | data/candidates*.json | 候选源/导出产物 |

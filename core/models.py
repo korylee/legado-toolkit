@@ -143,12 +143,6 @@ TEST_TITLES: Dict[str, Dict[str, Any]] = {
 #: 目录完整度比例阈值：按作品类型区分（小说目录完整要求更高）
 TOC_COMPLETE_THRESHOLD: Dict[str, float] = {"novel": 0.8, "manga": 0.6}
 
-#: 原创/自写/整理标记信号词（出现在名称、分组或备注中）
-ORIGINAL_TAG_PATTERNS: List[str] = [
-    "自写", "自建", "原创", "修复", "整理", "自制",
-    "自用", "精排", "重做",
-]
-
 
 @dataclass
 class BookSourceRecord:

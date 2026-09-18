@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import re
-from typing import Iterable, List, Sequence, Tuple
+from typing import Iterable, List, Tuple
 
 # 类型标签与 Legado 的 bookSourceType 一一对应（0/1/2/3），不含任何未定义类型
 SYSTEM_TYPE_TAGS = {"📖小说", "🎧听书", "🎨漫画", "📥下载"}

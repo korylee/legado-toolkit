@@ -16,7 +16,6 @@ DEFAULT_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
 TYPE_MAP = {"novel": 0, "manga": 2, "audio": 1, "file": 3}
 DISCOVER_ONLY_TAG = "仅发现"
 COVER_URL_HINTS = ("cover", "uploads", "book", "img", "image", "pic", "comic", "novel", ".webp", ".jpg", ".png")
-STATIC_LINK_HINTS = (".css", ".js", ".ico", ".png", ".jpg", ".webp", "javascript:", "mailto:", "/static/", "/uploads/")
 DETAIL_LINK_HINTS = ("/detail/", "/book/", "/read/", "/comic/", "/manhua/", "/novel/", "/info/", "/show/")
 SEARCH_ENDPOINT_TEMPLATES = [
     "/search?{p}={kw}",
@@ -43,8 +42,6 @@ CHAPTER_LINK_HINTS = [
     "/chapter", "/read/", "/reader/", "/view/", "/play/", "/content/",
     "chapter", "read_", "view_", "play_",
 ]
-BOOK_DETAIL_HINTS = ["/detail/", "/book/", "/read/", "/comic/", "/manhua/",
-                     "/novel", "/info/", "/show/", "/comic/", "/b/"]
 STATIC_LINK_HINTS = ["/css", "/js/", "/images/", "/img/", "/uploads/", ".jpg",
                      ".png", ".gif", ".webp", ".css", ".js", "javascript:",
                      "mailto:", "#", "/tag/", "/category/", "/search", "?"]

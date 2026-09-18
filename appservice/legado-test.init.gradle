@@ -1,0 +1,61 @@
+import org.gradle.api.tasks.PathSensitivity
+// 从外部把我们的测试源码挂进「阅读」App 的 test 编译，**不碰 AGP 的 sourceSets**。
+//
+// 目的：**fork 仓库里一个文件都不放**——它只被读取和构建，`git status` 永远干净，
+// 跟上游同步零冲突。我们的探针 / shadow / 资源都住在 legado-source/appservice/。
+//
+// 用法（由 appservice/legado-gradle.bat 调用，一般不用手敲）：
+//     <fork>\gradlew.bat -p <fork> -I <本文件> :app:testDebugUnitTest --tests "io.legado.app.WebBookProbeTest"
+//
+// ⚠️ **为什么不用 `android.sourceSets.test.java.srcDir(外部目录)`**：那样挂上去之后
+// Gradle 的**测试发现**会整个失效（连 App 自带的测试也报
+// 「No tests found for given includes」）。测试识别依赖「类文件 ↔ 源码路径」的相对
+// 映射，源码根一旦跑出项目根，映射就断了。实测过，别改回去。
+//
+// 所以这里只做三件事，都不碰 sourceSets：
+//   1. Kotlin 编译任务 `.source(dir)` —— 收 .kt（KGP 在本脚本执行前已快照过自己的
+//      源码目录，追加 android 的 java.srcDirs 对它无效，必须直接给编译任务）
+//   2. Java 编译任务 `.source(dir)` —— 收 .java（shadow 垫片）
+//   3. 测试任务 classpath 追加资源目录 —— `probe_source.json` 走 classLoader 读
+
+/** 本 init 脚本所在目录 = appservice 目录。优先用 wrapper 传的环境变量，其次自发现。 */
+def resolveAppserviceDir() {
+    def fromEnv = System.getenv('LEGADO_APPSERVICE_DIR')
+    if (fromEnv) return new File(fromEnv)
+    def me = gradle.startParameter.allInitScripts.find { it.name == 'legado-test.init.gradle' }
+    return me == null ? null : me.parentFile
+}
+
+gradle.projectsEvaluated {
+    def app = gradle.rootProject.findProject(':app')
+    if (app == null) {
+        throw new GradleException("找不到 :app 模块——请在阅读 App 仓库根目录下运行")
+    }
+    def appservice = resolveAppserviceDir()
+    if (appservice == null || !new File(appservice, 'test').exists()) {
+        throw new GradleException("定位不到 appservice 目录（设 LEGADO_APPSERVICE_DIR 环境变量）")
+    }
+
+    def testSrc = new File(appservice, 'test')
+    def testRes = new File(appservice, 'test/resources')
+
+    app.tasks.matching { it.name ==~ /compile.*UnitTestKotlin/ }.configureEach {
+        it.source(testSrc)
+    }
+    app.tasks.matching { it.name ==~ /compile.*UnitTestJavaWithJavac/ }.configureEach {
+        it.source(testSrc)
+    }
+    app.tasks.matching { it.name ==~ /test.*UnitTest/ }.configureEach {
+        it.classpath += app.files(testRes)
+        // 全量跑批 3774 条时 OOM（约 600 条崩）——Robolectric 默认堆不够 3000+ 协程
+        // 同时持有页面/规则对象。3g 实测够用；single fork 保持结论顺序稳定。
+        it.maxHeapSize = "3g" 
+        // appservice-args.properties 是「跑批参数」，必须声明为任务输入——
+        // 否则改了它 Gradle 仍判 UP-TO-DATE，静默跳过（实测踩过）。
+        it.inputs.file(new File(appservice, 'args.properties'))
+            .withPathSensitivity(PathSensitivity.NONE)
+            .optional()
+    }
+
+    app.logger.lifecycle("[appservice] 已挂载外部测试源码: " + appservice)
+}

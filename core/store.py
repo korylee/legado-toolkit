@@ -17,7 +17,7 @@ import os
 import sqlite3
 import threading
 import time
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 from core.tags import (
     DEFAULT_USER_TAGS as _DEFAULT_USER_TAGS,
@@ -535,35 +535,15 @@ class Store:
         给批量导入用。逐条 ``SELECT`` 的代价在导入这种场景下是致命的：实测
         3000 条要走 3000 次查询 + 3000 次提交（每条一次事务），60 秒。
         一次全捞回来是 3800 行的小表，可以忽略。
+
+        **必须过滤 ``deleted_at``**：回收站里的同 URL 行是历史版本，不是「已存在」
+        ——正是这一点让「删了再导入」成立。不过滤的话，删了再导入会被判「重复」，
+        既不恢复也不新建，用户看到的是一整批「重复」。
         """
         return {r["source_url"]: (str(r["fingerprint"] or "").strip())
                 for r in self.conn.execute(
                     "SELECT source_url, fingerprint FROM sources "
                     "WHERE deleted_at = ''")}
-
-    def get_source_fingerprint(self, url: str) -> Optional[str]:
-        """返回**在用那行**的 fingerprint；没有在用的行则为 None。供导入比对。
-
-        「在用」= ``deleted_at = ''``。**回收站里的同 URL 行不参与**：它们是历史
-        版本，不是「已存在」——正是这一点让「删了再导入」成立（旧版留在回收站，
-        新版成为在用的那一行）。见 ``migrate_sources_url_scope_once``。
-
-        以前这里不过滤 ``deleted_at``，回收站的行也返回指纹，于是调用方那句
-        ``if is_deleted: restore(...)`` 永远不可达：删了再导入被判「重复」，
-        既不恢复也不新建，用户看到的是一整批「重复」。
-
-        返回值从 ``(fp, is_deleted)`` 元组改成标量是**故意的**：新模型下导入
-        不需要知道"回收站里有没有"，那个布尔只会诱导出上一版那种分支。
-        """
-        from core.loader import _normalize_url
-
-        row = self.conn.execute(
-            "SELECT fingerprint FROM sources "
-            "WHERE source_url = ? AND deleted_at = ''",
-            (_normalize_url(url),)).fetchone()
-        if not row:
-            return None
-        return str(row["fingerprint"] or "").strip() or None
 
     def export_sources(self) -> List[Dict[str, Any]]:
         """导出全部书源（保持入库顺序），用于重新生成给 Legado 的 JSON。"""
@@ -699,24 +679,6 @@ class Store:
                 # 而界面上显示的还是「已生成 N 条的链接」
                 sql.append("AND 1 = 0")
         return " ".join(sql), args
-
-    def set_group(self, url: str, group: str) -> bool:
-        """改分组：同时更新列与 raw_json，保证导出不失真。"""
-        from core.loader import _normalize_url
-
-        key = _normalize_url(url)
-        row = self.conn.execute(
-            "SELECT raw_json FROM sources WHERE source_url = ?", (key,)).fetchone()
-        if not row:
-            return False
-        src = json.loads(row["raw_json"])
-        src["bookSourceGroup"] = group
-        with self.conn:
-            self.conn.execute(
-                "UPDATE sources SET group_name = ?, raw_json = ?, updated_at = ? "
-                "WHERE source_url = ?",
-                (group, json.dumps(src, ensure_ascii=False), now(), key))
-        return True
 
     def set_source_comment(self, url: str, comment: str) -> Optional[str]:
         """改备注：只更新 `raw_json["bookSourceComment"]`（没有对应的列）。

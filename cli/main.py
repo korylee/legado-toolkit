@@ -10,15 +10,13 @@ Legado 书源整理工具 CLI。
   dedupe   按 URL/名称去重（写出新文件）
   dups     找重复源：规则相同、只有地址/署名不同的（只读清单，不改数据）
   add      快捷新增书源：给搜索 URL 自动推断规则生成书源
-  import-sources 安全导入外部书源，生成待校验/待审记录
-  review-imports 查看或批准外部书源规则冲突
 
 示例：
-  python main.py report -i bookSource.json -o report.md
-  python main.py check -i bookSource.json -c 50 -o check_cache/
-  python main.py organize -i bookSource.json -r check_cache/ -o organized.json
-  python main.py merge -i a.json -i b.json -o merged.json --mode replace
-  echo 'https://host/search?q=%E7%BB%8D%E5%AE%8B' | python main.py add - --type manga --no-ask
+  python cli/main.py report -i bookSource.json -o report.md
+  python cli/main.py check -i bookSource.json -c 50 -o check_cache/
+  python cli/main.py organize -i bookSource.json -r check_cache/ -o organized.json
+  python cli/main.py merge -i a.json -i b.json -o merged.json --mode replace
+  echo 'https://host/search?q=%E7%BB%8D%E5%AE%8B' | python cli/main.py add - --type manga --no-ask
 """
 
 from __future__ import annotations
@@ -30,12 +28,11 @@ import glob
 import json
 import os
 import sys
-import time
 
 # 确保本文件所在目录在 sys.path 中（Windows 下直接运行需要）
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from core.loader import load_json_file, dump_json_file, dedupe_sources, merge_sources, fingerprint  # noqa: E402
+from core.loader import load_json_file, dump_json_file, dedupe_sources, merge_sources  # noqa: E402
 from core.models import build_record, Health  # noqa: E402
 # 探测深度的取值与默认值只在 settings_store 定义（AGENTS.md 硬性约定 #8），
 # 这里只引用——CLI 的 argparse 默认值曾与 AsyncChecker / ops.py 各写一份而漂移
@@ -331,76 +328,7 @@ def cmd_prepare(args: argparse.Namespace) -> int:
     return 0
 
 
-# ---------------------------------------------------------------- import-sources / review-imports
-def cmd_import_sources(args: argparse.Namespace) -> int:
-    """导入外部书源，但不直接修改候选库。"""
-    from core.registry import import_sources
 
-    try:
-        summary = import_sources(
-            args.candidate, args.input, args.registry, args.raw_dir,
-        )
-    except (OSError, ValueError) as error:
-        print(f"[错误] 导入失败：{error}", file=sys.stderr)
-        return 1
-
-    print(f"导入批次 #{summary.batch_id}")
-    print(f"  新增待校验: {summary.new_count}")
-    print(f"  重复忽略: {summary.duplicate_count}")
-    print(f"  规则冲突待审: {summary.conflict_count}")
-    print(f"  当前批次待校验: {summary.pending_count}")
-    return 0
-
-
-def cmd_review_imports(args: argparse.Namespace) -> int:
-    """列出待审冲突，或批准指定 URL 的外部规则。"""
-    from core.registry import (
-        approve_pending_source,
-        approve_review,
-        list_pending_reviews,
-        list_pending_sources,
-    )
-
-    if args.approve:
-        try:
-            approved = approve_review(args.registry, args.candidate, args.approve)
-        except (OSError, ValueError, json.JSONDecodeError) as error:
-            print(f"[错误] 审批失败：{error}", file=sys.stderr)
-            return 1
-        if not approved:
-            print(f"[错误] 未找到待审冲突或候选书源：{args.approve}", file=sys.stderr)
-            return 1
-        print(f"已批准并更新候选库: {args.approve}")
-        return 0
-
-    if args.approve_new:
-        try:
-            approved = approve_pending_source(args.registry, args.candidate, args.approve_new)
-        except (OSError, ValueError, json.JSONDecodeError) as error:
-            print(f"[错误] 批准待校验书源失败：{error}", file=sys.stderr)
-            return 1
-        if not approved:
-            print(f"[错误] 未找到待校验新源或候选库已有该 URL：{args.approve_new}", file=sys.stderr)
-            return 1
-        print(f"已批准待校验新源并更新候选库: {args.approve_new}")
-        return 0
-
-    reviews = list_pending_reviews(args.registry)
-    pending_sources = list_pending_sources(args.registry)
-    print(f"待审规则冲突: {len(reviews)} 个")
-    for review in reviews:
-        print(
-            f"- {review.url}（批次 #{review.batch_id}，"
-            f"候选 {review.candidate_fingerprint[:8]} → 外部 {review.incoming_fingerprint[:8]}，"
-            f"{review.created_at}）"
-        )
-    print(f"待校验新源: {len(pending_sources)} 个")
-    for source in pending_sources:
-        print(f"- {source.url}（批次 #{source.batch_id}，{source.created_at}）")
-    return 0
-
-
-# ---------------------------------------------------------------- dups
 def cmd_dups(args: argparse.Namespace) -> int:
     """找重复源（**只读**）：规则完全相同、只有地址/署名/排序/备注不同的那些。
 
@@ -640,7 +568,7 @@ def cmd_menu(args: argparse.Namespace) -> int:
     if name == "merge":
         # merge 需要至少两个文件，走原生 CLI 更合适
         print("合并需要手动指定多份书源文件，请用命令行：")
-        print("  python main.py merge -i 文件1.json -i 文件2.json -o merged.json")
+        print("  python cli/main.py merge -i 文件1.json -i 文件2.json -o merged.json")
         return 0
 
     # 构造 Namespace，用默认输入文件
@@ -789,24 +717,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_prep.add_argument("--fast-output", default="candidates-fast.json", help="仅可用源导出")
     p_prep.set_defaults(func=cmd_prepare)
 
-    # import-sources —— 外部书源安全导入
-    p_imp = sub.add_parser("import-sources", help="安全导入外部书源（新增待校验，冲突待审）")
-    p_imp.add_argument("--candidate", required=True, help="候选书源 JSON（只读，不会被导入命令改写）")
-    p_imp.add_argument("-i", "--input", required=True, help="外部书源 JSON")
-    p_imp.add_argument("--registry", default="book_sources.sqlite3", help="导入台账 SQLite 文件")
-    p_imp.add_argument("--raw-dir", default="imports/raw", help="外部原始文件留存目录")
-    p_imp.set_defaults(func=cmd_import_sources)
 
-    # review-imports —— 待审冲突查看与审批
-    p_review = sub.add_parser("review-imports", help="查看或批准外部书源规则冲突")
-    p_review.add_argument("--candidate", required=True, help="候选书源 JSON（批准时写入对应条目）")
-    p_review.add_argument("--registry", default="book_sources.sqlite3", help="导入台账 SQLite 文件")
-    p_review.add_argument("--approve", default="", help="批准指定 URL 的外部规则并更新候选库")
-    p_review.add_argument("--approve-new", default="", help="确认校验通过后，将指定新源加入候选库")
-    p_review.add_argument("--list", action="store_true", help="列出待审冲突（缺省也会列出）")
-    p_review.set_defaults(func=cmd_review_imports)
-
-    # dedupe
     p_ded = sub.add_parser("dedupe", help="按 URL/名称去重")
     p_ded.add_argument("-i", "--input", default="", help="输入书源 JSON（缺省自动探测）")
     p_ded.add_argument("-o", "--output", default="", help=f"输出 JSON 文件（缺省 {DEFAULT_OUTPUTS['dedupe']}）")

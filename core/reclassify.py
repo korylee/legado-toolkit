@@ -25,7 +25,7 @@ import sys
 from collections import Counter
 from typing import Any, Dict, List, Optional, Tuple
 
-from core.models import BOOK_SOURCE_TYPE_NAMES, Health, build_record
+from core.models import BOOK_SOURCE_TYPE_NAMES, Health
 from core.tags import extract_user_tags_from_group
 
 # ------------------------------------------------------------------ 类型信号表

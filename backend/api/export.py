@@ -18,7 +18,6 @@ from fastapi import APIRouter, Depends, HTTPException, Response
 
 from backend.deps import get_store
 from core.paths import data_path
-from core.store import now
 
 router = APIRouter()
 EXPORT_DIR = pathlib.Path(data_path("out", "exports"))

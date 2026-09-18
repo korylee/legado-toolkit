@@ -43,3 +43,6 @@ _inspect*.py
 
 # LLM 本地配置（含 API Key，禁止提交）
 data/config/
+# 2026-09-19 的设备实测产物（App 源清单备份 + searchBook 结果），
+# 产生它的脚本已删（步骤见 TODO「真机复检通道」），数据留着当证据。
+data/app_probe

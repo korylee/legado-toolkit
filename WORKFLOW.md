@@ -1,51 +1,51 @@
 # Legado 书源管理 · 完整链路
 
-> 本文件定义「新增源 / 外部源 → 最终源 → 最终报告」的完整工作流。
-> 所有命令在 `legado-tools/` 目录下执行（PowerShell）。
+> 本文件定义「新增源 / 外部源 → 校验 → 整理 → 报告 → 交付」的完整工作流。
+> 命令在**仓库根目录**下执行（PowerShell）。
+>
+> **两条入口，事实来源只有一个**：
+> - **Web 管理台**（`python -m backend`，浏览器开 `/`）：日常主用——源的增删改查、
+>   导入、校验、整理、报告都在界面上；数据落在 **`data/sources.sqlite3`**。
+> - **CLI**（`python cli/main.py <命令>`）：批量与离线场景——对**文件**跑
+>   check/organize/report/dedupe 等，产物默认写在当前目录（约定放 `out/`）。
+>
+> **JSON 是交付格式，不是事实来源**（AGENTS #2）：管理库才是。给 Legado 的 JSON 由
+> 管理库导出；CLI 的文件式流程与它互不影响，两边别互相覆盖。
 
 ---
 
 ## 一、链路总览
 
 ```
-                    ┌─────────────────────────────────────────┐
-                    │           输入（三类来源）               │
-                    └─────────────────────────────────────────┘
-       ① 新增源(URL)          ② 外部获取的源           ③ 候选主库
-   add_source 自动推断       (论坛/群分享/他人导出)     candidates.json
-        │                        │                          │
-        ▼                        ▼                          │
-  auto_added.json          source_import.json  ◄───────────┘
-        └──────────────┬─────────┘
-                       ▼
-               ┌───────────────┐
-               │ 安全导入批次  │   ← 留存原文件、清洗、URL+规则指纹比对
-               └───────────────┘
-                       ▼
-          新 URL → 待校验；规则冲突 → 待审；同规则 → 仅记录
-                       ▼
-          人工确认校验或审批冲突后，才写入 candidates.json
-                       ▼
-               ┌───────────────┐
-               │  check 校验   │   ← 指纹一致且未过期的缓存才复用
-               │ (check_cache) │      健康度 + 星级 + 被墙检测
-               └───────────────┘
-                       ▼
-               ┌───────────────┐
-               │ organize 整理 │   ← 按 类型+健康度+星级 重建分组
-               └───────────────┘
-                        ▼
-                ┌───────────────┐
-                │ sanitize 清洗 │   ← 外部文件常带类型脏值(''/[]/字符串数字)
-                │  (Gson兼容)   │      必跑，否则 Legado 导入报
-                └───────────────┘      IllegalStateException
-                        ▼
-                ┌───────────────┐
-                │  report 报告  │   ← 星级分布/健康分布/问题清单/重复源
-                └───────────────┘
-                        ▼
-             final_all.json（导入 Legado）
-             final_report.md（人工审阅）
+                    ┌───────────────────────────────┐
+                    │      三个入口（主要在 Web）    │
+                    └───────────────────────────────┘
+    ① 新增源(URL)          ② 外部来源              ③ 已有的源
+    Web「新增」/ add        Web「导入」对话框         （管理库里）
+        │                      │                         │
+        ▼                      ▼                         │
+   自动推断规则           三分类入库：                    │
+                      新 URL / 重复 / 冲突                │
+        └──────────────────────┴────────────┬────────────┘
+                                            ▼
+                          ┌───────────────────────────────────┐
+                          │  管理库 data/sources.sqlite3      │  ← 事实来源
+                          └───────────────────────────────────┘
+                                            ▼
+                          ┌───────────────────────────────────┐
+                          │  校验 check                       │  ← 指纹一致且未过期的
+                          │  （Web 按钮 / CLI 对文件跑）      │     缓存才复用；出健康度+星级
+                          └───────────────────────────────────┘
+                                            ▼
+                          ┌───────────────────────────────────┐
+                          │  整理 organize                    │  ← 按 类型+健康度 重建分组
+                          └───────────────────────────────────┘
+                                            ▼
+                          ┌───────────────────────────────────┐
+                          │  报告 report                      │  ← 星级分布/健康分布/问题清单
+                          └───────────────────────────────────┘
+                                            ▼
+                 给 Legado 的 JSON（交付格式） + Markdown 报告（人工审阅）
 ```
 
 ---
@@ -57,53 +57,55 @@
 ```powershell
 # 标准做法：URL 走 stdin（规避 shell 破坏 %XX 编码）
 echo 'https://www.koudaimh.com/search?q=%E7%BB%8D%E5%AE%8B' |
-  python main.py add - --name "口袋漫画" --type manga --no-ask
+  python cli/main.py add - --name "口袋漫画" --type manga --no-ask
 
 # 交互向导（推荐新手）：逐项确认名称/分组/类型
 echo 'https://www.koudaimh.com/search?q=%E7%BB%8D%E5%AE%8B' |
-  python main.py add - --interactive
+  python cli/main.py add - --interactive
 ```
 
 - 自动完成：搜索规则推断 → 详情页目录推断 → 全链路验证（search/bookUrl/toc/content）
 - 产物：`auto_added.json`（临时累积区，新源先落这里）
-- 生成后使用 `import-sources` 导入候选管理链路；不要用 `--to` 直接写入候选主库。
+- 生成后走 Web 的「导入」把它并入管理库；不要用 `merge --mode replace` 覆盖管理库里的源。
 
 ### ② 外部获取的源（他人分享 / 论坛 / 网络）
 
-```powershell
-# 首次迁移：以当前清理后的候选库建立唯一主库（仅做一次）
-Copy-Item final_clean.json candidates.json
+**只有一条路：Web 管理台的「导入」对话框**（后端 `backend/api/imports.py`）。
+（旧的 CLI `import-sources` / `review-imports` 与它那套独立台账 **2026-09-19 已删**：
+它写的是另一个 SQLite 文件、而那个文件在本机根本不存在，批准又写回 `candidates.json`
+——都已不是事实来源。）
 
-# 外部源只允许安全导入：原文件会留存，候选库不会被直接改写
-python main.py import-sources --candidate candidates.json -i source_import.json --registry book_sources.sqlite3 --raw-dir imports/raw
+粘贴外部 JSON，按 URL + 规则指纹三分类：
 
-# 查看新源与同 URL 规则冲突；先用现有 check 校验外部批次，再人工确认
-python main.py review-imports --candidate candidates.json --registry book_sources.sqlite3 --list
-python main.py check -i source_import.json -o source_import_checked.json --cache-dir check_cache
+- **新 URL** → 写入管理库，按原分组推断健康状态（无信号默认「待验证」）。
+- **同 URL 同规则** → 重复，跳过。
+- **同 URL 不同规则** → 冲突，**不自动覆盖**；按对话框里选的策略处理
+  （`keep` 保留库里那份 / `overwrite` 用外部覆盖），冲突源原样存到
+  `data/imports/conflicts/` 供回查。
 
-# 已确认的新源才进入候选库；规则冲突必须单独批准
-python main.py review-imports --candidate candidates.json --registry book_sources.sqlite3 --approve-new "https://new.example"
-python main.py review-imports --candidate candidates.json --registry book_sources.sqlite3 --approve "https://changed.example"
-```
+导入后照常走「校验 → 整理 → 报告」；要人工确认的外部规则，跑一次
+`check` 看结果，确实更好再用导入对话框的 `overwrite` 策略重新导入一次。
 
-- 新 URL 进入待校验，**不会**自动写入候选库。
-- 同 URL 且规则相同只记录为重复；不会制造副本。
-- 同 URL 但规则不同进入待审，**不会**自动覆盖候选库；只有 `--approve` 才能替换对应条目。
-- 每个外部文件会保留到 `imports/raw/`，导入批次和处置结果记录在 `book_sources.sqlite3`。
+### ③ 已有的源（管理库里的源；CLI 侧对应 `candidates.json`）
 
-### ③ 现有主源（candidates.json）
-
-- `candidates.json` 是唯一候选主库；`out/` 下的 `checked.json`、`organized.json` 及 `archive/` 里的 `final_*.json` 都是处理或导出产物，不可反向当作主库覆盖。
-- 主库保留可用、待验证和需代理复检源；待审和待校验源在获得人工确认前不进入主库。
+- **事实来源是管理库 `data/sources.sqlite3`**（Web 侧）；CLI 侧对应的是
+  `candidates.json`。`out/` 下的 `checked.json`/`organized.json`、`archive/` 里的
+  `final_*.json` 都是**处理或导出产物**，不能反向当作主库覆盖回去。
+- 库里保留可用、待验证、需代理复检的源；校验判死的源会被标记，**删不删由人定**
+  （回收站里留着历史版本，可回滚）。
 
 ---
 
 ## 三、合入后的处理链（每次新增/合入后必跑）
 
+> **Web 上不用敲这些命令**：管理台的「校验 / 整理 / 报告」按钮跑的是同一条链
+> （同一个 `core/` 实现），结论写回管理库。本节是**离线/批量**形态——操作对象是
+> JSON 文件，缓存是 `--cache-dir` 指向的目录。
+
 附件或自用源需要高优先级时，可一条命令生成三个产物：
 
 ```powershell
-python main.py prepare -i "D:\DownloadsshareBookSource(1).json" -i candidates.json --prefer-input first
+python cli/main.py prepare -i "D:\DownloadsshareBookSource(1).json" -i candidates.json --prefer-input first
 ```
 
 - `candidates-merged.json`：附件优先的去重合并底稿；
@@ -114,22 +116,22 @@ python main.py prepare -i "D:\DownloadsshareBookSource(1).json" -i candidates.js
 
 ```powershell
 # 1. 校验：仅 URL、规则指纹一致且缓存未过期的源可跳过联网
-python main.py check -i candidates.json -o out/checked.json --cache-dir check_cache -c 50 -t 8
+python cli/main.py check -i candidates.json -o out/checked.json --cache-dir check_cache -c 50 -t 8
 
 # 网络刚恢复，绕过旧缓存并用本次成功结果更新缓存
-python main.py check -i candidates.json -o out/checked.json --refresh-cache --cache-dir check_cache
+python cli/main.py check -i candidates.json -o out/checked.json --refresh-cache --cache-dir check_cache
 
 # 临时完全不使用缓存（不读也不写，适合一次性诊断）
-python main.py check -i candidates.json -o out/checked.json --no-cache
+python cli/main.py check -i candidates.json -o out/checked.json --no-cache
 
 # 2. 整理（按 类型+生命周期状态 重建分组，-r 恢复缓存里的星级数据）
-python main.py organize -i out/checked.json -o out/organized.json -r check_cache
+python cli/main.py organize -i out/checked.json -o out/organized.json -r check_cache
 
 # 3. 报告（-r 恢复缓存星级，报告才有星级分布/优质TOP）
-python main.py report -i out/organized.json -r check_cache -o out/final_report.md
+python cli/main.py report -i out/organized.json -r check_cache -o out/final_report.md
 ```
 
-> 等价的一条龙：`python main.py run -i candidates.json -o out/checked.json`
+> 等价的一条龙：`python cli/main.py run -i candidates.json -o out/checked.json`
 > （效果相同，但中间产物文件名固定为 checked.json / report.md，均落在 out/）
 
 **最终交付两件东西（均在 `out/`）：**
@@ -189,9 +191,9 @@ python main.py report -i out/organized.json -r check_cache -o out/final_report.m
 - 内置参考表（models.py `TEST_TITLES`，数据截至 2026-08）：斗破苍穹 1681 / 凡人修仙传 2446 / 赘婿 1358 / 诡秘之主 1432 / 庆余年 826 章；海贼王 1190 / 火影忍者 700 / 斗罗大陆 750 / 进击的巨人 139 / 龙珠 519 话
 
 ### 质量标签（追加在分组后，逗号分隔）
-`📖小说★★★★★,规则完整,原创`
+`📖小说,可用,规则完整`
 - **规则完整**：目录+正文规则都齐全（静态判定）
-- **原创**：书源注释带 自写/自建/原创/整理 等标记
+（**「原创」标签已退役**：`checker` 会把它当旧缓存遗留剔除，别再依赖它。）
 - 搜索命中结果**不再**以「命中《xx》」标签展示；命中信息仅用于星级评分与报告「命中作品」列
 
 ---
@@ -200,55 +202,65 @@ python main.py report -i out/organized.json -r check_cache -o out/final_report.m
 
 | 场景 | 命令 |
 |---|---|
-| 新增一个站 | `echo '搜索URL' \| python main.py add - --interactive` |
-| 导入外部源 | `python main.py import-sources --candidate candidates.json -i 外部.json --registry book_sources.sqlite3` |
-| 查看待校验/待审 | `python main.py review-imports --candidate candidates.json --registry book_sources.sqlite3 --list` |
-| 批准校验通过的新源 | `python main.py review-imports --candidate candidates.json --registry book_sources.sqlite3 --approve-new URL` |
-| 批准规则冲突 | `python main.py review-imports --candidate candidates.json --registry book_sources.sqlite3 --approve URL` |
-| 清洗类型脏值（导入前必跑） | `python main.py sanitize -i 外部.json`（缺省就地覆盖） |
-| 校验+整理+报告 | `python main.py run -i candidates.json -o out/checked.json` |
-| 深度验证审计（目录+正文实测） | `python main.py check -i candidates.json --probe-depth 4 --cache-dir check_cache` |
-| 仅可用源精简版 | `python main.py run -i candidates.json --keep-only-ok -o out/checked_ok.json` |
-| 只要报告（不重新校验） | `python main.py report -i out/organized.json -r check_cache -o out/report.md` |
-| 去重检查 | `python main.py dedupe -i 某文件.json -o 去重后.json` |
-| 忘了命令 | `python main.py`（进菜单）或 `python main.py -h` |
+| 新增一个站 | `echo '搜索URL' \| python cli/main.py add - --interactive` |
+| 导入外部源 | **Web 管理台「导入」对话框**（CLI 无此命令；冲突按策略处理并存档） |
+| 清洗类型脏值（导入前必跑） | `python cli/main.py sanitize -i 外部.json`（缺省就地覆盖） |
+| 校验+整理+报告 | `python cli/main.py run -i candidates.json -o out/checked.json` |
+| 深度验证审计（目录+正文实测） | `python cli/main.py check -i candidates.json --probe-depth 4 --cache-dir check_cache` |
+| 仅可用源精简版 | `python cli/main.py run -i candidates.json --keep-only-ok -o out/checked_ok.json` |
+| 只要报告（不重新校验） | `python cli/main.py report -i out/organized.json -r check_cache -o out/report.md` |
+| 去重检查 | `python cli/main.py dedupe -i 某文件.json -o 去重后.json` |
+| 忘了命令 | `python cli/main.py`（进菜单）或 `python cli/main.py -h` |
 
 ---
 
 ## 六、维护建议
 
-1. **新增源先进 `auto_added.json` 或外部批次**，通过 `import-sources` 进入待校验；不要再用 `merge --mode replace` 直接覆盖候选库。
-2. **规则冲突必须审阅**：确认外部规则更可靠后才执行 `--approve`，批准后该源会在下次校验时因指纹变化强制复检。
+1. **新增源走 `add`（CLI）或 Web 的「新增」；外部源走 Web 的「导入」**。不要用 `merge --mode replace` 直接覆盖管理库里的源。
+2. **规则冲突要人工判断**：先用 `check` 看外部那版的实测结果，确实更好再用导入对话框的 `overwrite` 覆盖；覆盖后指纹变化会强制复检。
 3. **缓存会自动过期**：可用源 14 天后复检；待验证、需代理复检及其他状态 7 天后复检；旧版本缓存也会自动复检。
-4. **被墙源**（🌐）可加 `--proxy` 复检：`python main.py check -i x.json --proxy http://127.0.0.1:7890`
+4. **被墙源**（🌐）可加 `--proxy` 复检：`python cli/main.py check -i x.json --proxy http://127.0.0.1:7890`
    （原先这里写的 `socks5://` 是失实示例——urllib 与 aiohttp 都不认，会直接连接失败。
    代理只支持 `http://` / `https://`。）
    Web 端不必敲命令：**设置 → 校验 → 代理** 里配一次，或在校验前用工具栏的
    「校验参数」只对本次生效。注意 CLI 与 Web 的参数**各自独立**，不共享。
-5. 候选主库与 `imports/raw/` 建议一同备份；台账 `book_sources.sqlite3` 保存了来源与审批历史。
+5. 备份只看两处：**管理库 `data/sources.sqlite3`** 与 `data/candidates*.json`。
 
 ---
 
-## 七、目录约定（2026-09 治理后）
+## 七、目录约定
 
-工作区根目录只保留：**代码文件 + 候选主库 + 台账 + 目录骨架**，所有处理产物不进根目录。
+**运行时数据都在 `data/`（已 gitignore）**，可用 `LEGADO_DATA_DIR` 覆盖。核心只有两件：
 
 | 路径 | 用途 |
 |---|---|
-| `candidates.json` | **唯一候选主库**（当前 3734 源，已清洗）。日常唯一读写的书源文件。 |
-| `auto_added.json` | `add` 命令的新增源暂存区（临时，导入批准后不长期留存）。 |
-| `out/` | 所有 `-o` 输出产物（`organized.json`/`check_*.json`/`report.md` 等）统一放这里。 |
-| `imports/raw/` | 外部导入的原始文件留存（`import-sources` 的 `--raw-dir`，含手机导出的原始 JSON）。 |
-| `imports/` | 外部导入批次、台账 `book_sources.sqlite3` 的归属目录。 |
-| `check_cache/` | **唯一**校验缓存目录（`--cache-dir`）。不要新建 `check_cache_full`/`_deep3` 变体。 |
-| `.venv/` | uv 虚拟环境（`uv venv` + `uv pip install -r requirements.txt`）。用 `uv run python main.py ...` 运行。 |
-| `archive/` | 历史产物归档（`productions/` 校验产物、`reports/` 报告、`caches/` 缓存、时间戳备份），**可回溯不删除**。 |
-| `tests/` | 单元测试。 |
+| `data/sources.sqlite3` | **管理库：事实来源**。源 / 校验缓存 / 任务 / 导出记录 |
+| `data/candidates*.json` | 候选源与导出产物（**交付格式**，可单独备份） |
+
+其余运行时目录：
+
+| 路径 | 用途 |
+|---|---|
+| `data/imports/conflicts/` | Web 导入时规则冲突的源（原样留存，可回查） |
+| `data/backups/` | 软删除记录（`deleted.jsonl`）+ 手动备份 |
+| `data/out/exports/` | 临时导出快照 |
+| `data/app_probe/` | App 实测产物（源清单备份 + searchBook 结果），产生它的脚本已删 |
+
+**CLI 的文件式产物**默认落在**当前目录**（`checked.json`、`check_cache/` …），项目约定
+统一放 `out/` 与 `check_cache/`：
+
+| 路径 | 用途 |
+|---|---|
+| `out/` | 所有 `-o` 产物（`organized.json`/`check_*.json`/`report.md`） |
+| `check_cache/` | CLI 的校验缓存目录（`--cache-dir`）。**不要再建 `check_cache_full`/`_deep3` 变体** |
+| `archive/` | 历史产物归档，**可回溯不删除** |
 
 约定：
-- `candidates.json` 之外的书源 JSON（外卖/手机导出/群分享）一律视为外部源，走 `import-sources` 安全导入，不进根目录。
-- 不创建的产物：`checked.json`/`checked_full.json`/`checked_deep3.json`/`checked_ok.json`/`final_*.json`/根目录 `shareBookSource.json`——均由 `out/` 或 `archive/` 承载。
-- 运行前若缺依赖：`uv pip install -r requirements.txt`（在当前 `.venv/` 下用 `uv run`）。
+- `candidates.json` 之外的书源 JSON（外卖 / 手机导出 / 群分享）一律视为**外部源**，
+  走 **Web 导入**，不进仓库根目录。
+- 别在根目录堆产物（`checked.json`/`final_*.json`/`shareBookSource.json`）——
+  要么 `-o out/...`，要么让 Web 去做。
+- 运行前若缺依赖：`uv pip install -r requirements.txt`（在 `.venv/` 下用 `uv run`）。
 
 ---
 
@@ -261,10 +273,10 @@ python main.py report -i out/organized.json -r check_cache -o out/final_report.m
 
 ```powershell
 # 只看判定结果，不改文件
-python main.py reclassify -i candidates.json --limit 50
+python cli/main.py reclassify -i candidates.json --limit 50
 
 # 回写 bookSourceType（之后重跑 organize 刷新分组）
-python main.py reclassify -i candidates.json --write
+python cli/main.py reclassify -i candidates.json --write
 ```
 
 判定信号（累计打分，>=3 且高于另一方才改判，否则保持原样）：
@@ -273,7 +285,6 @@ python main.py reclassify -i candidates.json --write
 |---|---|---:|
 | 漫画 | 域名含 manhua/manga/comic/acg/dm5... | +3 |
 | 漫画 | 名称/分组含 漫画/漫畫/汉化/图集/里番 | +3 |
-| 漫画 | 有 `ruleContent.image` | +3 |
 | 漫画 | 正文规则取图片（`img` / `@src` / `@data-original`） | +2 |
 | 漫画 | `imageStyle=FULL` / 章节 URL 含 manhua、comic | +1 |
 | 小说 | 域名含 xs/book/shu/biqu/novel... | +2 |
@@ -292,7 +303,7 @@ python main.py reclassify -i candidates.json --write
 
 ```powershell
 # 只探测非可用源，输出 Markdown 报告
-python main.py diagnose -i out/checked.json -o out/diagnose.md --only-dead -c 20
+python cli/main.py diagnose -i out/checked.json -o out/diagnose.md --only-dead -c 20
 ```
 
 | 归因 | 含义 | 建议动作 |
@@ -303,9 +314,9 @@ python main.py diagnose -i out/checked.json -o out/diagnose.md --only-dead -c 20
 | 需验证 | 403/429/验证码/登录墙 | 保留，人工或改 UA/Cookie 复检 |
 | 疑似可用 | 搜索能解析出列表 | 复检一次，可能是缓存过期或临时故障 |
 
-### 规则回放器 `legado_rules.py`
+### 规则回放器 `core/rules/replayer.py`
 
-`check`/`add`/`diagnose` 的规则解析统一走 `legado_rules.py`，语义对齐 Legado：
+`check`/`add`/`diagnose` 的规则解析统一走 `core/rules/replayer.py`，语义对齐 Legado：
 
 - `class.xxx` / `id.xxx` / `tag.a` 选择器简写
 - `class.item@tag.a@href` 链式选择、`.-1` / `.0` 索引

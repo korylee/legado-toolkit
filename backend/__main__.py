@@ -13,7 +13,7 @@
 import argparse
 import os
 import pathlib
-from typing import List, Optional, Sequence
+from typing import Optional, Sequence
 
 from backend import netinfo
 

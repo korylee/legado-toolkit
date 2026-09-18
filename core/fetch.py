@@ -413,6 +413,3 @@ def probe_search_endpoint(domain: str, keyword: str, timeout: int = 12) -> tuple
             template = base + tmpl.format(p=param, kw="{{key}}")
             return template, url, param
     return None, None, None
-def _header_headers():
-    """返回默认请求头。"""
-    return {"User-Agent": DEFAULT_UA}

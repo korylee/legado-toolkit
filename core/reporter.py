@@ -14,7 +14,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from typing import Any, Dict, List
+from typing import Dict, List
 
 from core.models import (BookSourceRecord, Health, DEAD_TAG_PATTERNS,
                          BOOK_SOURCE_TYPE_NAMES, HEALTH_NAMES)
