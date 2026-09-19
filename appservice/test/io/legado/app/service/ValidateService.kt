@@ -1,5 +1,7 @@
 package io.legado.app.service
 
+import io.legado.app.data.entities.Book
+import io.legado.app.data.entities.BookChapter
 import io.legado.app.data.entities.BookSource
 import io.legado.app.data.entities.SearchBook
 import io.legado.app.domain.gateway.BookExportSettingsGateway
@@ -160,6 +162,38 @@ object ValidateService {
     const val DEPTH_TOC = "toc"
     const val DEPTH_CONTENT = "content"
 
+    //: 「引擎把异常消息当成了规则的值」的识别。
+    //:
+    //: 实测（塔读系 4 条，占当批 ok 的 5%）：正文规则 `#x@value@js: java.ajax(result)...`
+    //: 里 `java.ajax` 抛 `IllegalArgumentException: Expected URL scheme 'http...'`，
+    //: Rhino 把**异常消息字符串**当成了 JS 结果返回——于是「非空即通过」判它 ok，
+    //: 而那段"正文"其实是一行报错。**「非空即通过」的前提是「非空的是内容」**，
+    //: 这个前提在引擎吞掉异常时不成立。
+    //:
+    //: 判据锚在**异常/错误的形态**上，不是"含 Exception 字样"——正文里出现这些词的
+    //: 概率不为零，误伤一个真源比漏掉一条假通过更贵。每条都必须自证是引擎产物：
+    //: 全限定异常类名、JS 引擎的报错形态、OkHttp 的 URL 校验消息。
+    private val ENGINE_ERROR_MARKERS = listOf(
+        "java.lang.", "org.mozilla.javascript.", "okhttp3.",
+        "ScriptException", "Expected URL scheme",
+        "TypeError:", "ReferenceError:", "SyntaxError:",
+        "is not a function", "Cannot read property", " is not defined",
+    )
+
+    private fun looksLikeEngineError(text: String): Boolean {
+        val head = text.take(200)
+        return ENGINE_ERROR_MARKERS.any { head.contains(it) }
+    }
+
+    //: App 的两类「空」异常：它们**是源级的结论**（规则跑不出内容/目录），
+    //: 不是网络或我们的失败——归成 `error` 会把它混进「网络异常」那桶里。
+    //: （对应用户看到的 App 行为：正文页空白，而不是"打不开"）
+    private fun isEmptyException(e: Throwable): Boolean {
+        val root = generateSequence(e) { it.cause }.lastOrNull() ?: e
+        return root::class.simpleName?.contains("EmptyException") == true ||
+            e::class.simpleName?.contains("EmptyException") == true
+    }
+
     //: 目录「完整」的**绝对下限**（按书源类型）。
     //:
     //: ⚠️ 与本地回放**不是同一把尺**：那边是**比例**（TOC_COMPLETE_THRESHOLD：
@@ -282,21 +316,66 @@ object ValidateService {
                             val toc = runBlocking {
                                 withTimeout(remaining()) { runTocStage(effective, books[0]) }
                             }
-                            row.putAll(toc)
+                            row.putAll(toc.fields)
                             row["stage"] = DEPTH_TOC
                             row["cost_ms"] = System.currentTimeMillis() - startedAt
-                            if ((toc["toc_count"] as? Int ?: 0) == 0) {
+                            if ((toc.fields["toc_count"] as? Int ?: 0) == 0) {
                                 row["state"] = "no_result"
                                 row["reason"] = "搜索命中但目录页没有章节（章节数 0）"
+                            } else if (depth == DEPTH_CONTENT) {
+                                // 目录有章节才验正文：没目录就没得验，fail-fast
+                                try {
+                                    val c = runBlocking {
+                                        withTimeout(remaining()) {
+                                            runContentStage(effective, toc.book, toc.chapters)
+                                        }
+                                    }
+                                    row.putAll(c)
+                                    row["stage"] = DEPTH_CONTENT
+                                    row["cost_ms"] = System.currentTimeMillis() - startedAt
+                                    if (c["content_ok"] == false) {
+                                        row["state"] = "no_result"
+                                        row["reason"] = c["reason"]
+                                    }
+                                } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
+                                    val spent = System.currentTimeMillis() - startedAt
+                                    row["state"] = "timeout"
+                                    row["stage"] = DEPTH_CONTENT
+                                    row["cost_ms"] = spent
+                                    // **不要把两种超时说成一种**：本次预算用尽，与 App 内部
+                                    // 请求超时，用户要采取的动作不同（前者是我们的参数，后者是源慢）。
+                                    // App 的 okhttp 读超时是 **60s**（`HttpHelper` 的
+                                    // `.readTimeout(60, SECONDS)`，符号名查证，行号会漂）——
+                                    // 实测 timeout=90 时这 14 条仍在 60–65s 断，正是它。
+                                    // → 所以**每源总预算要 > 60s 才有意义**，否则两个限制重叠，
+                                    // 用户分不清是哪一边断的。
+                                    row["reason"] = if (spent >= timeoutSec * 1000 - 1000)
+                                        "正文段超时（每源总预算 ${timeoutSec}s 用尽）"
+                                    else "正文段超时（用时 ${spent}ms，是 App 内部的请求超时，非本次预算）"
+                                } catch (e: Throwable) {
+                                    val root = generateSequence(e as Throwable?) { it.cause }.lastOrNull() ?: e
+                                    row["state"] = if (isEmptyException(e)) "no_result" else "error"
+                                    row["stage"] = DEPTH_CONTENT
+                                    row["reason"] = "${e::class.simpleName}: ${e.message?.take(160)}"
+                                    row["root"] = "${root::class.simpleName}: ${root.message?.take(160)}"
+                                    row["root_stack"] = root.stackTrace.take(6).joinToString(" | ") { f ->
+                                        "${f.className.substringAfterLast('.')}.${f.methodName}:${f.lineNumber}"
+                                    }
+                                }
                             }
                         } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
+                            val spent = System.currentTimeMillis() - startedAt
                             row["state"] = "timeout"
                             row["stage"] = DEPTH_TOC
-                            row["cost_ms"] = System.currentTimeMillis() - startedAt
-                            row["reason"] = "目录段超时（每源总预算 ${timeoutSec}s）"
+                            row["cost_ms"] = spent
+                            row["reason"] = if (spent >= timeoutSec * 1000 - 1000)
+                                "目录段超时（每源总预算 ${timeoutSec}s 用尽）"
+                            else "目录段超时（用时 ${spent}ms，是 App 内部的请求超时，非本次预算）"
                         } catch (e: Throwable) {
                             val root = generateSequence(e as Throwable?) { it.cause }.lastOrNull() ?: e
-                            row["state"] = "error"
+                            // 目录为空是**源级的结论**（App 自己抛 TocEmptyException），
+                            // 归 error 会混进「网络异常」那桶——两类的下一步动作不同
+                            row["state"] = if (isEmptyException(e)) "no_result" else "error"
                             row["stage"] = DEPTH_TOC
                             row["cost_ms"] = System.currentTimeMillis() - startedAt
                             row["reason"] = "${e::class.simpleName}: ${e.message?.take(160)}"
@@ -333,7 +412,10 @@ object ValidateService {
                 "url" to source.bookSourceUrl, "name" to source.bookSourceName,
                 "state" to "timeout",
                 "stage" to DEPTH_SEARCH,
-                "reason" to "搜索超时（每源总预算 ${timeoutSec}s）",
+                "cost_ms" to (System.currentTimeMillis() - startedAt),
+                "reason" to if (System.currentTimeMillis() - startedAt >= timeoutSec * 1000 - 1000)
+                    "搜索超时（每源总预算 ${timeoutSec}s 用尽）"
+                else "搜索超时（是 App 内部的请求超时，非本次预算）",
                 "webview_stripped" to stripped,
             )
         } catch (e: Throwable) {
@@ -363,7 +445,19 @@ object ValidateService {
      * **不落盘**：`getChapterListAwait` 不写 App 的数据库/缓存（needSave 那条纪律
      * 只约束正文段，这里连缓存都不碰）。
      */
-    private suspend fun runTocStage(source: BookSource, firstBook: SearchBook): Map<String, Any?> {
+    /**
+     * 目录段的产出：给结论用的字段 + 正文段要复用的 book/章节列表。
+     *
+     * 带着对象走是刻意的——正文段若重新搜一次，两次搜索可能命中**不同的书**
+     * （搜索结果有随机性/站点推荐），于是「正文」说的根本不是「目录」那本书。
+     */
+    private class TocStage(
+        val fields: Map<String, Any?>,
+        val book: Book,
+        val chapters: List<BookChapter>,
+    )
+
+    private suspend fun runTocStage(source: BookSource, firstBook: SearchBook): TocStage {
         val book = firstBook.toBook()
         WebBook.getBookInfoAwait(source, book)
         val res = WebBook.getChapterListAwait(source, book)
@@ -378,13 +472,75 @@ object ValidateService {
         // `toc_sample` + `toc_raw_count`：**让「只有 2 章」这种结论能自证真伪**——
         // 分不清「站点真的只有一章」和「我们的卷标过滤/规则解析把它吃掉了」时，
         // 只报一个数字等于把工具的问题说成源的问题
+        return TocStage(
+            linkedMapOf(
+                "book_url" to book.bookUrl,
+                "toc_url" to book.tocUrl,
+                "toc_count" to count,
+                "toc_raw_count" to all.size,
+                "toc_sample" to chapters.take(3).map { it.title.take(40) },
+                "toc_complete" to (count >= min && urlsOk),
+            ),
+            book, chapters,
+        )
+    }
+
+    /**
+     * 正文段：取目录**第 1 章**（`nextChapterUrl` 取第 2 章，与 `Debug.kt:353` 同口径
+     * ——它决定了 `nextContentUrl` 分页规则的求值基准）。
+     *
+     * **判定口径对齐 `core.quality.judge_content`**（Python 那份是权威，这里是同语义的
+     * 第二实现——跨语言没法共享代码，只能对齐语义）：
+     *  1. 下载源（type 3）不解析正文 → 无结论（App 用 `book.isWebFile` 跳过）
+     *  2. 正文规则为空 → 小说判失败（Legado 把章节链接当正文返回，无法阅读）；
+     *     音频/图片源是正常配置 → 通过（`WebBook.kt:400-403`）
+     *  3. 提取为空 → 失败（对应 App 的 `ContentEmptyException`）
+     *  4. **非空即通过**——不加「≥N 字」这类自造阈值：口径的权威只有一份，
+     *     这里多一条本地发明就会与那边漂移。字数照记（`content_len`），
+     *     要收紧门槛由**消费方**决定（界面上能看见原始数字）。
+     */
+    private suspend fun runContentStage(
+        source: BookSource,
+        book: Book,
+        chapters: List<BookChapter>,
+    ): Map<String, Any?> {
+        val type = source.bookSourceType
+        val rule = source.getContentRule().content.orEmpty()
+        if (type == 3) {
+            return linkedMapOf(
+                "content_ok" to null,
+                "content_len" to 0,
+                "reason" to "文件类书源，不解析正文（对齐 judge_content 的分流 1）",
+            )
+        }
+        if (rule.isBlank()) {
+            val ok = type == 1 || type == 2      // 音频/图片源回退用章节链接，是正常配置
+            return linkedMapOf(
+                "content_ok" to ok,
+                "content_len" to 0,
+                "reason" to if (ok) "正文规则为空；音频/图片源回退用章节链接（正常）"
+                else "正文规则为空；Legado 会把章节链接当作正文，无法阅读",
+            )
+        }
+        val first = chapters.first()
+        val nextUrl = chapters.getOrNull(1)?.url
+        // needSave=false 是硬约束：校验器对 App 的数据库/缓存只读
+        val text = WebBook.getContentAwait(source, book, first, nextUrl, needSave = false)
+        val len = text.length
+        val engineError = looksLikeEngineError(text)
         return linkedMapOf(
-            "book_url" to book.bookUrl,
-            "toc_url" to book.tocUrl,
-            "toc_count" to count,
-            "toc_raw_count" to all.size,
-            "toc_sample" to chapters.take(3).map { it.title.take(40) },
-            "toc_complete" to (count >= min && urlsOk),
+            "chapter_title" to first.title.take(40),
+            "chapter_url" to first.url,
+            "content_len" to len,
+            "content_ok" to (len > 0 && !engineError),
+            // 异常文本照记（它就是引擎返回的东西），但**不能算通过**——
+            // 理由见 ENGINE_ERROR_MARKERS 的注释
+            "content_sample" to text.take(60),
+            "reason" to when {
+                len == 0 -> "正文提取为空（对应 App 的 ContentEmptyException）"
+                engineError -> "正文规则在引擎里抛异常，异常消息被当成正文返回（源的问题）"
+                else -> ""
+            },
         )
     }
 
@@ -453,10 +609,10 @@ object ValidateService {
         }
         // 深度白名单：**未实现的值显式拒绝**，不静默降级成搜索档——
         // 静默降级会让调用方以为跑到了目录/正文段，拿到一份"看起来正常"的浅结论
-        if (depth !in listOf(DEPTH_SEARCH, DEPTH_TOC)) {
+        if (depth !in listOf(DEPTH_SEARCH, DEPTH_TOC, DEPTH_CONTENT)) {
             System.err.println(
-                "[appservice] --depth $depth 不可用（当前支持：$DEPTH_SEARCH / $DEPTH_TOC；" +
-                    "$DEPTH_CONTENT 见 S3-2）")
+                "[appservice] --depth $depth 不可用（支持：$DEPTH_SEARCH / $DEPTH_TOC / " +
+                    "$DEPTH_CONTENT）")
             return
         }
         ensureStarted("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
