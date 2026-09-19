@@ -49,6 +49,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from core import quality as Q
 from core.fetch import CACHE_AUTO, CacheMiss, fetch_ex, parse_source_header
+from core.urls import abs_url, split_url_options
 
 # ------------------------------------------------------------------ 常量
 
@@ -98,6 +99,13 @@ _START_RE = re.compile(r"^︾开始解析(搜索|发现|详情|目录|正文)页
 _DONE_RE = re.compile(r"^︽(搜索|发现|详情|目录|正文)页解析完成")
 #: 抓取成功：``≡获取成功:https://...``
 _URL_RE = re.compile(r"^≡获取成功[:：](.+)$")
+#: 正文规则为空时 App **不发请求**，只在事件流里打这一行就返回章节链接
+#: （``WebBook.getContentAwait``：``content.isNullOrEmpty()`` →
+#: ``Debug.log("⇒正文规则为空,使用章节链接:${bookChapter.url}")`` → return）。
+#: 这一行是正文页 URL 的**唯一来源**，也是补抓的入口：规则为空恰恰是用户
+#: 最需要看正文页源码的时刻（要从零写规则），不补抓这一页，抽屉里的
+#: 整页源码 / 候选 / AI 提议就全部失效。
+_EMPTY_CONTENT_RE = re.compile(r"^⇒正文规则为空.*?章节链接[:：](.+)$")
 #: 入口事件：``⇒开始搜索关键字:我`` / ``⇒开始访目录页:<URL>`` /
 #: ``⇒开始访问发现页:<URL>``（发现是「访问」而不是「访」，故 ``问`` 可选）
 _ENTRY_RE = re.compile(r"^⇒开始(?:搜索关键字|访(?:问)?(搜索|发现|详情|目录|正文)页)")
@@ -566,6 +574,38 @@ def _first_url(values: Sequence[str]) -> str:
 
 # ------------------------------------------------------------------ 页面抓取
 
+def _fallback_content_url(step: Dict[str, Any], seg_url: Dict[str, str]) -> str:
+    """正文段没有 ``≡获取成功`` 时，从「⇒正文规则为空,使用章节链接:」行找章节 URL。
+
+    返回**绝对化后的原文形态**：章节链接是规则取的原文，可能相对、也可能自带
+    ``,{...}`` 请求选项。绝对化必须只对 URL 主体做（App 的
+    ``BookChapter.getAbsoluteURL`` 就是先切选项、绝对化、再拼回）——直接
+    ``urljoin`` 会把选项当路径拼坏。选项原文拼回不做重序列化：这份 URL 还要
+    回填 ``step.url`` 给「从此步重跑」当 App 的 key，App 端 ``AnalyzeUrl``
+    自己会再解析它，保留原文最忠实。
+
+    拿不到返回空串——不抛、不打 note：base（目录/详情段）也没有 URL 时连
+    猜的资格都没有，硬 note 一句会让「正文页没抓」喧宾夺主。
+    """
+    for line in step.get("values", []):
+        m = _EMPTY_CONTENT_RE.match(line)
+        if not m:
+            continue
+        raw = m.group(1).strip()
+        if not raw:
+            continue
+        pure, _opts = split_url_options(raw)
+        base = seg_url.get("toc") or seg_url.get("bookUrl") or ""
+        if not pure:
+            continue
+        absolute = abs_url(base, pure)
+        if not absolute:
+            continue
+        tail = raw[len(pure):] if _opts else ""
+        return absolute + tail
+    return ""
+
+
 def fetch_debug_pages(steps: Sequence[Dict[str, Any]], source: Optional[Dict[str, Any]] = None,
                       proxy: str = "", timeout: int = 15,
                       cache: str = CACHE_AUTO) -> List[Dict[str, Any]]:
@@ -594,6 +634,12 @@ def fetch_debug_pages(steps: Sequence[Dict[str, Any]], source: Optional[Dict[str
         step["notes"] = list(step.get("notes", [])) + [text]
         step["has_notes"] = True
 
+    # 各段已知的请求 URL。正文段的 fallback（规则为空）要拿目录段的 URL 当
+    # 绝对化 base——App 侧 ``AnalyzeUrl`` 的 baseUrl 恰是 ``book.tocUrl``，同构；
+    # 目录段自己没有 URL 时退详情段（多数站的相对章节链接相对详情页也能解析）。
+    seg_url = {str(s.get("name", "")): str(s.get("url", "") or "")
+               for s in steps if s.get("url")}
+
     # 去重看**已尝试过的 URL**，不是「已登记的 page_id」。
     # 只看 page_id 的话，第一次抓超时（没登记）会让后面共用同一 URL 的步
     # **再抓一次**——实测详情页就是这样被抓了两遍，白等一个超时。
@@ -602,6 +648,13 @@ def fetch_debug_pages(steps: Sequence[Dict[str, Any]], source: Optional[Dict[str
         if len(pages) >= MAX_PAGES:
             break
         url = str(step.get("url", "") or "")
+        # 正文规则为空：App 没请求过正文页，但章节链接就在事件流里——
+        # 自己补上 URL 再抓。抓到就回填 step.url：抽屉的「整页源码」靠
+        # page_id 找页面，而「从此步重跑」直接拿这个 URL 当 App 的 key。
+        if not url and step.get("name") == "content":
+            url = _fallback_content_url(step, seg_url)
+            if url:
+                step["url"] = url
         page_id = str(step.get("page_id", "") or "")
         if not url or not page_id or page_id in pages:
             continue            # 没抓到 URL / 该页已登记（如目录页与详情页同 id）
@@ -613,14 +666,31 @@ def fetch_debug_pages(steps: Sequence[Dict[str, Any]], source: Optional[Dict[str
                     break
             continue
         tried.add(url)
+        # URL 可能自带 ``,{...}`` 请求选项（method/headers/body）——与 App 同一
+        # 套语法，抓取前拆出来应用，否则带选项的链接会被当成 GET 发出去，
+        # 抓回来的往往不是 App 看到的那份
+        fetch_url, opts = split_url_options(url)
+        req_headers = dict(headers)
+        opt_headers = opts.get("headers")
+        if isinstance(opt_headers, dict):
+            # 选项里的 header 覆盖源声明（对齐 AnalyzeUrl 的 putAll 次序）
+            req_headers.update({str(k): str(v) for k, v in opt_headers.items()})
+        method = str(opts.get("method", "") or "").strip().upper() or "GET"
+        body = str(opts.get("body", "") or "")
+        if method == "POST" and ("{{" in body or "<js>" in body or "@js:" in body):
+            # body 里的模板/JS 只有 App（Rhino）求得了值：本地硬抓发出去的是
+            # 字面量，拿回来的多半是参数错误页——不如明说，让用户连 App 看
+            _note(step, "正文链接的 body 带未求值的模板/JS，本地抓不了这一页，"
+                        "请连 App 调试")
+            continue
         try:
             # 传 source：最多补抓 3 页，也该遵守源声明的 concurrentRate
-            f = fetch_ex(url, headers=headers, charset=charset, proxy=proxy,
-                         source=source, cache=cache)
+            f = fetch_ex(fetch_url, headers=req_headers, charset=charset, proxy=proxy,
+                         source=source, cache=cache, method=method, body=body)
         except CacheMiss:
             # **不是「抓不到」**：这是我们按要求没去抓。混成一句「抓取失败」
             # 会让用户去查站点，而问题出在他自己刚选的模式下
-            _note(step, "只读缓存模式下这一页不在缓存里，本次没有抓它（%s）" % url)
+            _note(step, "只读缓存模式下这一页不在缓存里，本次没有抓它（%s）" % fetch_url)
             continue
         except Exception as e:
             _note(step, "页面抓取失败（%s），本步判定不受影响" % e)

@@ -617,3 +617,70 @@ class PageCacheTests(CacheIsolatedTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MethodBodyTests(CacheIsolatedTestCase):
+    """method / body 是补抓（core/app_debug）带来的请求维度。
+
+    没有它们，带 ``,{"method":"POST",...}`` 选项的链接会被当成 GET 发出去，
+    抓回来的往往不是 App 看到的那份——「看源码改规则」就失去地基。
+    """
+
+    def _capture(self, **kw):
+        """跑一次 fetch_ex，返回实际发出去的 Request 对象。"""
+        sent = {}
+
+        class FakeResp:
+            def read(self): return b"x"
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+
+        def fake_urlopen(req, timeout=None):
+            sent["req"] = req
+            return FakeResp()
+
+        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            F.fetch_ex("https://a.com/x", **kw)
+        return sent["req"]
+
+    def test_post_sends_body_and_method(self):
+        req = self._capture(method="POST", body="id=1&p=2")
+        self.assertEqual(req.get_method(), "POST")
+        self.assertEqual(req.data, b"id=1&p=2")
+
+    def test_get_drops_body(self):
+        """GET 不带 body（与 App 一致：选项里的 body 仅 POST 生效）。"""
+        req = self._capture(method="GET", body="id=1")
+        self.assertEqual(req.get_method(), "GET")
+        self.assertIsNone(req.data)
+
+    def test_unknown_method_raises(self):
+        """不认识的 method 显式报错——静默当 GET 发是「做了另一件事」。"""
+        with self.assertRaises(ValueError):
+            F.fetch_ex("https://a.com/x", method="PUT")
+
+    def test_post_form_body_gets_default_content_type(self):
+        """POST 且 body 非 JSON/XML、无显式 Content-Type → 补表单默认
+        （对齐 AnalyzeUrl.kt:278）。"""
+        req = self._capture(method="POST", body="id=1")
+        self.assertEqual(req.headers["Content-type"],
+                         "application/x-www-form-urlencoded")
+
+    def test_post_json_body_keeps_content_type_unset(self):
+        req = self._capture(method="POST", body='{"id":1}')
+        self.assertNotIn("Content-type", req.headers)
+
+    def test_post_explicit_content_type_wins(self):
+        req = self._capture(method="POST", body="id=1",
+                            headers={"Content-Type": "text/plain"})
+        self.assertEqual(req.headers["Content-type"], "text/plain")
+
+    def test_cache_key_distinguishes_method_and_body(self):
+        """同 URL 的 GET/POST、不同 body 是两个请求身份——混用键会静默串页。"""
+        h = {"User-Agent": "UA"}
+        base = F._cache_key("https://a.com/x", h, "", "")
+        self.assertNotEqual(base, F._cache_key("https://a.com/x", h, "", "", "POST", ""))
+        self.assertNotEqual(base, F._cache_key("https://a.com/x", h, "", "", "POST", "id=1"))
+        # method 大小写不改变身份（与 fetch_ex 里的 upper 归一口径一致）
+        self.assertEqual(F._cache_key("https://a.com/x", h, "", "", "post", ""),
+                         F._cache_key("https://a.com/x", h, "", "", "POST", ""))

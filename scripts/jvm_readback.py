@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """S1 读回：把 JVM 校验服务（ValidateService）的 NDJSON 结论写进管理库。
 
-来源与口径（TODO §2.1 S1）：
+来源与口径（TODO §一「JVM 校验服务」）：
   - 服务端：appservice/test/io/legado/app/service/ValidateService.kt
     （Robolectric 跑 App 真引擎，剥 webView 选项后走普通 HTTP；启动方式见
     appservice/args.properties + legado-gradle.bat）

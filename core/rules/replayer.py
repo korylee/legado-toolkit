@@ -740,7 +740,8 @@ def extract_field_in_nodes(
     整页求值会先命中**导航栏的第一条链接**，于是详情页变成站点首页，目录、正文
     跟着全错。三条真实源（SF轻小说 / 溜达小说 / 次元姬子）的详情页都被解成
     首页；对比之下 App 引擎拿到的是真正的书页（`/so/45121/` 这类）。
-    TODO §三 里记的「`bookUrl` 少了 bookList 作用域」就是它。
+    「`bookUrl` 少了 bookList 作用域」这条的机制与实测见 lessons §二十三「第二次实证」
+    与 §四十四。
 
     返回 ``(values, hits, error)``，与 ``extract_all_nodes`` 同形：
     ``values`` 与容器节点**一一对应**（该节点的字段求值为空时落空串，保持对齐——

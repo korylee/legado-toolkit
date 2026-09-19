@@ -51,11 +51,11 @@ const appDebugging = ref(false);
 // 三个值对应 core.fetch 的 CACHE_*，后端按同一份枚举校验。
 const DEBUG_CACHE_MODES = [
   { value: "auto", label: "用缓存",
-    tip: "同一次请求 5 分钟内不再联网：页面几分钟内改动的可能性很小，而抓一次要 0.8 秒上下" },
+    tip: "同一页面 5 分钟内只抓一次，调试更快" },
   { value: "only", label: "只读缓存",
-    tip: "补抓一页都不发。缓存里没有的页面会明说「本次没有抓它」，绝不偷偷去抓。注意 App 那边仍会联网跑链" },
+    tip: "一页都不抓，只用已缓存的页面。缺哪页会明确提示。App 那边仍会联网" },
   { value: "refresh", label: "忽略缓存",
-    tip: "这几页全部重新抓一遍（站点刚更新、或怀疑手里的页面是旧的时用）" },
+    tip: "这几页全部重新抓一遍。站点刚更新，或怀疑页面是旧的时用" },
 ];
 const appCacheMode = ref("auto");
 //: 当前口径的说明。下拉选项里的解释在弹层里，选完就看不见了，而这三档的差别
@@ -325,7 +325,7 @@ function applyRawJson() {
     apply();
   } catch (e) {
     rawJsonError.value = e.message;
-    ElMessage.error("JSON 解析失败: " + e.message);
+    ElMessage.error("JSON 解析失败：" + e.message);
   }
 }
 
@@ -431,7 +431,7 @@ async function loadTagOptions() {
     userTagOptions.value = tags.filter((t) => t.kind === "user");
   } catch (e) {
     userTagOptions.value = [];
-    ElMessage.warning("标签列表加载失败，请确认后端已重启，并检查 /api/sources/tags");
+    ElMessage.warning("标签列表加载失败，请确认后端已重启");
   }
 }
 
@@ -500,7 +500,7 @@ watch(() => [props.modelValue, props.sourceUrl], async ([show, url]) => {
     syncRawFromForm();
     savedSnapshot.value = JSON.stringify(form.value);   // 编辑：以加载到的源为基线
   } catch (e) {
-    ElMessage.error("加载源失败: " + e.message);
+    ElMessage.error("加载源失败：" + e.message);
   } finally {
     loading.value = false;
   }
@@ -566,7 +566,7 @@ async function quickGenerate() {
         quickStop = null;
         if (d.status !== "done") {
           quickProgress.value = "";
-          ElMessage.error("生成失败: " + (d.status || "未知错误"));
+          ElMessage.error("生成失败：" + (d.status || "未知错误"));
           return;
         }
         let result = {};
@@ -583,7 +583,7 @@ async function quickGenerate() {
   } catch (e) {
     quickLoading.value = false;
     quickProgress.value = "";
-    ElMessage.error("提交生成任务失败: " + e.message);
+    ElMessage.error("提交生成任务失败：" + e.message);
   }
 }
 
@@ -596,10 +596,12 @@ async function quickGenerate() {
 // 跑不了 JS 规则的源更是只有 App 那边验得了（Rhino / cookie / webView 全在 App 里）。
 // 结果**直接塞进 testResult**——App 调试返回的形状与离线回放一致，
 // 所以卡片与调试抽屉零改动。
-async function appDebugRun() {
+async function appDebugRun(keyOverride = "", rerunStep = "") {
   const host = appHost.value.trim();
   if (!host) return ElMessage.warning("请先填 App 的 IP（App 通知栏里有）");
-  const key = debugKeyForApp();
+  // keyOverride：「从此步重跑」拼好的分段 key（--/++/绝对URL）。空串走
+  // 表单里选的入口——两个来源最终都落到 App 的同一个调试 WS。
+  const key = keyOverride || debugKeyForApp();
   // 除「搜索」外都必须给出 URL（搜索空着会用默认关键词兜底）。放空进去会拼出
   // `发现::` / `++` 这种 App 认不了的目标——它对无效 key 是**静默无响应**，
   // 排查成本极高，宁可在这里挡住。
@@ -641,8 +643,39 @@ async function appDebugRun() {
     appDebugging.value = false;
   }
   expandTestFailures(testResult.value);
-  // 成功了才自动摊开证据；失败时卡片上那段错误信息本身就是要看的东西
-  if (testResult.value && !testResult.value.error) openDebug();
+  // 成功了才自动摊开证据；失败时卡片上那段错误信息本身就是要看的东西。
+  // rerunStep：「从此步重跑」要直接定位到重跑的那一步
+  if (testResult.value && !testResult.value.error) openDebug(rerunStep);
+}
+
+//: 步骤名 → 分段重跑的 key 构造。形态与 App `Debug.startDebug` 的 when 链
+//: 一一对应：绝对URL → 详情起步（详情→目录→正文）/ `++` → 目录起步 /
+//: `--` → 只跑正文；搜索/发现本来就是链头，重跑即整链。
+const STEP_KEY_BUILDERS = {
+  search: () => debugKeyForApp(),
+  explore: (url) => `发现::${url}`,
+  bookUrl: (url) => url,
+  toc: (url) => `++${url}`,
+  content: (url) => `--${url}`,
+};
+
+//: 抽屉里的「从此步重跑」：拿上轮结果里这一步的 URL 拼分段 key，整链重跑的
+//: 摩擦（搜索→详情→目录全重来）就砍掉了。URL 用**原文**：它是 App 自己请求过的
+//: 地址，传回去 App 端 AnalyzeUrl 能吃（含 ,{...} 选项形态）；库内那种
+//: 规范化（AGENTS #5）是给关联键用的，这里做了反而改坏 App 的目标。
+function rerunFromStep(stepName) {
+  const build = STEP_KEY_BUILDERS[stepName];
+  if (!build) return;
+  const step = ((testResult.value || {}).steps || [])
+    .find((s) => s.name === stepName) || {};
+  // 幂等去前缀（同 buildDebugKey 的手抄兜底）：step.url 不该带前缀，防一手
+  const url = String(step.url || "").trim().replace(/^(\+\+|--)/, "");
+  const key = stepName === "search" ? build() : (url ? build(url) : "");
+  if (!key) {
+    return ElMessage.warning(
+      "上一轮结果里没有这一步的链接。先跑一次完整调试，再重试这一步");
+  }
+  return appDebugRun(key, stepName);
 }
 
 //: 预检状态 → 卡片上的短标签与颜色
@@ -722,7 +755,7 @@ async function appPreflightRun() {
 function confirmPush(state) {
   const text = state === "missing"
     ? "App 里没有这个源。要先推送到 App 再调试吗？"
-    : "App 里是旧版本——直接调试跑的是 App 那份规则，不是你正在改的。"
+    : "App 里是旧版本。直接调试会跑 App 里那份规则，不是你正在改的。"
       + "要先推过去覆盖它再调试吗？";
   return ElMessageBox.confirm(text, "推送并调试", {
     confirmButtonText: "推送并调试", cancelButtonText: "取消", type: "warning",
@@ -737,7 +770,7 @@ function onApplyRule({ field, rule }) {
   const [group, key] = String(field || "").split(".");
   if (!group || !key || !form.value[group]) return;
   form.value[group][key] = rule;
-  ElMessage.success("已填入 " + field + "，在抽屉里点「用本页重放」看效果");
+  ElMessage.success("已填入 " + field + "，在抽屉里点「重新调试本页」看效果");
 }
 
 function openDebug(step) {
@@ -804,7 +837,7 @@ async function save() {
       if (r.exists) {
         try {
           await ElMessageBox.confirm(
-            `域名已存在（源名：${r.name || "(无名)"}），继续将覆盖其全部规则。`,
+            `域名已存在（源名：${r.name || "（无名）"}），继续将覆盖其全部规则。`,
             "确认覆盖", { type: "warning", confirmButtonText: "覆盖", cancelButtonText: "取消" },
           );
         } catch (e) {
@@ -827,7 +860,7 @@ async function doSave(s) {
     savedSnapshot.value = JSON.stringify(form.value);   // 保存成功后刷新快照
     emit("saved", s);
   } catch (e) {
-    ElMessage.error("保存失败: " + e.message);
+    ElMessage.error("保存失败：" + e.message);
   }
 }
 </script>
@@ -879,9 +912,9 @@ async function doSave(s) {
                    它和右侧 App 调试的结果用的是同一套三态视觉，不标就分不清
                    哪份可信 -->
               <p class="muted" style="margin: 0 0 8px">
-                <el-tag size="small" type="info">本地回放 · 仅供参考</el-tag>
+                <el-tag size="small" type="info">本地调试 · 仅供参考</el-tag>
                 <span style="margin-left: 6px">
-                  只判「取到值 / 不报错」，跑不了 JS 规则；要确认请用右侧「连 App 调试」。
+                  只检查是否取到值，不支持 JS 规则。要确认请用右侧「连 App 调试」。
                 </span>
               </p>
               <!-- 与试跑卡片同一套三态渲染：同一个 as_step_dict 产出的数据，
@@ -1047,7 +1080,7 @@ async function doSave(s) {
                     <el-input v-model="form.ruleContent.webJs" type="textarea" :rows="3"
                               placeholder="页面内执行的 ES5 JS，返回正文内容" />
                     <div class="muted" style="line-height: 1.5">
-                      只在**对应的 URL 规则**开了 <code>webView</code> 时才生效——
+                      只在对应的 URL 规则开了 <code>webView</code> 时才生效。
                       要写成 <code>url,{"webView":true}</code> 挂在
                       <code>目录规则</code> 的 <code>chapterUrl</code> 后面。
                       没开的话这段 JS 在 App 里会被静默忽略。
@@ -1102,7 +1135,7 @@ async function doSave(s) {
                   </el-form-item>
                   <p class="muted" style="margin: 0 0 8px">
                     <b v-if="!form.exploreUrl" style="color: #e6a23c">
-                      还没填 exploreUrl——开启发现也不会有发现页。
+                      还没填 exploreUrl。开启发现也不会有发现页。
                     </b>
                     ruleExplore 结构较复杂，可在「原始 JSON」里编辑。
                   </p>
@@ -1266,7 +1299,7 @@ async function doSave(s) {
                转义成实体也救不回来（编译发生在实体解码之后）。v-pre 让这一块
                整段跳过编译、原样输出，才写得出这些字面量。 -->
           <p class="muted" v-pre style="margin: 10px 0 0; line-height: 1.7">
-            <b>以下语法本地回放不了</b>，只能用「连 App 调试」验：<br>
+            <b>以下语法不支持本地调试</b>，只能用「连 App 调试」验：<br>
             @js: / &lt;js&gt; / {{ }} / || / @xpath: / &amp;&amp; / %% / $n /
             区间索引 [0:10] / 索引式 [-1] [0] [1,3] [!0] / text. 与 children. 简写 /
             @webjs: / @get:{ }
@@ -1287,7 +1320,9 @@ async function doSave(s) {
                      :initial-step="debugStep" :rules="ruleByStep"
                      :source-type="Number(form.bookSourceType) || 0"
                      :enabled-cookie-jar="!!form.enabledCookieJar"
-                     @goto="onDebugGoto" @apply-rule="onApplyRule" />
+                     :rerunning="appDebugging"
+                     @goto="onDebugGoto" @apply-rule="onApplyRule"
+                     @rerun-from="rerunFromStep" />
   </el-dialog>
 </template>
 

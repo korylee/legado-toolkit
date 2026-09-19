@@ -168,12 +168,15 @@ def _charset_key(charset: Any) -> str:
     return charset.strip().lower() if isinstance(charset, str) else ""
 
 
-def _cache_key(url: str, headers: dict, charset: Any, proxy: str) -> str:
-    """缓存键 = **请求身份**（URL + 请求头 + charset + 代理）。
+def _cache_key(url: str, headers: dict, charset: Any, proxy: str,
+               method: str = "GET", body: str = "") -> str:
+    """缓存键 = **请求身份**（URL + 请求头 + charset + 代理 + 方法 + body）。
 
     只按 URL 做键会把两种身份的内容串在一起（同一类坑见 lessons §五）：带登录态
     与不带登录态的源、换过 UA 的源，抓回来的不是同一份页面。代理也进键——换了
-    出口 IP，同一个 URL 可能给出另一个地区的页面。
+    出口 IP，同一个 URL 可能给出另一个地区的页面。method/body 同理：同 URL 的
+    GET 与 POST（或不同 body）是两个请求，混用键会静默给出另一份响应——
+    AGENTS #5b 的教训：影响结论的请求维度进键，而不是靠 TTL 掩盖。
 
     用哈希而不是把身份本身当键：URL 与请求头都可能很长，而键会常驻 200 份。
     ``url`` 传的是**编码后**的那份（见下面的 quote）：`?q=我` 与 `?q=%E6%88%91`
@@ -184,6 +187,8 @@ def _cache_key(url: str, headers: dict, charset: Any, proxy: str) -> str:
         "\x01".join("%s=%s" % (str(k).lower(), v) for k, v in sorted(headers.items())),
         _charset_key(charset),
         str(proxy or "").strip(),
+        method.upper(),
+        body,
     ])
     return hashlib.sha1(ident.encode("utf-8")).hexdigest()
 
@@ -239,13 +244,18 @@ def fetch(url: str, timeout: int = 15,
 def fetch_ex(url: str, timeout: int = 15,
              headers: dict = None, charset: str = "", proxy: str = "",
              source: Optional[Dict[str, Any]] = None,
-             cache: str = CACHE_AUTO) -> Fetched:
+             cache: str = CACHE_AUTO, method: str = "GET", body: str = "") -> Fetched:
     """抓取页面，返回 ``Fetched(html, cached, fetched_at)``。
 
     与 Legado 的 ``AnalyzeUrl`` 对齐的部分：
       - ``headers``：书源自身的 header；缺 User-Agent 时补默认 UA
         （对齐 BaseSource.kt 缺 UA 补 UA 的行为）
       - ``charset``：优先用它解码，失败按常见编码回退
+      - ``method``/``body``：URL 选项里的请求形态（``url,{"method":"POST",...}``），
+        只有 GET / POST 两种（与 ``AnalyzeUrl`` 的 UrlOption 同口径）。GET 时
+        ``body`` 忽略；POST 且 header 里没有 Content-Type 时补
+        ``application/x-www-form-urlencoded``（对齐 AnalyzeUrl.kt:278——仅当
+        body 不是 JSON / XML 时，那两种 App 也各按字面 Content-Type 发）
       - ``proxy``：形如 ``http://host:port``；留空走直连。
         **只支持 http 代理**——urllib 的 ProxyHandler 不认 ``socks5://``
         （会抛 ``unknown url type: socks5``）。项目别处（cli/main.py --proxy 帮助、
@@ -263,6 +273,15 @@ def fetch_ex(url: str, timeout: int = 15,
         # 实际每次都在联网，而界面上看不出任何区别
         raise ValueError("未知的缓存策略：%r（只能是 %s）"
                          % (cache, " / ".join(CACHE_MODES)))
+    method = str(method or "GET").strip().upper()
+    if method not in ("GET", "POST"):
+        # 显式拒绝而不是当 GET 发：调用方以为发的是 PUT，实际是 GET，
+        # 这种「安静地做了另一件事」比报错难查得多
+        raise ValueError("不支持的请求方法：%r（只能 GET / POST）" % method)
+    body = str(body or "")
+    if method == "GET":
+        body = ""          # GET 不带 body（与 App 一致：选项里 body 仅 POST 生效）
+
     h = {"User-Agent": DEFAULT_UA,
          "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
          "Accept-Language": "zh-CN,zh;q=0.9"}
@@ -272,6 +291,12 @@ def fetch_ex(url: str, timeout: int = 15,
         # None 单独挡：str(None) 是 "None"，会被当成真值把默认 UA 覆盖成字面量 "None"
         h.update({str(k): str(v) for k, v in headers.items()
                   if v is not None and str(v).strip()})
+    if method == "POST" and body and not any(k.lower() == "content-type" for k in h):
+        low = body.lstrip()[:1]
+        if low not in ("{", "<"):
+            # 对齐 AnalyzeUrl.kt:278：表单类 body 不声明 Content-Type 时补默认；
+            # JSON / XML 开头的 body App 不补（按调用方声明发），这里同样不补
+            h["Content-Type"] = "application/x-www-form-urlencoded"
 
     # URL 里可能是**未编码的非 ASCII**（实测：连 App 调试时它给的搜索 URL 就是
     # `...?q=我` 这种原样形态），而 urllib 发送前会按 ascii 编码 → 抛
@@ -281,7 +306,7 @@ def fetch_ex(url: str, timeout: int = 15,
     # 不会被二次编码成 `%25E6...`，对纯 ASCII 的 URL 完全幂等。
     url = urllib.parse.quote(url, safe=":/?#[]@!$&'()*+,;=%~")
 
-    key = _cache_key(url, h, charset, proxy)
+    key = _cache_key(url, h, charset, proxy, method, body)
     # 缓存查询放在**限速之前**：命中缓存根本没发请求，不该占掉一个限速名额
     # （否则「快了」的收益会被源自己声明的间隔吃掉大半）
     if cache != CACHE_REFRESH:
@@ -297,7 +322,10 @@ def fetch_ex(url: str, timeout: int = 15,
     # 那样参数校验失败也会白白占掉一个限速名额
     _throttle(*_rate_key(source))
 
-    req = urllib.request.Request(url, headers=h)
+    # body 按 UTF-8 发：Legado 侧 url 选项的 body 也是字符串按请求 charset 编码，
+    # 这里没把 charset 选项铺进来（同 checker 的取舍，见 parse_search_request 注释）
+    data = body.encode("utf-8") if method == "POST" else None
+    req = urllib.request.Request(url, data=data, headers=h, method=method)
 
     # 代理：checker 一直支持 proxy，verify 之前不支持——这会让需要代理的源
     # 在试跑里表现为「连接失败」，被用户误判成源坏了

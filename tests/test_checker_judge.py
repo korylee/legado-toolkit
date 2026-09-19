@@ -588,15 +588,15 @@ class TocUrlBranchTests(unittest.TestCase):
         self.assertEqual(extract_all(DETAIL_PAGE_NO_TOC, "class.chapters@tag.li"), [])
 
     def test_unreplayable_toc_url_rule_is_unknown(self):
-        """tocUrl 规则本地回放不了 → None + 原因，**不能退回详情页假装没事**。
+        """tocUrl 规则不支持本地调试 → None + 原因，**不能退回详情页假装没事**。
 
-        `text.` 简写就是我们回放不了的形态之一（App 能求值）。退回详情页的话，
+        `text.` 简写就是我们调不了的形态之一（App 能求值）。退回详情页的话，
         这一源会被判成「目录解析为空＝失效」，而我们只是没实现那个写法。
         """
         rec = make_record(self._raw_with_toc_url("text.查看目录@href"))
         run_toc(rec, pages={"https://site/book/1": DETAIL_PAGE_NO_TOC})
         self.assertIsNone(rec.toc_complete)
-        self.assertIn("回放", rec.toc_fail_reason)
+        self.assertIn("不支持本地调试", rec.toc_fail_reason)
 
     def test_empty_toc_url_stays_on_detail_page(self):
         """tocUrl 为空 → 目录就在详情页上（App 的兜底口径），不多发请求。"""

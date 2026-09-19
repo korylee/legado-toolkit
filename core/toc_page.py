@@ -20,7 +20,7 @@ isUrl = true)` 那一段，按符号查而非行号）：
   2. `tocUrl` 是纯地址（`https://…`）→ 直接用它（相对地址按详情页拼接）
   3. `tocUrl` 是规则 → **在详情页的 HTML 上求值**，取第一个非空结果（相对地址
      按详情页拼接）；求值为空同样回退详情页
-  4. 规则**本地回放不了** → 返回 `None` + 原因，调用方必须判 **unknown**，
+  4. 规则**本地调试不了** → 返回 `None` + 原因，调用方必须判 **unknown**，
      不能退回详情页假装没事：App 能求值而我们求不了，那是我们的能力边界
 """
 
@@ -53,7 +53,7 @@ def resolve_toc_page(
     返回 ``(目录页地址, 原因)``：
 
     - 成功：``(url, "")``——可能是详情页本身（`tocUrl` 为空或求值为空）
-    - 求值不了：``(None, "…规则本地无法回放…")``——调用方必须判 unknown
+    - 求值不了：``(None, "…规则不支持本地调试…")``——调用方必须判 unknown
 
     `detail_html` 为空也不报错：纯地址分支不需要页面，规则分支会自然求值为空
     并回退详情页（与 App 的兜底一致）。
@@ -65,7 +65,7 @@ def resolve_toc_page(
         return abs_url(detail_url, rule), ""
     ok, why = rule_supported(rule)
     if not ok:
-        return None, "tocUrl 规则本地无法回放：%s" % why
+        return None, "tocUrl 规则不支持本地调试：%s" % why
     vals, _hits, _err = extract_all_nodes(
         detail_html or "", rule, Q.MATCHED_NODES_LIMIT, Q.MAX_MATCHED_HTML_CHARS)
     picked = next((str(v).strip() for v in vals if str(v or "").strip()), "")

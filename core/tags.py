@@ -45,8 +45,8 @@ SYSTEM_TAGS = SYSTEM_TYPE_TAGS | SYSTEM_STATUS_TAGS | SYSTEM_QUALITY_TAGS
 #:     「代理复检」这个裸形式是旧分组真出现过的写法，单列一条。
 RETIRED_STATUS_TAG_RENAMES = {
     "需验证": "需登录",
-    "需代理复检": "需翻墙",
-    "代理复检": "需翻墙",
+    "需代理复检": "需翻墙",     # copy-ok: 换词表的键，逐字保留（AGENTS #17/#18）
+    "代理复检": "需翻墙",       # copy-ok: 同上
 }
 
 # 用户标签别名映射：新源带进来的别名先归一，再按已有标签过滤。

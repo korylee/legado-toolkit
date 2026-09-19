@@ -291,7 +291,7 @@ class TocUrlBranchTests(unittest.TestCase):
         r = run_chain(src)
         toc = step_of(r, "toc")
         self.assertEqual(toc["verdict"], "unknown")
-        self.assertIn("无法回放", toc["reason"])
+        self.assertIn("不支持本地调试", toc["reason"])
         self.assertEqual(toc["url"], "https://site/book/1")   # 没去抓目录页
 
 

@@ -32,7 +32,7 @@ from core.models import (
     NOVEL_TEST_KEYWORDS, MANGA_TEST_KEYWORDS, TEST_TITLES, TOC_COMPLETE_THRESHOLD,
 )
 from core.toc_page import resolve_toc_page
-from core.urls import abs_url as _abs_url
+from core.urls import abs_url as _abs_url, split_url_options
 # DNS 失败的归因（域名注销 vs 本地解析被污染）：**外部视角的唯一实现**，
 # 判定口径与「为什么不能只凭本机一次解析失败判死」都写在那模块的开头
 from core import dns_check
@@ -224,35 +224,12 @@ def err_desc(err: str, detail: str = "") -> str:
     return desc
 
 
-#: Legado 的 URL 选项分隔符——**原文照抄** `AnalyzeUrl.kt:776` 的 `paramPattern`：
-#:
-#:     Regex("\s*,\s*(?=\{)")
-#:
-#: 逗号 + 可选空白 + 紧随其后的 `{`。**切第一个匹配**，不是最后一个：切最后一个
-#: 会让 URL 里残留一段 `,{...}`，请求就变形了。
-_URL_OPTION_RE = re.compile(r"\s*,\s*(?=\{)")
+#: ``split_url_options`` 与 ``_URL_OPTION_RE`` 已抽到 core/urls.py（它是对 URL
+#: 语法的解析，不是校验逻辑；补抓 core/app_debug.py 也要用，不该为此导入本模块）。
+#: 上面从 core.urls 的导入把它 re-export，test_checker_judge 的导入不受影响。
 
 #: 关键词占位符（Legado 的 searchUrl 模板里可能是这几种写法之一）
 _KEYWORD_PLACEHOLDERS = ("{{key}}", "{{searchKey}}", "{{keyword}}", "$searchKey")
-
-
-def split_url_options(rule: str) -> Tuple[str, Dict[str, Any]]:
-    """把 ``url,{json}`` 拆成 ``(url, 选项 dict)``。
-
-    **JSON 解不出来时照样把 URL 切下来**、选项当空——这是**对齐 App**，不是随手：
-    Legado 先按 `paramPattern` 切出 `urlNoOption` 拿去发请求，**之后**才解析选项；
-    解析失败只是不应用选项，URL 已经被切了（`AnalyzeUrl.kt:219-231`）。
-    """
-    text = rule or ""
-    m = _URL_OPTION_RE.search(text)
-    if not m:
-        return text, {}
-    url = text[:m.start()]
-    try:
-        opt = json.loads(text[m.end():])
-    except Exception:
-        return url, {}
-    return url, opt if isinstance(opt, dict) else {}
 
 
 def parse_search_request(url_template: str, keyword: str

@@ -23,6 +23,7 @@ __pycache__/
 # ---- 工具 / 编辑器 ----
 .codegraph/
 .omo/
+.zcode/
 .vscode/
 .idea/
 .claude/

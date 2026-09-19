@@ -26,8 +26,11 @@ const props = defineProps({
   //: 源有没有声明 cookie jar。登录墙判定要用它：那一档「200 + 登录词」以它为前提
   //: （「请登录」在正常页面的导航栏里太常见）
   enabledCookieJar: { type: Boolean, default: false },
+  //: 「从此步重跑」在途（父组件的 appDebugging）。重跑是 App 实测动作，
+  //: 在途时按钮要转圈、并挡住连点——两次分段调试的 WS 会话会互相顶掉
+  rerunning: { type: Boolean, default: false },
 });
-const emit = defineEmits(["update:modelValue", "goto"]);
+const emit = defineEmits(["update:modelValue", "goto", "rerunFrom"]);
 
 const visible = computed({
   get: () => props.modelValue,
@@ -169,6 +172,21 @@ watch(() => props.modelValue, (show) => {
   replayResult.value = null;
 });
 
+// 「从此步重跑」完成后父组件会更新 initialStep 想定位到重跑的那一步。
+// 抽屉常开时 modelValue 不变（上面那个 watch 不触发），必须自己盯着 initialStep 走
+watch(() => props.initialStep, (v) => {
+  if (props.modelValue && v) selectStep(v);
+});
+
+//: 「从此步重跑」可不可点：搜索步永远可以（等于整链）；其余步要上轮结果里
+//: 有这一步的 URL（拼 App 的 ++/--/裸URL key 用），没有就只能先跑一次完整链路
+const canRerun = computed(() => {
+  if (!isAppResult.value) return false;
+  const s = current.value || {};
+  if (s.name === "search") return true;
+  return !!String(s.url || "").trim();
+});
+
 // 跳到第 i 处命中（i 为负则向前），必要时先扩大渲染范围
 function gotoHit(i) {
   const total = hitOffsets.value.length;
@@ -213,14 +231,14 @@ const canReplay = computed(
 //: 顺带说一句用途：本地回放结果正是「让 AI 改规则」要喂给模型的东西（规则 + 它
 //: 选中的 DOM），所以两者摆在同一屏上。
 const matchedFrom = computed(() => {
-  if ((current.value || {}).matched_html) return "本地试跑";
-  return replayResult.value ? "本地回放" : "";
+  if ((current.value || {}).matched_html) return "本地调试";
+  return replayResult.value ? "本地调试" : "";
 });
 const matchedHtml = computed(() => (current.value || {}).matched_html
   || (replayResult.value || {}).matched_html || "");
 const matchedHint = computed(() => {
-  if (!currentPage.value) return "这一步没抓到页面（App 只推文本，页面是补抓来的）";
-  if (!canReplay.value) return "这一步没有可回放的规则";
+  if (!currentPage.value) return "这一步没有页面。App 只推文本，页面是我们另抓的";
+  if (!canReplay.value) return "这一步的规则不支持本地调试";
   if (replayResult.value) {
     // 回放不了（JS / xpath 等）时 `rule_error` 就是原因，别笼统说「没有命中」
     return (replayResult.value.rule_error || replayResult.value.detail
@@ -315,7 +333,7 @@ async function tryCandidate(c, i) {
                                  (current.value || {}).name, props.sourceType);
     tryResult.value = { rule: c.rule, values: res.values || [], rule_error: res.rule_error || "" };
   } catch (e) {
-    ElMessage.error("试跑失败: " + e.message);
+    ElMessage.error("调试失败：" + e.message);
   } finally {
     testing.value = -1;
   }
@@ -398,8 +416,8 @@ const replayNote = computed(() => {
   if (!currentPage.value) return "这一步没有页面";
   const r = replayResult.value;
   if (!r) return "";
-  if (r.rule_error) return "本地回放不了（" + r.rule_error + "）";
-  return "本地回放取到 " + (r.values || []).length + " 条"
+  if (r.rule_error) return "本地调试不了（" + r.rule_error + "）";
+  return "本地调试取到 " + (r.values || []).length + " 条"
     + (r.reason ? "（" + r.reason + "）" : "");
 });
 //: App 实测取到的值 = 「正确的规则应当取到形似的东西」。行首的 ┌└◇ 是事件流的
@@ -496,34 +514,36 @@ const diagnosis = computed(() => {
   if (!s.name) return out;
 
   if (!s.page_id) {
-    push("warn", "这一步没有可抓的页面（App 的事件里没有页面标记）",
-         "这步没法本地复盘，只能看 App 的事件流");
+    push("warn", "App 没为这一步记录页面", "只能看 App 事件流，本地调试不了这一步");
   } else if (!s.url) {
-    push("warn", "App 在这一步没有发起页面请求，所以本地没有页面可看",
+    push("warn", "App 没有请求这一步的页面，也没有可用的章节链接",
          s.name === "content"
-           ? "正文规则为空时，App 会退回「拿章节链接当正文」，不请求新页面——"
-             + "先给正文配上规则，再连 App 重跑"
-           : "先确认这一步的规则是否为空；补上后重跑");
+           ? "正文规则为空时，App 会拿章节链接当正文，不请求新页面。"
+             + "连章节链接都没有，说明上一步没走通，先看前面几步"
+           : "先确认这一步的规则是否为空，补上后重新调试");
   } else if (!currentPage.value) {
     const note = (s.notes || []).find((n) => String(n).includes("页面抓取失败"));
     push("warn", note || "这一步的页面没抓回来", "没有页面就无法本地复盘，先按 App 的结果判断");
   } else if (hasWanted.value === false) {
     const st = pageStats.value || {};
     push("warn",
-         "这一页里没有「" + label + "」这类节点（链接 " + st.links + " 个、img "
-         + st.images + " 个，其中有 src 的只有 " + st.imagesWithSrc + " 个）",
-         "改选择器没用：内容多半是 JS 动态注入的，得用 webView + webJs"
-         + "（或 @js: 调站点接口）——本地和 CSS 规则都取不到");
+         "这一页没有「" + label + "」这类节点。链接 " + st.links + " 个，图片 "
+         + st.images + " 个，其中带 src 的只有 " + st.imagesWithSrc + " 个",
+         "改选择器没用，内容多半由 JS 生成，本地取不到。"
+         + "改用 webView + webJs，或 @js: 直接调接口");
   }
 
   if (!currentRule.value.trim()) {
     push("warn", "这条源没配「" + label + "」规则",
          s.name === "content" && Number(props.sourceType) === 0
-           ? "小说源没配正文规则时，App 会把章节链接当正文——必须补一条"
-           : "补一条规则再重跑");
+           ? (currentPage.value
+               ? "正文页已按章节链接抓回来。直接在下面看整页源码或选候选规则，"
+                 + "改完点「重新调试本步」只验这一步"
+               : "小说源没配正文规则时，App 会把章节链接当正文。必须补一条")
+           : "补一条规则后重新调试");
   } else if (replayResult.value && replayResult.value.rule_error) {
-    push("info", "规则本地回放不了：" + replayResult.value.rule_error,
-         "只能连 App 验——本地引擎跑不了 JS / 模板 / xpath 这类语法");
+    push("info", "规则不支持本地调试：" + replayResult.value.rule_error,
+         "只能连 App 调试。本地跑不了 JS、模板和 xpath");
   } else if (replayResult.value) {
     const vals = replayResult.value.values || [];
     if (!vals.length) {
@@ -548,7 +568,7 @@ async function doReplay() {
       currentPage.value.html, currentRule.value,
       current.value.name, props.sourceType);
   } catch (e) {
-    ElMessage.error("重放失败: " + e.message);
+    ElMessage.error("调试失败：" + e.message);
     replayResult.value = null;
   } finally {
     replaying.value = false;
@@ -592,19 +612,19 @@ async function copyMatched() {
     <!-- 来源必须写在标题旁：App 实测与本地回放的三态视觉完全一样，
          不标就分不清手里这份结果该信到什么程度 -->
     <template #header>
-      <span>试跑调试</span>
+      <span>调试</span>
       <el-tag size="small" :type="isAppResult ? 'success' : 'info'"
               style="margin-left: 8px">
-        {{ isAppResult ? "App 实测" : "本地回放 · 仅供参考" }}
+        {{ isAppResult ? "App 实测" : "本地调试 · 仅供参考" }}
       </el-tag>
     </template>
 
-    <el-empty v-if="!steps.length" description="没有试跑结果" :image-size="80" />
+    <el-empty v-if="!steps.length" description="没有调试结果" :image-size="80" />
 
     <template v-else>
       <el-alert v-if="!isAppResult" type="warning" :closable="false" show-icon
                 style="margin-bottom: 10px"
-                title="本地回放只判「取到值 / 不报错」，且跑不了 JS 规则——与 App 的真实行为可能有偏差。要确认请用「连 App 调试」。" />
+                title="本地调试不支持 JS 规则，结果仅供参考。要确认请用「连 App 调试」。" />
       <div class="debug-step-tabs">
         <!-- 高亮要跟着「实际显示的那一步」（current 在 activeStep 失效时会回退到
              steps[0]），否则重跑后会出现「有内容、没有任何页签高亮」 -->
@@ -617,12 +637,24 @@ async function copyMatched() {
       <div v-if="current" class="debug-head">
         <el-tag size="small" :type="tagType(current)">{{ verdictText(current) }}</el-tag>
         <span class="mono muted grow">{{ current.url }}</span>
+        <!-- 从这一步让 App 重跑：搜索/发现是整链，详情=详情→目录→正文，
+             目录=目录→正文，正文=只正文（App 的分段 key，零入侵）。
+             重跑走的是 App 的真引擎，与下面的「用本页重放」（本地、不发请求）
+             是两个层次——按钮相邻摆着，哪个快哪个准一目了然 -->
+        <el-tooltip placement="top" :disabled="!current.url && current.name !== 'search'"
+                    content="让 App 从这一步重新调试：目录会连正文一起跑，正文只跑正文。规则改过会先问你是否推送。">
+          <span>
+            <el-button v-if="isAppResult" size="small" plain :loading="rerunning"
+                       :disabled="rerunning || !canRerun"
+                       @click="emit('rerunFrom', current.name)">重新调试本步</el-button>
+          </span>
+        </el-tooltip>
         <!-- 失败就直接把人送到对应的规则页签，省掉自己翻页签找字段 -->
         <el-button v-if="current.verdict === 'fail'" size="small" type="primary" plain
                    @click="gotoRuleField(current)">去改规则</el-button>
         <!-- 用已抓到的 HTML 重放，**不发网络请求**：改完规则立刻看判定变没变 -->
         <el-button size="small" :loading="replaying" :disabled="!canReplay"
-                   @click="doReplay">用本页重放</el-button>
+                   @click="doReplay">重新调试本页</el-button>
       </div>
 
       <div v-if="replayResult" class="replay-box">
@@ -630,7 +662,7 @@ async function copyMatched() {
         <span class="muted">取到 {{ (replayResult.values || []).length }} 条</span>
         <span v-if="replayResult.reason" class="muted">· {{ replayResult.reason }}</span>
         <span v-if="isAppResult" class="muted">
-          · 这份重放跑在我们抓的 HTML 上，不是 App 所见
+          · 结果来自我们抓的 HTML，不是 App 看到的页面
         </span>
         <el-button link size="small" @click="replayResult = null">关闭</el-button>
       </div>
@@ -667,7 +699,7 @@ async function copyMatched() {
       <div v-if="candidates.length" class="candidates">
         <div class="cand-head">
           <b>在页面上找「{{ (want && want.label) || "目标" }}」</b>
-          <span class="muted">（点「试」就地回放看它取到什么，再决定用不用）</span>
+          <span class="muted">（点「试」看它取到什么，再决定用不用）</span>
         </div>
         <div v-for="(c, i) in candidates" :key="i" class="cand">
           <span class="mono rule">{{ c.rule }}</span>
@@ -684,7 +716,7 @@ async function copyMatched() {
         <div v-if="tryResult" class="try-result">
           <div class="try-head">
             <span class="mono">{{ tryResult.rule }}</span>
-            <el-tag v-if="tryResult.rule_error" size="small" type="warning">本地回放不了</el-tag>
+            <el-tag v-if="tryResult.rule_error" size="small" type="warning">本地调试失败</el-tag>
             <el-tag v-else size="small" :type="tryResult.values.length ? 'success' : 'danger'">
               取到 {{ tryResult.values.length }} 条
             </el-tag>
@@ -815,14 +847,13 @@ async function copyMatched() {
 
         <el-tab-pane label="命中源码" name="matched">
           <p class="muted" style="margin: 6px 0">
-            当前规则在这份页面上<b>选中了哪块 DOM</b>——改规则时看这个，
-            比在整页里猜要快得多。
+            当前规则<b>选中了哪块 DOM</b>。改规则时看这里，比在整页里猜快得多。
           </p>
           <p v-if="matchedFrom" class="muted" style="margin: 6px 0">
-            <el-tag size="small" :type="matchedFrom === '本地试跑' ? 'success' : 'warning'">
+            <el-tag size="small" :type="matchedFrom === '本地调试' ? 'success' : 'warning'">
               {{ matchedFrom }}
             </el-tag>
-            <span v-if="matchedFrom === '本地回放'" style="margin-left: 6px">
+            <span v-if="matchedFrom === '本地调试'" style="margin-left: 6px">
               跑不了 JS 规则，可能与 App 的实际命中不同
             </span>
           </p>

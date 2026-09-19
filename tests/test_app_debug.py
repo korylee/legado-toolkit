@@ -96,10 +96,27 @@ PAGES = {
 
 
 def fake_fetch(url, timeout=15, headers=None, charset="", proxy="", source=None,
-               cache="auto"):
+               cache="auto", method="GET", body=""):
     # 返回 Fetched 而不是字符串：补抓现在要拿「刚抓的还是缓存里的」填 pages[]
     return Fetched(PAGES.get(url, ""), False, "")
 
+
+
+#: 正文规则为空的形态（`WebBook.getContentAwait`：规则空 → 只打这一行就返回
+#: 章节链接，**不发请求**）：目录段有 URL，正文段没有 `≡获取成功`。
+EMPTY_CONTENT_TOC_URL = "https://a.com/book/1/"
+EMPTY_CONTENT_SAMPLE = [
+    "[00:00.100]⇒开始访目录页:https://a.com/book/1/",
+    "[00:00.200]︾开始解析目录页",
+    "[00:00.500]≡获取成功:https://a.com/book/1/",
+    "[00:00.700]◇目录总数:10",
+    "[00:00.900]︽目录页解析完成",
+    "[00:01.000]︾开始解析正文页",
+    "[00:01.100]⇒正文规则为空,使用章节链接:/book/1/c1.html",
+    "[00:01.200]︽正文页解析完成",
+]
+
+EMPTY_CONTENT_CHAPTER_URL = "https://a.com/book/1/c1.html"
 
 def step_of(steps, name):
     return next(s for s in steps if s["name"] == name)
@@ -387,7 +404,7 @@ class TestFetchPages(unittest.TestCase):
         seen = {}
 
         def spy(url, timeout=15, headers=None, charset="", proxy="", source=None,
-                   cache="auto"):
+                   cache="auto", method="GET", body=""):
             seen["headers"] = headers
             seen["charset"] = charset
             seen["source"] = source
@@ -404,7 +421,7 @@ class TestFetchPages(unittest.TestCase):
     def test_fetch_failure_is_noted_not_raised(self):
         """抓不到页面：该页不进 pages，在对应 step 的 notes 里说明，判定不受影响。"""
         def boom(url, timeout=15, headers=None, charset="", proxy="", source=None,
-                   cache="auto"):
+                   cache="auto", method="GET", body=""):
             raise OSError("连接超时")
 
         steps = self._steps()
@@ -447,7 +464,7 @@ class TestFetchPages(unittest.TestCase):
         seen = {}
 
         def spy(url, timeout=15, headers=None, charset="", proxy="", source=None,
-                cache="auto"):
+                cache="auto", method="GET", body=""):
             seen["cache"] = cache
             return Fetched("<html>x</html>", False, "")
 
@@ -461,7 +478,7 @@ class TestFetchPages(unittest.TestCase):
         混成一句「页面抓取失败」，用户会去查站点——而问题出在他自己刚选的那档。
         """
         def miss(url, timeout=15, headers=None, charset="", proxy="", source=None,
-                 cache="auto"):
+                 cache="auto", method="GET", body=""):
             raise CacheMiss("这一页没有缓存")
 
         steps = self._steps()
@@ -475,7 +492,7 @@ class TestFetchPages(unittest.TestCase):
     def test_pages_carry_the_html_source(self):
         """命中缓存时页面要带上「抓取时刻 + 来自缓存」——抽屉据此标出来。"""
         def hit(url, timeout=15, headers=None, charset="", proxy="", source=None,
-                cache="auto"):
+                cache="auto", method="GET", body=""):
             return Fetched("<html>x</html>", True, "2026-09-17 16:20:11")
 
         with patch("core.app_debug.fetch_ex", side_effect=hit):
@@ -719,3 +736,97 @@ class TestQualityNewPageShared(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# -------------------------------------------------- 正文规则为空的补抓
+
+class TestEmptyContentFallback(unittest.TestCase):
+    """正文规则为空：App 不请求正文页，只打一行「⇒正文规则为空,使用章节链接:」。
+
+    规则为空恰恰是用户**最需要看正文页源码**的时刻（要从零写规则），不补抓
+    这一页，抽屉里的整页源码 / 候选 / AI 提议就全部失效。这一组用例钉住
+    fallback 的三件事：URL 从哪来、怎么绝对化、怎么应用请求选项。
+    """
+
+    def _run(self, sample=EMPTY_CONTENT_SAMPLE, **spy_overrides):
+        steps = build_steps(sample)
+        seen = {}
+
+        def spy(url, timeout=15, headers=None, charset="", proxy="", source=None,
+                cache="auto", method="GET", body=""):
+            seen.update(url=url, headers=headers or {}, charset=charset,
+                        method=method, body=body)
+            return Fetched("<html>正文页</html>", False, "")
+
+        with patch("core.app_debug.fetch_ex", side_effect=spy):
+            pages = fetch_debug_pages(steps)
+        return steps, pages, seen
+
+    def test_falls_back_to_chapter_link_and_backfills_step_url(self):
+        steps, pages, seen = self._run()
+        content = step_of(steps, "content")
+        # build_steps 本身不认那一行（它不是页面请求）：url 是抓取层回填的
+        self.assertEqual(content["url"], EMPTY_CONTENT_CHAPTER_URL)
+        self.assertEqual(seen["url"], EMPTY_CONTENT_CHAPTER_URL)
+        self.assertEqual([p["id"] for p in pages], ["detail", "chapter"])
+        self.assertEqual(pages[-1]["url"], EMPTY_CONTENT_CHAPTER_URL)
+
+    def test_base_prefers_toc_segment_then_book_url(self):
+        """目录段没有 URL（如 SAMPLE）时退详情段的 URL 当绝对化 base。"""
+        sample = [
+            "[00:00.800]︾开始解析详情页",
+            "[00:01.100]≡获取成功:%s" % TOC_URL,
+            "[00:01.160]︽详情页解析完成",
+            "[00:01.200]︾开始解析目录页",
+            "[00:01.940]︽目录页解析完成",
+            "[00:02.000]︾开始解析正文页",
+            "[00:02.100]⇒正文规则为空,使用章节链接:/reader/1.html",
+            "[00:02.200]︽正文页解析完成",
+        ]
+        _steps, pages, seen = self._run(sample)
+        self.assertEqual(seen["url"], "https://www.52shuku.net/reader/1.html")
+        self.assertEqual([p["id"] for p in pages], ["detail", "chapter"])
+
+    def test_absolute_chapter_link_is_kept_as_is(self):
+        """章节链接本来就是绝对 URL 时原样使用。"""
+        sample = list(EMPTY_CONTENT_SAMPLE)
+        sample[6] = "[00:01.100]⇒正文规则为空,使用章节链接:https://b.com/c1.html"
+        _steps, _pages, seen = self._run(sample)
+        self.assertEqual(seen["url"], "https://b.com/c1.html")
+
+    def test_url_options_are_applied_to_the_fetch(self):
+        """章节链接自带 ``,{...}`` 选项：抓取按选项发（method/body/headers），
+        回填的 step.url 保留选项原文——「从此步重跑」要拿它当 App 的 key，
+        App 端 AnalyzeUrl 自己会再解析。"""
+        sample = list(EMPTY_CONTENT_SAMPLE)
+        sample[6] = ("[00:01.100]⇒正文规则为空,使用章节链接:"
+                     '/book/1/c1.html,{"method":"POST","body":"id=1",'
+                     '"headers":{"X-Token":"t"}}')
+        _steps, pages, seen = self._run(sample)
+        self.assertEqual(seen["url"], EMPTY_CONTENT_CHAPTER_URL)
+        self.assertEqual(seen["method"], "POST")
+        self.assertEqual(seen["body"], "id=1")
+        # 选项 header 与源声明合并；这里没传源，看默认 UA 与选项共存即可
+        self.assertEqual(seen["headers"].get("X-Token"), "t")
+        self.assertEqual(step_of(_steps, "content")["url"],
+                         EMPTY_CONTENT_CHAPTER_URL + ',{"method":"POST","body":"id=1",'
+                         '"headers":{"X-Token":"t"}}')
+        self.assertEqual([p["id"] for p in pages], ["detail", "chapter"])
+
+    def test_post_body_template_is_skipped_with_note(self):
+        """body 里的模板只有 App（Rhino）求得值：不抓、note 说明，判定不受影响。"""
+        sample = list(EMPTY_CONTENT_SAMPLE)
+        sample[6] = ("[00:01.100]⇒正文规则为空,使用章节链接:"
+                     '/book/1/c1.html,{"method":"POST","body":"kw={{key}}"}')
+        steps, pages, seen = self._run(sample)
+        content = step_of(steps, "content")
+        self.assertTrue(content["has_notes"])
+        self.assertIn("连 App", content["notes"][-1])
+        self.assertEqual([p["id"] for p in pages], ["detail"])
+
+    def test_no_fallback_line_leaves_content_without_page(self):
+        """没有那行（也没有 ≡获取成功）：维持旧行为——无正文页、不报错。"""
+        sample = [s for s in EMPTY_CONTENT_SAMPLE if "正文规则为空" not in s]
+        steps, pages, _seen = self._run(sample)
+        self.assertIsNone(step_of(steps, "content")["url"] or None)
+        self.assertEqual([p["id"] for p in pages], ["detail"])
