@@ -285,7 +285,7 @@ class DiagnoseWiringTests(unittest.TestCase):
         with mock.patch.object(R, "_get", self._fake_get), \
              mock.patch("core.checker.classify_http_status", return_value="auth"):
             res = asyncio.run(R.diagnose_source(None, self.SRC))
-        self.assertEqual(res["bucket"], "需验证")
+        self.assertEqual(res["bucket"], "需登录")
 
     def test_dead_bucket_comes_from_the_shared_table(self):
         """反向断言：表说 dead → 归「死站」，不能一律归「需验证」。

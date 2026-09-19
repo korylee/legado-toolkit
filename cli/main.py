@@ -211,17 +211,20 @@ def cmd_organize(args: argparse.Namespace) -> int:
     if getattr(args, "check_dir", ""):
         from core.checker import AsyncChecker, is_cache_item_valid, restore_from_cache
         cache = AsyncChecker(cache_dir=args.check_dir).load_cache()
+        restored = 0
         for rec in records:
             if rec.url in cache and is_cache_item_valid(rec, cache[rec.url]):
                 # 统一走公共恢复逻辑：星级由原始量重算 + 标签清洗（剔除命中《》、保留原创、补齐规则完整）
                 restore_from_cache(rec, cache[rec.url])
-        n_cached = sum(1 for r in records if r.health != Health.SKIPPED)
-        print(f"合并缓存结果: {n_cached}/{len(records)}")
+                restored += 1
+        print(f"合并缓存结果: {restored}/{len(records)}")
     else:
-        # 无缓存时从旧分组迁移明确状态；无法确认的源必须保守标为待验证
+        # 无缓存时从旧分组迁移明确状态；无法确认的源必须保守标为待验证。
+        # 这条路径上 health 只可能是默认值 PENDING（「没结论」），
+        # 用默认值当「没填过」的判据仍然成立
         from core.organizer import infer_health_from_group
         for rec in records:
-            if rec.health == Health.SKIPPED:
+            if rec.health == Health.PENDING:
                 rec.health = infer_health_from_group(rec.group)
 
     from core.organizer import organize_sources
@@ -250,12 +253,13 @@ def cmd_report(args: argparse.Namespace) -> int:
     if getattr(args, "check_dir", ""):
         from core.checker import AsyncChecker, is_cache_item_valid, restore_from_cache
         cache = AsyncChecker(cache_dir=args.check_dir).load_cache()
+        restored = 0
         for rec in records:
             if rec.url in cache and is_cache_item_valid(rec, cache[rec.url]):
                 # 统一走公共恢复逻辑：星级由原始量重算 + 标签清洗（剔除命中《》、保留原创、补齐规则完整）
                 restore_from_cache(rec, cache[rec.url])
-        n_cached = sum(1 for r in records if r.health != Health.SKIPPED)
-        print(f"合并缓存结果: {n_cached}/{len(records)}")
+                restored += 1
+        print(f"合并缓存结果: {restored}/{len(records)}")
     report = build_report(records, source_path=input_path)
     output = getattr(args, "output", "") or DEFAULT_OUTPUTS["report"]
     with open(output, "w", encoding="utf-8") as f:
@@ -316,7 +320,7 @@ def cmd_prepare(args: argparse.Namespace) -> int:
     from core.organizer import infer_health_from_group, organize_sources
     records = [build_record(source, index) for index, source in enumerate(merged)]
     for record in records:
-        if record.health == Health.SKIPPED:
+        if record.health == Health.PENDING:
             record.health = infer_health_from_group(record.group)
     full = organize_sources(records, skip_disabled=True)
     fast = organize_sources(records, skip_disabled=True, keep_only_ok=True)
@@ -683,7 +687,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_org.add_argument("--limit", type=int, default=0, help="只处理前 N 个源（测试用）")
     p_org.add_argument("--keep-disabled", action="store_true", help="输出时保留 enabled=false 的源")
     p_org.add_argument("--drop-dead", action="store_true",
-                       help="剔除失效源（Health.DEAD；需验证/被墙源保留）")
+                       help="剔除失效源（Health.DEAD；需登录/需翻墙源保留）")
     p_org.add_argument("--keep-only-ok", action="store_true",
                        help="只保留 ✅可用 源（精简导入版）")
     p_org.set_defaults(func=cmd_organize)
@@ -746,7 +750,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--insecure", action="store_true", help="不校验证书")
     p_run.add_argument("--keep-disabled", action="store_true", help="输出时保留 enabled=false 的源")
     p_run.add_argument("--drop-dead", action="store_true",
-                       help="剔除失效源（Health.DEAD；需验证/被墙源保留）")
+                       help="剔除失效源（Health.DEAD；需登录/需翻墙源保留）")
     p_run.add_argument("--keep-only-ok", action="store_true",
                        help="只保留 ✅可用 源（精简导入版）")
     p_run.add_argument("--cache-dir", default="", help=f"校验缓存目录（缺省 {DEFAULT_CACHE_DIR}）")
@@ -787,7 +791,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # diagnose —— 失效源归因
     p_dg = sub.add_parser("diagnose",
-                          help="失效源归因：死站/需翻墙/规则漂移/站点转型/需验证")
+                          help="失效源归因：死站/需翻墙/规则漂移/站点转型/需登录")
     p_dg.add_argument("-i", "--input", required=True, help="书源 JSON 数组")
     p_dg.add_argument("-o", "--output", help="Markdown 报告输出路径")
     p_dg.add_argument("--only-dead", action="store_true",

@@ -29,7 +29,7 @@ description: 本仓库 Legado 书源工具链的用法——13 个 CLI 命令、
 | `run` | 一条龙：校验 → 整理 → 报告 |
 | `add` | 给搜索 URL，自动推断规则生成书源 |
 | `reclassify` | 按实测信号重判类型（修正漫画/小说错标） |
-| `diagnose` | 失效归因：死站/规则漂移/站点转型/需验证 |
+| `diagnose` | 失效归因：死站/规则漂移/站点转型/需登录 |
 | `repair` | AI 修复循环：抓证据 → 提议 → 回放验证 → 重试 |
 | `merge` / `prepare` / `dedupe` | 合并 / 生成候选版 / 去重 |
 | `sanitize` | 清洗字段类型脏值（Legado 导入前必跑） |

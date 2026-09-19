@@ -54,7 +54,7 @@ def build_report(
 
     # ---- 健康状态分布
     health_ok = [r for r in enabled if r.health == Health.OK]
-    # ---- 星级分布（校验后）：覆盖全部源（0★=未评级/不可达，含失效/需验证等）
+    # ---- 星级分布（校验后）：覆盖全部源（0★=未评级/不可达，含失效/需登录等）
     starred = list(enabled)
     if starred:
         lines.append("## 二、星级分布（优质度检测）")
@@ -255,7 +255,7 @@ def build_report(
         good = health_ok[:10]
         lines.append(f"- 本次校验出 **{len(health_ok)}** 个可用源，建议优先从「✅可用」分组中挑选。")
         lines.append(f"- 推荐示例：{', '.join(r.name for r in good[:8])}")
-    lines.append("- 可用但需登录/验证的源（🔒需验证），导入后需在 App 内完成登录。")
+    lines.append("- 可用但需登录的源（🔒需登录），导入后需在 App 内完成登录。")
     lines.append("- 无搜索规则但目录/正文可用的源，只能通过「发现」浏览，无法关键词搜索。")
     lines.append("")
     return "\n".join(lines)

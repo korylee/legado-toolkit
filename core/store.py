@@ -306,6 +306,7 @@ class Store:
         self.conn.execute("DROP VIEW IF EXISTS v_sources")
         self.conn.execute(self.VIEW_DDL)
         self.migrate_user_tags_once()
+        self.migrate_health_tiers_once()
         self.cleanup_system_tags_once()
         self.fix_enabled_explore_once()
         self.fix_dirty_source_type_once()
@@ -783,6 +784,64 @@ class Store:
         self.set_meta("user_tags_migrated_at", now())
         return True
 
+    def migrate_health_tiers_once(self) -> bool:
+        """Once-off：健康档位收成六档——映射 checks 里的旧值，并刷新组名里的旧词。
+
+        2026-09 档位重设计（判据「下一步动作相同才合并」，见 lessons）：timeout /
+        error / no_search / skipped 并入 pending（待验证）。这是一次**纯子集合并**
+        ——每个旧值的含义都完整落在新档里，底层观测（status_code / error / steps）
+        一个字节没动，所以历史 checks 就地映射、不必作废；ok / dead / auth / gfw /
+        cert 五个值原样保留。
+
+        **组名里的旧词要跟着换掉，否则旧词会以用户标签的身份现形**：
+        `sources.group_name` 里写的是**当时**的标签词（实测 1051 条「需验证」+
+        98 条「需代理复检」），而前端的 `splitSystemUser` 认的是 `/tags/meta`
+        下发的新词表——认不出的旧词会被当成**用户标签**渲染出来（`core/tags.py`
+        判定表注释里记的正是这个坑）。
+
+        **只换名、不重算状态**：这一步刻意**不**调 `rebuild_system_tags()`。
+        重算是另一件事，且在这里做有害——它按 `checks` 表推导，而「从未校验」的源
+        没有 checks 行，重算会把它们统一压成「待验证」，**抹掉导入时从旧分组
+        推断出来的状态**（`infer_health_from_group` 存在的意义就是留住那个信号，
+        见 WORKFLOW「未联网时状态只从旧分组迁移」）。改名则原样保留每个源的状态，
+        锁定行也照改（钉住的是「状态」，不是「这个词怎么写」）。
+
+        **与 CACHE_VERSION 的分工**：checks 是历史记录，映射后照常可读；探测缓存
+        是「当时的结论」，词表变了整体作废重探（checker.CACHE_VERSION 13）——
+        两边各管各的，不要在这里「顺手」清缓存。
+        """
+        if self.get_meta("health_tiers_v2"):
+            return False
+        with self.conn:
+            cur = self.conn.execute(
+                "UPDATE checks SET health = 'pending' "
+                "WHERE health IN ('timeout', 'error', 'no_search', 'skipped')")
+            n = cur.rowcount
+        renamed = self._rename_retired_status_tags()
+        self.set_meta("health_tiers_v2", now())
+        return n > 0 or renamed > 0
+
+    def _rename_retired_status_tags(self) -> int:
+        """把 `group_name` 里已退役的状态标签词换成现役词（映射见 core/tags.py）。
+
+        **不动状态本身**：同名换词，段的顺序与其它标签（类型、规则完整、用户标签）
+        一概原样保留。返回改过的行数。
+        """
+        from core.tags import RETIRED_STATUS_TAG_RENAMES
+
+        updates = []
+        for row in self.conn.execute("SELECT id, group_name FROM sources"):
+            segments = _parse_group(row["group_name"])
+            renamed = [RETIRED_STATUS_TAG_RENAMES.get(t, t) for t in segments]
+            if renamed != segments:
+                updates.append((",".join(renamed), row["id"]))
+        if not updates:
+            return 0
+        with self.conn:
+            self.conn.executemany(
+                "UPDATE sources SET group_name=? WHERE id=?", updates)
+        return len(updates)
+
     def cleanup_system_tags_once(self) -> bool:
         """Once-off cleanup: remove system tags that leaked into user_tags."""
         if self.get_meta("system_tags_cleaned_at"):
@@ -1112,7 +1171,7 @@ class Store:
         for row in rows:
             if row["system_tags_locked"]:
                 continue
-            health = row["health"] or Health.SKIPPED
+            health = row["health"] or Health.PENDING
             base = group_title(int(row["source_type"] or 0), health, int(row["stars"] or 0))
             quality = _normalize_tags(row["quality_tags"] or "")
             if "规则完整" in quality:

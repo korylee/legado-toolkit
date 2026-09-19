@@ -88,9 +88,14 @@ from core.constants import DEFAULT_UA
 # 12：本地回放的能力边界补了两类写法（`text.` / `children.` 简写、方括号索引式
 # `[-1]` / `[0]` / `[1,3]` / `[!0]`）。它们此前被判成「解析为空」＝**源失效**，
 # 现在一律 unknown（无法离线回放）。判定变了，旧缓存里的 toc/content 结论作废。
-CACHE_VERSION = 12
+# 13：健康档位收成六档——timeout / error / no_search / skipped 并入 pending
+# （「待验证」），判据是下一步动作相同；AUTH / GFW 的标签改名「需登录 / 需翻墙」。
+# 结论词表变了：旧缓存里的 health 是旧词表的产物，必须整体作废（checks 表的
+# 历史值由 Store.migrate_health_tiers_once 一次性映射——纯子集合并、观测不变；
+# 缓存这边直接重探，重跑是已知代价）。
+CACHE_VERSION = 13
 
-#: 缓存有效期（天）：可用源留久一点，其余状态一律短 TTL——「待验证」「需代理复检」
+#: 缓存有效期（天）：可用源留久一点，其余状态一律短 TTL——「待验证」「需翻墙」
 #: 长期停在旧结论上，比多校验几次更糟。
 #:
 #: **默认值只从 settings_store 取**（AGENTS.md 硬性约定 #8），Web 端可在设置里
@@ -98,14 +103,14 @@ CACHE_VERSION = 12
 #: 走这里的默认值。
 DEFAULT_TTL_OK = _SETTINGS_DEFAULTS["check"]["cache_ttl_ok"]
 DEFAULT_TTL_OTHER = _SETTINGS_DEFAULTS["check"]["cache_ttl_other"]
-#: 「200 + 登录词」判出来的「需验证」单独一个短 TTL，见 is_cache_item_valid
+#: 「200 + 登录词」判出来的「需登录」单独一个短 TTL，见 is_cache_item_valid
 DEFAULT_TTL_AUTH = _SETTINGS_DEFAULTS["check"]["cache_ttl_auth"]
 
 
 def classify_transport_error(error: str) -> str:
     """将传输层错误映射为保守状态，避免断网把源误判为永久失效。
 
-    **DNS 单独说**：这里给的 ``TIMEOUT``（待复检）是**保守兜底**，因为只凭本机一次
+    **DNS 单独说**：这里给的 ``PENDING``（待复检）是**保守兜底**，因为只凭本机一次
     解析失败无法区分「域名注销」和「本机解析被污染/断网」。真正的归因在
     ``check_one`` 里做——它拿 ``core/dns_check`` 的外部视角去交叉验证，验得出来
     才会升级成 ``DEAD``（两个公共 DNS 都说域名不存在）或 ``GFW``（公共 DNS 能解析
@@ -115,11 +120,9 @@ def classify_transport_error(error: str) -> str:
         return Health.GFW
     if error == "cert":
         return Health.CERT
-    if error in ("timeout", "proxy"):
-        return Health.TIMEOUT
-    if error == "dns":
-        return Health.TIMEOUT
-    return Health.ERROR
+    # timeout / proxy / dns / 其他传输层错误：都是「这次没测出结论」，
+    # 下一步动作相同——重跑。原因留在 record.error。
+    return Health.PENDING
 
 
 def classify_http_status(status: Optional[int], text: str,
@@ -129,7 +132,7 @@ def classify_http_status(status: Optional[int], text: str,
     三处需要它：`AsyncChecker._classify`（域名探测）、`_probe_search`（搜索探测）、
     `reclassify.diagnose_source`（失效归因）。原来各写一份，实测已在 5 种输入上分叉：
 
-        503（无响应体）         域名探测=dead    归因=需验证
+        503（无响应体）         域名探测=dead    归因=需登录
         404 / 500 / 406         域名探测=dead    归因=继续判
         200 + 登录页 + cookie   域名探测=auth    归因=继续判
 
@@ -143,7 +146,7 @@ def classify_http_status(status: Optional[int], text: str,
     # 401 / 403 / 429 一律 AUTH：它们本身就是「要登录 / 被拒」，不必再看响应体
     if status in (401, 403, 429):
         return Health.AUTH
-    # 503 要看响应体：带反爬特征才算「需验证」，否则是服务端挂了
+    # 503 要看响应体：带反爬特征才算「需登录」，否则是服务端挂了
     if status == 503 and any(m in low for m in ANTI_BOT_MARKERS):
         return Health.AUTH
     if status >= 500:
@@ -178,7 +181,7 @@ def is_login_wall(text: str, enabled_cookie_jar: bool = False) -> bool:
 
 
 def is_transient(health: str) -> bool:
-    """这次失败是「瞬时网络错误」吗（超时 / 网络异常）。
+    """这次失败是「瞬时网络错误」吗（待验证档：超时 / 异常等没结论的失败）。
 
     **这个判定只用来决定"能不能复用"，不再用来决定"要不要写"。**
     原来它叫 `should_cache_result`，同时管着写库那道门——结果是超时/异常的源
@@ -186,11 +189,11 @@ def is_transient(health: str) -> bool:
     显示成「未校验」：明明刚跑过，界面上却像没跑（实测 3861 条里有 1222 条是
     这个状态，占 31.7%），而且每次全量都会把它们的请求重打一遍。
 
-    现在拆开：**照写**（界面能显示「⏱超时/⚠️异常」、能筛出来单独重测）+ **不复用**
+    现在拆开：**照写**（界面能显示「❓待验证」、能筛出来单独重测）+ **不复用**
     （一次断网/抖动不会变成源的结论）。原来要防的那件事（污染）靠 `is_cache_item_valid`
     的那道早退照样堵着。
     """
-    return health in (Health.TIMEOUT, Health.ERROR)
+    return health == Health.PENDING
 
 
 def err_desc(err: str, detail: str = "") -> str:
@@ -497,7 +500,7 @@ def evaluate_stars(
 
     阶梯本身（每一级依赖上一级，方案D 分档宽松）：
 
-      1★ 可达：health ∈ (ok / auth / no_search)（域名通或能访问，仅需登录/不可搜）
+      1★ 可达：health ∈ (ok / auth)（域名通或能访问，仅需登录）
       2★ 搜索连通：有搜索规则且搜索请求有响应（search_response_ms > 0）
       3★ 弱证据档：搜索真实命中测试作品 或 静态规则完整（目录+正文规则齐全）
       4★ 目录完整：命中源用实测 toc_complete（None=无法验证→回退静态目录规则非空）；
@@ -511,7 +514,7 @@ def evaluate_stars(
       - 深度验证「无法验证」（None）的维度回退静态规则判定——不误杀规则齐全的源
       - 实测明确不达标（False）仍按不满足扣分——不误放真坏的源
     """
-    if health not in (Health.OK, Health.AUTH, Health.NO_SEARCH):
+    if health not in (Health.OK, Health.AUTH):
         return 0, ""
     stars = 1  # 可达（域名请求本身是实测）
     if not (has_search and search_response_ms > 0):
@@ -575,7 +578,7 @@ def restore_from_cache(rec: BookSourceRecord, item: Dict[str, Any]) -> None:
     - 标签：剔除旧缓存遗留的「命中《》」标签，保留静态「原创」标记，
       并按静态规则补齐「规则完整」（若缓存里没有）
     """
-    rec.health = item.get("health", Health.SKIPPED)
+    rec.health = item.get("health", Health.PENDING)
     rec.status_code = int(item.get("status_code", 0) or 0)
     rec.response_time_ms = int(item.get("response_time_ms", 0) or 0)
     rec.error = item.get("error", "")
@@ -948,8 +951,8 @@ class AsyncChecker:
         判定表只有一份，见模块级的 :func:`classify_http_status`——**不要在这里
         另写一遍**（那正是原来三处分叉的成因）。
 
-        返回 ``(健康态, 依据文案)``。依据只对「需验证」这一档有内容：它是唯一
-        **由词表启发式**判出来的状态，不说清命中了哪个词，用户看到「需验证」
+        返回 ``(健康态, 依据文案)``。依据只对「需登录」这一档有内容：它是唯一
+        **由词表启发式**判出来的状态，不说清命中了哪个词，用户看到「需登录」
         就只能怀疑程序（实测就是这么误判了 797 条）。
         """
         text = _decode_body(body)
@@ -958,11 +961,11 @@ class AsyncChecker:
             return health, ""
         anti = anti_bot_marker_of(text)
         if anti:
-            return health, "页面出现「%s」（反爬特征）→ 需验证" % anti
+            return health, "页面出现「%s」（反爬特征）→ 需登录" % anti
         login = login_marker_of(text)
         if login:
-            return health, "页面出现「%s」，且源声明了 cookieJar → 需验证" % login
-        return health, "站点返回 %s，判为需验证" % status
+            return health, "页面出现「%s」，且源声明了 cookieJar → 需登录" % login
+        return health, "站点返回 %s，判为需登录" % status
 
 
     async def _classify_dns(self, record: BookSourceRecord,
@@ -984,7 +987,7 @@ class AsyncChecker:
                     "本机解析失败，但%s，本地 DNS 疑似被污染，可开代理复检" % note)
         if verdict == dns_check.GONE:
             return Health.DEAD, "域名已注销（%s），建议删除" % note
-        return Health.TIMEOUT, "DNS 解析失败待复检（%s）" % note
+        return Health.PENDING, "DNS 解析失败待复检（%s）" % note
 
 
     async def check_one(
@@ -996,7 +999,7 @@ class AsyncChecker:
         assert self._sem is not None
         async with self._sem:
             if not record.url:
-                record.health = Health.ERROR
+                record.health = Health.PENDING
                 record.error = "无 bookSourceUrl"
                 record.quality_stars = 0
                 record.star_basis = ""
@@ -1027,7 +1030,7 @@ class AsyncChecker:
                         # 目标域名（https 交给代理 CONNECT），所以这里的 dns 失败是
                         # **代理主机自己**解析不了。拿目标域名去交叉验证会得出一句
                         # 与事实无关的话（"本地 DNS 疑似被污染"），把排查引偏
-                        health = Health.TIMEOUT
+                        health = Health.PENDING
                         record.error = "代理主机解析失败，待复检（检查设置里的代理地址）"
                     else:
                         health, record.error = await self._classify_dns(record, domain_url)

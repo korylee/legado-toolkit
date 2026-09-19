@@ -133,13 +133,13 @@ class DnsHealthMappingTests(unittest.TestCase):
 
     def test_dns_transport_error_stays_pending_by_default(self) -> None:
         """传输层分类里 DNS 仍然只是「待复检」——归因要外部视角才能做。"""
-        self.assertEqual(classify_transport_error("dns"), Health.TIMEOUT)
+        self.assertEqual(classify_transport_error("dns"), Health.PENDING)
 
     def test_certificate_error_has_its_own_bucket(self) -> None:
         """证书错误单独一档：它是这批源里**唯一我们自己能处理**的一类
-        （站点是通的，关掉证书校验就能用），混进「⚠️异常」等于把可操作的信息丢了。"""
+        （站点是通的，关掉证书校验就能用），混进「待验证」等于把可操作的信息丢了。"""
         self.assertEqual(classify_transport_error("cert"), Health.CERT)
-        self.assertNotEqual(classify_transport_error("cert"), Health.ERROR)
+        self.assertNotEqual(classify_transport_error("cert"), Health.PENDING)
 
 
 class ClassifyDnsTests(unittest.TestCase):
@@ -187,7 +187,7 @@ class ClassifyDnsTests(unittest.TestCase):
     def test_unknown_maps_to_pending(self) -> None:
         self._stub(dns_check.UNKNOWN)
         health, error = self._run()
-        self.assertEqual(health, Health.TIMEOUT, "验不出来就维持待复检，不能判死")
+        self.assertEqual(health, Health.PENDING, "验不出来就维持待复检，不能判死")
         self.assertIn("待复检", error)
 
     def test_verdict_is_cached_per_host(self) -> None:

@@ -15,7 +15,7 @@ router = APIRouter()
 @router.get("", response_model=SourcePage)
 def list_sources(
     type: Optional[int] = Query(None, description="0小说 1听书 2漫画 3下载"),
-    health: str = Query("", description="ok/dead/auth/gfw"),
+    health: str = Query("", description="ok/dead/auth/gfw/cert/pending/none"),
     group: str = "",
     tag: str = "",
     q: str = "",
@@ -42,7 +42,7 @@ def list_source_urls(
     # （本仓库的测试惯例，见 test_settings_api）时会被原样传进 SQL，报
     # 「int() argument must be ... not 'Query'」。校验需求（ge/le）也没有
     type: Optional[int] = None,     # 0小说 1听书 2漫画 3下载；None = 不筛
-    health: str = "",               # ok/dead/auth/gfw/none；空 = 不筛
+    health: str = "",               # ok/dead/auth/gfw/cert/pending/none；空 = 不筛
     group: str = "",
     tag: str = "",
     q: str = "",

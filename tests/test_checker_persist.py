@@ -127,18 +127,18 @@ class StoreBackendSaveTests(unittest.TestCase):
 
         改之前：超时/异常的源一条都不写，于是列表按「有没有 checks 行」把它们算成
         「未校验」，永远显示没跑过（实测 1222/3861 条），每次全量还要重打一遍请求。
-        改之后：照写（界面显示「⏱超时」，能筛出来单独重测），复用那道门挪到
+        改之后：照写（界面显示「❓待验证」，能筛出来单独重测），复用那道门挪到
         `is_cache_item_valid`（一次断网/抖动仍然不会变成源的结论）。
 
         **两个方向都断言**：只断言"写进去了"的话，把复用那道门删掉照样绿——
-        而那样一次断网就会把 3861 条全判成超时并复用 7 天。
+        而那样一次断网就会把 3861 条全判成待验证并复用 7 天。
         """
         ck = AsyncChecker(concurrency=1, use_store=True)
-        ck.save_cache_append(checked(health="timeout"))
+        ck.save_cache_append(checked(health="pending"))
         ck.close()
         rows = self._rows()
         self.assertEqual(len(rows), 1, "瞬时错误也要落库，否则界面永远显示「未校验」")
-        self.assertEqual(rows[0]["health"], "timeout")
+        self.assertEqual(rows[0]["health"], "pending")
         # 而且不能被复用（哪怕它就在 TTL 内、指纹也一致）
         reader = AsyncChecker(concurrency=1, use_store=True)
         item = reader.load_cache()[_normalize_url("https://a.example/")]

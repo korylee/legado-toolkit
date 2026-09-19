@@ -24,19 +24,20 @@ def source(group: str = "") -> dict:
 class OrganizerTests(unittest.TestCase):
     def test_status_group_uses_readable_lifecycle_name(self) -> None:
         self.assertEqual(group_title(0, Health.OK), "📖小说,可用")
-        self.assertEqual(group_title(0, Health.AUTH), "📖小说,需验证")
-        self.assertEqual(group_title(0, Health.GFW), "📖小说,需代理复检")
+        self.assertEqual(group_title(0, Health.AUTH), "📖小说,需登录")
+        self.assertEqual(group_title(0, Health.GFW), "📖小说,需翻墙")
 
     def test_auth_and_pending_are_different_tags(self) -> None:
         """「有结论但被站点拒绝」与「我们没结论」必须是两个标签。
 
         合并过一阵子：AUTH 也写「待验证」，结果一个真在用的源被判 AUTH 后，
         在编辑弹窗里和三千多条从没校验过的源显示一模一样，看不出区别。
+
+        2026-09 档位重设计后「没结论」只有 PENDING 一档（timeout / error /
+        no_search / skipped 已并入，判据是下一步动作相同）。
         """
-        self.assertNotEqual(group_title(0, Health.AUTH), group_title(0, Health.SKIPPED))
-        self.assertEqual(group_title(0, Health.SKIPPED), "📖小说,待验证")
-        for h in (Health.NO_SEARCH, Health.TIMEOUT, Health.ERROR):
-            self.assertEqual(group_title(0, h), "📖小说,待验证")
+        self.assertNotEqual(group_title(0, Health.AUTH), group_title(0, Health.PENDING))
+        self.assertEqual(group_title(0, Health.PENDING), "📖小说,待验证")
 
     def test_status_tag_round_trips_through_inference(self) -> None:
         """分组标签 -> 健康状态 -> 分组标签，必须回到原处。
@@ -48,7 +49,8 @@ class OrganizerTests(unittest.TestCase):
         任何一张，症状都是"它悄悄落进「待验证」"——和三千多条从没校验过的源
         显示成同一个标签（CERT 就是这么被漏过一次）。
         """
-        for health in (Health.OK, Health.AUTH, Health.GFW, Health.DEAD, Health.CERT):
+        for health in (Health.OK, Health.AUTH, Health.GFW, Health.DEAD, Health.CERT,
+                       Health.PENDING):
             tag = group_title(0, health).split(",", 1)[1]
             self.assertEqual(infer_health_from_group(tag), health,
                              "「%s」往返后变了" % tag)
@@ -58,7 +60,7 @@ class OrganizerTests(unittest.TestCase):
         它是**有结论**的（站点可达、只是证书不被信任），落进「待验证」就等于
         和从没校验过的源显示成同一个标签。"""
         self.assertEqual(group_title(0, Health.CERT), "📖小说,证书问题")
-        self.assertNotEqual(group_title(0, Health.CERT), group_title(0, Health.SKIPPED))
+        self.assertNotEqual(group_title(0, Health.CERT), group_title(0, Health.PENDING))
 
     def test_organize_removes_hit_marker_and_original_group_line(self) -> None:
         raw = source("📖小说/✅★★★★★,命中《斗破苍穹》,规则完整")
@@ -85,20 +87,37 @@ class OrganizerTests(unittest.TestCase):
 
         result = organize_sources([record])
 
-        self.assertEqual(result[0]["bookSourceGroup"], "📖小说,需验证,R18")
+        self.assertEqual(result[0]["bookSourceGroup"], "📖小说,需登录,R18")
 
     def test_legacy_group_health_is_inferred_conservatively(self) -> None:
         self.assertEqual(infer_health_from_group("📖小说/✅★★★☆☆"), Health.OK)
         self.assertEqual(infer_health_from_group("📖小说/🔒需验证"), Health.AUTH)
         self.assertEqual(infer_health_from_group("📖小说/🌐需翻墙"), Health.GFW)
 
-    def test_unrecognizable_group_is_pending_not_auth(self) -> None:
-        """认不出来的分组 = **我们不知道**，不能推断成「需验证」。
+    def test_retired_tag_names_stay_system(self) -> None:
+        """改名的旧标签必须继续被认成系统侧，不能漏成用户标签。
 
-        兜底曾经返回 Health.AUTH；AUTH 现在显示为「需验证」，那会把"不知道"
+        `_is_legacy_system_segment` 漏认的后果：旧分组里的它被当用户标签写进
+        `user_tags` 且不再纠正（core/tags.py 判定表注释里的坑）。
+
+        「代理复检」这个裸形式是旧分组真出现过的写法，单列一条——集合里
+        「需代理复检」在、裸形式漏掉时，上面的断言仍然全绿。
+        """
+        from core.tags import extract_user_tags_from_group
+
+        self.assertEqual(infer_health_from_group("📖小说,需代理复检"), Health.GFW)
+        self.assertEqual(extract_user_tags_from_group("📖小说,需验证"), [])
+        self.assertEqual(extract_user_tags_from_group("📖小说,需代理复检"), [])
+        self.assertEqual(extract_user_tags_from_group("📖小说,代理复检"), [])
+        self.assertEqual(extract_user_tags_from_group("📖小说,需翻墙"), [])
+
+    def test_unrecognizable_group_is_pending_not_auth(self) -> None:
+        """认不出来的分组 = **我们不知道**，不能推断成「需登录」。
+
+        兜底曾经返回 Health.AUTH；AUTH 现在显示为「需登录」，那会把"不知道"
         说成"站点要验证"——凭空造结论。保守的方向是「待验证」。
         """
-        self.assertEqual(infer_health_from_group("自用"), Health.SKIPPED)
+        self.assertEqual(infer_health_from_group("自用"), Health.PENDING)
         self.assertEqual(group_title(0, infer_health_from_group("自用")),
                          "📖小说,待验证")
 
@@ -119,7 +138,7 @@ class HealthTableCoverageTests(unittest.TestCase):
 
     它们都走 `.get(key, 默认)` 兜底，**漏一个键不报错**，只是静默给出错误分类：
 
-      - `HEALTH_ORDER`：漏了 → 排序落到 9（最后）。CERT 就这样排到了 SKIPPED 之后
+      - `HEALTH_ORDER`：漏了 → 排序落到最后。CERT 就这样排到了「待验证」之后
       - `STATUS_GROUP_NAMES`：漏了 → 落进「待验证」。CERT 也犯过（见那张表的注释）
       - `HEALTH_NAMES` 本身是权威，前两张表由它派生
 
@@ -140,11 +159,26 @@ class HealthTableCoverageTests(unittest.TestCase):
         self.assertEqual(set(STATUS_GROUP_NAMES), set(HEALTH_NAMES),
                          "STATUS_GROUP_NAMES 与 HEALTH_NAMES 的键集必须一致")
 
-    def test_cert_sorts_before_skipped(self) -> None:
-        """CERT 是「可达、有结论、能自己处理」的档，不该排在 SKIPPED 之后。"""
+    def test_cert_sorts_before_pending(self) -> None:
+        """CERT 是「可达、有结论、能自己处理」的档，不该排在「待验证」之后。"""
         from core.organizer import HEALTH_ORDER
 
-        self.assertLess(HEALTH_ORDER[Health.CERT], HEALTH_ORDER[Health.SKIPPED])
+        self.assertLess(HEALTH_ORDER[Health.CERT], HEALTH_ORDER[Health.PENDING])
+
+    def test_display_name_ends_with_the_group_tag(self) -> None:
+        """一个状态只有一个名字：`HEALTH_NAMES` 必须就是「emoji + 分组标签」。
+
+        这两张表描述同一件事的两个落点——统计条/报告读前者，写进 App 的分组读
+        后者。措辞一旦分叉（「需验证」vs「需登录」、「证书」vs「证书问题」），
+        用户就会在界面上看到同一个状态有两个名字，这正是本轮重设计要消掉的东西。
+        """
+        from core.models import HEALTH_NAMES
+        from core.organizer import STATUS_GROUP_NAMES
+
+        for health, tag in STATUS_GROUP_NAMES.items():
+            self.assertTrue(HEALTH_NAMES[health].endswith(tag),
+                            "「%s」的显示名 %s 与分组标签 %s 措辞不一致"
+                            % (health, HEALTH_NAMES[health], tag))
 
 
 # ---------------------------------------------------------------- 变异记录

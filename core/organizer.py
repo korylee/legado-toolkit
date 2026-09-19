@@ -23,49 +23,49 @@ HEALTH_ORDER = {
     Health.GFW: 2,
     # CERT 与 AUTH / GFW 同组：站点**可达**、有结论、而且**能自己处理**
     # （关掉证书校验或换 http）。原来漏了它，`.get(..., 9)` 兜底让它排到
-    # SKIPPED 之后——「关掉校验就能用」的源被排在最后。
+    # 最后——「关掉校验就能用」的源被排在最后。
     # **这张表必须覆盖 HEALTH_NAMES 的每个键**（tests/test_organizer.py 守着）。
     Health.CERT: 3,
-    Health.NO_SEARCH: 4,
-    Health.TIMEOUT: 5,
-    Health.DEAD: 6,
-    Health.ERROR: 7,
-    Health.SKIPPED: 8,
+    Health.PENDING: 4,
+    Health.DEAD: 5,
 }
 
 
 #: ``Health`` -> 系统状态标签。
 #:
-#: **AUTH 单独一个「需验证」，不并进「待验证」。** 两者含义相反：AUTH 是**有结论**
+#: **AUTH 单独一个「需登录」，不并进「待验证」。** 两者含义相反：AUTH 是**有结论**
 #: （站点拒绝了我们的请求：403/401/429/503、验证码页、登录墙），待验证是**没结论**
-#: （没校验过、超时、异常、无搜索规则）。合并过一阵子，后果是一个真在用的源被误判
+#: （没校验过、超时、异常）。合并过一阵子，后果是一个真在用的源被误判
 #: 成 AUTH 后，在编辑弹窗里和 3500 条从没校验过的源显示同一个标签，看不出区别。
 #:
-#: 这个往返现在是对称的：``infer_health_from_group`` 认得「需验证」→ AUTH，
-#: 这里 AUTH → 「需验证」。之前反向写回给的是「待验证」，读回来就丢了。
+#: 这个往返现在是对称的：``infer_health_from_group`` 认得「需登录」（也认旧写法
+#: 「需验证」），这里 AUTH → 「需登录」。之前反向写回给的是「待验证」，读回来就丢了。
+#:
+#: 2026-09 档位重设计：TIMEOUT / ERROR / NO_SEARCH / SKIPPED 并入 PENDING——
+#: 判据是「下一步动作相同」（都是跑/重跑一次校验），失败原因留在 checks 的
+#: error / steps 里。六个键必须覆盖 HEALTH_NAMES 的每个键（测试钉着）。
 STATUS_GROUP_NAMES = {
-    Health.OK: "可用", Health.AUTH: "需验证", Health.GFW: "需代理复检",
-    Health.DEAD: "已失效", Health.NO_SEARCH: "待验证", Health.TIMEOUT: "待验证",
-    Health.ERROR: "待验证", Health.SKIPPED: "待验证",
+    Health.OK: "可用", Health.AUTH: "需登录", Health.GFW: "需翻墙",
+    Health.DEAD: "已失效", Health.PENDING: "待验证",
     # CERT 也是**有结论**的（站点可达，只是证书不被信任），不能落进「待验证」。
     # 漏了它的后果与上面 AUTH 那段完全一样：分组名走 .get(..., '待验证') 兜底，
-    # 于是一批"证书有问题、关掉校验就能用"的源，在编辑弹窗里和 3500 条从没校验过
+    # 于是一批"证书有问题、关掉校验就能用"的源，在编辑弹窗里和从没校验过
     # 的源显示成同一个标签。**新增健康态时这张表必须跟着加**
     Health.CERT: "证书问题",
 }
 
 
 def infer_health_from_group(group: str) -> str:
-    """从旧分组迁移可确认的健康状态；**无法确认时归为 SKIPPED（→「待验证」）**。
+    """从旧分组迁移可确认的健康状态；**无法确认时归为 PENDING（→「待验证」）**。
 
-    兜底必须是「待验证」那一档，不能是 AUTH：AUTH 现在会显示成「需验证」，
+    兜底必须是「待验证」那一档，不能是 AUTH：AUTH 现在会显示成「需登录」，
     是个肯定的断言。分组认不出来只说明**我们不知道**，把它说成"站点要验证"
     是凭空造结论——那正是本模块先前把 AUTH 和「待验证」合并时埋下的坑。
     """
     value = str(group or "")
-    # 「需代理复检」是 STATUS_GROUP_NAMES 里 GFW 的写法（group_title 就写这个），
-    # 少了它往返接不上：写出去是「需代理复检」，读回来落到兜底 → 被当成没结论。
-    # 旧分组里另有「需翻墙 / 被墙 / 🌐」的写法，一并认。
+    # 「需翻墙」是 STATUS_GROUP_NAMES 里 GFW 的现役写法；旧数据里另有
+    # 「需代理复检 / 代理复检 / 被墙 / 🌐」，一并认——少了它们往返接不上：
+    # 写出去的分组读回来落到兜底，被当成没结论。
     if ("需翻墙" in value or "被墙" in value or "🌐" in value
             or "需代理复检" in value or "代理复检" in value):
         return Health.GFW
@@ -77,7 +77,7 @@ def infer_health_from_group(group: str) -> str:
         return Health.AUTH
     if "✅" in value or "可用" in value:
         return Health.OK
-    return Health.SKIPPED
+    return Health.PENDING
 
 
 def group_title(source_type: int, health: str, stars: int = 0, style: str = "status") -> str:
@@ -139,7 +139,7 @@ def organize_sources(
     :param skip_disabled: 是否排除 enabled=false 的源
     :param keep_original_group: 是否在 comment 里保留原始分组
     :param drop_dead: 是否剔除「失效」源（Health.DEAD）。
-        注意：需验证(AUTH)/被墙(GFW) 源不剔除——可能只是暂时反爬或需翻墙。
+        注意：需登录(AUTH)/需翻墙(GFW) 源不剔除——可能只是暂时反爬或需翻墙。
     :param keep_only_ok: 是否只保留「✅可用」(Health.OK) 源（精简导入版）。
     """
     if skip_disabled:

@@ -40,10 +40,15 @@ def make_cache_item(source: dict, health: str, checked_at: str) -> dict:
 
 class CacheValidityTests(unittest.TestCase):
     def test_transport_timeout_is_not_classified_as_dead(self) -> None:
-        self.assertEqual(classify_transport_error("timeout"), Health.TIMEOUT)
-        self.assertEqual(classify_transport_error("proxy"), Health.TIMEOUT)
-        self.assertEqual(classify_transport_error("dns"), Health.TIMEOUT)
-        self.assertEqual(classify_transport_error("other"), Health.ERROR)
+        """传输层失败一律保守落「待验证」，绝不判死。
+
+        2026-09 档位重设计：timeout / proxy / dns / 其他都是「这次没测出结论」，
+        下一步动作相同（重跑），失败原因留在 record.error。
+        """
+        self.assertEqual(classify_transport_error("timeout"), Health.PENDING)
+        self.assertEqual(classify_transport_error("proxy"), Health.PENDING)
+        self.assertEqual(classify_transport_error("dns"), Health.PENDING)
+        self.assertEqual(classify_transport_error("other"), Health.PENDING)
 
     def test_transient_network_result_is_never_reused(self) -> None:
         """瞬时错误**照写但绝不复用**。
@@ -55,17 +60,14 @@ class CacheValidityTests(unittest.TestCase):
         **两个方向都要断言**：只断言"不复用"的话，把写库那道门加回来照样绿，
         而界面上那些源又会全部变回「未校验」。
         """
-        self.assertTrue(is_transient(Health.TIMEOUT))
-        self.assertTrue(is_transient(Health.ERROR))
+        self.assertTrue(is_transient(Health.PENDING))
         self.assertFalse(is_transient(Health.OK))
         # 证书问题不是瞬时的（站点证书不会自己变好），所以照常缓存、照常复用
         self.assertFalse(is_transient(Health.CERT))
         source = make_source()
-        item = make_cache_item(source, Health.TIMEOUT, "2026-08-21 11:00:00")
+        item = make_cache_item(source, Health.PENDING, "2026-08-21 11:00:00")
         self.assertFalse(is_cache_item_valid(build_record(source, 0), item, now=NOW),
                          "瞬时错误的缓存一定不能复用——它就在 TTL 内也一样")
-        item = make_cache_item(source, Health.ERROR, "2026-08-21 11:00:00")
-        self.assertFalse(is_cache_item_valid(build_record(source, 0), item, now=NOW))
 
     def test_cache_with_changed_rule_fingerprint_is_not_reused(self) -> None:
         source_a = make_source()

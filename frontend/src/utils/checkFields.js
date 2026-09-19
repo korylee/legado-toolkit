@@ -55,7 +55,7 @@ export const CHECK_FIELDS = [
     hint: "有效期内直接复用校验结果、不重新请求。",
   },
   {
-    key: "cache_ttl_auth", label: "「需验证」缓存有效期", type: "number", perRun: false,
+    key: "cache_ttl_auth", label: "「需登录」缓存有效期", type: "number", perRun: false,
     suffix: "天",
     hint: "它是由页面里的登录/反爬特征**推断**出来的状态（不像 403 那样是站点明确拒绝），"
         + "而触发它的常常是当时的临时页面。设 0 = 每次校验都重测这一档。",
@@ -63,7 +63,7 @@ export const CHECK_FIELDS = [
   {
     key: "cache_ttl_other", label: "其他状态缓存有效期", type: "number", perRun: false,
     suffix: "天",
-    hint: "待验证/需验证/需代理复检留短一点，免得旧结论一直挂着。"
+    hint: "待验证/需登录/需翻墙留短一点，免得旧结论一直挂着。"
         + "要这一次全部重测，用工具栏「校验参数 → 忽略缓存」。",
   },
 ];

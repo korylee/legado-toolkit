@@ -274,7 +274,7 @@ def combine_type(source: Dict[str, Any], home: Optional[Tuple[int, int, List[str
 ACTION_OF = {
     "死站": "两次明确失败后淘汰",
     "需翻墙": "保留，开代理（或换 DNS）复检",
-    "需验证": "保留，人工或改 UA/Cookie 复检",
+    "需登录": "保留，人工或改 UA/Cookie 复检",
     "规则漂移": "保留，进 AI 修复队列（域名活着，规则过期）",
     "站点转型": "改 bookSourceType 或按新类型重建规则",
     "疑似可用": "复检一次；可能是缓存误判或临时故障",
@@ -317,8 +317,8 @@ async def diagnose_source(session, source, timeout=8.0, keywords=None):
     # 与域名探测在 503 / 404 / 500 / 登录页四类输入上分叉过。
     h = classify_http_status(status, text, bool(source.get("enabledCookieJar")))
     if h == Health.AUTH:
-        res["attribution"] = "需验证：反爬/登录墙 (status=%s)" % status
-        res["bucket"] = "需验证"
+        res["attribution"] = "需登录：反爬/登录墙 (status=%s)" % status
+        res["bucket"] = "需登录"
         return res
     if h == Health.DEAD:
         res["attribution"] = "死站：HTTP %s" % status
@@ -357,8 +357,8 @@ async def diagnose_source(session, source, timeout=8.0, keywords=None):
         if s_status is None:
             continue
         if s_status in (401, 403, 429):
-            res["attribution"] = "需验证：搜索接口被拦截 (status=%s)" % s_status
-            res["bucket"] = "需验证"
+            res["attribution"] = "需登录：搜索接口被拦截 (status=%s)" % s_status
+            res["bucket"] = "需登录"
             return res
         if s_status >= 400:
             continue
@@ -469,7 +469,7 @@ def cmd_diagnose(args) -> int:
     if args.only_dead:
         # **筛的是「最近一次校验结果」，不是 build_record 的默认值。**
         # 原来这里写的是 `build_record(s, 0).health != Health.OK`，而 build_record
-        # **根本不读校验结果**（health 恒为默认的 SKIPPED）——条件永远为真，这个开关
+        # **根本不读校验结果**（health 恒为默认的 PENDING）——条件永远为真，这个开关
         # 从没筛掉过任何东西：`--only-dead` 照样对全部 3861 条发请求，而用户以为只测
         # 失效的。名不副实、且不报错。
         #
@@ -537,7 +537,7 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--limit", type=int, default=30, help="控制台明细条数")
     r.set_defaults(func=cmd_reclassify)
 
-    d = sub.add_parser("diagnose", help="对失效源重新探测并归因（死站/规则漂移/站点转型/需验证）")
+    d = sub.add_parser("diagnose", help="对失效源重新探测并归因（死站/规则漂移/站点转型/需登录）")
     d.add_argument("-i", "--input", required=True, help="书源 JSON 数组")
     d.add_argument("-o", "--output", help="Markdown 报告输出路径")
     d.add_argument("--only-dead", action="store_true", help="只探测非 OK 的源")

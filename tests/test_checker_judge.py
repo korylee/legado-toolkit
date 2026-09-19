@@ -121,6 +121,10 @@ class CacheVersionTests(unittest.TestCase):
     def test_version_bumped(self):
         """判定逻辑变了，缓存必须整体作废，否则改了等于没改。
 
+        v13：健康档位收成六档（timeout / error / no_search / skipped → pending），
+        AUTH / GFW 的标签改名「需登录 / 需翻墙」。**结论词表变了**——旧缓存里的
+        health 是旧词表的产物，必须整体作废重探（历史 checks 行由 Store 一次性
+        映射，那是历史记录，与这份"当时的结论"是两回事）。
         v12：回放器补了两类**本地回放不了**的写法（`text.` / `children.` 简写、
         方括号索引式 `[-1]` / `[0]` / `[1,3]` / `[!0]`）。它们此前被判成
         「解析为空」＝源失效（`toc_complete=False`），现在一律 unknown
@@ -137,7 +141,7 @@ class CacheVersionTests(unittest.TestCase):
         v7：反爬词表删掉裸 "cloudflare"——原来判 auth 的源现在判 ok，
         不作废的话那条 auth 会在 TTL 内一直命中缓存，看起来像修复失效。
         """
-        self.assertEqual(checker.CACHE_VERSION, 12)
+        self.assertEqual(checker.CACHE_VERSION, 13)
 
     def test_old_cache_item_rejected(self):
         raw = {"bookSourceUrl": "https://a.com", "bookSourceName": "x",

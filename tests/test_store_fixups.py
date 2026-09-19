@@ -190,6 +190,122 @@ class DirtySourceTypeMigrationTests(unittest.TestCase):
             self.assertEqual(self._row(st, "https://c.com"), (2, 2))
 
 
+class HealthTierMigrationTests(unittest.TestCase):
+    """健康档位收成六档：checks 表里的旧值一次性映射进新词表。
+
+    2026-09 档位重设计把 timeout / error / no_search / skipped 并入 pending。
+    这是一次**纯子集合并**——底层观测（status_code / error / steps）没动，
+    所以历史行就地映射、不作废；ok / dead / auth / gfw / cert 原样保留。
+    """
+
+    def setUp(self) -> None:
+        self.root = os.path.join(_ROOT, "tmp_healthtier_" + uuid.uuid4().hex[:8])
+        os.makedirs(self.root)
+        self.db = os.path.join(self.root, "sources.sqlite3")
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def _seed(self, st: Store, healths):
+        st.upsert_sources([make_source("https://a.com")])
+        st.conn.executemany(
+            "INSERT INTO checks(source_url, health, checked_at) VALUES (?, ?, ?)",
+            [("https://a.com", h, "2026-09-01 10:00:00") for h in healths])
+        st.conn.commit()
+
+    def _healths(self, st: Store):
+        return [r["health"] for r in st.conn.execute(
+            "SELECT health FROM checks ORDER BY id")]
+
+    def test_retired_values_become_pending(self) -> None:
+        with Store(self.db) as st:
+            self._seed(st, ["timeout", "error", "no_search", "skipped"])
+            st.conn.execute("DELETE FROM meta WHERE key='health_tiers_v2'")
+            st.conn.commit()
+            self.assertTrue(st.migrate_health_tiers_once())
+            self.assertEqual(self._healths(st), ["pending"] * 4)
+
+    def test_conclusive_values_are_left_alone(self) -> None:
+        """反向断言：有结论的档一个都不能动。
+
+        映射写成「一律 pending」也会让上一条全绿——那样 1680 条可用源
+        会连结论一起丢掉。
+
+        **断言钉在 health 列上，不钉返回值**：返回值是「有没有改动」，
+        组名重建（本迁移的另一半）也会让它为真，用 assertFalse 会变成
+        一条与本题无关的脆弱用例。
+        """
+        with Store(self.db) as st:
+            self._seed(st, ["ok", "dead", "auth", "gfw", "cert"])
+            st.conn.execute("DELETE FROM meta WHERE key='health_tiers_v2'")
+            st.conn.commit()
+            st.migrate_health_tiers_once()
+            self.assertEqual(self._healths(st), ["ok", "dead", "auth", "gfw", "cert"])
+
+    def test_it_runs_only_once(self) -> None:
+        """第二次进来必须是空操作——否则每次开库都全表扫一遍。"""
+        with Store(self.db) as st:
+            self._seed(st, ["timeout"])
+            st.conn.execute("DELETE FROM meta WHERE key='health_tiers_v2'")
+            st.conn.commit()
+            self.assertTrue(st.migrate_health_tiers_once())
+            self.assertFalse(st.migrate_health_tiers_once())
+
+    def test_group_name_words_are_renamed(self) -> None:
+        """组名要跟着换词：旧词留在 group_name 里会被前端当成**用户标签**。
+
+        前端 `splitSystemUser` 认的是 `/tags/meta` 下发的新词表（需登录/需翻墙），
+        而 `sources.group_name` 里存的是**当时**写下的词。实测库里 1051 条
+        「需验证」+ 98 条「需代理复检」——不换的话它们会以用户标签的身份
+        出现在标签列里，而且可编辑、可导出。
+        """
+        with Store(self.db) as st:
+            # 刻意**不**给 checks 行：这正是「重算会抹掉状态」的那个场景
+            st.upsert_sources([make_source("https://a.com")])
+            st.conn.execute("UPDATE sources SET group_name='📖小说,需验证'")
+            st.conn.execute("DELETE FROM meta WHERE key='health_tiers_v2'")
+            st.conn.commit()
+            st.migrate_health_tiers_once()
+            row = st.conn.execute(
+                "SELECT group_name FROM sources WHERE source_url='https://a.com'").fetchone()
+            self.assertEqual(row["group_name"], "📖小说,需登录")
+
+    def test_rename_keeps_the_state_and_the_other_tags(self) -> None:
+        """**换名不等于重算状态**：其余标签与那个源自己的状态一个都不能动。
+
+        重算（`rebuild_system_tags`）会按 checks 表推导，而「从未校验」的源没有
+        checks 行——重算会把它们统一压成「待验证」，抹掉导入时从旧分组推断出来的
+        状态。所以这里断言的是：原有状态词原样保留，只有旧词换新词。
+        """
+        with Store(self.db) as st:
+            st.upsert_sources([make_source("https://a.com")])
+            st.conn.execute(
+                "UPDATE sources SET group_name='📖小说,可用,规则完整,需代理复检'")
+            st.conn.execute("DELETE FROM meta WHERE key='health_tiers_v2'")
+            st.conn.commit()
+            st.migrate_health_tiers_once()
+            row = st.conn.execute(
+                "SELECT group_name FROM sources WHERE source_url='https://a.com'").fetchone()
+            self.assertEqual(row["group_name"], "📖小说,可用,规则完整,需翻墙")
+
+    def test_rename_reaches_locked_rows(self) -> None:
+        """锁定行照改——钉住的是「状态」，不是「这个词怎么写」。
+
+        与 `rebuild_system_tags` 的区别正在这里：那个必须跳过锁定行（它会覆盖
+        用户钉的状态），而换名不改变任何状态，跳过只会让旧词留下来继续被误判。
+        """
+        with Store(self.db) as st:
+            st.upsert_sources([make_source("https://a.com")])
+            st.conn.execute("UPDATE sources SET group_name='📖小说,需代理复检', "
+                            "system_tags_locked=1")
+            st.conn.execute("DELETE FROM meta WHERE key='health_tiers_v2'")
+            st.conn.commit()
+            st.migrate_health_tiers_once()
+            row = st.conn.execute(
+                "SELECT group_name FROM sources WHERE source_url='https://a.com'").fetchone()
+            self.assertEqual(row["group_name"], "📖小说,需翻墙")
+
+
 if __name__ == "__main__":
     unittest.main()
 

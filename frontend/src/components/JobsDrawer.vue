@@ -244,8 +244,13 @@ defineExpose({ refresh: load });
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* 配色与列表页的 healthType 同口径（SourcesView）：同一个状态在两处该长一样。
+   结论的两极是可用/已失效；需登录与证书问题是「能自己处理」的黄；
+   需翻墙与待验证是「等下一步」的灰。 */
 .job-detail .changes .chg .to-ok { color: var(--el-color-success); }
-.job-detail .changes .chg .to-dead,
-.job-detail .changes .chg .to-gfw { color: var(--el-color-danger); }
-.job-detail .changes .chg .to-auth { color: var(--el-color-warning); }
+.job-detail .changes .chg .to-dead { color: var(--el-color-danger); }
+.job-detail .changes .chg .to-auth,
+.job-detail .changes .chg .to-cert { color: var(--el-color-warning); }
+.job-detail .changes .chg .to-gfw,
+.job-detail .changes .chg .to-pending { color: var(--el-color-info); }
 </style>

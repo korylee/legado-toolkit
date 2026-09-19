@@ -25,11 +25,12 @@
 | **S1 服务化·搜索档闭环** ✅（2026-09-19，剩全量跑） | ValidateService（收源 → searchBookAwait → 结论 NDJSON）+ Launcher（参数走 `appservice/args.properties`）；(a) 剥 webView 选项 ✅；(a2) 壳归因 ✅（empty_js_shell）；100 条验收：46 ok / 18 no_result / 35 error（归因细分见 lessons §五十二）/ 1 empty_js_shell；结论已写 meta（`jvm_check:<batch>:<url>`） | S0 | **✅ 全量已跑完（2026-09-19，17 分钟/3774 条，8 并发 + 3g 堆）**：ok 1324 / no_result 935 / error 1444（被墙重置 462、JS 失败 313、DNS 死亡 291、JSONPath 不符 152、超时 66、其他 220）/ timeout 61 / empty_js_shell 10；剥 webView 的 147 条里 16 条被救回 ok；**环境缺口 0** |
 | **S2 接进产品** | 设置项（App 源码目录 + JDK/SDK/gradle-home 自动推导）+ **自检接口/按钮** + 前端页签 + `checks` 来源阶梯（本地/JVM/真机） | S1 | 界面上能配、能自检、能看见结论来自哪一层 |
 | **S3 补深度** | 目录段 + 正文段（`getBookInfoAwait` → `getChapterListAwait` → `getContentAwait(needSave=false)`）；**(b) 浏览器桥**（复用本机 Edge/Chrome + CDP） | S2 | 全链路可跑；(b) 上线后那批 webView 源不再是盲区 |
-| **S4 清存量** | Health 档位重设计 **+** 分类侧可行动性（**同一件事的两面，必须一起做**） | 可与 S3 并行 | 「待验证」能区分「未校验 / 验了没结论 / 网络性失败」 |
+| **S4 清存量** ✅（2026-09-19） | Health 档位重设计 **+** 分类侧可行动性（**同一件事的两面，必须一起做**） | 可与 S3 并行 | **✅ 9 档 + 未校验 → 6 档**（ok/auth/gfw/cert/pending/dead，按「下一步动作」合并）；「未校验」降为派生筛选（`health=none`）；CACHE_VERSION 13；`checks` 旧值一次性映射 + 组名换词（`Store.migrate_health_tiers_once`）。**残留**：unknown 的产品出口、标签快照过期 → 见 §四 |
 | **S5 按需** | 真机复检通道（只读那条先做）、本地回放的 `bookUrl` 作用域、体验类 P2 | —— | —— |
 
 > ⚠️ **CACHE_VERSION 合并 bump**：S3/S4/S5 里凡是翻转判定结论的改动，**做完一批
 > 再 bump 一次**、付一次全量重跑，别每步付一次。
+> （S4 已 bump 到 **13**——档位词表变了，旧缓存的 health 是旧词表的产物。）
 
 ---
 
@@ -281,51 +282,17 @@ webView」就能过（说明那批标记是冗余的），但**「真需要浏�
 > 需要 HTML 的那条线」。等 JVM 服务上线后，上面这些「本地验不了」的语法**由服务兜住**，
 > 只有还留在交互路径（调试抽屉 / AI 修复）的语义才急。**做之前先确认它还在不在那条路径上。**
 
-## 四、Health 档位重设计 + 分类侧可行动性（同一件事的两面）
+## 四、分类侧可行动性（档位重设计已完成，剩呈现与出口）
 
+> **档位重设计 2026-09-19 已完成**（9 档 + 未校验 → 6 档：ok / auth / gfw / cert /
+> pending / dead，判据是「下一步动作是否相同」；timeout、error、no_search、skipped
+> 并入 pending）。这一节只剩下**呈现与出口那半边**。
 
-**实测分布**（存活 3774 条，最近一条 `checks`）：ok 1680 / auth 1051 / timeout 711 /
-dead 173 / gfw 98 / error 61 —— 而 **cert 0、no_search 0、skipped ≈0**。
-
-三档的实情（都核过代码）：
-
-| 档 | 实情 |
-|---|---|
-| `no_search` | **全仓没有任何赋值点**（只有 `checker.evaluate_stars` 的「可达集合」在期待它）——一条都不可能产出 |
-| `cert` | 有产出点（证书错误），但当前 **0 条**；它是 2026-09-15 才加的，属「刚埋下」 |
-| `skipped` | 不是判定结果：它是 `models.BookSourceRecord.health` 的**默认值**和 `.get(..., SKIPPED)` 的兜底，实际只有「源被禁用」这一种来源（当前全库 1 条 disabled） |
-
-**重设计的判据（先想清，别先改表）**：两档该不该合并，看**下一步动作是否相同**——
-删 / 修 / 重测 / 翻墙 / 连 App 试。动作相同的两档，用户分不出来也不该让他分。
-
-**必须一起摆平的三层**（现在混在同一屏）：**有结论**（Health 表里的值）、
-**没结论**（`unknown`：校验跑了但判不了，落在 steps/verdict 里，**不在 Health 表里**）、
-**没跑过**（没有 `checks` 行）。P2 的「分类侧可行动性」记录的就是这一坨被折进
-「待验证」的现状（`organizer.STATUS_GROUP_NAMES`：TIMEOUT / ERROR / SKIPPED /
-NO_SEARCH + 兜底全折成「待验证」）——**那条与本节是同一件事的两面，必须一起做**，
-只改一边等于没改。
-
-**约束（改之前先看这几处，它们都从这张表派生）**：`models.HEALTH_NAMES`（名字+emoji，
-系统标签与 UI chip 的唯一来源）、`organizer.STATUS_GROUP_NAMES` + `HEALTH_ORDER` +
-`group_title`、`dups` 的健康位串、`reporter` 的分布表、`transitions` 的校验变化、
-`quality.evaluate_stars` 的「可达集合」。另外 AGENTS #5b：**动到影响结论的维度要加
-`CACHE_VERSION`**；档位改名/合并会让历史 `checks` 里的值变成孤儿，重跑是必然代价。
-
-
----
-
-
-
-**分类侧可行动性（呈现与出口那半边）**
-
-> **与「四、Health 档位重设计」是同一件事的两面**（那边改档位/判定，这边改呈现与出口），
-> **要一起做**——只改一边等于没改。NO_SEARCH 死档也收在那边。
-
-- **「待验证」是个不可行动的大杂烩**：TIMEOUT / ERROR / NO_SEARCH / SKIPPED 四档
-  Health 全折进同一个标签（`organizer.STATUS_GROUP_NAMES`），加上 unknown 与
-  「从未校验」，用户面对几百条「待验证」得不到下一步（删/修/重验）。AUTH、证书
-  当初拆出来就是「有结论、可行动」，同一原则没贯彻到「待验证」内部。
-  方向：至少把「从未校验 / 校验了没结论（unknown） / 网络性失败」分开。
+- **DONE（当时的方向：至少把「从未校验 / 校验了没结论 / 网络性失败」分开）**：
+  「从未校验」已分开——它不是一档状态而是数据缺失，统计条上单独一个灰 chip、
+  筛选取值 `health=none`。**「验了没结论」与「网络性失败」则刻意不再分档**：
+  两者下一步动作相同（重跑一次校验），失败原因留在 `checks.error` 与详情里，
+  按动作分档的原则不该为它们再开两档（当时的判据见 lessons §五十二）。
 - **unknown 缺产品出口**：界面上只有解释文案，没有转化动作（如「连 App 验一次」）——
   与下面「App 连接」页签那条是同一件事的两面。
 - **标签是快照，导入即开始过期**：写进 App 的分组标签是校验瞬间的结论，App 侧

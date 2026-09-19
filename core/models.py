@@ -25,21 +25,24 @@ BOOK_SOURCE_TYPE_NAMES: Dict[int, str] = {
     3: "📥下载",
 }
 
-#: 校验健康状态
+#: 校验健康状态。**六档，按「下一步动作」划分**（2026-09 档位重设计）：
+#: 两档该不该合并，唯一判据是动作是否相同——删 / 修 / 重测 / 翻墙 / 连 App 试。
 class Health:
-    OK = "ok"                # ✅ 可用
-    DEAD = "dead"            # ❌ 失效（域名不可达）
-    GFW = "gfw"              # 🔒 需翻墙（DNS污染/连接重置/TLS阻断）
-    AUTH = "auth"            # 🔒 需登录/验证（403/验证码/登录页）
-    NO_SEARCH = "no_search"  # 🔍 不可搜索（无搜索规则）
-    TIMEOUT = "timeout"      # ⏱ 超时
-    SKIPPED = "skipped"      # ⏭ 跳过（enabled=false）
-    ERROR = "error"          # ⚠️ 校验异常
+    OK = "ok"                # ✅ 可用——直接用
+    DEAD = "dead"            # ❌ 已失效（域名不可达）——删
+    GFW = "gfw"              # 🌐 需翻墙（DNS污染/连接重置/TLS阻断）——挂代理复测
+    AUTH = "auth"            # 🔒 需登录（403/验证码/登录墙）——连 App 试
     #: 🔐 证书问题（自签/过期/域名不匹配）。**单独一档**的理由：它是这批源里唯一
     #: 「我们自己能处理」的一类——站点本身是通的，关掉证书校验（设置里的
-    #: verify_ssl）或用 http 就能用。混进「⚠️异常」时用户只看到"网络异常"，
+    #: verify_ssl）或用 http 就能用。混进「待验证」时用户只看到"没结论"，
     #: 既不知道该翻墙、该删源，还是该关校验。实测 20 条异常抽样里有 1 条是它
     CERT = "cert"
+    #: ❓ 待验证——**我们没结论**。吸收旧档 timeout / error / no_search / skipped
+    #: 和「从未校验」：它们的下一步动作完全相同（跑/重跑一次校验），分档只是在
+    #: 罗列失败原因，用户分不出来也不该让他分。失败**原因**不丢——落在 checks
+    #: 的 error 与 steps 里，列表 tooltip 仍可见。档名必须是「待验证」这类
+    #: 非断言：「异常」是肯定断言，会把一次请求都没发过的新源凭空标成坏的。
+    PENDING = "pending"
 
 
 #: 健康状态中文名。**这是唯一一份**（`core/organizer.py` 拿它写书源分组名，
@@ -47,14 +50,11 @@ class Health:
 #: 为什么允许存在、以哪份为准）
 HEALTH_NAMES: Dict[str, str] = {
     Health.OK: "✅可用",
-    Health.DEAD: "❌失效",
-    Health.GFW: "🔒需翻墙",
-    Health.AUTH: "🔒需验证",
-    Health.NO_SEARCH: "🔍不可搜",
-    Health.TIMEOUT: "⏱超时",
-    Health.SKIPPED: "⏭跳过",
-    Health.ERROR: "⚠️异常",
-    Health.CERT: "🔐证书",
+    Health.AUTH: "🔒需登录",
+    Health.GFW: "🌐需翻墙",
+    Health.CERT: "🔐证书问题",
+    Health.PENDING: "❓待验证",
+    Health.DEAD: "❌已失效",
 }
 
 # ---------------------------------------------------------------- 失效/异常特征词
@@ -96,7 +96,7 @@ LOGIN_MARKERS: List[str] = [
 
 
 def anti_bot_marker_of(text: str) -> str:
-    """命中的反爬特征词（没有则空串）。给「为什么判需验证/异常」留痕用。"""
+    """命中的反爬特征词（没有则空串）。给「为什么判需登录/异常」留痕用。"""
     low = str(text or "").lower()
     for m in ANTI_BOT_MARKERS:
         if m in low:
@@ -171,7 +171,7 @@ class BookSourceRecord:
     #   - `has_search` 留着：探测门与星级都在读
     # 另外 `AUTH_TAG_PATTERNS` 也随 `auth_tagged` 一起删了——它的唯一读者就是那个字段。
     # ---- 动态校验结果 ----
-    health: str = Health.SKIPPED
+    health: str = Health.PENDING
     status_code: int = 0
     response_time_ms: int = 0
     error: str = ""

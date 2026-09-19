@@ -10,22 +10,44 @@ from typing import Iterable, List, Tuple
 SYSTEM_TYPE_TAGS = {"📖小说", "🎧听书", "🎨漫画", "📥下载"}
 # 有序定义：下发给 Web 前端与界面渲染都按这个顺序（set 无序，不能直接下发）。
 # set 由元组派生，保证判定与展示用的是同一份定义。
-#: 状态标签的顺序。**「需验证」是 AUTH 的标签**：站点拒绝了我们的请求
+#: 状态标签的顺序。**「需登录」是 AUTH 的标签**：站点拒绝了我们的请求
 #: （403/401/429/503、验证码页、登录墙），它有结论，与「待验证」（我们没结论）
-#: 是两回事。故意排在「需代理复检」旁边，两个都是「有结论、要人工处理」。
+#: 是两回事。故意排在「需翻墙」旁边，两个都是「有结论、要人工处理」。
 #: 「证书问题」同理（站点可达、只是证书不被信任）——**排在最后是为了不动已有顺序**。
+#:
+#: 2026-09 改名：AUTH「需验证」→「需登录」、GFW「需代理复检」→「需翻墙」——
+#: 「待验证/需验证」一字之差分不清。旧写法由 `_is_legacy_system_segment` 的
+#: 遗留集合继续认（认不出的旧系统标签会被当用户标签固化，见下）。
 #:
 #: ⚠️ **它是判定表，不只是展示表**：`is_system_tag` 直接查它的派生 set，漏一个的
 #: 后果不是"少显示一个标签"，而是那个标签被当成**用户标签**写进 `user_tags`
 #: （用户可见、可编辑，且源修好之后不会自动清掉，导出分组会变成
 #: 「📖小说,可用,证书问题」这种自相矛盾的状态）。`organizer.STATUS_GROUP_NAMES`
 #: 是写出去的那一侧，两张表必须同集合——`tests/test_tags.py` 有一致性用例钉着。
-SYSTEM_STATUS_TAG_ORDER: Tuple[str, ...] = ("可用", "待验证", "已失效", "需验证",
-                                            "需代理复检", "证书问题")
+SYSTEM_STATUS_TAG_ORDER: Tuple[str, ...] = ("可用", "待验证", "已失效", "需登录",
+                                            "需翻墙", "证书问题")
 SYSTEM_QUALITY_TAG_ORDER: Tuple[str, ...] = ("规则完整",)
 SYSTEM_STATUS_TAGS = set(SYSTEM_STATUS_TAG_ORDER)
 SYSTEM_QUALITY_TAGS = set(SYSTEM_QUALITY_TAG_ORDER)
 SYSTEM_TAGS = SYSTEM_TYPE_TAGS | SYSTEM_STATUS_TAGS | SYSTEM_QUALITY_TAGS
+
+#: 已退役的状态标签词 → 现役词。**旧分组回读与存量迁移共用这一份。**
+#:
+#: 2026-09 档位重设计改了 AUTH / GFW 的措辞（「待验证 / 需验证」一字之差分不清）。
+#: 与「合并档位」不同，这是**同一个状态的另一个写法**——所以凡是遇到旧词，
+#: 就地换名即可，不需要（也不该）重新推断状态。
+#:
+#: 两个用途：
+#:   - `Store.migrate_health_tiers_once`：把存量 `sources.group_name` 里的旧词换掉。
+#:     不换的话前端 `splitSystemUser` 认不出（它拿的是新词表）→ 旧词会以
+#:     **用户标签**的身份出现在标签列里，可编辑、可导出。
+#:   - `_is_legacy_system_segment`：旧分组里的这些词不许漏成用户标签。
+#:     「代理复检」这个裸形式是旧分组真出现过的写法，单列一条。
+RETIRED_STATUS_TAG_RENAMES = {
+    "需验证": "需登录",
+    "需代理复检": "需翻墙",
+    "代理复检": "需翻墙",
+}
 
 # 用户标签别名映射：新源带进来的别名先归一，再按已有标签过滤。
 # key 使用小写，值使用标准标签名。按需继续补充。
@@ -114,7 +136,11 @@ def _is_legacy_system_segment(segment: str) -> bool:
     stripped = stripped.strip("✅❌🌐🔒❓")
     if stripped in SYSTEM_TAGS:
         return True
-    if stripped in {"失效", "需验证", "需登录", "需翻墙", "被墙"}:
+    # 遗留系统标签写法：现役词表改名/收编后，旧分组字符串里还会遇到。
+    # 漏认的后果不是显示错，而是被 `extract_user_tags_from_group` 当成
+    # 用户标签写进 user_tags 且不再纠正。「需登录/需翻墙」虽已是现役名，
+    # 也可能是旧数据里的写法，一并留在遗留集合。
+    if stripped in {"失效", "需登录", "需翻墙", "被墙"} | set(RETIRED_STATUS_TAG_RENAMES):
         return True
     if any(tag.startswith(prefix) for prefix in SYSTEM_TYPE_TAGS):
         return True
