@@ -82,10 +82,18 @@ meta 落库、列表阶梯列）——S3 只往里加深度，不另起炉灶。
 
 | 批 | 做什么 | 验收判据 |
 |---|---|---|
-| **S3-1 目录段** | `validateOne` 加 `depth` 参数：`toc` 档在搜索 ok 后接 `getBookInfoAwait` + `getChapterListAwait`。结论加字段：`toc_count`（目录条数，过滤卷标）、`toc_complete`、`book_url`/`toc_url`（供调试）。**toc_complete 的 JVM 口径**：本地回放是「与参考表比对比例」（小说 ≥80%，`TOC_COMPLETE_THRESHOLD`）——JVM 拿到的是真实目录，没有「应有多少章」的参考，退化为**绝对下限**（≥10 章且首末章 url 非空）；两者口径不同，对比矛盾率时按此解读 | 100 条抽样（搜索档 ok 的源里随机）：目录段结论与本地回放的 `toc_complete` 矛盾率 < 15%；`--depth toc` 全量跑一遍无环境缺口 |
+| **S3-1 目录段** ✅（2026-09-19） | `depth` 参数（search/toc）+ `stage` 字段 + `runTocStage`（getBookInfoAwait → getChapterListAwait，链路照抄 Debug.kt）+ 结论字段 `toc_count`/`toc_raw_count`/`toc_sample`/`toc_complete`/`book_url`/`toc_url`；顺手修两处：源无搜索规则不再报 error（是能力事实不是网络失败）、**Koin 网关一次补齐 7 个**（目录段触发 AppLog → OtherSettingsGateway 缺定义，12 条里 7 条栽在这） | ✅ 100 条抽样：95 条跑到目录段（SF轻小说 1201 章 / 听书 1251 / 全本 433，**章数经独立抓页验证属实**）。⚠️ **原判据（与本地矛盾率 <15%）作废**——两边不是同一把尺，74.7% 里混着口径差异与本地实现缺陷，见 lessons §二十三「第二次实证」 |
 | **S3-2 正文段** | `depth=content`：取目录第 1 章（`nextChapterUrl` 取第 2 章），`getContentAwait(needSave=false)`。结论加 `content_len`、`content_ok`。**判定复用 `core.quality.judge_content` 的口径**（非空即通过 + 形状嗅探）——但那是 Python 实现，JVM 侧按同样语义重写（≥200 字、无「章节错误」类特征词），**语义对齐、代码不共享**（跨 JVM/Python 没法直接 import，别假装能复用） | 同一 100 条抽样：正文段结论与本地回放 `content_ok` 矛盾率 < 15%；正文字符数分布合理（中位数 > 500） |
 | **S3-3 结论落库 + 界面** | meta 键升级为 `jvm_check:<batch>:<url>` 内含 `depth` 字段（**键格式不变**，读侧按 depth 取最深一条）；`/api/jvm/results` 与列表回填带 `jvm_toc`/`jvm_content`；列表 JVM 列 tooltip 显示「搜索✓ 目录 856 章 正文 ✓」；JvmSettingsPanel 加「探测深度」选择（枚举进 `settings_store.LIMITS`，AGENTS #8） | 界面上能选深度、能看见三段结论；`settings limits` 测试同步更新 |
 | **S3-4 浏览器桥 (b)** | **先做「检测」再做「渲染」**：① (a2) 的空壳判定从「特征词猜测」升级为「用浏览器渲染一次再判」——`empty_js_shell` 的源自动进浏览器复验，渲染后规则跑出内容 → 结论改 ok（带 `rendered: true` 标注）。⚠️ **壳判定需要页面 HTML，而 `searchBookAwait` 只回 BookList 不回页面**——复验路径要么直接 `AnalyzeUrl(searchUrl).getStrResponse()` 拿渲染后页面再喂 `AnalyzeRule`，要么走 shadow 后的完整链路（② 做完 ① 自动获得），动手时先确认取页面这条最短路径；② shadow `BackstageWebView.getStrResponse()`：拦截点在 `AnalyzeUrl.kt:440-470` 的两处 `BackstageWebView(` 构造（POST 与 GET 分支）——shadow 类转发给本机 Edge（`C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe` 已确认存在）起 CDP：`Page.navigate` → 等 load → `Runtime.evaluate('document.documentElement.outerHTML')` → 包成 `StrResponse`（构造它要先建 okhttp `Response`，`StrResponse.kt` 的 `raw` 字段是必填）。**专用 user-data-dir**（新 Chrome 安全加固），profile 可持久化放 cookie。**Edge 不可用时显式报 `browser_unavailable`**，不静默退回空壳判定 | 全量重跑后 `empty_js_shell` 从 11 条降到 ≤3 条（其余转 ok 或有结论的 error）；带 `rendered: true` 的源在 tooltip 里标注「浏览器渲染」；App 仓库 `git status` 恒为空 |
+
+**S3-1 顺带暴露的本地缺陷（独立于 S3，待修）**：`checker._probe_toc` 没接
+`ruleBookInfo.tocUrl`（只在详情页数章节），而 `verify.py` 那条链接了——库里 **1617 条**
+目录在独立页上的源因此在 `checks` 里带着 `toc_complete=False` 的**假结论**（实测
+SF轻小说：本地 False/0 章，JVM True/1201 章，手工喂对页面后本地能跑出 1227 值）。
+修法：把 `verify.py` 的 tocUrl 求值逻辑提成共用函数，两条链都调（同一件事两个实现，
+lessons §二十三）。**改动会翻转结论 → 需要 CACHE_VERSION bump + 一次全量重跑**，
+所以单独排（不要塞进 S3）。
 
 **关键约束（动手时重读）**：
 

@@ -9,7 +9,8 @@
   在哪缺、怎么装，逐条返回给界面。
 
 派生优先级（每项都按此链找，全部失败才报缺）：
-  JDK          JAVA_HOME → 常见安装目录（含 Android Studio JBR）→ PATH 里的 java
+  JDK          JAVA_HOME → vfox（`~/.vfox/sdks/java`）→ 常见安装目录（含
+               Android Studio JBR）→ PATH 里的 java
   Android SDK  ANDROID_HOME → <repo>/local.properties 的 sdk.dir → 常见目录
   gradle-home  GRADLE_USER_HOME（设置进程的环境变量）→ **与仓库同盘的
                <盘>:\\.gradle**（KSP 的跨盘限制，lessons §四十八）
@@ -36,9 +37,28 @@ class Check:
     items: List[Dict[str, str]] = field(default_factory=list)  # 探测过的候选
 
 
+def _vfox_java_candidates() -> List[Path]:
+    """vfox 装过的 JDK（`VFOX_HOME` 或 `~/.vfox` 下的 `sdks/java`）。
+
+    vfox 把 SDK 装在 ``<root>/sdks/<name>``，**java 插件两种布局都见过**：
+    单版本时 JDK 根直接落在 ``sdks/java/``（里面有 bin/ release），多版本时在
+    ``sdks/java/<version>/`` 下。两种都收，多版本按目录名倒序（取新版优先）——
+    只认一种的话，另一种布局下会「明明装了却报找不到 JDK」。
+    """
+    root = Path(os.environ.get("VFOX_HOME") or (Path.home() / ".vfox"))
+    base = root / "sdks" / "java"
+    if not base.is_dir():
+        return []
+    if (base / "bin").is_dir():
+        return [base]
+    return sorted((d for d in base.iterdir() if d.is_dir()), reverse=True)
+
+
 def _common_jdk_candidates() -> List[Path]:
     out = [
         Path(os.environ["JAVA_HOME"]) if os.environ.get("JAVA_HOME") else None,
+        # vfox 管理的 JDK 排在最前：用户既然用它管版本，就该以它为准
+        *_vfox_java_candidates(),
         Path("C:/Program Files/Java"),
         Path("C:/Program Files/Eclipse Adoptium"),
         Path("D:/Program Files/Java"),

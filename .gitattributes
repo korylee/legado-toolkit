@@ -1,0 +1,3 @@
+# .bat 必须 CRLF（cmd 对 LF-only 的多行块会拼错行、污染 gradle 参数——实测踩过）。
+# core.autocrlf=input 只归一提交、不管检出，所以这条不能靠全局配置兜住。
+*.bat text eol=crlf

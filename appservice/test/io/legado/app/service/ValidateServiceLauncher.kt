@@ -25,7 +25,7 @@ class ValidateServiceLauncher {
     @Test
     fun run() {
         // 传参走 appservice-args.properties（key=value：file/dir/keyword/out/
-        // concurrency/timeout/limit/noStripWebview）。比命令行转义可靠——
+        // concurrency/timeout/limit/depth/noStripWebview）。比命令行转义可靠——
         // bash→cmd→gradle 三层引号转义已经坑过三轮。
         // 文件定位：先 CWD，再按 LEGADO_APPSERVICE_DIR 兜底（启动器会把 CWD
         // 设为 App 仓库根）。
@@ -49,6 +49,7 @@ class ValidateServiceLauncher {
         props.getProperty("concurrency")?.let { args += listOf("--concurrency", it) }
         props.getProperty("timeout")?.let { args += listOf("--timeout", it) }
         props.getProperty("limit")?.let { args += listOf("--limit", it) }
+        props.getProperty("depth")?.let { args += listOf("--depth", it) }
         if (props.getProperty("noStripWebview") == "1") args += "--no-strip-webview"
         println("APPSERVICE-LAUNCHER: args=" + args)
         ValidateService.main(args.toTypedArray())
