@@ -93,6 +93,8 @@ from core.constants import DEFAULT_UA
 # 结论词表变了：旧缓存里的 health 是旧词表的产物，必须整体作废（checks 表的
 # 历史值由 Store.migrate_health_tiers_once 一次性映射——纯子集合并、观测不变；
 # 缓存这边直接重探，重跑是已知代价）。
+# 12：回放边界判定——跑不了的写法显式 unknown、末段语义对齐 getResultLast、
+# tocUrl 进探针（旧缓存大量 fail 是冤枉，整体作废）。
 CACHE_VERSION = 13
 
 #: 缓存有效期（天）：可用源留久一点，其余状态一律短 TTL——「待验证」「需翻墙」

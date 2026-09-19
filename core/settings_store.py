@@ -69,6 +69,17 @@ DEFAULTS: Dict[str, Dict[str, Any]] = {
         #: 用户点「重新校验」只会看到「复用缓存」，而调试里明明是好的。
         "cache_ttl_auth": 1,
     },
+    #: JVM 校验服务（S2）。**只有一个路径类输入**（App 源码目录），其余环境
+    #: （JDK / Android SDK / Gradle 用户目录）全部由后端自检接口推导——
+    #: 「必须与另一个字段同盘」的 gradle-home 尤其不该让用户手填（AGENTS #13）。
+    #: 路径为空 = 功能未配置（界面上显示「未配置」，而不是拿默认值瞎跑）。
+    "jvm": {
+        "app_repo": "",
+        "keyword": "我",
+        "timeout": 25,
+        "concurrency": 8,
+        "limit": 0,
+    },
 }
 
 #: 各键的合法区间。**「clamp 到多少」的唯一定义处**——前端表单的
@@ -81,6 +92,9 @@ LIMITS: Dict[str, tuple] = {
     "cache_ttl_ok": (1, 365),
     "cache_ttl_other": (1, 365),
     "cache_ttl_auth": (0, 365),
+    "jvm_timeout": (5, 120),
+    "jvm_concurrency": (1, 32),
+    "jvm_limit": (0, 100000),
 }
 
 #: 代理只认 http/https。**故意不含 socks5**：aiohttp 原生不支持（要 ``aiohttp_socks``，
@@ -146,6 +160,13 @@ def _to_proxy(value: Any) -> str:
     if not s:
         return ""
     return s if s.lower().startswith(_PROXY_SCHEMES) else ""
+
+
+def _to_path(value: Any) -> str:
+    """目录路径：去引号与首尾空白；不存在也保留（自检接口负责报「不可达」，
+    设置层不该因为目录暂时不存在的输入抛错——用户可能先填后建）。"""
+    s = str(value or "").strip().strip('"').strip("'")
+    return s
 
 
 def _to_probe_depth(value: Any) -> int:
@@ -215,6 +236,14 @@ _SPECS: Dict[tuple, Any] = {
         v, DEFAULTS["check"]["cache_ttl_other"], *LIMITS["cache_ttl_other"]),
     ("check", "cache_ttl_auth"): lambda v: _to_int(
         v, DEFAULTS["check"]["cache_ttl_auth"], *LIMITS["cache_ttl_auth"]),
+    ("jvm", "app_repo"): _to_path,
+    ("jvm", "keyword"): lambda v: (str(v).strip() or DEFAULTS["jvm"]["keyword"]),
+    ("jvm", "timeout"): lambda v: _to_int(
+        v, DEFAULTS["jvm"]["timeout"], *LIMITS["jvm_timeout"]),
+    ("jvm", "concurrency"): lambda v: _to_int(
+        v, DEFAULTS["jvm"]["concurrency"], *LIMITS["jvm_concurrency"]),
+    ("jvm", "limit"): lambda v: _to_int(
+        v, DEFAULTS["jvm"]["limit"], *LIMITS["jvm_limit"]),
 }
 
 

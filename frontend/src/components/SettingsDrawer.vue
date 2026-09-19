@@ -4,6 +4,7 @@
 import { ref, computed } from "vue";
 import CheckSettingsPanel from "./CheckSettingsPanel.vue";
 import LLMSettingsPanel from "./LLMSettingsPanel.vue";
+import JvmSettingsPanel from "./JvmSettingsPanel.vue";
 
 const props = defineProps({ modelValue: { type: Boolean, default: false } });
 const emit = defineEmits(["update:modelValue"]);
@@ -29,12 +30,16 @@ const activeTab = ref("check");
       <el-tab-pane label="模型" name="llm" lazy>
         <LLMSettingsPanel />
       </el-tab-pane>
+      <el-tab-pane label="JVM 校验" name="jvm" lazy>
+        <JvmSettingsPanel />
+      </el-tab-pane>
       <el-tab-pane label="App 连接" name="app" lazy>
-        <!-- 还没做。宁可写清楚，也不放一个点了没反应的空表单 -->
+        <!-- 复检通道（S5）。校验主线在「JVM 校验」页签；这里未来只放
+             登录墙/WebView/用户网络出口三类复检的配置 -->
         <el-empty :image-size="70"
-                  description="尚未实现：App 的 IP / 调试端口 / 连接超时会在这一页配置" />
+                  description="复检通道（连手机 App）尚未实现：JVM 校验在上一页签" />
         <div class="muted" style="text-align: center">
-          当前 App 的 IP 在「编辑书源」弹窗里填，端口固定用默认值 1123
+          仅当 JVM 校验判「无法验证 / 需登录」时才需要它：真机带 cookie 与真实网络出口
         </div>
       </el-tab-pane>
     </el-tabs>

@@ -14,7 +14,7 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from backend import netinfo
-from backend.api import (export, feed, imports, jobs, llm, ops, rules,
+from backend.api import (export, feed, imports, jvm, jobs, llm, ops, rules,
                          settings, sources)
 from backend.jobs import runner
 from core.store import Store
@@ -43,6 +43,7 @@ app.include_router(imports.router, prefix="/api/import", tags=["import"])
 app.include_router(rules.router, prefix="/api/rules", tags=["rules"])
 app.include_router(llm.router, prefix="/api/llm", tags=["llm"])
 app.include_router(settings.router, prefix="/api/settings", tags=["settings"])
+app.include_router(jvm.router, prefix="/api/jvm", tags=["jvm"])
 
 # 导入即注册 ops 里的 job handler
 _ = ops

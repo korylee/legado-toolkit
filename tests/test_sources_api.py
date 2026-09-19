@@ -19,7 +19,7 @@ import unittest
 import uuid
 
 from backend.api.sources import list_source_urls, soft_delete_sources
-from backend.schemas import SourceDeleteIn
+from backend.schemas import SourceDeleteIn, SourceOut
 from core.store import Store
 
 
@@ -84,6 +84,27 @@ class _StoreCase(unittest.TestCase):
 
 
 class SourceUrlsTests(_StoreCase):
+    def test_list_enrichment_fields_are_on_source_out(self):
+        """response_model 按模型**裁字段**：list_sources 往 item 里塞的每个键，
+        SourceOut 必须声明，否则 HTTP 响应里静默消失（服务端直调却看得到）。
+        star_basis、jvm_state 各栽过一次——形状测试防回归，注释防不住下一次。
+        """
+        from backend.api import sources as sources_api
+        from inspect import signature
+
+        # list_sources 函数体里给 item 写入的全部动态键
+        src = inspect.getsource(sources_api.list_sources)
+        written = set()
+        for line in src.splitlines():
+            stripped = line.strip()
+            if stripped.startswith('it["') or stripped.startswith('row["'):
+                written.add(stripped.split('"')[1])
+        self.assertTrue(written, "解析不到回填键，测试自身失效时要跟着改")
+        for key in written:
+            self.assertIn(key, SourceOut.model_fields,
+                          f"list_sources 回填了 {key!r}，但 SourceOut 没声明——"
+                          "HTTP 响应会把它裁掉（§二：跨层隐式转换·字段）")
+
     def test_all_sources_are_returned_with_a_total(self):
         with self._seed() as st:
             out = list_source_urls(st=st)

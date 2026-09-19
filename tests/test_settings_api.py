@@ -90,10 +90,12 @@ class PatchSemanticsTests(SettingsApiTestCase):
         self.assertEqual(set(got), {"values", "defaults", "limits"})
         self.assertEqual(got["values"]["check"]["concurrency"], 3)
         self.assertEqual(got["defaults"], S.DEFAULTS)
-        # 只有「有区间/有枚举」的键需要下发约束；布尔与代理文本框没有上下界
+        # 只有「有区间/有枚举」的键需要下发约束；布尔与代理文本框没有上下界。
+        # jvm_* 三根是 S2 的 JVM 校验参数（超时/并发/条数上限）
         self.assertEqual(set(got["limits"]),
                          {"concurrency", "timeout", "probe_depth",
-                          "cache_ttl_ok", "cache_ttl_other", "cache_ttl_auth"})
+                          "cache_ttl_ok", "cache_ttl_other", "cache_ttl_auth",
+                          "jvm_timeout", "jvm_concurrency", "jvm_limit"})
         self.assertEqual(got["limits"]["probe_depth"], (1, 2, 3, 4))
 
     def test_reset_endpoint_restores_defaults(self) -> None:

@@ -370,6 +370,26 @@ function depthClass(row) {
   return v ? (v.ok ? "v-ok" : "v-bad") : "";
 }
 
+//: JVM 结论的短文案与着色（S2 来源阶梯）。**没有结论就不显示**——空串和
+//: 「未校验」是一个意思，但每行都印一个「—」会把真正有结论的行淹没。
+//: 着色口径同 depthClass：绿=跑过且通过，红=跑过且失败；无果/空壳这类
+//: 「跑了但没结论」不着色，避免看起来像失败。
+const JVM_SHORT = {
+  ok: "JVM✓", no_result: "无果", empty_js_shell: "空壳",
+  timeout: "超时", error: "JVM✗", invalid: "无效",
+};
+const JVM_STATE_LABELS = {
+  ok: "搜索通过", no_result: "跑了但没出结果", empty_js_shell: "JS 规则是空壳",
+  timeout: "超时", error: "报错", invalid: "规则无效",
+};
+function jvmText(row) { return JVM_SHORT[row.jvm_state] || ""; }
+function jvmStateLabel(state) { return JVM_STATE_LABELS[state] || state; }
+function jvmClass(row) {
+  if (row.jvm_state === "ok") return "v-ok";
+  if (["error", "timeout", "invalid"].includes(row.jvm_state)) return "v-bad";
+  return "";
+}
+
 function lockedStatus(row) {
   if (!row.system_tags_locked) return "";
   return splitTags(row.group_name || "").find((t) => isStatusTag(t)) || "";
@@ -786,6 +806,10 @@ onUnmounted(() => {
               <el-tag v-else-if="row.health" size="small" :type="healthType[row.health] || 'info'">
                 {{ healthLabel(row.health) }}
               </el-tag>
+              <!-- 与表格同口径：证据阶梯第二层（JVM 引擎） -->
+              <el-tag v-if="row.jvm_state" size="small" :type="row.jvm_state === 'ok' ? 'success' : (['error','timeout','invalid'].includes(row.jvm_state) ? 'danger' : 'info')">
+                {{ jvmText(row) }}
+              </el-tag>
               <span class="muted nowrap" v-if="row.toc_complete !== null || row.content_ok !== null">
                 {{ row.toc_complete === 1 ? "目录✓" : row.toc_complete === 0 ? "目录✗" : "" }}
                 {{ row.content_ok === 1 ? " 正文✓" : row.content_ok === 0 ? " 正文✗" : "" }}
@@ -857,6 +881,20 @@ onUnmounted(() => {
                    星级与「实测/仅规则」收进同一个 tooltip，信息不丢 -->
               <span v-if="row.probe_depth" :class="depthClass(row)">{{ depthText(row) }}</span>
               <span v-else class="muted">未校验</span>
+            </el-tooltip>
+          </template>
+        </el-table-column>
+        <el-table-column label="JVM" width="84" align="center">
+          <template #default="{ row }">
+            <!-- 证据阶梯的第二层（本地回放 → JVM 引擎 → 真机）。悬停给全称：
+                 缩写文案是为扫视设计的，但「空壳」这种词第一次见到的人读不懂 -->
+            <el-tooltip v-if="row.jvm_state" placement="top" :show-after="200">
+              <template #content>
+                <div>JVM 引擎校验：{{ jvmStateLabel(row.jvm_state) }}</div>
+                <div v-if="row.jvm_hit != null">搜索命中率：{{ row.jvm_hit }}%</div>
+                <div v-if="row.jvm_batch">批次：{{ row.jvm_batch }}</div>
+              </template>
+              <span :class="jvmClass(row)">{{ jvmText(row) }}</span>
             </el-tooltip>
           </template>
         </el-table-column>

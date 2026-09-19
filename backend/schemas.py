@@ -25,6 +25,14 @@ class SourceOut(BaseModel):
     toc_complete: Optional[int] = None
     content_ok: Optional[int] = None
     search_hit: Optional[str] = None
+    #: 来源阶梯（S2）：最近一批 JVM 校验的结论。state 取 ok/no_result/
+    #: empty_js_shell/timeout/error/invalid，空串 = 没跑过。hit 是搜索命中率
+    #: （0-100 整数，error 时为 None）。同 star_basis：**必须声明在这里**，
+    #: response_model 会按模型裁字段——之前 enrichment 在服务端明明算出来了，
+    #: HTTP 响应里却全变空，查起来极像前端 bug。
+    jvm_state: str = ""
+    jvm_hit: Optional[int] = None
+    jvm_batch: str = ""
 
 
 class SourcePage(BaseModel):
@@ -220,10 +228,22 @@ class CheckSettingsPatch(BaseModel):
     cache_ttl_auth: Optional[int] = None
 
 
+class JvmSettingsPatch(BaseModel):
+    """JVM 校验服务设置（core.settings_store.DEFAULTS["jvm"]）。同 CheckSettingsPatch
+    的约定：收敛全部交给 settings_store.coerce。"""
+
+    app_repo: Optional[str] = None
+    keyword: Optional[str] = None
+    timeout: Optional[int] = None
+    concurrency: Optional[int] = None
+    limit: Optional[int] = None
+
+
 class SettingsPatch(BaseModel):
     """按 section 分组，与 settings_store 的文件结构一一对应（不做映射层）。"""
 
     check: Optional[CheckSettingsPatch] = None
+    jvm: Optional[JvmSettingsPatch] = None
 
 
 class JobCreate(BaseModel):

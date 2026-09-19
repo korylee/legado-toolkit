@@ -7,7 +7,11 @@
 > 回放边界判定（简写/索引式/排除索引/XPath 一律 unknown，顺带修掉 JSON 下标取不到值
 > 的路由 bug）、`tocUrl` 按规则在详情页求值、**取值类规则末段语义**（290 条误放项）、
 > `HEALTH_ORDER` 补 CERT、**修复循环接登录墙**（evidence 用 `checker.is_login_wall`）、
-> **JVM 校验服务探针跑通**（零入侵挂载，App 仓库 `git status` 恒为空）。
+> **JVM 校验探针跑通**（零入侵挂载，App 仓库 `git status` 恒为空）、
+> **S2 完成**：JVM 校验接进设置与界面（selftest/run/results 三接口 + 「JVM 校验」
+> 页签 + 列表 JVM 列；response_model 裁字段坑二次踩中，形状测试已钉，lessons §二）、
+> **S4 完成**：健康档位 9 档 + 未校验收成 6 档（判据：下一步动作相同），
+> 存量迁移与组名换词一次做完（lessons §五十二）。
 > 更早的以 lessons 与 git 历史为准——这份清单只回答「这条是不是刚做过」。
 >
 > **已定决策：缓存不做向后兼容**（`CACHE_VERSION`）。它是纯派生数据，口径一变就整体
@@ -23,14 +27,15 @@
 |---|---|---|---|
 | **S0 收尾**（立刻） | 提交当前这批（改动文件 + `appservice/`）；`cd frontend && pnpm build` | —— | `git status` 干净、745 个测试绿、前端产物与源码一致 |
 | **S1 服务化·搜索档闭环** ✅（2026-09-19，剩全量跑） | ValidateService（收源 → searchBookAwait → 结论 NDJSON）+ Launcher（参数走 `appservice/args.properties`）；(a) 剥 webView 选项 ✅；(a2) 壳归因 ✅（empty_js_shell）；100 条验收：46 ok / 18 no_result / 35 error（归因细分见 lessons §五十二）/ 1 empty_js_shell；结论已写 meta（`jvm_check:<batch>:<url>`） | S0 | **✅ 全量已跑完（2026-09-19，17 分钟/3774 条，8 并发 + 3g 堆）**：ok 1324 / no_result 935 / error 1444（被墙重置 462、JS 失败 313、DNS 死亡 291、JSONPath 不符 152、超时 66、其他 220）/ timeout 61 / empty_js_shell 10；剥 webView 的 147 条里 16 条被救回 ok；**环境缺口 0** |
-| **S2 接进产品** | 设置项（App 源码目录 + JDK/SDK/gradle-home 自动推导）+ **自检接口/按钮** + 前端页签 + `checks` 来源阶梯（本地/JVM/真机） | S1 | 界面上能配、能自检、能看见结论来自哪一层 |
+| **S2 接进产品** ✅（2026-09-19） | 设置项（App 源码目录 + JDK/SDK/gradle-home 自动推导）+ **自检接口/按钮** + 前端页签 + **列表 JVM 阶梯列**（不写 checks——JVM 与本地回放是两条证据，meta `jvm_check:<batch>:<url>` 每源每 URL 取最新批次） | S1 | ✅ 界面上能配、能自检、列表上能看见 JVM 结论（tooltip 给命中率与批次） |
 | **S3 补深度** | 目录段 + 正文段（`getBookInfoAwait` → `getChapterListAwait` → `getContentAwait(needSave=false)`）；**(b) 浏览器桥**（复用本机 Edge/Chrome + CDP） | S2 | 全链路可跑；(b) 上线后那批 webView 源不再是盲区 |
 | **S4 清存量** ✅（2026-09-19） | Health 档位重设计 **+** 分类侧可行动性（**同一件事的两面，必须一起做**） | 可与 S3 并行 | **✅ 9 档 + 未校验 → 6 档**（ok/auth/gfw/cert/pending/dead，按「下一步动作」合并）；「未校验」降为派生筛选（`health=none`）；CACHE_VERSION 13；`checks` 旧值一次性映射 + 组名换词（`Store.migrate_health_tiers_once`）。**残留**：unknown 的产品出口、标签快照过期 → 见 §四 |
 | **S5 按需** | 真机复检通道（只读那条先做）、本地回放的 `bookUrl` 作用域、体验类 P2 | —— | —— |
 
 > ⚠️ **CACHE_VERSION 合并 bump**：S3/S4/S5 里凡是翻转判定结论的改动，**做完一批
 > 再 bump 一次**、付一次全量重跑，别每步付一次。
-> （S4 已 bump 到 **13**——档位词表变了，旧缓存的 health 是旧词表的产物。）
+> （S4 已 bump 到 **13**——档位词表变了，旧缓存的 health 是旧词表的产物；
+> 12 是回放边界判定那批。）
 
 ---
 
@@ -128,7 +133,7 @@ Robolectric 下对一条真源（天堂深圳，无 JS 的 CSS 源）调 `WebBoo
   真机(App + 真实环境)`，与既有的 `measured / static` 是同一件事的延伸。界面按
   这个阶梯展示，用户才知道该不该信、以及「要不要连手机复检一次」。
 
-**服务化与设置项（2026-09-19 定，动手前的设计约束）**：
+**服务化与设置项（2026-09-19 定，✅ 已按此实现——S2）**：
 
 - **App 源码目录进全局设置**（`core/settings_store.DEFAULTS` 新增一个 section，前端经
   `GET /api/settings` 读写；**不在前端硬编码、不写死在本仓库的脚本里**——现在的
@@ -140,10 +145,10 @@ Robolectric 下对一条真源（天堂深圳，无 JS 的 CSS 源）调 `WebBoo
   `different roots` 的坑）——让用户填一个「必须与另一个字段同盘」的字段，
   本身就是让手工维护一个能算出来的状态。
 - **必须有「自检」**（一个接口 + 一个按钮）：首次使用要下 SDK/Gradle、首次编译十几
-  分钟，用户必须能看见「缺什么、在装什么」。**别让它变成 App 连接页签那种
-  「点开只有一句话」的状态**（那条待办见 P2）。
+  分钟，用户必须能看见「缺什么、在装什么」。✅ 已做：`GET /api/jvm/selftest` +
+  前端自检按钮（App 仓库/JDK/Android SDK/Gradle 缓存四项）。
 - **形态先做一次性调用**（我们后端 subprocess 调服务，跑完退出），别一上来就做常驻：
-  常驻要管生命周期、端口、守护进程回收，等确实嫌慢（增量 ~15s/次）再说。
+  常驻要管生命周期、端口、守护进程回收，等确实嫌慢（增量 ~15s/次）再说。✅ 即如此实现。
 
 **App 连接的定位修正（2026-09-19）：校验不再必需它，调试也不是它更好**：
 
@@ -293,6 +298,25 @@ webView」就能过（说明那批标记是冗余的），但**「真需要浏�
   筛选取值 `health=none`。**「验了没结论」与「网络性失败」则刻意不再分档**：
   两者下一步动作相同（重跑一次校验），失败原因留在 `checks.error` 与详情里，
   按动作分档的原则不该为它们再开两档（当时的判据见 lessons §五十二）。
+
+<details>
+<summary>重设计前的实测分布与判据（2026-09-19 定稿时留档）</summary>
+
+**实测分布**（存活 3774 条，最近一条 `checks`）：ok 1680 / auth 1051 / timeout 711 /
+dead 173 / gfw 98 / error 61 —— 而 **cert 0、no_search 0、skipped ≈0**。
+
+三档的实情（都核过代码）：
+
+| 档 | 实情 |
+|---|---|
+| `no_search` | **全仓没有任何赋值点**（只有 `checker.evaluate_stars` 的「可达集合」在期待它）——一条都不可能产出 |
+| `cert` | 有产出点（证书错误），但当时 **0 条**；它是 2026-09-15 才加的，属「刚埋下」 |
+| `skipped` | 不是判定结果：它是 `models.BookSourceRecord.health` 的**默认值**和 `.get(..., SKIPPED)` 的兜底，实际只有「源被禁用」这一种来源 |
+
+**判据**：两档该不该合并，看**下一步动作是否相同**——删 / 修 / 重测 / 翻墙 / 连 App 试。
+动作相同的两档，用户分不出来也不该让他分。
+
+</details>
 - **unknown 缺产品出口**：界面上只有解释文案，没有转化动作（如「连 App 验一次」）——
   与下面「App 连接」页签那条是同一件事的两面。
 - **标签是快照，导入即开始过期**：写进 App 的分组标签是校验瞬间的结论，App 侧
@@ -336,30 +360,7 @@ lessons §三十四；「明确不做」的五条也在那一节（不自动合�
 - `TrashDrawer` 的批量恢复对齐同一套 URL 语义（它仍是页级勾选 + 行对象，
   与列表页 `ec93ad4` 之后的 URL 语义不一致）
 
-
-
-`SettingsDrawer.vue` 那一页现在是空的，文案写着「尚未实现：App 的 IP / 调试端口 /
-连接超时会在这一页配置」。**UI 已经向用户承诺了这件事**，所以它是一条真实的待办，
-不是"以后有空再说"。
-
-现状是散的：
-
-| 项 | 现在在哪 |
-|---|---|
-| App 的 IP | `SourceEditDialog` 的输入框 + localStorage（`legado.appHost`） |
-| 调试端口 1123 / HTTP 端口 1122 | `core/app_debug.py` 硬编码（`DEFAULT_DEBUG_PORT` / `DEFAULT_HTTP_PORT`） |
-| 连接 10s / 收帧 20s / HTTP 8s | `core/app_debug.py` 硬编码（`CONNECT_TIMEOUT` / `RECV_TIMEOUT` / `HTTP_TIMEOUT`），**调试接口根本不接受这几个参数** |
-
-两个方向，选一个：
-
-- **实现**：IP / 端口提到设置里（IP 从 localStorage 迁过来，与「个人设置存库」的既有
-  约定对齐——见「合并重复源」那节的约束），三个超时按需要暴露
-- **撤承诺**：把那句文案改成说明现状（IP 在编辑弹窗里填、端口固定 1123），
-  页签去掉或改成只读展示
-
-**别让它一直是"点开只有一句话"的状态**——那比没有这一页更让人以为功能坏了。
-
-
+---
 
 方向可行，但有个前提：**试跑的是表单里当前的规则**，未保存时 `fingerprint` 与库里
 不一致，缓存写了也用不上（`is_cache_item_valid` 要比 fingerprint）。所以只对
