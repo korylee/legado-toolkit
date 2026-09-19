@@ -18,6 +18,9 @@ import io.legado.app.domain.model.settings.MangaSettings
 import io.legado.app.domain.model.settings.OtherSettings
 import io.legado.app.domain.model.settings.ReadSettings
 import io.legado.app.domain.model.settings.ThemeSettings
+import io.legado.app.model.analyzeRule.AnalyzeUrl
+import io.legado.app.model.analyzeRule.RuleData
+import io.legado.app.model.webBook.BookList
 import io.legado.app.model.webBook.WebBook
 import io.legado.app.utils.GSON
 import io.legado.app.utils.fromJsonObject
@@ -106,6 +109,68 @@ object ValidateService {
 
     private var started = false
 
+    //: 浏览器会话：**一批一个进程**，不是一源一个。
+    //: 一源一个的实测后果是并发直接失效——第二个进程因 profile 目录被占用**立刻退出**，
+    //: 9 条源里 7 条报 `browser_unavailable: 浏览器进程已退出`。
+    //: 启动失败也**记住**，别让后面 3774 条源各试一次。
+    private val browserLock = Any()
+    private var browserSession: BrowserBridge.Session? = null
+    private var browserError: String? = null
+    private var browserDisabled = false
+
+    private fun browserProfileDir(): File =
+        File(System.getProperty("legado.browser.profile")
+            ?: System.getenv("LEGADO_BROWSER_PROFILE")
+            ?: File(System.getProperty("java.io.tmpdir"), "legado-appservice-profile").path)
+
+    /** f 是不是自愈路径创建的专属 profile（`<base>-run<时间戳>`）。
+     *  只认这个模式，用户经系统属性/环境变量指定的 profile **永不匹配**；
+     *  base 自己恰好叫这名字时也排除，防止把用户的目录删了。 */
+    private fun isRunProfile(f: File, base: File): Boolean {
+        if (f.absolutePath == base.absolutePath) return false
+        val prefix = base.name + "-run"
+        if (!f.name.startsWith(prefix)) return false
+        return f.name.drop(prefix.length).toLongOrNull() != null
+    }
+
+    /** 取（必要时启动）共享的浏览器会话。返回 (会话, 失败原因)。 */
+    private fun browser(): Pair<BrowserBridge.Session?, String> {
+        if (browserDisabled) return null to "browser_unavailable: 本次跑批已禁用浏览器桥"
+        synchronized(browserLock) {
+            browserError?.let { return null to it }
+            browserSession?.let { return it to "" }
+            // 兜底清扫：上次进程被外部杀掉时 shutdown 走不到，-run<时间戳>
+            // 专属 profile 会残留（含缓存，几十 MB 级）。趁浏览器没起先扫一遍；
+            // 删不掉（文件还被占）不碍事，下次跑批会再试。
+            runCatching {
+                val base = browserProfileDir()
+                base.parentFile?.listFiles()?.forEach { f ->
+                    if (isRunProfile(f, base)) f.deleteRecursively()
+                }
+            }
+            var (s, why) = BrowserBridge.launch(browserProfileDir())
+            if (s == null) {
+                // **退一步：换本次专属 profile 再试一次**。
+                // 固定 profile 的价值是能留住 cookie（对登录墙后的源有用），但
+                // **上一轮残留的浏览器实例会占着它**——那时新实例会立刻退出
+                // （实测：手工起过一个同 profile 的 Edge，之后所有启动都报
+                // 「浏览器进程已退出」）。专属 profile 打不开就换一个，
+                // 别让整批源卡在"浏览器不可用"上。
+                val base = browserProfileDir()
+                val fresh = File(base.parentFile, base.name + "-run" + System.currentTimeMillis())
+                val (s2, why2) = BrowserBridge.launch(fresh, tempProfile = true)
+                if (s2 == null) {
+                    browserError = "$why2（固定 profile 也失败：$why）"
+                    return null to browserError!!
+                }
+                s = s2
+                why = ""
+            }
+            browserSession = s
+            return s to ""
+        }
+    }
+
     /** 进程级初始化（幂等）：Koin + appCtx。由 [main] 在跑批前调用一次。 */
     fun ensureStarted(userAgent: String) {
         if (started) return
@@ -138,6 +203,10 @@ object ValidateService {
     }
 
     fun shutdown() {
+        synchronized(browserLock) {
+            browserSession?.close()
+            browserSession = null
+        }
         if (started) {
             stopKoin()
             started = false
@@ -394,7 +463,10 @@ object ValidateService {
                     val searchTxt = source.searchUrl ?: ""
                     val exploreTxt = source.exploreUrl ?: ""
                     val likelyShell = searchTxt.contains("webView", true) || exploreTxt.contains("webView", true)
-                    linkedMapOf(
+                    // **显式写 <String, Any?>**：靠推断的话，值全是 String/Int 时
+                    // 会被推成公共父类型 `Comparable<*> & Serializable`，后面合并
+                    // 复验结果（Any?）就编译不过——报错信息还指向 forEach 那一行
+                    val shellRow = linkedMapOf<String, Any?>(
                         "url" to source.bookSourceUrl,
                         "name" to source.bookSourceName,
                         "state" to if (likelyShell) "empty_js_shell" else "no_result",
@@ -405,6 +477,27 @@ object ValidateService {
                         "cost_ms" to cost,
                         "webview_stripped" to stripped,
                     )
+                    // (b) 浏览器桥复验：只对「疑似 JS 壳」的源做（其余源的"没结果"
+                    // 是源自己的结论，渲染一次也变不出书来，白花时间）
+                    if (likelyShell) {
+                        val retry = runBlocking {
+                            withTimeout(remaining()) {
+                                validateByRendering(source, keyword, timeoutSec)
+                            }
+                        }
+                        if ((retry["state"] as? String) == "ok") {
+                            retry.forEach { (k, v) -> shellRow[k] = v }
+                            shellRow["cost_ms"] = System.currentTimeMillis() - startedAt
+                        } else {
+                            // 渲染没救回来：**把原因带上**，但保留原来的空壳结论
+                            shellRow["rendered"] = retry["rendered"]
+                            shellRow["render_reason"] = retry["render_reason"]
+                            if (retry["render_root"] != null) {
+                                shellRow["render_root"] = retry["render_root"]
+                            }
+                        }
+                    }
+                    shellRow
                 }
             }
         } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
@@ -433,6 +526,61 @@ object ValidateService {
                 "webview_stripped" to stripped,
             )
         }
+    }
+
+    /**
+     * 用浏览器渲染搜索页并**复验**（S3-4 的①）。
+     *
+     * 为什么需要它：剥掉 webView 选项之后，若页面是 JS 壳，规则自然跑空——
+     * 判 `empty_js_shell`（unknown）是"不冤枉"，但那批源仍然进不了验证。
+     * 这里把「取数」换成真浏览器，**解析仍然走 App 自己的 `BookList`**：
+     * `BackstageWebView` 本来就只是替换取数那一步（lessons §四十九），
+     * 而解析层收 `body: String?`——所以不必 shadow WebView，喂渲染后的 HTML 即可。
+     *
+     * 链路照抄 `WebBook.searchBookAwait`，只有 `body` 换成渲染结果：
+     * AnalyzeUrl 先正常请求一次拿**最终 URL**（跳转后的地址，App 的 webView 分支
+     * 也是这么做的：`BackstageWebView(url = res.url, …)`），再让浏览器加载它。
+     */
+    private suspend fun validateByRendering(
+        source: BookSource,
+        keyword: String,
+        timeoutSec: Long,
+    ): Map<String, Any?> {
+        val (session, why) = browser()
+        if (session == null) {
+            // 浏览器不可用**显式说**，不静默退回空壳结论
+            return linkedMapOf("rendered" to false, "render_reason" to why)
+        }
+        try {
+            val ruleData = RuleData()
+            val analyzeUrl = AnalyzeUrl(
+                // 到这里 searchUrl 必不为空（validateOne 开头已对空搜索规则早退）
+                mUrl = source.searchUrl!!, key = keyword, page = 1,
+                baseUrl = source.bookSourceUrl, source = source, ruleData = ruleData)
+            val res = analyzeUrl.getStrResponseAwait()
+            val rendered = BrowserBridge.renderSerial(session, res.url, timeoutSec * 1000)
+            if (!rendered.ok) {
+                return linkedMapOf("rendered" to false, "render_reason" to rendered.reason)
+            }
+            val books = BookList.analyzeBookList(
+                bookSource = source, ruleData = ruleData, analyzeUrl = analyzeUrl,
+                baseUrl = res.url, body = rendered.html, isSearch = true)
+            return if (books.isNotEmpty()) linkedMapOf(
+                "state" to "ok", "stage" to DEPTH_SEARCH, "rendered" to true,
+                "hit" to books.size, "sample" to books.take(3).map { it.name },
+                "reason" to "浏览器渲染后命中（原源声明 webView）",
+            ) else linkedMapOf(
+                "rendered" to true, "render_reason" to
+                    "浏览器渲染后仍然没结果（页面确实没有这本书，或需要交互）")
+        } catch (e: Throwable) {
+            val root = generateSequence(e as Throwable?) { it.cause }.lastOrNull() ?: e
+            return linkedMapOf(
+                "rendered" to false,
+                "render_reason" to "${e::class.simpleName}: ${e.message?.take(120)}",
+                "render_root" to "${root::class.simpleName}: ${root.message?.take(120)}")
+        }
+        // 注意：**不要在这里 close 会话**——它是整批共享的，关了后面的源就没得用；
+        // 收尾在 shutdown() 里
     }
 
     /**

@@ -48,6 +48,10 @@ def list_sources(
             it["jvm_content_len"] = j.get("content_len") if j else None
             it["jvm_content_ok"] = j.get("content_ok") if j else None
             it["jvm_batch"] = j.get("_batch", "") if j else ""
+            #: 这条结论是不是**经过浏览器渲染**得到的（S3-4）：
+            #: None=没走浏览器，True=渲染成功，False=渲染失败（原因在 jvm_render_reason）
+            it["jvm_rendered"] = j.get("rendered") if j else None
+            it["jvm_render_reason"] = (j.get("render_reason") or "") if j else ""
     except Exception as exc:
         # 静默吞掉的话，「为什么列表上看不到 JVM 结论」就永远查不出来——
         # 这里至少要留下痕迹（ lessons §二：不接受静默失败）

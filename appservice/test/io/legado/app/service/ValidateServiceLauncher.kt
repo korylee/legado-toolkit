@@ -50,6 +50,10 @@ class ValidateServiceLauncher {
         props.getProperty("timeout")?.let { args += listOf("--timeout", it) }
         props.getProperty("limit")?.let { args += listOf("--limit", it) }
         props.getProperty("depth")?.let { args += listOf("--depth", it) }
+        // 浏览器 profile 目录（S3-4）：给跑批用，探针自己读同一个键
+        props.getProperty("profile")?.let {
+            System.setProperty("legado.browser.profile", it)
+        }
         if (props.getProperty("noStripWebview") == "1") args += "--no-strip-webview"
         println("APPSERVICE-LAUNCHER: args=" + args)
         ValidateService.main(args.toTypedArray())

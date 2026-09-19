@@ -40,6 +40,9 @@ class SourceOut(BaseModel):
     jvm_content_len: Optional[int] = None
     jvm_content_ok: Optional[bool] = None
     jvm_batch: str = ""
+    #: 结论是否经浏览器渲染（S3-4）：None=未走浏览器 / True=渲染成功 / False=渲染失败
+    jvm_rendered: Optional[bool] = None
+    jvm_render_reason: str = ""
 
 
 class SourcePage(BaseModel):

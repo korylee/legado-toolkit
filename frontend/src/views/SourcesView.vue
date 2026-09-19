@@ -935,6 +935,12 @@ onUnmounted(() => {
                   <span v-if="s.ok === true">✓</span>
                   <span v-else-if="s.ok === false">✗</span>
                 </div>
+                <!-- 浏览器渲染状态（S3-4）：只在走过浏览器时显示——
+                     「没渲染过」和「渲染过」是两件事，摆在一起会让人以为源有问题 -->
+                <div v-if="row.jvm_rendered === true" class="muted">浏览器渲染：已渲染</div>
+                <div v-else-if="row.jvm_rendered === false" class="muted">
+                  浏览器渲染：失败（{{ row.jvm_render_reason || "原因未记录" }}）
+                </div>
                 <div v-if="row.jvm_batch" class="muted">批次：{{ row.jvm_batch }}</div>
               </template>
               <span :class="jvmClass(row)">{{ jvmText(row) }}</span>
