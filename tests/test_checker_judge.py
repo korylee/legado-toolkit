@@ -37,10 +37,16 @@ from core.models import BookSourceRecord, Health, build_record
 
 SEARCH_PAGE = '<div class="item"><a href="https://site/book/1">测试书</a></div>'
 
+#: 目录页。**列表项与字段要分层**（`li` 里放 `a`）：App 的求值语义是
+#: 「先 getElements(chapterList) 取节点，再在**每个节点内**求 chapterUrl」
+#: （`BookChapterList.kt` 的 elements.forEachIndexed { setContent(item) … }）。
+#: 旧 fixture 写成 `<a>` 直接挂在 `.chapters` 下、chapterList 又选到 `<a>`——
+#: 那种形状下 App 也取不到 url（在 a 里找 a），只有「对整页求值」的旧本地实现
+#: 才能跑通。fixture 按能跑通的那套语义写，测出来的结论就是假的。
 TOC_PAGE = ('<div class="chapters">'
-            '<a href="/read/1.html">第1章</a>'
-            '<a href="/read/2.html">第2章</a>'
-            '<a href="/read/3.html">第3章</a>'
+            '<li><a href="/read/1.html">第1章</a></li>'
+            '<li><a href="/read/2.html">第2章</a></li>'
+            '<li><a href="/read/3.html">第3章</a></li>'
             '</div>')
 
 #: 只有 3 个中文字符的正文——旧实现要求 >100 字符，收拢后底线是「非空即通过」
@@ -54,6 +60,17 @@ IMAGES_PAGE = ('<div class="imgs">'
 
 #: 中位章节（3 条取 urls[1]）→ 这条 URL 必须被请求到
 MEDIAN_CHAPTER_URL = "https://site/read/2.html"
+
+#: 「目录在独立页上」的形态（实测库里 1617 条）：详情页里没有章节列表，
+#: 目录页地址写在 `ruleBookInfo.tocUrl` 规则里，要在详情页上求值取出来。
+DETAIL_PAGE_NO_TOC = ('<div class="info"><a class="toc-link" href="/book/1/toc/">'
+                      '查看目录</a></div>')
+SEPARATE_TOC_PAGE = ('<div class="chapters">'
+                     '<li><a href="1.html">第1章</a></li>'
+                     '<li><a href="2.html">第2章</a></li>'
+                     '<li><a href="3.html">第3章</a></li>'
+                     '</div>')
+SEPARATE_TOC_URL = "https://site/book/1/toc/"
 
 TEST_TITLES = {"测试书": {"type": "novel", "chapters": 3}}
 
@@ -83,7 +100,7 @@ class _StubChecker(AsyncChecker):
         return 200, page.encode("utf-8"), 1.0, "", ""
 
 
-def make_raw(content_rule="id.content", toc_rule="class.chapters@tag.a"):
+def make_raw(content_rule="id.content", toc_rule="class.chapters@tag.li"):
     """每次调用都新建 dict（含嵌套），避免用例之间互相污染。"""
     return {
         "bookSourceUrl": "https://site",
@@ -142,8 +159,11 @@ class CacheVersionTests(unittest.TestCase):
         对开着搜索探测的用户必须整体重验，否则快速体检写下的结论会一直被复用。
         v7：反爬词表删掉裸 "cloudflare"——原来判 auth 的源现在判 ok，
         不作废的话那条 auth 会在 TTL 内一直命中缓存，看起来像修复失效。
+        v14：目录判定改在 **tocUrl 指向的目录页**上做（此前一律在详情页数章节）——
+        「目录在独立页上」的源（实测 1617 条）从「解析为空＝失效」翻成真实章节数，
+        方向变了，旧缓存的 toc/content 必须作废。
         """
-        self.assertEqual(checker.CACHE_VERSION, 13)
+        self.assertEqual(checker.CACHE_VERSION, 14)
 
     def test_old_cache_item_rejected(self):
         raw = {"bookSourceUrl": "https://a.com", "bookSourceName": "x",
@@ -529,6 +549,79 @@ class TocProbeTests(unittest.TestCase):
         run_toc(rec)
         self.assertIsNone(rec.toc_complete)     # 不是 True（走到比例比对了）
         self.assertIn("文件类书源", rec.toc_fail_reason)
+
+
+class TocUrlBranchTests(unittest.TestCase):
+    """目录页地址的解析（`ruleBookInfo.tocUrl`）。
+
+    **这一节守的是一个真实事故**：`_probe_toc` 原来完全没有 tocUrl 这一步，
+    一律在**详情页**上数章节——于是「目录在独立页上」的源（实测 1617 条）
+    全部「解析结果为空」→ `toc_complete=False`，看起来像源坏了。实测 SF轻小说：
+    本地判 0 章、JVM 用 App 引擎拿到 1201 章。修法是把解析口径收进
+    `core/toc_page`，checker 与 verify 共用（lessons §二十三 第二次实证）。
+    """
+
+    def _raw_with_toc_url(self, toc_url_rule):
+        raw = make_raw()
+        raw["ruleBookInfo"] = {"tocUrl": toc_url_rule}
+        return raw
+
+    def test_separate_toc_page_is_fetched_and_parsed(self):
+        """tocUrl 规则求值出独立目录页 → 去抓那一页，并在那页上数章节。"""
+        rec = make_record(self._raw_with_toc_url("class.toc-link@href"))
+        stub = run_toc(rec, pages={
+            "https://site/book/1": DETAIL_PAGE_NO_TOC,
+            SEPARATE_TOC_URL: SEPARATE_TOC_PAGE,
+        })
+        self.assertIn(SEPARATE_TOC_URL, stub.requested)
+        self.assertEqual(rec.chapter_count, 3)
+        self.assertIs(rec.toc_complete, True)
+        self.assertEqual(rec.toc_page_url, SEPARATE_TOC_URL)
+
+    def test_detail_page_alone_would_have_failed(self):
+        """反证：同样的源，若只在详情页上数章节，就是「解析为空」（旧行为）。
+
+        这条不放宽断言——它钉的是 fixture 确实重现了事故形态：详情页里没有章节。
+        没有它的话，上一条用例可能因为「详情页里恰好也有章节」而恒真。
+        """
+        from core.rules.replayer import extract_all
+        self.assertEqual(extract_all(DETAIL_PAGE_NO_TOC, "class.chapters@tag.li"), [])
+
+    def test_unreplayable_toc_url_rule_is_unknown(self):
+        """tocUrl 规则本地回放不了 → None + 原因，**不能退回详情页假装没事**。
+
+        `text.` 简写就是我们回放不了的形态之一（App 能求值）。退回详情页的话，
+        这一源会被判成「目录解析为空＝失效」，而我们只是没实现那个写法。
+        """
+        rec = make_record(self._raw_with_toc_url("text.查看目录@href"))
+        run_toc(rec, pages={"https://site/book/1": DETAIL_PAGE_NO_TOC})
+        self.assertIsNone(rec.toc_complete)
+        self.assertIn("回放", rec.toc_fail_reason)
+
+    def test_empty_toc_url_stays_on_detail_page(self):
+        """tocUrl 为空 → 目录就在详情页上（App 的兜底口径），不多发请求。"""
+        rec = make_record(make_raw())
+        rec.raw["ruleBookInfo"] = {"tocUrl": ""}
+        stub = run_toc(rec, pages={"https://site/book/1": TOC_PAGE})
+        self.assertEqual(stub.requested, ["https://site/book/1"])
+        self.assertEqual(rec.chapter_count, 3)
+
+
+class TocPageBaseUrlTests(unittest.TestCase):
+    def test_chapter_url_resolves_against_toc_page(self):
+        """正文段的章节相对链接要以**目录页**为基准。
+
+        目录页在子目录时（`/book/1/toc/`），页面里的 `2.html` 正确地址是
+        `/book/1/toc/2.html`；旧实现拿 domain_url 当基准会拼成 `/2.html` → 404，
+        于是这类源的正文被判「请求失败」——而那是我们拼错了地址。
+        """
+        rec = make_record(make_raw())
+        rec.toc_page_url = SEPARATE_TOC_URL
+        stub = _StubChecker({"https://site/book/1/toc/2.html": SHORT_CONTENT_PAGE})
+        asyncio.run(stub._probe_content(None, rec, "https://site",
+                                        SEPARATE_TOC_PAGE.encode("utf-8")))
+        self.assertEqual(stub.requested, ["https://site/book/1/toc/2.html"])
+        self.assertIs(rec.content_ok, True)
 
 
 # ------------------------------------------------------------ 正文判定

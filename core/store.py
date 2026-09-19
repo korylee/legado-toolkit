@@ -403,6 +403,59 @@ class Store:
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value", (key, str(value)))
         self.conn.commit()
 
+    #: JVM 结论的深度排序（结论里的 `stage` 字段）：**越深排越后**。
+    #: 与 `appservice` 的 DEPTH_* 同集合——那里是产出侧，这里是读取侧。
+    _JVM_STAGE_RANK = {"search": 1, "toc": 2, "content": 3}
+
+    def latest_jvm_conclusions(self) -> "Dict[str, Dict[str, Any]]":
+        """{归一化 url: 该源**最深**的一条 JVM 结论}。
+
+        取舍规则是**「深者胜、同深取新」**，不是「最新批次胜」：
+        一次 `depth=search` 的补跑（改了个设置、只重跑几条快筛）会把上一批
+        目录/正文级的结论盖掉——界面上从「目录 856 章」退回「搜索✓」，
+        而用户什么都没删。反过来（deep 覆盖 shallow）永远是对的：更深的结论
+        包含更浅的全部信息。
+
+        **同一个 URL 只留一条**、两侧都过宽松归一——库里的 URL 本身有脏字符
+        （前导空格/尾斜杠），实测 77/77 靠归一对上（lessons §五十一）。
+        """
+        import json as _json
+        import re as _re
+        from core.loader import _normalize_url
+
+        rows = self.conn.execute(
+            "SELECT key, value FROM meta WHERE key LIKE 'jvm_check:%'").fetchall()
+        out: "Dict[str, Dict[str, Any]]" = {}
+        ranks: "Dict[str, int]" = {}
+        for row in rows:
+            key, value = row["key"], row["value"]
+            m = _re.match(r"jvm_check:([^:]+):(.+)", key)
+            if not m:
+                continue
+            batch, raw_url = m.group(1), m.group(2)
+            url = _normalize_url(raw_url.strip()).rstrip("/")
+            if not url:
+                continue
+            try:
+                d = _json.loads(value)
+            except Exception:
+                continue
+            # 缺 `stage` 的是 S3-1 之前那批（那时服务只会跑搜索段）——按事实记成
+            # search，而不是排到 0：排 0 会让它们在任何比较里都"最浅"，界面上
+            # 显示成「没跑到任何一段」，与真相不符
+            stage = str(d.get("stage") or "search")
+            d.setdefault("stage", stage)
+            rank = self._JVM_STAGE_RANK.get(stage, 0)
+            prev = ranks.get(url)
+            if prev is not None:
+                # 更浅的不覆盖；同深比批次号（`YYYYmmdd_HHMMSS` 字典序即时序）
+                if rank < prev or (rank == prev and batch <= str(out[url].get("_batch") or "")):
+                    continue
+            d["_batch"] = batch
+            out[url] = d
+            ranks[url] = rank
+        return out
+
 # sources ------------------------------------------------------------
     def _system_group_for(self, source_type: int, raw_group: str) -> str:
         """按 source_type 重建类型标签，保留健康状态和规则完整标签。"""

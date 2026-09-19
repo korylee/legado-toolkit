@@ -42,6 +42,12 @@ VERSION = 2
 PROBE_DEPTHS = (1, 2, 3, 4)
 DEPTH_HOME, DEPTH_SEARCH, DEPTH_TOC, DEPTH_CONTENT = PROBE_DEPTHS
 
+#: JVM 校验的探测深度（S3）。**与上面的 ``PROBE_DEPTHS`` 是两根轴**：那根是本地
+#: 回放的（1/2/3/4，按星级口径），这根是 App 真引擎跑到哪一段——两者编号独立，
+#: 不要互相换算（深度轴的含义一平移，历史结论整列都会变意思，AGENTS #5b）。
+#: 取值与 ``appservice`` 的 ``ValidateService.DEPTH_*`` 一一对应。
+JVM_DEPTHS = ("search", "toc", "content")
+
 #: 全局设置的**唯一权威来源**。前端不硬编码默认值——``GET /api/settings`` 把这份
 #: 原样下发（含 defaults），「恢复默认」直接用后端给的值，避免两处各存一份漂移
 #: （AGENTS.md 硬性约定 #7 记过系统标签枚举的同类事故）。
@@ -79,6 +85,10 @@ DEFAULTS: Dict[str, Dict[str, Any]] = {
         "timeout": 25,
         "concurrency": 8,
         "limit": 0,
+        #: 默认停在**搜索**档：S1/S2 的历史结论就是这一档，深一档（目录+正文）
+        #: 会让全量耗时成倍增长（搜索档实测 17 分钟 / 3774 条）。**默认值不许
+        #: 静默改变既有行为的成本**——想验得更深由用户在设置里选，界面上会写清代价。
+        "depth": "search",
     },
 }
 
@@ -95,6 +105,8 @@ LIMITS: Dict[str, tuple] = {
     "jvm_timeout": (5, 120),
     "jvm_concurrency": (1, 32),
     "jvm_limit": (0, 100000),
+    # 枚举型（与 probe_depth 同形）：前端据此渲染下拉，不在 JS 里再写一份
+    "jvm_depth": JVM_DEPTHS,
 }
 
 #: 代理只认 http/https。**故意不含 socks5**：aiohttp 原生不支持（要 ``aiohttp_socks``，
@@ -244,6 +256,9 @@ _SPECS: Dict[tuple, Any] = {
         v, DEFAULTS["jvm"]["concurrency"], *LIMITS["jvm_concurrency"]),
     ("jvm", "limit"): lambda v: _to_int(
         v, DEFAULTS["jvm"]["limit"], *LIMITS["jvm_limit"]),
+    ("jvm", "depth"): lambda v: (str(v).strip().lower()
+                                 if str(v).strip().lower() in JVM_DEPTHS
+                                 else DEFAULTS["jvm"]["depth"]),
 }
 
 

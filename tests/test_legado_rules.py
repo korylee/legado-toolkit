@@ -475,3 +475,53 @@ if __name__ == "__main__":
 #        （M36/M37 是一对：**JSON 的 `[0]` 是实现了的**，把 CSS 的索引检测套上去
 #          就把它判成「索引式未实现」；而修 M36 之前，「放行」同样错——会变成
 #          静默跑空＝判源失效。两条都钉着才算把这件事收干净。）
+
+class FieldScopeTests(unittest.TestCase):
+    """列表字段的**作用域**语义：`bookUrl` / `chapterUrl` 在列表节点内求值。
+
+    App 是 `getElements(列表规则)` → 逐节点 `setContent(item)` → 求字段
+    （`BookChapterList.kt` 的 elements.forEachIndexed）。对整页求值会先命中
+    **导航栏的第一条链接**——实测三条真实源（SF轻小说/溜达小说/次元姬子）的
+    详情页因此被解成站点首页，目录与正文跟着全错（TODO §三 记的那一条）。
+    """
+
+    HTML = ('<a href="/">首页</a>'
+            '<div class="item"><a href="/book/1">书一</a></div>'
+            '<div class="item"><a href="/book/2">书二</a></div>')
+
+    def test_field_is_evaluated_inside_each_container_node(self):
+        from core.rules.replayer import extract_field_in_nodes
+        vals, _h, err = extract_field_in_nodes(self.HTML, "class.item", "tag.a@href", 50, 2000)
+        self.assertEqual(vals, ["/book/1", "/book/2"], err)
+
+    def test_whole_page_evaluation_would_grab_nav_link(self):
+        """反证：整页求值拿到的是导航栏那条——这就是我们要避免的形态。"""
+        from core.rules.replayer import extract_all
+        self.assertEqual(extract_all(self.HTML, "tag.a.0@href"), ["/"])
+
+    def test_values_align_with_container_nodes(self):
+        """求值为空的节点落空串而不是被跳过——调用方要按「第几条结果」配对时，
+        错位比缺项更难查（列表与字段一一对应是 Legado 的语义）。"""
+        from core.rules.replayer import extract_field_in_nodes
+        html = ('<div class="item"><a href="/b/1">一</a></div>'
+                '<div class="item">没有链接</div>'
+                '<div class="item"><a href="/b/3">三</a></div>')
+        vals, _h, _e = extract_field_in_nodes(html, "class.item", "tag.a@href", 50, 2000)
+        self.assertEqual(vals, ["/b/1", "", "/b/3"])
+
+    def test_attr_only_rule_works_inside_node(self):
+        """`@href` 这种「只取属性」的写法**只在作用域内可用**：整页求值返回空
+        （没有节点可施），在节点内才对。实测库里 19 条源就是这么写的。"""
+        from core.rules.replayer import extract_all, extract_field_in_nodes
+        html = '<a href="/read/1.html">第1章</a>'
+        self.assertEqual(extract_all(html, "@href"), [""])
+        vals, _h, _e = extract_field_in_nodes(html, "tag.a", "@href", 50, 2000)
+        self.assertEqual(vals, ["/read/1.html"])
+
+    def test_unreplayable_field_rule_reports_reason(self):
+        """字段规则回放不了 → 返回原因（调用方判 unknown），不是静默空列表。"""
+        from core.rules.replayer import extract_field_in_nodes
+        vals, _h, err = extract_field_in_nodes(
+            self.HTML, "class.item", "tag.a@href@js:result", 50, 2000)
+        self.assertEqual(vals, [])
+        self.assertTrue(err)

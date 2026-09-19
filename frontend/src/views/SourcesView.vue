@@ -378,11 +378,49 @@ const JVM_SHORT = {
   ok: "JVM✓", no_result: "无果", empty_js_shell: "空壳",
   timeout: "超时", error: "JVM✗", invalid: "无效",
 };
+//: 结论按**段**展开成若干行，供 tooltip 逐行显示。
+//:
+//: **只显示跑到的段**：跑到搜索档的行不该出现「正文：未验证」——那是**没跑**，
+//: 不是**跑了没过**，摆在一起会让人以为源有问题（S3-3 的核心取舍）。
+//: 段的顺序固定为 搜索 → 目录 → 正文，与探测深度同向。
+function jvmSteps(row) {
+  const stage = row.jvm_stage || "";
+  if (!stage) return [];
+  const out = [{
+    label: "搜索",
+    text: row.jvm_hit != null ? "命中 " + row.jvm_hit + " 本" : (row.jvm_state || "—"),
+    ok: row.jvm_state === "ok" ? true : null,
+  }];
+  if (stage === "toc" || stage === "content") {
+    out.push({
+      label: "目录",
+      text: row.jvm_toc_count != null ? row.jvm_toc_count + " 章" : "未取到",
+      ok: row.jvm_toc_ok === true ? true : row.jvm_toc_ok === false ? false : null,
+    });
+  }
+  if (stage === "content") {
+    out.push({
+      label: "正文",
+      text: row.jvm_content_len != null ? row.jvm_content_len + " 字" : "未取到",
+      ok: row.jvm_content_ok === true ? true : row.jvm_content_ok === false ? false : null,
+    });
+  }
+  return out;
+}
+
 const JVM_STATE_LABELS = {
   ok: "搜索通过", no_result: "跑了但没出结果", empty_js_shell: "JS 规则是空壳",
   timeout: "超时", error: "报错", invalid: "规则无效",
 };
-function jvmText(row) { return JVM_SHORT[row.jvm_state] || ""; }
+function jvmText(row) {
+  const base = JVM_SHORT[row.jvm_state] || "";
+  // 跑到目录档的补一个章数（列表上就能看出"这个源有八百多章"），
+  // 正文档只补 ✓ —— 字数放 tooltip，列宽有限
+  if (base === "JVM✓" && row.jvm_stage === "toc" && row.jvm_toc_count != null) {
+    return "JVM✓ " + row.jvm_toc_count + "章";
+  }
+  return base;
+}
 function jvmStateLabel(state) { return JVM_STATE_LABELS[state] || state; }
 function jvmClass(row) {
   if (row.jvm_state === "ok") return "v-ok";
@@ -891,8 +929,13 @@ onUnmounted(() => {
             <el-tooltip v-if="row.jvm_state" placement="top" :show-after="200">
               <template #content>
                 <div>JVM 引擎校验：{{ jvmStateLabel(row.jvm_state) }}</div>
-                <div v-if="row.jvm_hit != null">搜索命中率：{{ row.jvm_hit }}%</div>
-                <div v-if="row.jvm_batch">批次：{{ row.jvm_batch }}</div>
+                <!-- 逐段结果：跑到哪一段就显示哪几行（没跑的不显示"未验证"） -->
+                <div v-for="s in jvmSteps(row)" :key="s.label" class="jvm-step">
+                  {{ s.label }}：{{ s.text }}
+                  <span v-if="s.ok === true">✓</span>
+                  <span v-else-if="s.ok === false">✗</span>
+                </div>
+                <div v-if="row.jvm_batch" class="muted">批次：{{ row.jvm_batch }}</div>
               </template>
               <span :class="jvmClass(row)">{{ jvmText(row) }}</span>
             </el-tooltip>

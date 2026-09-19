@@ -190,6 +190,10 @@ class BookSourceRecord:
     chapter_count: int = 0           # 目录解析出的章节数
     toc_complete: Optional[bool] = None  # 目录完整度（True=达标 / False=不达标 / None=无法验证）
     toc_fail_reason: str = ""        # 目录验证失败归因（网络失败/规则解析失败/参考表缺项）
+    #: 目录页地址（`ruleBookInfo.tocUrl` 求值的结果；为空=目录就在详情页上）。
+    #: **不是展示字段，是正文段的计算基准**：章节链接是相对目录页的，正文段要拿它
+    #: 拼绝对地址。放模型上而不是运行时挂属性，是为了让「谁在用它」看得见。
+    toc_page_url: str = ""
     content_ok: Optional[bool] = None    # 正文可用性（True/False/None=无法验证）
     content_fail_reason: str = ""    # 正文验证失败归因
     content_response_ms: int = 0     # 抽样章节正文响应耗时

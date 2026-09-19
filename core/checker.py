@@ -31,11 +31,13 @@ from core.models import (
     anti_bot_marker_of, login_marker_of,
     NOVEL_TEST_KEYWORDS, MANGA_TEST_KEYWORDS, TEST_TITLES, TOC_COMPLETE_THRESHOLD,
 )
+from core.toc_page import resolve_toc_page
 from core.urls import abs_url as _abs_url
 # DNS 失败的归因（域名注销 vs 本地解析被污染）：**外部视角的唯一实现**，
 # 判定口径与「为什么不能只凭本机一次解析失败判死」都写在那模块的开头
 from core import dns_check
 from core.rules.replayer import (extract_all as apply_css_rule, extract_all_nodes,
+                          extract_field_in_nodes,
                           parse_rule)
 from core.loader import _normalize_url, fingerprint
 # 判定口径的唯一来源（与「全链路试跑」共用，避免同源两判）。
@@ -94,7 +96,10 @@ from core.constants import DEFAULT_UA
 # 结论词表变了：旧缓存里的 health 是旧词表的产物，必须整体作废（checks 表的
 # 历史值由 Store.migrate_health_tiers_once 一次性映射——纯子集合并、观测不变；
 # 缓存这边直接重探，重跑是已知代价）。
-CACHE_VERSION = 13
+# 14：目录判定改在 **tocUrl 指向的目录页**上做（此前一律在详情页数章节）——
+# 「目录在独立页上」的源（实测 1617 条）从「解析为空＝失效」翻成真实章节数，
+# 结论方向变了，旧缓存的 toc/content 必须作废。
+CACHE_VERSION = 14
 
 #: 缓存有效期（天）：可用源留久一点，其余状态一律短 TTL——「待验证」「需翻墙」
 #: 长期停在旧结论上，比多校验几次更糟。
@@ -1211,7 +1216,18 @@ class AsyncChecker:
             return None
         try:
             html = _decode_body(s_body)
-            urls = apply_css_rule(html, _strip_rule_prefix(book_url_rule))
+            # **bookUrl 在 bookList 节点内求值**（Legado 的字段作用域语义）：
+            # 对整页求值时 `tag.a.0@href` 会先命中导航栏的第一条链接，详情页于是
+            # 变成站点首页，目录/正文跟着全错（实测 SF轻小说/溜达小说/次元姬子
+            # 三条都是这个形态）。见 replayer.extract_field_in_nodes。
+            book_list_rule = str(search.get("bookList", "") or "").strip()
+            if book_list_rule:
+                urls, _h, _e = extract_field_in_nodes(
+                    html, _strip_rule_prefix(book_list_rule),
+                    _strip_rule_prefix(book_url_rule),
+                    Q.MATCHED_NODES_LIMIT, Q.MAX_MATCHED_HTML_CHARS)
+            else:
+                urls = apply_css_rule(html, _strip_rule_prefix(book_url_rule))
             urls = [str(u).strip() for u in urls if str(u or "").strip()]
             if not urls:
                 record.toc_complete = None
@@ -1226,10 +1242,31 @@ class AsyncChecker:
                 record.toc_fail_reason = f"详情页请求失败(status={d_status})"
                 return None
             d_html = _decode_body(d_body)
+            # ---- 目录页在哪：`ruleBookInfo.tocUrl` 是**规则**，要在详情页上求值 ----
+            # 这一步原本**完全缺失**：直接在详情页数章节，于是「目录在独立页上」的
+            # 源（实测库里 1617 条）一律「解析为空」→ `toc_complete=False`——
+            # 把"我们看错了页面"说成"源的目录不完整"。两处实现只对了一处的第二次
+            # 实证见 lessons §二十三；解析口径收在 `core/toc_page`，checker 与
+            # verify 共用同一份。
+            toc_page_url, toc_why = resolve_toc_page(raw, d_html, detail_url)
+            if toc_page_url is None:
+                # 求值不了是我们的能力边界，**不能退回详情页假装没事**
+                record.toc_complete = None
+                record.toc_fail_reason = toc_why
+                return None
+            t_html = d_html
+            if toc_page_url != detail_url:
+                t_status, t_body, _t_cost, t_err, _t_detail = await self._request(
+                    session, record, toc_page_url)
+                if t_status is None or t_status >= 400:
+                    record.toc_complete = None
+                    record.toc_fail_reason = f"目录页请求失败(status={t_status})"
+                    return None
+                t_html = _decode_body(t_body)
             # 基础判定交 core.quality（非空即通过）；比例比对留在下面由 checker 叠加，
             # 因为那依赖 TEST_TITLES 参考数据，是 checker 独有的信息
             chapters, hits, rule_error = extract_all_nodes(
-                d_html, _strip_rule_prefix(chapter_list_rule),
+                t_html, _strip_rule_prefix(chapter_list_rule),
                 Q.MATCHED_NODES_LIMIT, Q.MAX_MATCHED_HTML_CHARS)
             chapters = [str(c).strip() for c in chapters if str(c or "").strip()]
             record.chapter_count = len(chapters)
@@ -1255,7 +1292,11 @@ class AsyncChecker:
                 record.toc_fail_reason = (
                     f"章节数 {record.chapter_count} < 参考 {ref['chapters']}×{threshold}={need}"
                 )
-            return d_body
+            # 交回**目录页**的响应体与地址：正文段要在同一张页面上解析 chapterUrl，
+            # 且相对链接必须以目录页为基准（原来用 domain_url 拼，目录页在子目录时
+            # 会拼出 404 的地址）
+            record.toc_page_url = toc_page_url
+            return t_body if toc_page_url != detail_url else d_body
         except Exception as e:
             record.toc_complete = None
             record.toc_fail_reason = f"验证异常：{type(e).__name__}"
@@ -1292,7 +1333,16 @@ class AsyncChecker:
             return
         try:
             html = _decode_body(toc_body)
-            urls = apply_css_rule(html, _strip_rule_prefix(chapter_url_rule))
+            # chapterUrl 同样在 **chapterList 节点内**求值（与 bookUrl 同一条语义）
+            toc = raw.get("ruleToc") or {}
+            chapter_list_rule = str(toc.get("chapterList", "") or "").strip()
+            if chapter_list_rule:
+                urls, _h, _e = extract_field_in_nodes(
+                    html, _strip_rule_prefix(chapter_list_rule),
+                    _strip_rule_prefix(chapter_url_rule),
+                    Q.MATCHED_NODES_LIMIT, Q.MAX_MATCHED_HTML_CHARS)
+            else:
+                urls = apply_css_rule(html, _strip_rule_prefix(chapter_url_rule))
             urls = [str(u).strip() for u in urls if str(u or "").strip()]
             if not urls:
                 record.content_ok = None
@@ -1300,7 +1350,8 @@ class AsyncChecker:
                 return
             # 中位章节（>1 时取中间），单章源取唯一章节
             pick = urls[len(urls) // 2] if len(urls) > 1 else urls[0]
-            chap_url = _abs_url(domain_url, pick)
+            # 基准是**目录页**（章节链接相对它才有意义），拿不到才退回域名根
+            chap_url = _abs_url(record.toc_page_url or domain_url, pick)
             c_status, c_body, c_cost, c_err, _c_detail = await self._request(
                 session, record, chap_url)
             record.content_response_ms = int(c_cost)

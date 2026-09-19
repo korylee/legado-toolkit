@@ -724,6 +724,66 @@ def extract_all_ex(content: str, rule: str) -> Tuple[List[str], str]:
     return _apply_regex(values, pr.regex, pr.replacement, pr.replace_first), ""
 
 
+def extract_field_in_nodes(
+    content: str,
+    container_rule: str,
+    field_rule: str,
+    limit: int,
+    max_chars: int,
+) -> Tuple[List[str], List[str], str]:
+    """在 ``container_rule`` 选中的**每个节点内**求 ``field_rule``，每个节点取首个非空值。
+
+    这是 Legado 的**字段作用域**语义：列表字段（`bookUrl` / `chapterUrl` /
+    `chapterName` …）是在列表节点内求值的，不是对整页求值。
+
+    **不这么做的代价是整条链路都错**——实测：`bookUrl` 写成 `tag.a.0@href` 时对
+    整页求值会先命中**导航栏的第一条链接**，于是详情页变成站点首页，目录、正文
+    跟着全错。三条真实源（SF轻小说 / 溜达小说 / 次元姬子）的详情页都被解成
+    首页；对比之下 App 引擎拿到的是真正的书页（`/so/45121/` 这类）。
+    TODO §三 里记的「`bookUrl` 少了 bookList 作用域」就是它。
+
+    返回 ``(values, hits, error)``，与 ``extract_all_nodes`` 同形：
+    ``values`` 与容器节点**一一对应**（该节点的字段求值为空时落空串，保持对齐——
+    调用方要按"第几条结果"配对时，错位比缺项更难查）。
+
+    ``limit`` / ``max_chars`` 同样必须显式传（证据预算只在 core.quality 定义一处）。
+    """
+    cpr = parse_rule(container_rule)
+    if cpr.unsupported:
+        return [], [], cpr.unsupported
+    fpr = parse_rule(field_rule)
+    if fpr.unsupported:
+        return [], [], fpr.unsupported
+    if not cpr.steps:
+        return [], [], "容器规则为空"
+    if not fpr.steps:
+        return [], [], "字段规则为空"
+    try:
+        root = _root_of(content, cpr.kind)
+    except Exception as e:
+        return [], [], "内容解析失败：%s" % type(e).__name__
+    nodes, _values, err, _hits = _walk_hits([root], cpr.steps, cpr.kind)
+    if err:
+        return [], [], err
+    values: List[str] = []
+    hits: List[str] = []
+    for node in nodes[:limit]:
+        v_nodes, v_values, v_err, v_hits = _walk_hits([node], fpr.steps, fpr.kind)
+        if v_err:
+            values.append("")
+            continue
+        if v_values is None:
+            if fpr.kind == "json":
+                v_values = [_json_to_text(n) for n in v_nodes]
+            else:
+                v_values = [_extract_value(n, "text", fpr.kind) for n in v_nodes]
+        v_values = _apply_regex(v_values, fpr.regex, fpr.replacement, fpr.replace_first)
+        first = next((str(v).strip() for v in v_values if str(v or "").strip()), "")
+        values.append(first)
+        hits.extend(v_hits or [])
+    return values, hits, ""
+
+
 def extract_all_nodes(
     content: str,
     rule: str,

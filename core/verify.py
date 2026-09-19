@@ -16,7 +16,9 @@ from core.constants import *
 from core.urls import abs_url as _abs_url
 # fetch_ex 而不是 fetch：页面证据要标出「这份 HTML 是刚抓的还是缓存里的」
 from core.fetch import Fetched, fetch_ex, parse_source_header
-from core.rules.replayer import extract_all_nodes, rule_supported
+from core.rules.replayer import (extract_all_nodes, extract_field_in_nodes,
+                                    rule_supported)
+from core.toc_page import is_plain_url, resolve_toc_page
 from core import quality as Q
 
 
@@ -24,16 +26,6 @@ from core import quality as Q
 #: core/app_debug.py）。这里保留 ``_new_page`` 这个名字与调用点形状——本模块
 #: 只做提取，不改行为，也不动既有的三个调用点。
 _new_page = Q.new_page
-
-
-#: 纯地址的 `tocUrl`（http/https、不含模板与规则语法）。实测库里 121 条是这种
-#: 写法、1496 条是规则——两者要分开处理：纯地址直接用，规则要在详情页上求值。
-_PLAIN_URL_RE = re.compile(r"^https?://\S+$")
-
-
-def _is_plain_url(value: str) -> bool:
-    v = str(value or "").strip()
-    return bool(_PLAIN_URL_RE.match(v)) and "{" not in v and "<js" not in v and "@js:" not in v
 
 
 def _extract(html: str, rule: str):
@@ -226,7 +218,15 @@ def verify_chain(source: dict, keyword: str, detail_url: str = "",
 
         # ---- Step 2: 详情链接（取第 pick 条） ----
         book_url_rule = (src.get("ruleSearch") or {}).get("bookUrl", "")
-        hrefs, _hits, _err = _extract(s_html, book_url_rule)
+        # **在 bookList 节点内求值**（Legado 的字段作用域语义，同 checker）：
+        # 对整页求值时 `tag.a.0@href` 先命中导航栏，详情页会变成站点首页
+        book_list_rule = (src.get("ruleSearch") or {}).get("bookList", "")
+        if str(book_list_rule or "").strip():
+            hrefs, _hits, _err = extract_field_in_nodes(
+                s_html, book_list_rule, book_url_rule,
+                Q.MATCHED_NODES_LIMIT, Q.MAX_MATCHED_HTML_CHARS)
+        else:
+            hrefs, _hits, _err = _extract(s_html, book_url_rule)
         hrefs = [str(h).strip() for h in hrefs if str(h or "").strip()]
         if not hrefs or pick > len(hrefs):
             j = Q.Judgement("fail", "取不到详情链接")
@@ -254,23 +254,16 @@ def verify_chain(source: dict, keyword: str, detail_url: str = "",
     toc_page_url = book_url          # 默认：目录就在详情页上（App 的兜底口径）
     try:
         if toc_url_rule:
-            # **先判纯地址**，再判规则：`https://site/toc.html` 这种字符串在
-            # parse_rule 眼里是「一个 CSS 选择器」（解析期看不出来），但它是地址。
-            if _is_plain_url(toc_url_rule):
-                toc_page_url = _abs_url(book_url, toc_url_rule)
-            else:
-                ok_rule, why_rule = rule_supported(toc_url_rule)
-                if not ok_rule:
-                    # 求值不了就**如实说**，不能退回详情页假装没事——App 是能求值的
-                    steps.append(_step(
-                        "toc",
-                        Q.Judgement("unknown", "tocUrl 规则本地无法回放：%s" % why_rule),
-                        book_url, ""))
-                    return _done()
-                d_html = _fetch(book_url).html      # 详情页：tocUrl 规则在它上面求值
-                vals, _h, _e = _extract(d_html, toc_url_rule)
-                picked = next((str(v).strip() for v in vals if str(v or "").strip()), "")
-                toc_page_url = _abs_url(book_url, picked) if picked else book_url
+            # **解析口径在 `core/toc_page` 里，只有那一份**（checker 的全量校验走
+            # 同一份实现——两处各写一遍的代价见那个模块的模块注释）
+            # 纯地址不需要详情页，省一次抓取
+            d_html = "" if is_plain_url(toc_url_rule) else _fetch(book_url).html
+            resolved, why = resolve_toc_page(src, d_html, book_url)
+            if resolved is None:
+                # 求值不了就**如实说**，不能退回详情页假装没事——App 是能求值的
+                steps.append(_step("toc", Q.Judgement("unknown", why), book_url, ""))
+                return _done()
+            toc_page_url = resolved
         f = _fetch(toc_page_url)
         t_html = f.html
         toc = src.get("ruleToc") or {}
@@ -293,7 +286,14 @@ def verify_chain(source: dict, keyword: str, detail_url: str = "",
     try:
         toc = src.get("ruleToc") or {}
         ch_url_rule = toc.get("chapterUrl", "")
-        ch_urls, _hits, _err = _extract(t_html, ch_url_rule)
+        # 同 bookUrl：章节字段也在**列表节点内**求值
+        chapter_list_rule = toc.get("chapterList", "")
+        if str(chapter_list_rule or "").strip():
+            ch_urls, _hits, _err = extract_field_in_nodes(
+                t_html, chapter_list_rule, ch_url_rule,
+                Q.MATCHED_NODES_LIMIT, Q.MAX_MATCHED_HTML_CHARS)
+        else:
+            ch_urls, _hits, _err = _extract(t_html, ch_url_rule)
         # 过滤伪链接（javascript:/# 等），避免抓取报错
         ch_urls = [u for u in ch_urls
                    if u.strip() and not u.strip().lower().startswith(

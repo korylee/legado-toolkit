@@ -58,7 +58,7 @@ def _launcher() -> Path:
 
 
 def _write_args(keyword: str, timeout: int, concurrency: int, limit: int,
-                out_path: Path, source_file: Path) -> None:
+                out_path: Path, source_file: Path, depth: str = "search") -> None:
     """把跑批参数写进 appservice/args.properties（Launcher 的唯一参数入口）。"""
     from core.jvm_env import selftest  # 局部导入避免循环
     repo = settings_store.load().get("jvm", {}).get("app_repo", "").strip()
@@ -72,6 +72,9 @@ def _write_args(keyword: str, timeout: int, concurrency: int, limit: int,
         "out=%s" % out_path.as_posix(),
         "timeout=%d" % (timeout or st_conf.get("timeout", 25)),
         "concurrency=%d" % (concurrency or st_conf.get("concurrency", 8)),
+        # 深度也进参数文件（Launcher 读它转发给 --depth）。**不硬编码 search**：
+        # 设置里选了什么就跑什么，跑批结论里的 stage 才与实际一致
+        "depth=%s" % (depth or st_conf.get("depth", "search")),
     ]
     if limit:
         lines.append("limit=%d" % limit)
@@ -169,7 +172,8 @@ async def jvm_run():
     if out_path.exists():
         out_path.unlink()
     _write_args(conf.get("keyword", "我"), int(conf.get("timeout", 25)),
-                int(conf.get("concurrency", 8)), limit, out_path, src_file)
+                int(conf.get("concurrency", 8)), limit, out_path, src_file,
+                str(conf.get("depth", "search")))
 
     def _blocking() -> Dict[str, Any]:
         code = _run_gradle()
@@ -189,34 +193,25 @@ async def jvm_run():
 
 @router.get("/results")
 def jvm_results():
-    """最近一批 JVM 结论（按 url 去重），供列表合并展示。"""
+    """每源**最深**的一条 JVM 结论，供列表/面板展示。
+
+    取舍规则收在 ``Store.latest_jvm_conclusions``（深者胜、同深取新）——
+    这里**不再自己实现一遍**：列表回填读的是同一张表，两处各写一次就会漂
+    （lessons §二十三 的「同一件事两个实现」已经栽过两次）。
+    """
     st = Store()
     try:
-        kv = st.conn.execute(
-            "SELECT key, value FROM meta WHERE key LIKE 'jvm_check:%' ORDER BY key DESC").fetchall()
+        latest = st.latest_jvm_conclusions()
     finally:
         st.close()
-    latest: Dict[str, Dict[str, Any]] = {}
-    batch_of: Dict[str, str] = {}
-    for k, v in kv:
-        # key 形如 jvm_check:<batch>:<url>；倒序遍历 ⇒ 每个 url 第一条就是最新批次
-        m = re.match(r"jvm_check:([^:]+):(.+)", k)
-        if not m:
-            continue
-        batch, url = m.group(1), m.group(2)
-        if url in latest:
-            continue
-        try:
-            d = json.loads(v)
-        except Exception:
-            continue
-        latest[url] = d
-        batch_of[url] = batch
     dist = Counter(d.get("state") for d in latest.values())
+    stage_dist = Counter(d.get("stage") for d in latest.values())
+    batches = sorted({str(d.get("_batch") or "") for d in latest.values()}, reverse=True)
     return {
         "count": len(latest),
-        "batches": sorted(set(batch_of.values()), reverse=True)[:5],
+        "batches": [b for b in batches if b][:5],
         "dist": dict(dist),
+        "stage_dist": dict(stage_dist),
         "label": STATE_LABEL,
         "items": [{"url": u, **d} for u, d in latest.items()],
     }

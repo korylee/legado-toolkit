@@ -95,7 +95,9 @@ class PatchSemanticsTests(SettingsApiTestCase):
         self.assertEqual(set(got["limits"]),
                          {"concurrency", "timeout", "probe_depth",
                           "cache_ttl_ok", "cache_ttl_other", "cache_ttl_auth",
-                          "jvm_timeout", "jvm_concurrency", "jvm_limit"})
+                          "jvm_timeout", "jvm_concurrency", "jvm_limit",
+                          # 枚举型：前端据此渲染深度下拉，不在 JS 里再写一份（AGENTS #8）
+                          "jvm_depth"})
         self.assertEqual(got["limits"]["probe_depth"], (1, 2, 3, 4))
 
     def test_reset_endpoint_restores_defaults(self) -> None:

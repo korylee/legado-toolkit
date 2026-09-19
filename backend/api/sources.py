@@ -1,9 +1,7 @@
 # -*- coding: utf-8 -*-
 import collections
-from typing import Any, Dict, Optional
+from typing import Optional
 
-import json
-import re
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from core.loader import _normalize_url
@@ -39,11 +37,16 @@ def list_sources(
     # 来源阶梯（S2）：给每行附上最近一批 JVM 结论（无则缺省）。
     # **不写 checks**——JVM 与本地回放是两条证据，混在一个字段里就分不出谁说的。
     try:
-        jvm = _latest_jvm_map(st)
+        jvm = st.latest_jvm_conclusions()
         for it in items:
             j = jvm.get(_normalize_url(str(it.get("source_url", "") or "")).rstrip("/"))
             it["jvm_state"] = j.get("state", "") if j else ""
+            it["jvm_stage"] = j.get("stage", "") if j else ""
             it["jvm_hit"] = j.get("hit") if j else None
+            it["jvm_toc_count"] = j.get("toc_count") if j else None
+            it["jvm_toc_ok"] = j.get("toc_complete") if j else None
+            it["jvm_content_len"] = j.get("content_len") if j else None
+            it["jvm_content_ok"] = j.get("content_ok") if j else None
             it["jvm_batch"] = j.get("_batch", "") if j else ""
     except Exception as exc:
         # 静默吞掉的话，「为什么列表上看不到 JVM 结论」就永远查不出来——
@@ -52,29 +55,6 @@ def list_sources(
         traceback.print_exc()
         print(f"[list_sources] JVM 结论回填失败: {exc!r}", flush=True)
     return {"total": total, "items": items}
-
-
-def _latest_jvm_map(st) -> Dict[str, Dict[str, Any]]:
-    """{归一化 url: jvm 结论}，取每个 URL 最新批次的一条。"""
-    kv = st.conn.execute(
-        "SELECT key, value FROM meta WHERE key LIKE 'jvm_check:%' ORDER BY key DESC").fetchall()
-    out: Dict[str, Dict[str, Any]] = {}
-    for k, v in kv:
-        m = re.match(r"jvm_check:([^:]+):(.+)", k)
-        if not m:
-            continue
-        # key 尾是 JVM 报告的原文 url（库里的 URL 本身有脏字符：前导空格/尾斜杠，
-        # lessons §五十一 实测 77/77 要靠宽松归一对上）——两侧都要归一
-        url = _normalize_url(m.group(2).strip()).rstrip("/")
-        if url in out:
-            continue
-        try:
-            d = json.loads(v)
-        except Exception:
-            continue
-        d["_batch"] = m.group(1)
-        out[url] = d
-    return out
 
 
 @router.get("/urls")

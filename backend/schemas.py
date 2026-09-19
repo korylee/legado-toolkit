@@ -31,7 +31,14 @@ class SourceOut(BaseModel):
     #: response_model 会按模型裁字段——之前 enrichment 在服务端明明算出来了，
     #: HTTP 响应里却全变空，查起来极像前端 bug。
     jvm_state: str = ""
+    #: 结论跑到的最深一段（search/toc/content）。列表 tooltip 按它决定展示哪几行：
+    #: 「跑到搜索」的行不该显示「目录：未验证」——那是**没跑**，不是**跑了没过**
+    jvm_stage: str = ""
     jvm_hit: Optional[int] = None
+    jvm_toc_count: Optional[int] = None
+    jvm_toc_ok: Optional[bool] = None
+    jvm_content_len: Optional[int] = None
+    jvm_content_ok: Optional[bool] = None
     jvm_batch: str = ""
 
 
@@ -237,6 +244,9 @@ class JvmSettingsPatch(BaseModel):
     timeout: Optional[int] = None
     concurrency: Optional[int] = None
     limit: Optional[int] = None
+    #: 探测深度（search/toc/content）。取值与范围只在 settings_store.JVM_DEPTHS，
+    #: 这里只管收——收敛交给 coerce（同 CheckSettingsPatch 的约定）
+    depth: Optional[str] = None
 
 
 class SettingsPatch(BaseModel):

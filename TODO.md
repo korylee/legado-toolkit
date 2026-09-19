@@ -84,16 +84,8 @@ meta 落库、列表阶梯列）——S3 只往里加深度，不另起炉灶。
 |---|---|---|
 | **S3-1 目录段** ✅（2026-09-19） | `depth` 参数（search/toc）+ `stage` 字段 + `runTocStage`（getBookInfoAwait → getChapterListAwait，链路照抄 Debug.kt）+ 结论字段 `toc_count`/`toc_raw_count`/`toc_sample`/`toc_complete`/`book_url`/`toc_url`；顺手修两处：源无搜索规则不再报 error（是能力事实不是网络失败）、**Koin 网关一次补齐 7 个**（目录段触发 AppLog → OtherSettingsGateway 缺定义，12 条里 7 条栽在这） | ✅ 100 条抽样：95 条跑到目录段（SF轻小说 1201 章 / 听书 1251 / 全本 433，**章数经独立抓页验证属实**）。⚠️ **原判据（与本地矛盾率 <15%）作废**——两边不是同一把尺，74.7% 里混着口径差异与本地实现缺陷，见 lessons §二十三「第二次实证」 |
 | **S3-2 正文段** ✅（2026-09-19） | `depth=content`：目录第 1 章（`nextChapterUrl` 取第 2 章，Debug.kt:353 口径）→ `getContentAwait(needSave=false)`；结论带 `content_len`/`content_ok`/`content_sample`/`chapter_title`/`chapter_url`。判定**语义对齐** `core.quality.judge_content`（非空即通过 + 类型分流；跨语言不共享代码）。**TocStage 带着 book/chapters 走**——正文段若重新搜一次，可能命中的不是同一本书 | ✅ 100 条：97 条跑到正文段，78 条有正文（中位数 **2569 字**，p10 890 / p90 5502）；独立抓页自证（溜达小说：页面 `#content` 4203 字 vs JVM 报 4136，开头逐字一致）。**跑批暴露三处结论质量问题，均已修**：① 引擎把异常消息当正文返回（塔读系 4 条，`java.ajax` 抛 `IllegalArgumentException` → 「非空即通过」判它 ok = 假通过）；② `ContentEmptyException`/`TocEmptyException` 被归成 `error` 混进网络桶（其实是源级空）；③ 超时文案谎报「每源总预算用尽」——实测是 App 内部的 **60s 读超时**（`HttpHelper`），故 `timeout` 要 >60s 才有区分度 |
-| **S3-3 结论落库 + 界面** | meta 键升级为 `jvm_check:<batch>:<url>` 内含 `depth` 字段（**键格式不变**，读侧按 depth 取最深一条）；`/api/jvm/results` 与列表回填带 `jvm_toc`/`jvm_content`；列表 JVM 列 tooltip 显示「搜索✓ 目录 856 章 正文 ✓」；JvmSettingsPanel 加「探测深度」选择（枚举进 `settings_store.LIMITS`，AGENTS #8） | 界面上能选深度、能看见三段结论；`settings limits` 测试同步更新 |
+| **S3-3 结论落库 + 界面** ✅（2026-09-19） | 设置加 `jvm.depth`（枚举 `JVM_DEPTHS` 只在 `settings_store` 定义，前端经 `limits.jvm_depth` 拿选项）；`args.properties` 透传 depth；**「取最深一条」收进 `Store.latest_jvm_conclusions`**（深者胜、同深取新）——`/api/jvm/results` 与列表回填**共用这一份实现**（原来各写一遍，正是 lessons §二十三 那个坑）；列表新增 `jvm_stage`/`jvm_toc_count`/`jvm_toc_ok`/`jvm_content_len`/`jvm_content_ok` | ✅ 端到端验证：tooltip 实测渲染「搜索：命中 10 本 ✓ / 目录：432 章 ✓ / 正文：2583 字 ✓」；设置面板「校验深度」三档（标签改名以免与本地回放的「探测深度」同名不同物）；5 个新测试钉住取舍规则（含「后跑的浅批次不许盖掉先跑的深结论」） |
 | **S3-4 浏览器桥 (b)** | **先做「检测」再做「渲染」**：① (a2) 的空壳判定从「特征词猜测」升级为「用浏览器渲染一次再判」——`empty_js_shell` 的源自动进浏览器复验，渲染后规则跑出内容 → 结论改 ok（带 `rendered: true` 标注）。⚠️ **壳判定需要页面 HTML，而 `searchBookAwait` 只回 BookList 不回页面**——复验路径要么直接 `AnalyzeUrl(searchUrl).getStrResponse()` 拿渲染后页面再喂 `AnalyzeRule`，要么走 shadow 后的完整链路（② 做完 ① 自动获得），动手时先确认取页面这条最短路径；② shadow `BackstageWebView.getStrResponse()`：拦截点在 `AnalyzeUrl.kt:440-470` 的两处 `BackstageWebView(` 构造（POST 与 GET 分支）——shadow 类转发给本机 Edge（`C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe` 已确认存在）起 CDP：`Page.navigate` → 等 load → `Runtime.evaluate('document.documentElement.outerHTML')` → 包成 `StrResponse`（构造它要先建 okhttp `Response`，`StrResponse.kt` 的 `raw` 字段是必填）。**专用 user-data-dir**（新 Chrome 安全加固），profile 可持久化放 cookie。**Edge 不可用时显式报 `browser_unavailable`**，不静默退回空壳判定 | 全量重跑后 `empty_js_shell` 从 11 条降到 ≤3 条（其余转 ok 或有结论的 error）；带 `rendered: true` 的源在 tooltip 里标注「浏览器渲染」；App 仓库 `git status` 恒为空 |
-
-**S3-1 顺带暴露的本地缺陷（独立于 S3，待修）**：`checker._probe_toc` 没接
-`ruleBookInfo.tocUrl`（只在详情页数章节），而 `verify.py` 那条链接了——库里 **1617 条**
-目录在独立页上的源因此在 `checks` 里带着 `toc_complete=False` 的**假结论**（实测
-SF轻小说：本地 False/0 章，JVM True/1201 章，手工喂对页面后本地能跑出 1227 值）。
-修法：把 `verify.py` 的 tocUrl 求值逻辑提成共用函数，两条链都调（同一件事两个实现，
-lessons §二十三）。**改动会翻转结论 → 需要 CACHE_VERSION bump + 一次全量重跑**，
-所以单独排（不要塞进 S3）。
 
 **关键约束（动手时重读）**：
 
@@ -147,17 +139,26 @@ App 自带的校验结果，**一行 App 数据都不写**。回推（备份 →
 **判定**：真机结论的**证据等级最高**（真引擎 + 真环境 + 真 cookie），落 `checks` 时要
 按来源阶梯标注（本地回放 < JVM < 真机），别和另外两条混成一个数。
 
-## 三、本地回放：剩下的一件事
+## 三、本地回放：剩下的一件 ✅（2026-09-19 已完成，见下）
 
-**只剩一件**：`bookUrl` 少了 bookList 作用域（旧称 §1-A）。
+**`bookUrl` 的 bookList 作用域已补**（旧称 §1-A），并且发现它是**一类**问题：
+列表字段（`bookUrl` / `chapterUrl`）在 Legado 里是**在列表节点内**求值的
+（`BookChapterList.kt` 的 `elements.forEachIndexed { setContent(item) }`），
+而对整页求值时 `tag.a.0@href` 先命中导航栏 → 详情页变成站点首页 → 目录/正文全错。
+修法：`replayer.extract_field_in_nodes`（一个实现），checker 与 verify 都调它；
+配套修了目录页 `tocUrl` 那条（checker 原来完全不看 tocUrl）。
+实测：溜达小说 0→1914 章、穿越小说 0→1664 章、必去网站 0→1491 章，
+SF轻小说从「False＝源坏了」翻成 `None`（诚实的 `{{}}` 能力边界）。
+CACHE_VERSION 13→14，**全量已重跑**（depth 4，3774 条 / 8 分钟 / 写库失败 0）：
+113 条源从「0 章」翻成有真实章节（中位 398 章、合计 11.9 万章）；
+28 条反向变化全部归因清楚（19 条是这一轮限流没走到目录段、8 条是旧实现在整页
+瞎选到一个 URL 的"假成功"、8 条是 tocUrl 回放不了改成如实判 unknown）。
+跑前快照与库备份留在 `data/app_probe/check_snapshot_*.json` 与 `data/backups/`。
 
-**证据**：实测 `book.sfacg.com`——现状把 `tag.a@href` 作用于**整页** → 解出 33 条
-（全是导航栏），取第一条 = `https://www.sfacg.com`（漫画首页）；按 Legado 语义先在
-`tag.form@tag.table.-2@tag.ul` 节点内取 → `https://book.sfacg.com/Novel/249775`（对的）。
-
-**已修的两条**（别重复查）：`text.`/`children.` 简写的**判定半边**（一律 unknown）、
-`_probe_toc` 接入 `tocUrl`（含 `verify.py` 把 tocUrl 当 URL 字符串的附带 bug）——
-`git log` 与 lessons §四十四。
+**已修的三条**（别重复查）：`bookUrl`/`chapterUrl` 的**列表作用域**、
+`text.`/`children.` 简写的**判定半边**（一律 unknown）、`_probe_toc` 接入 `tocUrl`
+（含 `verify.py` 把 tocUrl 当 URL 字符串的附带 bug）——`git log`、
+lessons §二十三「第二次实证」与 §四十四。
 
 **还值得做的**（按收益排，**全部是「能被验到」而非「不被冤枉」**——冤枉那半已修完）：
 

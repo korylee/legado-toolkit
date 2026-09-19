@@ -18,10 +18,15 @@ SEARCH_HTML = """
   <li class="item"><h3><a href="/book/2">第二本</a></h3></li>
 </div>
 """
+#: 目录页。**列表项与字段分层**（li 里放 a）：App 是「先取 chapterList 节点，
+#: 再在每个节点内求 chapterUrl」（`BookChapterList.kt`）——写成 `<a>` 直接挂在
+#: `.chapters` 下、chapterList 又选到 `<a>` 的话，App 也取不到 url，
+#: 而旧 fixture 只有「整页求值」的旧实现才跑得通：那种绿是假的。
 TOC_HTML = """
 <div class="chapters">
-  <a href="/read/1.html">第1章</a><a href="/read/2.html">第2章</a>
-  <a href="/read/3.html">第3章</a>
+  <li><a href="/read/1.html">第1章</a></li>
+  <li><a href="/read/2.html">第2章</a></li>
+  <li><a href="/read/3.html">第3章</a></li>
 </div>
 """
 #: 正文恰好 200 字符 —— test_content_values_are_full_text 钉的就是这个数
@@ -46,7 +51,7 @@ SOURCE = {
     "searchUrl": "https://site/search?q={{key}}",
     "ruleSearch": {"bookList": "class.item", "name": "tag.a@text",
                    "bookUrl": "tag.a@href"},
-    "ruleToc": {"chapterList": "class.chapters@tag.a", "chapterName": "tag.a@text",
+    "ruleToc": {"chapterList": "class.chapters@tag.li", "chapterName": "tag.a@text",
                 "chapterUrl": "tag.a@href"},
     "ruleContent": {"content": "id.content@text"},
 }
@@ -211,8 +216,9 @@ class TocUrlBranchTests(unittest.TestCase):
 
     #: 详情页：只有 tocUrl 规则要取的那个链接，没有章节列表
     DETAIL_HTML = '<div class="info"><a class="toc-link" href="/toc/9.html">目录</a></div>'
-    #: 独立目录页：章节列表在这里
-    TOC_PAGE_HTML = '<div class="chapters"><a href="/read/1.html">第1章</a></div>'
+    #: 独立目录页：章节列表在这里（列表项与字段分层，同 TOC_HTML 的理由）
+    TOC_PAGE_HTML = ('<div class="chapters">'
+                     '<li><a href="/read/1.html">第1章</a></li></div>')
 
     def _pages(self):
         pages = dict(PAGES)
@@ -250,13 +256,13 @@ class TocUrlBranchTests(unittest.TestCase):
         而它只在「tocUrl 指向独立目录页」时才会不同，正是这次修的那条路。
         """
         src = source_with(ruleBookInfo={"tocUrl": "class.toc-link@href"},
-                          ruleToc={"chapterList": "class.chapters@tag.a",
+                          ruleToc={"chapterList": "class.chapters@tag.li",
                                    "chapterUrl": "tag.a@href"})
         pages = self._pages()
         # **不能写 `/read/1.html`**：那是根绝对路径，按哪个 base 补全都一样，
         # 这条用例就测不出 base 是谁。要的是真正的相对链接。
         pages["https://site/toc/9.html"] = (
-            '<div class="chapters"><a href="read/1.html">第1章</a></div>')
+            '<div class="chapters"><li><a href="read/1.html">第1章</a></li></div>')
         pages["https://site/toc/read/1.html"] = CONTENT_HTML
         with patch("core.verify.fetch_ex",
                    side_effect=lambda url, **kw: Fetched(pages.get(url, ""), False, "")):
