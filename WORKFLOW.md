@@ -33,7 +33,7 @@
                           └───────────────────────────────────┘
                                             ▼
                           ┌───────────────────────────────────┐
-                          │  校验 check                       │  ← 指纹一致且未过期的
+                          │  校验 check                       │  ← 特征一致且未过期的
                           │  （Web 按钮 / CLI 对文件跑）      │     缓存才复用；出健康度+星级
                           └───────────────────────────────────┘
                                             ▼
@@ -75,7 +75,7 @@ echo 'https://www.koudaimh.com/search?q=%E7%BB%8D%E5%AE%8B' |
 它写的是另一个 SQLite 文件、而那个文件在本机根本不存在，批准又写回 `candidates.json`
 ——都已不是事实来源。）
 
-粘贴外部 JSON，按 URL + 规则指纹三分类：
+粘贴外部 JSON，按 URL + 规则特征三分类：
 
 - **新 URL** → 写入管理库，按原分组推断健康状态（无信号默认「待验证」）。
 - **同 URL 同规则** → 重复，跳过。
@@ -113,10 +113,10 @@ python cli/main.py prepare -i "D:\DownloadsshareBookSource(1).json" -i candidate
 - `candidates-full.json`：完整候选版，分组为类型 + 状态；
 - `candidates-fast.json`：仅保留当前标记为可用的快速使用版。
 
-未联网复检时，状态只从旧分组迁移：明确带可用标记的归为“可用”，无法确认的全部归为“待验证”。
+未联网复查时，状态只从旧分组迁移：明确带可用标记的归为“可用”，无法确认的全部归为“待验证”。
 
 ```powershell
-# 1. 校验：仅 URL、规则指纹一致且缓存未过期的源可跳过联网
+# 1. 校验：仅 URL、规则特征一致且缓存未过期的源可跳过联网
 python cli/main.py check -i candidates.json -o out/checked.json --cache-dir check_cache -c 50 -t 8
 
 # 网络刚恢复，绕过旧缓存并用本次成功结果更新缓存
@@ -226,11 +226,11 @@ python cli/main.py report -i out/organized.json -r check_cache -o out/final_repo
 ## 六、维护建议
 
 1. **新增源走 `add`（CLI）或 Web 的「新增」；外部源走 Web 的「导入」**。不要用 `merge --mode replace` 直接覆盖管理库里的源。
-2. **规则冲突要人工判断**：先用 `check` 看外部那版的实测结果，确实更好再用导入对话框的 `overwrite` 覆盖；覆盖后指纹变化会强制复检。
+2. **规则冲突要人工判断**：先用 `check` 看外部那版的实测结果，确实更好再用导入对话框的 `overwrite` 覆盖；覆盖后特征变化会强制复查。
 3. **缓存会自动过期**：可用源 14 天、其余状态 7 天；其中「需登录」单独 1 天（它常由
    当时的页面启发式判出，锁久了点重校验只会看到复用缓存）；「证书问题」**永不复用**
-   （关掉证书校验就能变好，复用等于修了没修）。旧版本缓存也会自动复检。
-4. **被墙源**（🌐）可加 `--proxy` 复检：`python cli/main.py check -i x.json --proxy http://127.0.0.1:7890`
+   （关掉证书校验就能变好，复用等于修了没修）。旧版本缓存也会自动复查。
+4. **被墙源**（🌐）可加 `--proxy` 复查：`python cli/main.py check -i x.json --proxy http://127.0.0.1:7890`
    （原先这里写的 `socks5://` 是失实示例——urllib 与 aiohttp 都不认，会直接连接失败。
    代理只支持 `http://` / `https://`。）
    Web 端不必敲命令：**设置 → 校验 → 代理** 里配一次，或在校验前用工具栏的
@@ -325,8 +325,8 @@ python cli/main.py diagnose -i out/checked.json -o out/diagnose.md --only-dead -
 | 死站 | 域名解析失败 / 连接失败 / 重置 / TLS | 两次明确失败后淘汰 |
 | 规则漂移 | 域名可达（200），但搜索跑不出结果或列表解析为空 | **保留**，进 AI 修复队列 |
 | 站点转型 | 实测类型与 `bookSourceType` 不符 | 改类型或按新类型重建规则 |
-| 需登录 | 403/429/验证码/登录墙 | 保留，人工或改 UA/Cookie 复检 |
-| 疑似可用 | 搜索能解析出列表 | 复检一次，可能是缓存过期或临时故障 |
+| 需登录 | 403/429/验证码/登录墙 | 保留，人工或改 UA/Cookie 复查 |
+| 疑似可用 | 搜索能解析出列表 | 复查一次，可能是缓存过期或临时故障 |
 
 ### 规则回放器 `core/rules/replayer.py`
 

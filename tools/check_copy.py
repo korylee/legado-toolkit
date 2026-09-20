@@ -57,6 +57,12 @@ TERM_RULES: Dict[str, Tuple[str, str]] = {
 #: 键是术语，值是**紧邻前一个字符**——等于它就跳过这一处匹配。按需加，别预加。
 _TERM_GUARDS = {"试跑": "调"}
 
+#: 后缀护栏：同样的道理，但撞的是**后一个字符**。加它的判据是「后面接上这个字就成了
+#: 一个专有名字」，而不是「我想放它一马」。
+#: 目前只有一条：**「回放器」是组件名**（`core/rules/replayer.py`，README/AGENTS 都用它），
+#: 而「回放」作为**动作词**仍然禁掉（「本地回放」这类写法照抓）。按需加，别预加。
+_TERM_SUFFIX_GUARDS = {"回放": "器"}
+
 #: 永久例外标记：必须**逐字保留**的串（换词表的键、协议字面量等）在行尾写
 #: ``# copy-ok: 理由``。这类例外**不进基线**——基线是「只减不增」的欠账清单，
 #: 往里塞永久条目等于把闸门关掉（AGENTS #18）。
@@ -75,11 +81,15 @@ LONG_TEXT = 40
 def _term_hits(text: str, term: str) -> int:
     """术语在文案里出现的次数，**排除跨词巧合**（见 ``_TERM_GUARDS``）。"""
     guard = _TERM_GUARDS.get(term, "")
+    suffix_guard = _TERM_SUFFIX_GUARDS.get(term, "")
     count, idx = 0, text.find(term)
     while idx >= 0:
-        if not guard or text[idx - 1:idx] != guard:
+        end = idx + len(term)
+        head_ok = not guard or text[idx - 1:idx] != guard
+        tail_ok = not suffix_guard or text[end:end + 1] != suffix_guard
+        if head_ok and tail_ok:
             count += 1
-        idx = text.find(term, idx + len(term))
+        idx = text.find(term, end)
     return count
 
 
@@ -255,10 +265,17 @@ def python_candidates(path: pathlib.Path) -> List[Tuple[int, int, str]]:
 
 
 #: 要扫的目录与后缀。``tools/`` 自己不扫（本模块的 docstring 里全是反面例子）。
+#:
+#: **`README.md` / `WORKFLOW.md` 也算文案面**（它们是给使用者的）：AGENTS #18 的
+#: 「一个词只指一件事」不加这两份，就只在代码里成立、在文档里是空的——实测
+#: README 里「试跑 / 本地回放」就是这么活到被审计翻出来的。
+#: **`skills/*.md` 不扫**：那是写给改代码的人的（与注释同一档，精确优先）。
 TARGETS = (("frontend/src", (".vue", ".js")),
            ("core", (".py",)),
            ("backend", (".py",)),
-           ("cli", (".py",)))
+           ("cli", (".py",)),
+           ("README.md", (".md",)),
+           ("WORKFLOW.md", (".md",)))
 
 
 def has_copy_ok(path: pathlib.Path, start: int, end: int) -> bool:
@@ -279,14 +296,46 @@ def has_copy_ok(path: pathlib.Path, start: int, end: int) -> bool:
     return False
 
 
+def markdown_candidates(path: pathlib.Path) -> List[Tuple[int, int, str]]:
+    """Markdown 的「文案」：正文行（含表格单元格），跳过围栏与缩进代码块。
+
+    **围栏代码块不是文案**（那样本模块的 docstring 就该被扫了）：JSON 片段、命令行、
+    URL 里的中文都不是给用户看的措辞。行首的 `>`、`-`、`|` 等标记不影响词匹配，
+    原样带进去即可。
+    """
+    out: List[Tuple[int, int, str]] = []
+    in_fence = False
+    for i, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            in_fence = not in_fence
+            continue
+        if in_fence or not stripped:
+            continue
+        if line.startswith("    ") or line.startswith("	"):
+            continue
+        if not _HAN.search(stripped):
+            continue
+        out.append((i, i, stripped))
+    return out
+
+
 def scan(root: pathlib.Path) -> List[dict]:
     """全量扫描，返回违规列表（未去重、未过滤基线）。"""
     out: List[dict] = []
     for rel, exts in TARGETS:
-        for path in sorted((root / rel).rglob("*")):
+        base = root / rel
+        # 目标是单个文件时直接用它（README.md/WORKFLOW.md）；目录才 rglob
+        paths = [base] if base.is_file() else sorted(base.rglob("*"))
+        for path in paths:
             if path.suffix not in exts or not path.is_file():
                 continue
-            reader = python_candidates if path.suffix == ".py" else frontend_candidates
+            if path.suffix == ".py":
+                reader = python_candidates
+            elif path.suffix == ".md":
+                reader = markdown_candidates
+            else:
+                reader = frontend_candidates
             try:
                 candidates = reader(path)
             except (OSError, UnicodeDecodeError) as e:

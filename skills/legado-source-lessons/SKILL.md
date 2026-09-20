@@ -56,7 +56,7 @@ description: 本项目的架构决策与踩过的坑——规则回放器一致�
 **④ 留痕与复用绑在同一个开关上。** `should_cache_result()` 想防「一次断网污染后续
 校验」，却顺手把**落库**也禁了；而列表是按「有没有 checks 行」算「未校验」的 →
 1222 条源永远显示「未校验」，每次全量还要重打一遍。拆开：**照写，但绝不复用**
-（复用的门在 `is_cache_item_valid` 的 `is_transient`）。
+（复用的门在 `is_cache_item_valid` 的 `is_inconclusive`）。
 
 **规矩**：
 
@@ -534,10 +534,13 @@ group 是 `organizer.group_title` / `store._system_group_for` **按 `bookSourceT
     # 一行就能证伪一个猜测
     sum(1 for s in d if ...)
 
-**推论：注释与代码不一致时，信代码。** `_classify` 的注释写着「其他 2xx/3xx 视为可达」，
+**推论：注释与代码不一致时，信代码。** 当时 `_classify` 的注释写着「其他 2xx/3xx 视为可达」，
 而代码是 `return Health.OK`——**没有范围判断**，404 / 400 / 410 / 451 全被判成「可用」
 （实测库里 91 条 `ok` + 4xx）。注释描述的是**意图**，代码描述的是**行为**；
 两者矛盾时，坏掉的是行为，修的时候两边都要改。
+
+> **该缺陷已修**（`CACHE_VERSION 9`：4xx 一律判 `dead`，见 `checker.classify_http_status`）。
+> 留在这里的是**判据**，不是待办：**别把「注释这么写的」当成「代码这么做」。**
 
 ## 二十三、同一件事可能走两个函数
 
@@ -896,6 +899,10 @@ Cloudflare 连不上，规则把它留在了「待复检」（只凭阿里就已
   有 `#` / emoji / 空白 / 括号分隔，或去掉后名字已在库中时才删。
 - 类型 / 品牌 emoji（🎧🎨📖📥📚🎵🎬📺🔞）首尾保护；其余装饰符号才清。
 - 空 / 过短才回退域名主名，且置信度降到 0.5 以下。
+
+**调试那条链路同理**：调试抽屉跑的是**表单里当前的规则**，源没保存时它的
+`fingerprint` 与库里那行不一致，于是那次调试写下的缓存**下次校验用不上**
+（`is_cache_item_valid` 要比 fingerprint）。这不是缺陷，是「缓存键就是规则本身」的必然结果。
 
 **写路径的代价**：`core/loader.fingerprint` 包含 `bookSourceName`，改名会让校验缓存
 失效、下次重跑。apply 必须同时更新 `sources.name` 与 `raw_json["bookSourceName"]`，

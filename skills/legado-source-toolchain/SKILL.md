@@ -103,7 +103,7 @@ JSONPath 递归下降 `..` 等）。**完整清单以 `parse_rule(...).unsupport
 
     python cli/main.py diagnose -i x.json -o out/diagnose.md --only-dead
     python cli/main.py repair   -i x.json --report out/repair.md
-    python cli/main.py repair   -i x.json --write -o data/sources/x_fixed.json
+    python cli/main.py repair   -i x.json --write -o data/x_fixed.json
 
 闭环是「抓证据 → 模型提议 → 回放验证 → 失败差异回喂重试」。
 **模型只提议，验收一律由回放器完成**，不通过不落地。
@@ -111,9 +111,9 @@ JSONPath 递归下降 `..` 等）。**完整清单以 `parse_rule(...).unsupport
 ## 七、日常 runbook
 
     # 全量校验（增量，缓存命中不联网）
-    python cli/main.py check -i data/sources/candidates.json -o data/out/checked.json -c 50
+    python cli/main.py check -i data/candidates.json -o data/out/checked.json -c 50
     # 整理 + 报告
     python cli/main.py organize -i data/out/checked.json -o data/out/organized.json -r data/check_cache
     python cli/main.py report -i data/out/organized.json -r data/check_cache -o data/out/report.md
     # 校验前的备份（candidates.json 不在 git 里，务必单独备份）
-    Copy-Item data/sources/candidates.json "data/backups/candidates_$(Get-Date -Format yyyyMMdd_HHmm).json"
+    Copy-Item data/candidates.json "data/backups/candidates_$(Get-Date -Format yyyyMMdd_HHmm).json"

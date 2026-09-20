@@ -456,7 +456,6 @@ window.scrollTo(0, document.body.scrollHeight);
   "bookSourceType": 2,
   "customOrder": 0,
   "enabled": true,
-  "enabledExplore": true,
   "header": "{\"User-Agent\":\"Mozilla/5.0 (Linux; Android 10)\"}",
   "loginUrl": "",
   "charset": "utf-8"
@@ -466,8 +465,10 @@ window.scrollTo(0, document.body.scrollHeight);
 | 字段 | 说明 |
 | :--- | :--- |
 | `bookSourceType` | 0=文本，1=音频，2=漫画，3=文件 |
-| `bookSourceGroup` | 分组名，多个用逗号或 `&&` |
-| `enabledExplore` | 是否启用发现 |
+| `bookSourceGroup` | 分组名，**多个用逗号（或分号）分隔**——上游就按 `[,;，；]` 切
+（`AppPattern.splitGroupRegex`）。`&&` 是 **`exploreUrl` 多项之间**的分隔，不是分组分隔符 |
+| `enabledExplore` | 是否启用发现。**不要手写**：有 `exploreUrl` / `ruleExplore` 才算数，
+由配置推导（AGENTS #13——手写实测漂了 885 条），缺这个键时导入链路会自己对齐 |
 | `header` | 全局请求头，JSON 字符串 |
 | `charset` | GBK 页面需指定，如 `gbk` |
 
