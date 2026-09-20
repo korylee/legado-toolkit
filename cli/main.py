@@ -182,6 +182,10 @@ def cmd_check(args: argparse.Namespace) -> int:
         proxy=getattr(args, "proxy", None),
         probe_depth=getattr(args, "probe_depth", DEPTH_SEARCH),
         refresh_cache=refresh_cache,
+        # --no-cache 要**真的**不读不写：只把 cache_dir 置空挡不住 store 后端
+        # （use_store 默认 True）。不给这一项的话，help 里那句「不读取旧缓存，
+        # 也不写入本次结果」在默认配置下是假的——读的还是管理库、写的也是。
+        use_store=False if getattr(args, "no_cache", False) else None,
     )
     # 统计
     from collections import Counter
@@ -200,6 +204,17 @@ def cmd_check(args: argparse.Namespace) -> int:
         data = organize_sources(results, skip_disabled=not args.keep_disabled)
         dump_json_file(output, data)
         print(f"已保存整理结果: {output}")
+    # **落库了 health 就要重建那几条的组名**，否则界面上一屏两个来源打架：
+    # 健康列读 checks.health、标签列读 sources.group_name，而 CLI 的 organize
+    # 只写 JSON、不写库——那个组名会一直停在旧结论上。口径与 Web 那条链路
+    # （backend/api/ops.py）完全相同：只重建**这次校验过的**源。
+    # 两个后端都没被关掉时才重建（`--no-cache` 不落库、`--legacy-cache` 落 NDJSON）
+    store_backend = not (getattr(args, "no_cache", False)
+                         or getattr(args, "legacy_cache", False))
+    if results and store_backend:
+        from core.store import Store
+        with Store() as st:
+            st.rebuild_system_tags([r.url for r in results])
     return 0
 
 

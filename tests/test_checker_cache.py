@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import sys
 import unittest
 from argparse import Namespace
 
@@ -326,6 +327,66 @@ class TransportErrorRoutingTests(unittest.TestCase):
         exc = aiohttp.ServerDisconnectedError()
         _status, _body, _cost, err, _detail = self._call(exc)
         self.assertEqual(err, "reset")
+
+
+class CheckCmdWiringTests(unittest.TestCase):
+    """`check` 命令的接线：参数**真的**传下去了吗。
+
+    这两条不去读源码里的调用语句（那种用例改坏源码照样绿），而是把下游打桩、
+    断言「下游收到了什么」：`--no-cache` 要变成 `use_store=False`（否则 help 那句
+    「不读不写」在默认后端下是假的），以及**校验完要重建那几条源的组名**
+    （不重建的话界面上健康列与标签列会互相打架，口径同 backend/api/ops.py）。
+    """
+
+    def _run_check(self, argv):
+        from unittest import mock
+        from cli import main as M
+        from core.models import build_record, Health
+
+        rec = build_record(make_source(), 0)
+        rec.health = Health.OK
+        seen = {}
+
+        def fake_run(records, **kw):
+            seen.update(kw)
+            return records
+
+        class FakeStore:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def rebuild_system_tags(self, urls=None):
+                seen["rebuild_urls"] = urls
+                return len(urls or [])
+
+        # main() 不带参数（自己读 sys.argv），所以连 argv 一起打桩
+        with (mock.patch.object(sys, "argv", ["legado-tools"] + argv),
+              mock.patch.object(M, "_resolve_input", lambda args: "x.json"),
+              mock.patch.object(M, "_load_records", lambda path, limit: ([rec], [{}])),
+              mock.patch.object(M, "dump_json_file", lambda *a, **k: None),
+              mock.patch("core.checker.run_check", fake_run),
+              mock.patch("core.store.Store", FakeStore)):
+            rc = M.main()
+        self.assertEqual(rc, 0)
+        return seen
+
+    def test_no_cache_becomes_use_store_false(self):
+        seen = self._run_check(["check", "-i", "x.json", "--no-cache"])
+        self.assertIs(seen.get("use_store"), False,
+                      "--no-cache 没关掉 store 后端 → help 里那句「不读不写」是假的")
+
+    def test_default_keeps_the_store_backend(self):
+        """反向断言：不给 --no-cache 时**不要**传 False（那会把缓存整体关掉）。"""
+        seen = self._run_check(["check", "-i", "x.json"])
+        self.assertIsNone(seen.get("use_store"), "默认必须交回 AsyncChecker 自己判")
+
+    def test_checked_sources_get_their_group_rebuilt(self):
+        seen = self._run_check(["check", "-i", "x.json"])
+        self.assertEqual(seen.get("rebuild_urls"), [make_source()["bookSourceUrl"]],
+                         "校验完没重建组名 → 健康列与标签列会长得不一样")
 
 
 # ---------------------------------------------------------------- 变异记录

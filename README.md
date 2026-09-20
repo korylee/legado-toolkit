@@ -73,7 +73,8 @@ Legado（阅读）书源管理工具链：CLI + FastAPI + SQLite + Vue 3。
 ```text
 .
 ├─ backend/                FastAPI 后端（**入口之一**）
-│  ├─ api/                 路由：sources/jobs/export/feed/rules/llm
+│  ├─ api/                 路由：sources/imports/export/feed/rules/llm/
+│  │                       jobs/settings/jvm/ops（共 10 个模块，不逐一列）
 │  ├─ jobs/                后台任务运行器 + SSE
 │  ├─ app.py               FastAPI 应用
 │  └─ __main__.py          后端启动入口
@@ -89,7 +90,8 @@ Legado（阅读）书源管理工具链：CLI + FastAPI + SQLite + Vue 3。
 │  ├─ tags.py              标签规范化 / 系统标签
 │  └─ ...
 ├─ services/               **应用编排层**：串起多个 core 模块完成一件业务动作
-│  └─ add_source.py        快速新增源——CLI 与 backend **共用**，所以不放在任一个入口里
+│  ├─ add_source.py        快速新增源——CLI 与 backend **共用**，所以不放在任一个入口里
+│  └─ merge_sources.py     合并去重（Web 的「整理源」抽屉走它）
 ├─ frontend/               Vue 3 管理台
 ├─ tests/                  Python 测试
 ├─ tools/                  **开发与 agent 工具，不是运行时依赖**
@@ -292,7 +294,9 @@ python cli/main.py merge -i a.json -i b.json -o merged.json --mode replace
 
 - 类型：📖小说、🎧听书、🎨漫画、📥下载（对应 bookSourceType 0/1/2/3）
 - 健康状态：✅可用、🔒需登录、🌐需翻墙、🔐证书问题、❓待验证、❌已失效
-  （**权威清单是 `core/models.py` 的 `HEALTH_NAMES`**，这里只是给人看的枚举）
+  （**显示名的权威是 `core/models.py` 的 `HEALTH_NAMES`**；写进分组/判定用的是
+  `core/tags.py` 的 `SYSTEM_STATUS_TAG_ORDER`（无 emoji）。前端两份都从
+  `GET /api/sources/tags/meta` 拿，别自己抄）
 - 规则质量：规则完整
 
 六档按**下一步动作**划分——两档该不该合成一档，看动作是否相同：
@@ -350,6 +354,9 @@ python cli/main.py merge -i a.json -i b.json -o merged.json --mode replace
 | POST /api/rules/app-debug | 连 App 调试：借 App 的调试 WS 跑完整链路，含 JS 规则。`cache` 选 auto / only / refresh（只影响我们抓的页面） |
 | POST /api/rules/app-preflight | 调试前预检：连不上 / App 里没有这个源 / 可以调试 |
 | POST /api/rules/app-push | 把源推送到 App（幂等，会改动 App 数据，需显式触发） |
+| GET /api/jvm/selftest | JVM 校验的环境自检（App 源码目录 / 启动器 / JDK / Android SDK / gradle-home 逐项） |
+| POST /api/jvm/run | 跑批：后端起 `appservice` 子进程，跑完即退出；结论落 meta（`jvm_check:<批次>:<URL>`） |
+| GET /api/jvm/results | 每源最深的一条 JVM 结论（深者胜、同深取新），供列表与面板展示 |
 | POST /api/rules/replay-step | 用已抓到的 HTML 重新调试一步规则（不联网） |
 | POST /api/rules/suggest-rule | 让 AI 给某一步提候选规则（只提议；每条都过规则回放器，验不了的单独标「只能连 App 试」） |
 | GET /api/llm/profiles | LLM 模型配置 |
@@ -378,12 +385,15 @@ python cli/main.py merge -i a.json -i b.json -o merged.json --mode replace
 
 ## 数据与存储
 
-运行时数据默认放在 data/，已加入 .gitignore。
+运行时数据默认放在 data/。`.gitignore` **按子目录白名单**忽略（archive/backups/
+cache/check_cache/imports/out/config/app_probe 等）——**新增子目录要自己补一条**，
+别以为整个 data/ 都被忽略了。
 
 | 路径 | 内容 |
 | :--- | :--- |
 | data/sources.sqlite3 | 管理库：源、校验缓存、诊断、修复、任务 |
-| data/check_cache/ | 书源校验缓存 |
+| data/check_cache/ | **遗留**的 NDJSON 校验缓存：现役缓存在管理库 `checks` 表
+（上一行），这里只在 `--legacy-cache` 与迁移/对拍时读 |
 | data/out/exports/ | 临时导出快照 |
 | data/backups/ | 软删除记录（`deleted.jsonl`，一行一次删除操作，含原因）/ 手动备份 |
 | data/imports/conflicts/ | 导入时规则冲突的源（原样留存，可回查） |

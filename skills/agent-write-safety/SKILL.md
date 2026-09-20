@@ -29,7 +29,8 @@ description: 在受限 agent 沙箱里安全写文件、改代码的传输通道
 **不可靠的方式**：
 
 - 把多行代码放进 `Invoke-Expression` 或 `python -c`，引号层会破坏它
-- bash / heredoc：本沙箱里 bash 起不来（`CreateFileMapping ... Win32 error 5`）
+- bash / heredoc：**在那个受限沙箱里** bash 起不来（`CreateFileMapping ... Win32 error 5`）
+  ——这是**环境快照不是永久结论**：换 harness / 换机器先实测一次再照着走
 - 超长 here-string（>5KB）：有截断风险，且失败时表现为「无任何输出」
 
 ## 二、改代码的纪律（比通道更重要）
@@ -66,8 +67,9 @@ description: 在受限 agent 沙箱里安全写文件、改代码的传输通道
 - **能改名不能删内容**：整个目录可以 rename，但目录内文件删不掉
 - **%TEMP% 可能不可写**：tempfile.TemporaryDirectory 会失败，
   测试要显式指定仓库内临时目录
-- **bash 存在但不可用**：`C:/Program Files/Git/bin/bash.exe` 存在，
-  但 fork 时 CreateFileMapping 被拒，不要指望它
+- **bash 可能存在但不可用**：`C:/Program Files/Git/bin/bash.exe` 在，但 fork 时
+  CreateFileMapping 被拒。**先在当前环境试一条无害命令**（如 `echo ok`）再决定用不用；
+  不可用时走 stdin 脚本通道
 
 ## 五、可复用的应用器
 

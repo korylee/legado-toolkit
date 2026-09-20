@@ -1500,8 +1500,13 @@ def run_check(
     proxy: Optional[str] = None,
     probe_depth: int = DEPTH_HOME,
     refresh_cache: bool = False,
+    use_store: Optional[bool] = None,
 ) -> List[BookSourceRecord]:
     """同步入口：运行校验（Windows 上 asyncio.run 即可）。
+
+    ``use_store=None`` 交回 AsyncChecker 自己判（默认走管理库，见那里的注释）；
+    CLI 的 ``--no-cache`` 传 False——**它是唯一能关掉 store 后端的口子**：
+    只把 cache_dir 置空是不够的，store 仍会照读照写。
 
     probe_depth 一档对一级星级（口径定义在 core/settings_store.py）：
         1 主页   仅域名探测                                   → 1★
@@ -1519,6 +1524,7 @@ def run_check(
         max_keywords=max_keywords,
         proxy=proxy,
         probe_depth=probe_depth,
+        use_store=use_store,
     )
     checker.refresh_cache = refresh_cache
     return asyncio.run(checker.run(records))

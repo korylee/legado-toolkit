@@ -157,7 +157,7 @@ def verify(html: str, rule: str, step: str, source_type: int = 0,
         out["values"] = values
     if rule_error:
         # 「我们验不了」——不是「规则不好」。前端必须显式标「只能连 App 试」
-        out["note"] = "本地回放不了（%s），只能连 App 试" % rule_error
+        out["note"] = "本地调试不了（%s），只能连 App 试" % rule_error
     elif not values:
         out["note"] = "在这份页面上取不到值"
     else:
@@ -227,7 +227,7 @@ def preselect(candidates: List[str], app_values: List[str], html: str,
         out["reason"] = "没有候选可挑"
         return out
     if not basis:
-        out["reason"] = ("没有 App 实测值作基准（本地回放取到的值不能当基准——"
+        out["reason"] = ("没有 App 实测值作基准（本地调试取到的值不能当基准——"
                          "那是当前这条坏规则的产物）")
         return out
 
@@ -283,7 +283,7 @@ def preselect(candidates: List[str], app_values: List[str], html: str,
     unreplayable = [r for r in ranked if r["rule_error"]]
     out["reason"] = "候选取到的值和 App 实测值都对不上"
     if unreplayable:
-        out["reason"] += ("；另有 %d 条本地回放不了（%s）——只能连 App 试"
+        out["reason"] += ("；另有 %d 条本地调试不了（%s）——只能连 App 试"
                           % (len(unreplayable), unreplayable[0]["rule_error"]))
     return out
 

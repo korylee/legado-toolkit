@@ -29,6 +29,11 @@ const refreshOn = computed({
   set: (v) => emit("update:refresh", v),
 });
 
+//: 「忽略缓存，全部重校」那一行的字段描述。**只用于渲染**——它不进
+//: `PER_RUN_FIELDS`（没有全局对应值可比，不参与上面那个 diff），
+//: 走 CheckFieldRow 是为了与参数行共用同一套行格式。
+const REFRESH_FIELD = { key: "refresh", label: "忽略缓存，全部重校", type: "bool" };
+
 const global = ref(null);   // 打开时拉到的全局值
 const form = ref(null);     // 编辑态（全局值打底 + 上次的 diff 叠上去）
 const limits = ref(null);
@@ -90,19 +95,28 @@ watch([form, () => props.refresh], () => {
                      compact v-model="form[f.key]" />
     </el-form>
 
-    <!-- 本次动作：没有全局对应值，所以不参与上面的 diff -->
+    <!-- 「忽略缓存，全部重校」这一行**也用上面那 5 行同一个 CheckFieldRow**：
+         格式（标签在上、控件在下）就必然一致，以后行样式改了它自动跟着。
+         原来用 `active-text` + `inline-prompt` 把标签塞进开关内部，而开关是 small
+         尺寸、8 个汉字——那行字根本显示不出来，用户看到的是一个没有名字的开关。
+         单独一个 el-form 只为拿到一致的 label-position/size：不并进上面那个表单，
+         是因为设置拉取失败时上面整块不渲染，而这条仍然要有。 -->
     <el-divider style="margin: 10px 0" />
-    <div class="muted" style="margin-bottom: 6px">本次动作</div>
-    <el-switch v-model="refreshOn" size="small" active-text="忽略缓存，全部重校"
-               inline-prompt style="--el-switch-on-color: var(--el-color-warning)" />
-    <div class="muted" style="margin-top: 4px">
+    <el-form label-position="top" size="small" style="margin-bottom: 0">
+      <CheckFieldRow :field="REFRESH_FIELD" compact v-model="refreshOn" />
+    </el-form>
+    <div class="muted">
       有效期内的缓存本来会直接复用、不重新请求；打开就这次全部重来
     </div>
 
     <el-divider style="margin: 10px 0" />
+    <!-- **说结果，不说机制**（AGENTS #18）。原来那句「与全局设置相同的项不会进本次
+         覆盖」里，「覆盖」是我们的内部叫法——用户读不出「只有跟全局不一样的那几项
+         才算」这层意思（实测反馈：「看不懂是啥意思」）。另外 0 项时要说清会发生什么，
+         而不是只描述一条规则。 -->
     <div class="muted">
-      与全局设置相同的项不会进本次覆盖
-      <template v-if="activeCount"> · 本次生效 {{ activeCount }} 项</template>
+      <template v-if="activeCount">本次改了 {{ activeCount }} 项，只对这一次生效</template>
+      <template v-else>这次直接用全局设置</template>
     </div>
   </div>
 </template>
@@ -110,4 +124,5 @@ watch([form, () => props.refresh], () => {
 <style scoped>
 /* popover 只有 330px、6 个字段，默认的 18px 行距会撑得很长 */
 :deep(.el-form-item) { margin-bottom: 10px; }
+
 </style>

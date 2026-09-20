@@ -223,7 +223,7 @@ MIXED_SOURCE = {
 
 
 class MergeGuardTests(unittest.TestCase):
-    """本地回放不了的字段：不许覆盖、不许采纳，但**要报出来**（口径同 quality：
+    """本地调试不了的字段：不许覆盖、不许采纳，但**要报出来**（判定同 quality：
     unknown = 我们不判，不是「没问题」）。两道拦各挡一种把源改坏的方式。"""
 
     def test_unreplayable_current_is_not_overwritten(self):
@@ -234,7 +234,7 @@ class MergeGuardTests(unittest.TestCase):
         self.assertEqual(merged["ruleToc"]["chapterUrl"],
                          "<js>return baseUrl + '/c/' + id</js>")
         self.assertEqual([s["field"] for s in skipped], ["ruleToc.chapterUrl"])
-        self.assertIn("当前规则本地回放不了", skipped[0]["why"])
+        self.assertIn("当前规则本地调试不了", skipped[0]["why"])
 
     def test_unreplayable_proposal_is_not_adopted(self):
         """提议本身回放不了时不能落地：落地了本地验不了它，而 verify_chain 对
@@ -242,7 +242,7 @@ class MergeGuardTests(unittest.TestCase):
         merged, skipped = R.merge_proposal(
             SOURCE, {"ruleSearch": {"bookList": "@js:return doc.select('.x')"}})
         self.assertEqual(merged["ruleSearch"]["bookList"], ".old-list")
-        self.assertIn("提议的规则本地回放不了", skipped[0]["why"])
+        self.assertIn("提议的规则本地调试不了", skipped[0]["why"])
 
     def test_replayable_field_is_still_updated(self):
         """反向保护：能回放的字段必须照常覆盖，否则护栏把修复本身也挡住了。"""
@@ -262,7 +262,7 @@ class MergeGuardTests(unittest.TestCase):
         self.assertEqual([s["field"] for s in res["skipped"]], ["ruleToc.chapterUrl"])
         report = R.build_report([res])
         self.assertIn("未改动 `ruleToc.chapterUrl`", report)
-        self.assertIn("本地回放不了", report)
+        self.assertIn("本地调试不了", report)
 
     def test_skipped_is_an_empty_list_when_clean(self):
         """键必须常在（消费方按它判断有没有留下验不了的部分），哪怕是空的。"""

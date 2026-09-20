@@ -146,6 +146,30 @@ class StoreBackendSaveTests(unittest.TestCase):
         self.assertFalse(is_cache_item_valid(build_record(make_source(), 0), item),
                          "瞬时错误的缓存复用了 = 把一次抖动当成源的结论")
 
+    def test_no_cache_really_disables_the_store_backend(self):
+        """``--no-cache`` 要**真的**不读不写——只置空 cache_dir 挡不住 store 后端。
+
+        `AsyncChecker` 默认走管理库（`use_store = not LEGADO_LEGACY_CACHE`），所以
+        `cache_dir=""` 对它毫无影响：读还是从 `checks` 表读、写还是往 `checks` 表写。
+        而 CLI 的 help 与那行提示都承诺「不读取旧缓存，也不写入本次结果」——
+        默认配置下这句话曾经是假的。修法是把 `use_store=False` 一路透传下来
+        （`run_check(use_store=...)`），这条用例守的就是那个口子。
+        """
+        with Store() as st1:
+            ck1 = AsyncChecker(concurrency=1, use_store=True)
+            ck1.save_cache_append(checked())
+            ck1.close()
+        self.assertEqual(len(self._rows()), 1, "前提：库里有了一条缓存")
+
+        # 关闭 store 后端之后：读不到、也写不进
+        ck = AsyncChecker(concurrency=1, use_store=False, cache_dir="")
+        self.assertEqual(ck.load_cache(), {}, "store 关了还读得到缓存 = --no-cache 是假的")
+        ck.save_cache_append(checked(health="dead"))
+        ck.close()
+        rows = self._rows()
+        self.assertEqual(len(rows), 1, "store 关了还写得进去 = --no-cache 是假的")
+        self.assertEqual(rows[0]["health"], "ok", "原有那行被改了")
+
     def test_search_probed_survives_the_store_roundtrip(self):
         """search_probed 必须真的落库、读得回来。
 

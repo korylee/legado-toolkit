@@ -130,13 +130,13 @@ def merge_proposal(current: Dict[str, Any], proposal: Dict[str, Any]
                     if not ok_old:
                         skipped.append({
                             "field": "%s.%s" % (key, k), "rule": old_rule,
-                            "why": "当前规则本地回放不了（%s），未改动" % why_old})
+                            "why": "当前规则本地调试不了（%s），未改动" % why_old})
                         continue
                 ok_new, why_new = rule_supported(new_rule)
                 if not ok_new:
                     skipped.append({
                         "field": "%s.%s" % (key, k), "rule": new_rule,
-                        "why": "提议的规则本地回放不了（%s），未采纳" % why_new})
+                        "why": "提议的规则本地调试不了（%s），未采纳" % why_new})
                     continue
                 base[k] = new_rule
             out[key] = base
@@ -303,7 +303,7 @@ def build_report(results: List[Dict[str, Any]]) -> str:
     n_skip = sum(1 for r in results if r.get("skipped"))
     if n_skip:
         # 「修好了」和「有字段根本没敢动」必须分开看：后者可能是真正坏掉的那部分
-        L += ["", "> **%d 个源有「本地回放不了、因此没动」的字段**——它们可能正是坏掉的"
+        L += ["", "> **%d 个源有「本地调试不了、因此没动」的字段**——它们可能正是坏掉的"
               "那部分，只能连 App 验。" % n_skip]
     L += ["", "## 明细", ""]
     for r in results:

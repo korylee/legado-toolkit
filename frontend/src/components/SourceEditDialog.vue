@@ -1291,7 +1291,7 @@ async function doSave(s) {
             <li>取值：@text / @textNodes / @ownText / @html / @all</li>
             <li>属性：@href / @src / @data-original 等</li>
             <li>正则：规则##正则##替换（支持 $1）</li>
-            <li>类型前缀：@css: / @json: / @html:（@html: 直接取原始响应体）</li>
+            <li>类型前缀：@css: / @@ / @xpath: / @json:（没有 @html: 前缀——@html 是取值动作）</li>
             <li>接口源：$.data.list[*].name</li>
             <li>取图：tag.img@src / @data-original</li>
           </ul>

@@ -179,6 +179,12 @@ const healthCount = (key) => {
   return (h && h[key]) || 0;
 };
 
+// 统计条上**只渲染有数的档**：0 条的状态在这里没有信息量（「这档存在、当前没有」），
+// 却把这一行越摊越长——用户的原话是「太多太杂」。空档位在**筛选下拉里照旧全给**
+// （那是能力清单，不是现状概览），所以按档下钻、确认「确实一条都没有」仍然做得到。
+const activeHealthOptions = computed(
+  () => HEALTH_OPTIONS.filter((h) => healthCount(h.value) > 0));
+
 async function loadStats() {
   try { stats.value = await getStats(); } catch (e) { stats.value = null; }
 }
@@ -679,13 +685,14 @@ onUnmounted(() => {
         <button type="button" class="chip" :class="{ active: !filterCount }" @click="reset">
           源 <b>{{ stats ? stats.sources : "—" }}</b>
         </button>
-        <button v-for="h in HEALTH_OPTIONS" :key="h.value" type="button" class="chip"
+        <button v-for="h in activeHealthOptions" :key="h.value" type="button" class="chip"
                 :class="{ active: query.health === h.value }" @click="onHealthChip(h.value)">
           {{ h.label }} <b>{{ healthCount(h.value) }}</b>
         </button>
-        <!-- 「未校验」= 没有校验记录（health IS NULL），后端 _where 已支持值 "none" -->
-        <button type="button" class="chip" :class="{ active: query.health === 'none' }"
-                @click="onHealthChip('none')">
+        <!-- 「未校验」= 没有校验记录（health IS NULL），后端 _where 已支持值 "none"。
+             与上面同一条规矩：0 条时不占位置（新导入一批源之后它会自己冒出来） -->
+        <button v-if="healthCount('None') > 0" type="button" class="chip"
+                :class="{ active: query.health === 'none' }" @click="onHealthChip('none')">
           未校验 <b>{{ healthCount("None") }}</b>
         </button>
       </div>
