@@ -42,3 +42,20 @@ def abs_url(base_url: str, href: str) -> str:
     if href.startswith(("http://", "https://")):
         return href
     return urljoin(base_url or "", href)
+
+
+def rule_url(base_url: str, raw_value: str) -> str:
+    """把**规则产出的 URL**变成可直接请求的地址：先剥 `,{json}` 选项，再补绝对地址。
+
+    两件事必须一起做。选项里装的是 **App 才懂的东西**（`webView` / `method` /
+    `body`），带上它去发请求必然拿不到页面——实测
+    `.../1.html,{"webView":true}` 返回 **404**，同一个地址剥掉选项后返回 **200**。
+    后果不是「少验一点」：`_probe_content` 会把 404 写成
+    `正文请求失败(status=404)`，读起来像**源坏了**，而其实是我们拼错了地址
+    ——AGENTS #4 的同一类错：不能把我们的问题说成源的问题。
+
+    与 `core/app_debug.py` 里那条**保留选项尾巴**的用法不同：那边要把 URL 连同
+    选项一起当身份存起来（`absolute + tail`），这里只要一个能发的地址。
+    """
+    pure, _opts = split_url_options(str(raw_value or ""))
+    return abs_url(base_url, pure)

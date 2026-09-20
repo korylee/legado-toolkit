@@ -525,3 +525,54 @@ class FieldScopeTests(unittest.TestCase):
             self.HTML, "class.item", "tag.a@href@js:result", 50, 2000)
         self.assertEqual(vals, [])
         self.assertTrue(err)
+
+
+class AttrOrTagNameTests(unittest.TestCase):
+    """`title` / `style` / `label` 既是 HTML 标签名又是常见属性名。
+
+    Legado 的取值规则走 `getResultList` → 末段交给 `getResultLast`，那里除
+    text/textNodes/ownText/html/all 五个动作外**一律** `element.attr(末段)`
+    （AnalyzeByJSoup.kt 的 getResultLast）。所以 `class.a@title` 是「取 title
+    属性」，不是「在 a 里再选一个 title 元素」。
+
+    改前 `_is_selector_like` 先命中 HTML_TAGS，这三条规则**恒取空**——静默的
+    那种：调用方看到的是「源没取到书名」，而不是「工具不会算」（AGENTS #4）。
+    实测语料里末段是 `title` 的取值规则约 170 条。
+    """
+
+    HTML = ('<html><head><title>页标题</title></head><body>'
+            '<div class="a" title="书名" style="color:red" label="标签">正文</div>'
+            '<div class="list"><a href="/1">一</a><a href="/2">二</a></div>'
+            '</body></html>')
+
+    def test_title_is_an_attribute_in_last_segment(self):
+        self.assertEqual(R.extract_all(self.HTML, "class.a@title"), ["书名"])
+        self.assertEqual(R.extract_all(self.HTML, "div.a@title"), ["书名"])
+
+    def test_style_and_label_too(self):
+        """同一个碰撞的另外两个词——只修 title 会留下同形的坑。"""
+        self.assertEqual(R.extract_all(self.HTML, "class.a@style"), ["color:red"])
+        self.assertEqual(R.extract_all(self.HTML, "class.a@label"), ["标签"])
+
+    def test_bare_attr_rule_inside_node(self):
+        """`@title` 是「取当前节点的 title 属性」的惯用写法（库里 7 条这么写）。"""
+        from core.rules.replayer import extract_field_in_nodes
+        vals, _h, _e = extract_field_in_nodes(self.HTML, "class.a", "@title", 50, 2000)
+        self.assertEqual(vals, ["书名"])
+
+    def test_list_rule_last_segment_still_a_selector(self):
+        """**列表**规则不走 getResultLast：每个 `@` 段都是选择器。
+
+        库里 bookList/chapterList 末段用这三个词的规则实测 0 条，所以这条
+        「末段当属性」的改动碰不到列表字段——这里钉住它，防止有人顺手改宽。
+        """
+        vals, err = R.extract_all_ex(self.HTML, "class.list@tag.a")
+        self.assertEqual(vals, ["一", "二"], err)
+        vals, err = R.extract_all_ex(self.HTML, "class.list@a")
+        self.assertEqual(vals, ["一", "二"], err)
+
+    def test_parse_steps_shape(self):
+        self.assertEqual(R.parse_rule("class.a@title").steps,
+                         [("select", ".a"), ("attr", "title")])
+        self.assertEqual(R.parse_rule("class.list@tag.a").steps,
+                         [("select", ".list"), ("select", "a")])

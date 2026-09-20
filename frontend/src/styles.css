@@ -322,13 +322,3 @@ body {
   .mobile-only { display: none !important; }
   .app-tabbar { display: none; }
 }
-
-/* 重复源抽屉：内部三栏用 flex（顶部工具 / 可滚列表 / 底部操作）。
-   footer 是 flex 的固定末项，不做 sticky——sticky 在 teleport 的 drawer body 里
-   会与 body 自身的滚动叠加，表现为「贴底但一直遮内容」。 */
-.dup-drawer .el-drawer__body {
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  padding-bottom: 0;
-}

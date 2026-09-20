@@ -96,8 +96,15 @@ def main():
         p = pathlib.Path(target)
         if not p.exists():
             raise SystemExit("目标文件不存在: " + target)
-        out = apply_ops(p.read_text(encoding="utf-8"), items)
-        p.write_text(out, encoding="utf-8")
+        # **不要用 write_text**：Windows 上它把 \n 全翻成 \r\n，而本仓库源码是
+        # LF——改一个字就整文件换行尾，且 diff 看不出来（两边都归一化），
+        # 只在提交时冒一句「CRLF will be replaced by LF」。
+        # 读时按通用换行解码（CRLF 归一成 LF，锚点才对得上），写回时还原原样式。
+        raw = p.read_bytes()
+        crlf = b"\r\n" in raw
+        out = apply_ops(raw.decode("utf-8").replace("\r\n", "\n"), items)
+        data = (out.replace("\n", "\r\n") if crlf else out).encode("utf-8")
+        p.write_bytes(data)
         print("OK  %-30s %d 处" % (target, len(items)))
     print("全部应用完成")
 

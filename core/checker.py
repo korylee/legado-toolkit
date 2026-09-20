@@ -32,7 +32,7 @@ from core.models import (
     NOVEL_TEST_KEYWORDS, MANGA_TEST_KEYWORDS, TEST_TITLES, TOC_COMPLETE_THRESHOLD,
 )
 from core.toc_page import resolve_toc_page
-from core.urls import abs_url as _abs_url, split_url_options
+from core.urls import abs_url as _abs_url, rule_url as _rule_url, split_url_options
 # DNS 失败的归因（域名注销 vs 本地解析被污染）：**外部视角的唯一实现**，
 # 判定口径与「为什么不能只凭本机一次解析失败判死」都写在那模块的开头
 from core import dns_check
@@ -1211,7 +1211,7 @@ class AsyncChecker:
                 record.toc_fail_reason = "bookUrl 解析为空（搜索结果页结构变化？）"
                 return None
             # 取第一条详情 URL（相对链接补全为绝对地址）
-            detail_url = _abs_url(domain_url, urls[0])
+            detail_url = _rule_url(domain_url, urls[0])
             d_status, d_body, d_cost, d_err, _d_detail = await self._request(
                 session, record, detail_url)
             if d_status is None or d_status >= 400:
@@ -1328,7 +1328,7 @@ class AsyncChecker:
             # 中位章节（>1 时取中间），单章源取唯一章节
             pick = urls[len(urls) // 2] if len(urls) > 1 else urls[0]
             # 基准是**目录页**（章节链接相对它才有意义），拿不到才退回域名根
-            chap_url = _abs_url(record.toc_page_url or domain_url, pick)
+            chap_url = _rule_url(record.toc_page_url or domain_url, pick)
             c_status, c_body, c_cost, c_err, _c_detail = await self._request(
                 session, record, chap_url)
             record.content_response_ms = int(c_cost)

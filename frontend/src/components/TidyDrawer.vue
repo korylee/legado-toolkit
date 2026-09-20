@@ -278,27 +278,35 @@ watch(() => props.modelValue, (v) => {
       <el-step title="3 收尾重跑" @click.native="goStep('finish')" />
     </el-steps>
 
+    <!-- 三步共用一副上中下三栏骨架：.tidy-head 固定 / .tidy-main 唯一滚动区 /
+         .tidy-foot 固定。让步骤条与底部按钮永远在视野里——列表有 1600+ 条，
+         整页滚动时「我批到哪了」和「下一步按钮在哪」都会滚丢。
+         三栏的样式写在全局 styles.css：抽屉 teleport 到 body，组件内 scoped 够不到
+         .el-drawer__body（AGENTS #15）。 -->
+
     <!-- ---------------------------------------------------------- 第 1 步 -->
     <template v-if="step === 'names'">
-      <el-alert type="info" :closable="false" show-icon style="margin-bottom: 12px">
-        <template #title>
-          清洗的是<b>展示名</b>，<b>不动地址</b>（地址是源的身份，改了在 App 里等于换了一条源）。
-        </template>
-      </el-alert>
+      <div class="tidy-head">
+        <el-alert type="info" :closable="false" show-icon style="margin-bottom: 12px">
+          <template #title>
+            清洗的是<b>展示名</b>，<b>不动地址</b>（地址是源的身份，改了在 App 里等于换了一条源）。
+          </template>
+        </el-alert>
 
-      <div class="toolbar" style="margin-bottom: 10px">
-        <el-button @click="loadNames" :loading="loading">重新预演</el-button>
-        <el-switch v-model="showAll" size="small"
-                   :active-text="'显示全部 ' + rows.length + ' 条'" inactive-text="只看高置信" />
-        <el-button size="small" @click="checkAll(true)">本页全选</el-button>
-        <el-button size="small" @click="checkAll(false)">本页全不选</el-button>
-        <span class="grow" />
-        <span class="muted">
-          共 {{ total }} 条 · 建议改 {{ rows.length }} 条 · 确定性规则 {{ highCount }} 条
-        </span>
+        <div class="toolbar" style="margin-bottom: 10px">
+          <el-button @click="loadNames" :loading="loading">重新预演</el-button>
+          <el-switch v-model="showAll" size="small"
+                     :active-text="'显示全部 ' + rows.length + ' 条'" inactive-text="只看高置信" />
+          <el-button size="small" @click="checkAll(true)">本页全选</el-button>
+          <el-button size="small" @click="checkAll(false)">本页全不选</el-button>
+          <span class="grow" />
+          <span class="muted">
+            共 {{ total }} 条 · 建议改 {{ rows.length }} 条 · 确定性规则 {{ highCount }} 条
+          </span>
+        </div>
       </div>
 
-      <div v-loading="loading" class="list">
+      <div v-loading="loading" class="list tidy-main">
         <div v-for="r in listRows" :key="r.url" class="row"
              :class="{ on: checked.has(r.url) }" @click="toggle(r)">
           <el-checkbox :model-value="checked.has(r.url)" @click.prevent.stop="toggle(r)" />
@@ -320,45 +328,49 @@ watch(() => props.modelValue, (v) => {
                   description="没有需要清洗的名字" :image-size="70" />
       </div>
 
-      <div v-if="nameResult" class="result">
-        <span>已改 <b>{{ nameResult.applied }}</b> 条</span>
-        <span v-if="nameResult.missing" class="muted">
-          （{{ nameResult.missing }} 条已不在库里，跳过）
-        </span>
-        <el-button link type="primary" :disabled="nameUndone" @click="undoNameChanges">
-          {{ nameUndone ? "已撤销" : "撤销本次改名" }}
-        </el-button>
-      </div>
+      <div class="tidy-foot">
+        <div v-if="nameResult" class="result">
+          <span>已改 <b>{{ nameResult.applied }}</b> 条</span>
+          <span v-if="nameResult.missing" class="muted">
+            （{{ nameResult.missing }} 条已不在库里，跳过）
+          </span>
+          <el-button link type="primary" :disabled="nameUndone" @click="undoNameChanges">
+            {{ nameUndone ? "已撤销" : "撤销本次改名" }}
+          </el-button>
+        </div>
 
-      <div class="foot">
-        <el-button type="primary" :loading="applying" :disabled="!checked.size"
-                   @click="applyNameChanges">
-          应用改名（{{ checked.size }} 条）
-        </el-button>
-        <el-button @click="goStep('dups')">下一步：重复梳理</el-button>
+        <div class="foot">
+          <el-button type="primary" :loading="applying" :disabled="!checked.size"
+                     @click="applyNameChanges">
+            应用改名（{{ checked.size }} 条）
+          </el-button>
+          <el-button @click="goStep('dups')">下一步：重复梳理</el-button>
+        </div>
       </div>
     </template>
 
     <!-- ---------------------------------------------------------- 第 2 步 -->
     <template v-else-if="step === 'dups'">
-      <el-alert type="warning" :closable="false" show-icon style="margin-bottom: 12px">
-        <template #title>
-          只列<b>同站点 + 规则完全相同</b>的组。同域名但规则不同、名称相同的镜像站
-          <b>不在这里</b>——那些要人判断，一律不自动删。被合并的条移入回收站，可撤销。
-        </template>
-      </el-alert>
+      <div class="tidy-head">
+        <el-alert type="warning" :closable="false" show-icon style="margin-bottom: 12px">
+          <template #title>
+            只列<b>同站点 + 规则完全相同</b>的组。同域名但规则不同、名称相同的镜像站
+            <b>不在这里</b>——那些要人判断，一律不自动删。被合并的条移入回收站，可撤销。
+          </template>
+        </el-alert>
 
-      <div class="toolbar" style="margin-bottom: 10px">
-        <el-button @click="loadDups" :loading="dupsLoading">重新读取</el-button>
-        <el-checkbox v-model="mergeTags" size="small">并过被删条的标签</el-checkbox>
-        <el-checkbox v-model="mergeComment" size="small">备注一并保留</el-checkbox>
-        <span class="grow" />
-        <span class="muted">
-          {{ dupGroups.length }} 组 · 建议合并 {{ willDrop }} 条
-        </span>
+        <div class="toolbar" style="margin-bottom: 10px">
+          <el-button @click="loadDups" :loading="dupsLoading">重新读取</el-button>
+          <el-checkbox v-model="mergeTags" size="small">并过被删条的标签</el-checkbox>
+          <el-checkbox v-model="mergeComment" size="small">备注一并保留</el-checkbox>
+          <span class="grow" />
+          <span class="muted">
+            {{ dupGroups.length }} 组 · 建议合并 {{ willDrop }} 条
+          </span>
+        </div>
       </div>
 
-      <div v-loading="dupsLoading" class="list">
+      <div v-loading="dupsLoading" class="list tidy-main">
         <div v-for="g in dupGroups" :key="g.key" class="card" :class="{ on: selected.has(g.key) }">
           <div class="card-head">
             <el-checkbox :model-value="selected.has(g.key)"
@@ -384,30 +396,34 @@ watch(() => props.modelValue, (v) => {
                   description="没有可合并的重复源" :image-size="70" />
       </div>
 
-      <div v-if="mergeResult" class="result">
-        <span>已合并 <b>{{ mergeResult.merged }}</b> 条</span>
-        <el-button link type="primary" @click="undoMergeAll">撤销本次合并</el-button>
-      </div>
+      <div class="tidy-foot">
+        <div v-if="mergeResult" class="result">
+          <span>已合并 <b>{{ mergeResult.merged }}</b> 条</span>
+          <el-button link type="primary" @click="undoMergeAll">撤销本次合并</el-button>
+        </div>
 
-      <div class="foot">
-        <el-button type="primary" :loading="merging" :disabled="!selected.size"
-                   @click="runMerge">
-          合并选中（{{ selectedGroups.length }} 组 · 删 {{ willDrop }} 条）
-        </el-button>
-        <el-button @click="goStep('finish')">下一步：收尾重跑</el-button>
+        <div class="foot">
+          <el-button type="primary" :loading="merging" :disabled="!selected.size"
+                     @click="runMerge">
+            合并选中（{{ selectedGroups.length }} 组 · 删 {{ willDrop }} 条）
+          </el-button>
+          <el-button @click="goStep('finish')">下一步：收尾重跑</el-button>
+        </div>
       </div>
     </template>
 
     <!-- ---------------------------------------------------------- 第 3 步 -->
     <template v-else>
-      <el-alert type="success" :closable="false" show-icon style="margin-bottom: 12px">
-        <template #title>
-          改名会改指纹（指纹含名称），那些源的校验结果已经失效。现在跑一次全量，
-          让结论与当前的书源对齐——<b>这是整条流水线存在的理由</b>：把重跑集中到最后一次。
-        </template>
-      </el-alert>
+      <div class="tidy-head">
+        <el-alert type="success" :closable="false" show-icon style="margin-bottom: 12px">
+          <template #title>
+            改名会改指纹（指纹含名称），那些源的校验结果已经失效。现在跑一次全量，
+            让结论与当前的书源对齐——<b>这是整条流水线存在的理由</b>：把重跑集中到最后一次。
+          </template>
+        </el-alert>
+      </div>
 
-      <div class="summary">
+      <div class="summary tidy-main">
         <p>本次整理：</p>
         <ul>
           <li>改了 <b>{{ nameApplied }}</b> 条名字</li>
@@ -418,25 +434,34 @@ watch(() => props.modelValue, (v) => {
         </p>
       </div>
 
-      <div class="foot">
-        <el-button type="primary" @click="emit('requestCheck')">
-          去跑全量校验
-        </el-button>
-        <el-button @click="emit('changed'); visible = false">先不跑，关闭</el-button>
+      <div class="tidy-foot">
+        <div class="foot">
+          <el-button type="primary" @click="emit('requestCheck')">
+            去跑全量校验
+          </el-button>
+          <el-button @click="emit('changed'); visible = false">先不跑，关闭</el-button>
+        </div>
       </div>
     </template>
   </el-drawer>
 </template>
 
 <style scoped>
-/* 抽屉主体做成 flex 列，列表吃满剩余高度。
+/* 三栏骨架：抽屉 body 是 flex 列（那条规则在全局 styles.css，teleport 到 body 的
+   容器组件内的 scoped 样式够不到），这里只管三块各自怎么吃高度：
+   头尾按内容、中间是唯一的滚动区。
    原来列表高度写死成 `calc(100vh - 430px)`（移动端 46vh）——那个 430 是猜的数，
-   与抽屉真实可用高度对不上：步骤条/提示条/底部按钮一多就留白，少一点就溢出 */
-.tidy-drawer :deep(.el-drawer__body) { display: flex; flex-direction: column; }
-.list {
-  flex: 1 1 auto; min-height: 0;
-  overflow: auto; border: 1px solid #ebeef5; border-radius: 4px;
+   与抽屉真实可用高度对不上：步骤条/提示条/底部按钮一多就留白，少一点就溢出。
+   第 1、2 步的中间是列表、第 3 步是一段小结，都带 `.tidy-main`。 */
+.tidy-head { flex: 0 0 auto; }
+.tidy-main { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+.tidy-foot {
+  flex: 0 0 auto;
+  display: flex; flex-direction: column; gap: 8px;
+  margin-top: 10px;
 }
+/* 列表只是那个「框」：滚动交给 .tidy-main，免得一层套一层两个滚动条 */
+.list { border: 1px solid #ebeef5; border-radius: 4px; }
 .row {
   display: flex; align-items: center; gap: 8px;
   padding: 6px 10px; border-bottom: 1px solid #f5f7fa; cursor: pointer;
@@ -458,10 +483,25 @@ watch(() => props.modelValue, (v) => {
 .member.keep { background: #f0f9eb; }
 .member .names { flex: 0 1 auto; }
 .result {
-  display: flex; align-items: center; gap: 8px; margin-top: 10px;
+  display: flex; align-items: center; gap: 8px;
   padding: 8px 12px; background: #f0f9eb; border-radius: 4px;
 }
-.foot { display: flex; gap: 8px; margin-top: 12px; }
+.foot { display: flex; gap: 8px; flex-wrap: wrap; }
 .summary { line-height: 1.9; }
 .summary ul { margin: 4px 0; padding-left: 20px; }
+</style>
+
+<!-- 抽屉 body 是 el-drawer 自己的内部结构，scoped 够不到它——连 `:deep()` 也不行：
+     那个带 `.tidy-drawer` class 的元素身上没有 `data-v-*`（el-drawer 的根是 Teleport，
+     父组件的 scope id 落不到里面真正带 class 的元素上），前缀永远匹配不上。
+     所以单开一个**不带 scoped** 的块，用 class 前缀限定，别污染其它抽屉。
+     （跨组件共用的（如 `.dot` 系列）才上全局 styles.css。）
+     底部操作是 flex 的固定末项，不做 sticky——sticky 在 teleport 的 drawer body 里
+     会与 body 自身的滚动叠加，表现为「贴底但一直遮内容」。 -->
+<style>
+.tidy-drawer .el-drawer__body {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
 </style>

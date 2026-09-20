@@ -121,6 +121,26 @@ def _is_selector_like(seg: str) -> bool:
     return False
 
 
+def _is_attr_or_action_name(seg: str) -> bool:
+    """这个 `@` 分段是不是「属性名 / 取值动作」（= Legado 取值规则**末段**的语义）。
+
+    `title` / `style` / `label` **同时**是 HTML 标签名与常见属性名，而
+    `_looks_like_attr` 里的 `_is_selector_like` 先命中 HTML_TAGS，于是
+    `class.a@title` 被判成「在 a 里再选一个 title 元素」→ **恒取空**。
+
+    为什么末段是属性名：Legado 对取值规则走 `getResultList` → 末段交给
+    `getResultLast`，那里除 text/textNodes/ownText/html/all 五个动作外一律
+    `element.attr(末段)`（符号见 AnalyzeByJSoup.kt 的 getResultLast）。
+    实测语料里末段为 `title` 的取值规则约 170 条（`ruleToc.chapterName: "@title"`
+    这种「取当前节点的 title 属性」写法就在其中），改前全被静默算成取不到。
+
+    **列表类规则不走这条**：`getElements` 把每个 `@` 段都当选择器，
+    而库里列表字段（bookList/chapterList）末段用这三个词的规则**实测 0 条**。
+    """
+    low = (seg or "").lower()
+    return low in VALUE_ACTIONS or low in COMMON_ATTRS
+
+
 def _looks_like_attr(seg: str) -> bool:
     """判断一个 @ 分段是「属性/动作」而不是选择器。"""
     if _is_selector_like(seg):
@@ -162,7 +182,8 @@ def _parse_css_steps(body: str) -> List[Tuple[str, str]]:
     if not segs:
         return []
     # 单段且看起来是属性/动作 -> 直接取值（如规则就是 "text"）
-    if len(segs) == 1 and _looks_like_attr(segs[0]):
+    if len(segs) == 1 and (_looks_like_attr(segs[0])
+                           or _is_attr_or_action_name(segs[0])):
         return [("attr", segs[0])]
 
     last = len(segs) - 1
@@ -193,7 +214,7 @@ def _parse_css_steps(body: str) -> List[Tuple[str, str]]:
         # chapterList 或 bookList 上**，也就不会踩到 `getElements` 那条路。
         #
         # 单段规则（`html` / `text`）不受影响——那时它是选择器，不是动作。
-        if i == last and last > 0 and seg.lower() in VALUE_ACTIONS:
+        if i == last and last > 0 and _is_attr_or_action_name(seg):
             steps.append(("attr", seg))
             continue
         if i == 0 or not _looks_like_attr(seg):

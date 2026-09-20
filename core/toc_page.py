@@ -30,7 +30,7 @@ import re
 from typing import Any, Dict, Optional, Tuple
 
 from core.rules.replayer import extract_all_nodes, rule_supported
-from core.urls import abs_url
+from core.urls import abs_url, rule_url
 from core import quality as Q
 
 #: 纯地址：`https://…`，且不含模板/JS/规则语法。
@@ -69,4 +69,4 @@ def resolve_toc_page(
     vals, _hits, _err = extract_all_nodes(
         detail_html or "", rule, Q.MATCHED_NODES_LIMIT, Q.MAX_MATCHED_HTML_CHARS)
     picked = next((str(v).strip() for v in vals if str(v or "").strip()), "")
-    return (abs_url(detail_url, picked) if picked else detail_url), ""
+    return (rule_url(detail_url, picked) if picked else detail_url), ""

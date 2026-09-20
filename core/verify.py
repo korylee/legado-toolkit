@@ -13,7 +13,7 @@
 """
 
 from core.constants import *
-from core.urls import abs_url as _abs_url
+from core.urls import abs_url as _abs_url, rule_url as _rule_url
 # fetch_ex 而不是 fetch：页面证据要标出「这份 HTML 是刚抓的还是缓存里的」
 from core.fetch import Fetched, fetch_ex, parse_source_header
 from core.rules.replayer import (extract_all_nodes, extract_field_in_nodes,
@@ -233,7 +233,7 @@ def verify_chain(source: dict, keyword: str, detail_url: str = "",
             steps.append(_step("bookUrl", j, search_url, "", hrefs))
             return _done()
         chosen = hrefs[pick - 1]
-        book_url = chosen if chosen.startswith("http") else _abs_url(search_url, chosen)
+        book_url = _rule_url(search_url, chosen)
         bu = _step("bookUrl", Q.Judgement("pass"), search_url,
                    "search" if "search" in pages else "", hrefs)
         bu["detail"] = "%d 条候选，取第 %d 条：%s" % (len(hrefs), pick, book_url)
@@ -303,7 +303,7 @@ def verify_chain(source: dict, keyword: str, detail_url: str = "",
             return _done()
         first_ch = ch_urls[0]
         # 相对章节链接要相对**目录页**补全（不是详情页——tocUrl 指向独立目录页时两者不同）
-        ch_url = _abs_url(toc_page_url, first_ch) if not first_ch.startswith("http") else first_ch
+        ch_url = _rule_url(toc_page_url, first_ch)
         f = _fetch(ch_url)
         c_html = f.html
         content_rule = (src.get("ruleContent") or {}).get("content", "")
