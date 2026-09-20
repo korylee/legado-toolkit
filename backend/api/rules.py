@@ -41,9 +41,9 @@ async def jvm_debug(body: JvmDebugRequest):
     前端抽屉与卡片零改动——`source` 是 ``"jvm"``，抽屉据此标「本机引擎」而不是
     「App 实测」。
 
-    不排队：跑批与调试共用 `appservice/args.properties` 与同一个 Gradle 任务，
-    同时跑会互相踩；`core.jvm_debug` 里的锁拿不到就直接返回一句「另一个任务在跑」
-    （错误体，不是 500——用户侧等一下就能自己解决）。
+    不排队：跑批与调试共用 `appservice/args.properties`，同时跑会互相踩——锁与那句
+    提示都在 `core.jvm_debug`（拿不到就返回「另一个任务在跑」，错误体而不是 500，
+    用户侧等一下就能自己解决）。
     """
     from core.fetch import CACHE_MODES
     from core.jvm_debug import run_jvm_debug
@@ -56,7 +56,7 @@ async def jvm_debug(body: JvmDebugRequest):
                                  % (cache, " / ".join(CACHE_MODES)))
     if int(body.timeout or 0) <= 0:
         raise HTTPException(400, "timeout 必须是正数")
-    # 同步阻塞（subprocess 拉 Gradle），必须让出事件循环
+    # 同步阻塞（默认常驻 daemon，回落时才拉 Gradle），必须让出事件循环
     return await asyncio.to_thread(
         run_jvm_debug, dict(body.source or {}), body.key or "我",
         int(body.timeout or 60), body.cookie or "", cache,

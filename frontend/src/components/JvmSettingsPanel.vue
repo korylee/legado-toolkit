@@ -104,7 +104,7 @@ import { ref, reactive, computed, onMounted } from "vue";
 import { ElMessage } from "element-plus";
 import { getSettings, patchSettings } from "../api/settings";
 import { jvmSelftest, jvmResults } from "../api/jvm.js";
-import { depthHintText, depthLabel, depthOptions } from "../utils/jvmDepth";
+import { depthHintText, depthOptions } from "../utils/jvmDepth";
 
 const conf = reactive({ app_repo: "", keyword: "我", timeout: 25, concurrency: 8,
                         limit: 0, depth: "search" });

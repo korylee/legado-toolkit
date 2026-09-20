@@ -15,13 +15,13 @@ import java.io.BufferedWriter
 import java.io.File
 
 /**
- * 调试服务（S5-A1）：在 JVM 里跑一次 App 的调试链，把事件流落成 NDJSON。
+ * 调试服务：在 JVM 里跑一次 App 的调试链，把事件流落成 NDJSON。
  *
  * **它替代的是「连 App 调试」的前半条**——设备 WS（`core/app_debug.py`）与它跑的是
  * 同一段 App 代码（`Debug.startDebug` → `WebBook.*`），区别只有一个：
  * **我们手里握着事件流，不经过网络、不需要设备**。所以 NDJSON 必须与设备 WS
  * 推的**逐事件同构**，`core/app_debug.py` 的 `_split_segments` / `build_steps`
- * 一行不改就能吃——这是本批的验收判据。照抄的是 App 自己的 WS 处理
+ * 一行不改就能吃。事件流的形状照抄的是 App 自己的 WS 处理
  * （`BookSourceDebugWebSocket.kt` 里那段 `startDebug` + `events.collect`）。
  *
  * ## 两个「照抄 App」的决定，别随手改
@@ -34,8 +34,7 @@ import java.io.File
  *    「看规则命中了什么」是第三期的活（shadow/OkHttp 环形缓冲回填），不是这里。
  * 2. **不注入合成事件行**。超时/零事件**只**通过退出码 + stderr 表达，
  *    不往 NDJSON 里塞一行假的 Error——否则同一件事在两个通道里长得不一样，
- *    而「同构」正是本批要保住的不变量。（TODO 原话是「+ 一行错误」，
- *    这里按同构优先改了口径，退出码承担这件事。）
+ *    而「同构」是不变量；超时这件事由退出码承担。
  *
  * ## 退出码（调用方按它分派，**每一种的下一步动作都不同**）
  *
@@ -46,7 +45,7 @@ import java.io.File
  * - `5` 流被截断：收到了事件，但**没等到终止事件**（App 侧异常/cancel/流中间被关）
  *
  * 「有事件」不等于「跑完了」——`0` 与 `5` 分开就是为了这件事：只看事件数的话，
- * 「收到两条就断了」会被当成成功，正是本批要消灭的那种静默截断。
+ * 「收到两条就断了」会被当成成功。
  *
  * ## 参数（走 `appservice/args.properties`，由启动器转发；见 DebugServiceLauncher）
  *
@@ -56,7 +55,7 @@ import java.io.File
  *     timeout= 整次调试的墙钟上限（秒，默认 60）
  *     cookie=  手工注入的一条 cookie（可选；不给就按源 URL 从我们的浏览器 profile 读）
  *
- * 命令行形态是 `--file/--key/--out/--timeout`——**与 ValidateService 同一套拼法**，
+ * 命令行形态是 `--file/--key/--out/--timeout/--cookie`——**与 ValidateService 同一套拼法**，
  * 因为拉起它的都是那个 `legado-gradle.bat` + `--tests <启动器>`。
  *
  * ## 产物有两个
@@ -190,15 +189,19 @@ object DebugService {
             return BAD_INPUT
         }
 
-        // A1 不做 webView（那是 A2 的 shadow 桥）。带 webView 的源在这里**必须显式说出来**：
-        // Robolectric 里的 WebView 是桩，硬跑会产出「取不到」这种看着像源坏了的结论——
-        // AGENTS #4 的同一类错。这里只警告不拦：搜索段这类不受 webView 影响的段仍有价值。
-        // 同一个判据进侧车（`webview_unsupported`），A4 才能在界面上讲出来。
+        // 带 webView 的源在这里**必须显式说出来**：取数那一步现在由 A2 的 shadow 桥委托给
+        // 真浏览器，但它有**三条明确不支持的边界**（`ShadowBackstageWebView` 的类注释：
+        // `isRule` 注入路径 / `sourceRegex` 嗅探 / 只给 html 的 loadDataWithBaseURL）——
+        // 撞上边界时那几段会被读成「取不到」，看着像源坏了（AGENTS #4 的同一类错）。
+        // 所以这里只警告不拦：搜索段这类不受 webView 影响的段仍有价值。
+        // 同一个判据进侧车（`webview_unsupported`）；**那个字段目前没有程序化消费方**
+        // （前端不读它），留着是给排障的人看的那份原始事实。
         val webviewSeen = webViewPattern.containsMatchIn(sourceJson)
         if (webviewSeen) {
             System.err.println(
-                "[appservice] ⚠ 该源的 URL 规则带 webView：**A1 尚未支持**，" +
-                    "带 webView 的那几段结果不可信（等 A2 的 shadow 桥）。")
+                "[appservice] ⚠ 该源的 URL 规则带 webView：取值交给浏览器桥，" +
+                    "但 isRule / sourceRegex / 只给 html 这三种形态**本机不支持**，" +
+                    "撞上时那几段结果不可信（原因见侧车 webview_unsupported）。")
         }
 
         ValidateService.ensureStarted()
@@ -307,7 +310,8 @@ object DebugService {
         // ——另一个 JVM（跑批、一次性调试）撞上占用就「自愈」换临时 profile，
         // **cookie 静默全丢**（实测：同一条源从 3 段变 1 段，还白等 18s 超时）。
         // 那种错长得像「源坏了」（AGENTS #4），拿 0.65s 换掉它是划算的。
-        // 真要留着，正确做法是「谁要用谁先让 daemon 交出来」（D2 再议），不是默认占着。
+        // 真要留着，正确做法是「谁要用谁先让 daemon 交出来」（还没做，见 TODO §一点八），
+        // 而不是默认占着。
         runCatching { BrowserSession.close() }
 
         // 退出码：**「流关了但没有终止事件」也算失败**。原来只看 count/timedOut，

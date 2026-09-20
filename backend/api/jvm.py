@@ -130,10 +130,8 @@ def _export_sources_file(st, urls: Optional[List[str]] = None) -> Path:
 def _run_gradle(timeout_min: int = 90) -> int:
     """调启动器跑批（阻塞直到 Gradle 退出）。返回退出码。
 
-    **顺手刷新 dump**（与 `core.jvm_debug._run_launcher` 同一条不变式）：Gradle 一定会先
-    编译，所以它跑完之后「dump 比 .kt 新」= 「这份类是新编译的」——调试那条常驻链
-    （`core.jvm_debug.default_launcher`）就是靠这个判据决定敢不敢用常驻进程。
-    少了这一步，跑完一次批也会让常驻被「类可能是旧的」挡在外面。
+    **顺手刷新 dump**：与 `core.jvm_debug._run_launcher` 同一条不变式（机制在
+    `core.jvm_direct.dump_is_stale` 与 `core.jvm_debug.default_launcher` 那两处，别在这抄）。
     """
     exe = _launcher()
     env = {**os.environ,
@@ -193,10 +191,9 @@ async def jvm_run(body: Optional[JvmRunRequest] = None):
     #: 只跑这几条源（列表页勾选的）。空 = 全部在用源
     want_urls = [u for u in ((body.urls if body else []) or []) if str(u or "").strip()]
 
-    # **与调试共用一把锁**（`core.jvm_debug.RUN_LOCK`）：跑批与调试都写
-    # `appservice/args.properties`、都 `--rerun` 同一个 Gradle 任务，同时跑会互相踩
-    # （参数被改写、两个 Gradle 抢同一份构建产物），而那种失败看起来像「JVM 坏了」。
-    # 非阻塞拿不到就直说，不排队——跑批本身十几分钟，排队会把界面卡死。
+    # **与调试共用一把锁**（`core.jvm_debug.RUN_LOCK`）：两条链都写同一个参数文件，
+    # 同时跑会互相踩。锁的理由、`BUSY_REASON` 那句话与「为什么非阻塞」都在
+    # `core.jvm_debug`（**一处写**，别在这里再抄一份因果）。
     from core.jvm_debug import BUSY_REASON, RUN_LOCK
     if not RUN_LOCK.acquire(blocking=False):
         return {"started": False, "reason": BUSY_REASON}

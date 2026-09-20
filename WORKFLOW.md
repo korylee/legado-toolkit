@@ -66,7 +66,8 @@ echo 'https://www.koudaimh.com/search?q=%E7%BB%8D%E5%AE%8B' |
 
 - 自动完成：搜索规则推断 → 详情页目录推断 → 全链路验证（search/bookUrl/toc/content）
 - 产物：`auto_added.json`（临时累积区，新源先落这里）
-- 生成后走 Web 的「导入」把它并入管理库；不要用 `merge --mode replace` 覆盖管理库里的源。
+- 生成后走 Web 的「导入」把它并入管理库（**别用 `merge --mode replace` 覆盖管理库**，
+  理由见 §六 维护建议）。
 
 ### ② 外部获取的源（他人分享 / 论坛 / 网络）
 
@@ -101,7 +102,10 @@ echo 'https://www.koudaimh.com/search?q=%E7%BB%8D%E5%AE%8B' |
 > **Web 上不用敲这些命令**：管理台的「校验 / 整理 / 报告」按钮跑的是同一条链
 > （同一个 `core/` 实现），结论写回管理库。本节是**离线/批量**形态——操作对象是
 > JSON 文件。**校验缓存默认在管理库**（`data/sources.sqlite3` 的 `checks` 表）——
-`--cache-dir` / `-r` 只在 `--legacy-cache` 下才被读写，默认传了也是空转。
+`--cache-dir` / `-r` **默认读的是管理库**（`AsyncChecker` 的 `use_store` 默认开）——
+  想读旧的 NDJSON 缓存目录要 `LEGADO_LEGACY_CACHE=1`（`check` / `run` 另有 `--legacy-cache`
+  开关，`organize` / `report` **没有**）。所以下面示例里的 `-r check_cache` 指的是
+  「从缓存恢复星级」，**不表示去读那个目录**。
 
 附件或自用源需要高优先级时，可一条命令生成三个产物：
 
@@ -125,11 +129,13 @@ python cli/main.py check -i candidates.json -o out/checked.json --refresh-cache 
 # 临时完全不使用缓存（不读也不写，适合一次性诊断）
 python cli/main.py check -i candidates.json -o out/checked.json --no-cache
 
-# 2. 整理（按 类型+生命周期状态 重建分组，-r 恢复缓存里的星级数据）
-python cli/main.py organize -i out/checked.json -o out/organized.json -r check_cache
+# 2. 整理（按 类型+生命周期状态 重建分组，-r 从缓存恢复星级数据）
+python cli/main.py organize -i out/checked.json -o out/organized.json -r
 
-# 3. 报告（-r 恢复缓存星级，报告才有星级分布/优质TOP）
-python cli/main.py report -i out/organized.json -r check_cache -o out/final_report.md
+# 3. 报告（同样需要星级的分布与 TOP）
+python cli/main.py report -i out/organized.json -r -o out/final_report.md
+#    要读**旧的 NDJSON 缓存目录**（不是管理库）时，前面加 LEGADO_LEGACY_CACHE=1；
+#    否则 `-r` 给的目录会被忽略——那两个子命令没有 --legacy-cache 开关
 ```
 
 > 等价的一条龙：`python cli/main.py run -i candidates.json -o out/checked.json`
@@ -188,7 +194,10 @@ python cli/main.py report -i out/organized.json -r check_cache -o out/final_repo
     4★/5★ 保留给有命中实测证据的源
   - 深度验证**无法验证**（XPath/JS 规则、网络失败、参考表缺项）的维度**回退静态规则判定**，
     不误杀规则齐全的源；实测**明确不达标**（False）仍扣分，不误放真坏的源
-- **验证深度**由 `--probe-depth` 控制。**一根轴四档，一档对一级星级**（默认 **2** = 搜索）：
+- **验证深度**由 `--probe-depth` 控制。**一根轴四档，一档对一级星级**（默认 **2** = 搜索）。
+  **界面下拉里只给 2/3/4 三档**（2026-09-20 起撤掉主页档：每档本来都先打主页探测，
+  所以搜索档拿到的「谁不可达」与主页档逐字相同；见 lessons §七十）；`1` 仍是**合法值**
+  （历史结论与旧配置迁移都用它），**CLI 这条链照旧接受**：
   - `1` 主页：只测域名连通（1 个请求/源），目录/正文维度走静态规则判定
   - `2` 搜索：再**实测搜索**是否命中测试作品（+1~2 个请求/源）→ 2★连通 / 3★命中
   - `3` 目录：命中后**实测目录**——解析详情页数章节数与参考表比对（+2 个请求/源）→ 4★
@@ -217,7 +226,7 @@ python cli/main.py report -i out/organized.json -r check_cache -o out/final_repo
 | 校验+整理+报告 | `python cli/main.py run -i candidates.json -o out/checked.json` |
 | 深度验证审计（目录+正文实测） | `python cli/main.py check -i candidates.json --probe-depth 4 --cache-dir check_cache` |
 | 仅可用源精简版 | `python cli/main.py run -i candidates.json --keep-only-ok -o out/checked_ok.json` |
-| 只要报告（不重新校验） | `python cli/main.py report -i out/organized.json -r check_cache -o out/report.md` |
+| 只要报告（不重新校验） | `python cli/main.py report -i out/organized.json -r -o out/report.md` |
 | 去重检查 | `python cli/main.py dedupe -i 某文件.json -o 去重后.json` |
 | 忘了命令 | `python cli/main.py`（进菜单）或 `python cli/main.py -h` |
 
@@ -233,8 +242,10 @@ python cli/main.py report -i out/organized.json -r check_cache -o out/final_repo
 4. **被墙源**（🌐）可加 `--proxy` 复查：`python cli/main.py check -i x.json --proxy http://127.0.0.1:7890`
    （原先这里写的 `socks5://` 是失实示例——urllib 与 aiohttp 都不认，会直接连接失败。
    代理只支持 `http://` / `https://`。）
-   Web 端不必敲命令：**设置 → 校验 → 代理** 里配一次，或在校验前用工具栏的
-   「校验参数」只对本次生效。注意 CLI 与 Web 的参数**各自独立**，不共享。
+   Web 端不必敲命令：**设置 → 校验 → 代理** 里配一次，或在校验前用批量校验弹框里的
+   「本次覆盖」只对那一次生效。代理支持哪些协议、以及「CLI 与 Web 参数各自独立」这两条
+   **在 [`README.md`](README.md) 的「校验参数的取值优先级」里维护**（配置 reference 归
+   那份），这里只留命令示例。
 5. 备份只看两处：**管理库 `data/sources.sqlite3`** 与 `data/candidates*.json`。
 
 ---
@@ -255,7 +266,7 @@ python cli/main.py report -i out/organized.json -r check_cache -o out/final_repo
 | `data/imports/conflicts/` | Web 导入时规则冲突的源（原样留存，可回查） |
 | `data/backups/` | 软删除记录（`deleted.jsonl`）+ 手动备份 |
 | `data/out/exports/` | 临时导出快照 |
-| `data/app_probe/` | App 实测产物（源清单备份 + searchBook 结果），产生它的脚本已删 |
+| `data/app_probe/` | App / JVM 实测产物（调试 NDJSON + 侧车、跑批导出、常驻日志、探针输出）。**现在仍在写**：`core/jvm_debug.py`、`core/jvm_daemon.py`、`scripts/jvm_debug_run.py`、`scripts/jvm_debug_direct.py`、`backend/api/jvm.py` |
 
 **CLI 的文件式产物**默认落在**当前目录**（`checked.json`、`check_cache/` …），项目约定
 统一放 `out/` 与 `check_cache/`：
@@ -272,7 +283,8 @@ python cli/main.py report -i out/organized.json -r check_cache -o out/final_repo
   走 **Web 导入**，不进仓库根目录。
 - 别在根目录堆产物（`checked.json`/`final_*.json`/`shareBookSource.json`）——
   要么 `-o out/...`，要么让 Web 去做。
-- 运行前若缺依赖：`uv pip install -r requirements.txt`（在 `.venv/` 下用 `uv run`）。
+- 运行前若缺依赖：`uv sync`（依赖声明在 `pyproject.toml` + `uv.lock`，**仓库里没有
+  `requirements.txt`**；`.venv/` 下用 `uv run`）。
 
 ---
 

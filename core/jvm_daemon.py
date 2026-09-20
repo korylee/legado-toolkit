@@ -1,22 +1,23 @@
 # -*- coding: utf-8 -*-
-"""常驻调试 daemon 的客户端（S5-A 第二期 D1）。
+"""常驻调试 daemon 的客户端。
 
-**它解决什么**（D0 实测）：单次调试的入场费是 **10.7s**（JVM + Robolectric + App 初始化），
-而站点本身只要 0.7s。daemon 把「起一次」摊到多次请求上——同一条源连跑两次，第二次
-只剩站点的时间。
+**它解决什么**：单次调试的**入场费**（JVM + Robolectric + App 初始化）比站点请求贵一个
+量级，常驻把「起一次」摊到多次请求上——同一条源连跑两次，第二次只剩站点的时间。
+**实测数字别在这里抄**（会过期）：见 lessons §六十五 / §六十七。
 
-## 与一次性那条**同形**（这是关键设计，别改成另一套）
+## 与一次性那条**同形**（关键设计，别改成另一套）
 
-daemon 只换「怎么拉起」：请求走一行 JSON 过 socket，产物（NDJSON + 侧车）**还是落到
-原来的路径**，于是 `core.jvm_debug.run_jvm_debug` 的解析一行不改——它就靠 D0 留的
-`launcher=` 缝接进来。所以三条拉起方式（Gradle / `java` 直起 / 常驻）的差别**只有拉起**，
-结论不可能因为换了拉起方式而不同（这正是 D1 的验收判据）。
+daemon 只换「怎么拉起」：请求走一行 JSON 过 socket，产物（NDJSON + 侧车）**还是落到原来
+的路径**，于是 `core.jvm_debug.run_jvm_debug` 的解析一行不改——它靠 `launcher=` 缝接进来。
+所以三条拉起方式（Gradle / `java` 直起 / 常驻）的差别**只有拉起**。
 
-## 降级路径（必须有，别等 D2）
+## 降级路径（必须有）
 
-`launcher_from_args()` 的每一次调用都是「先试 daemon，**任何失败都回落直起**」：
-daemon 起不来 / 半路死了 / 版本对不上 / 端口被占——用户看到的顶多是「这次慢一点」，
-而不是「调试坏了」。回落走 `core.jvm_direct`（D0 那条直起路径，已与 bat 路径对拍过）。
+`launcher_from_args()` 的每一次调用都是「先试 daemon，**任何失败就回落**」：daemon 起不来 /
+半路死了 / 版本对不上 / 端口被占——用户看到的顶多是「这次慢一点」，而不是「调试坏了」。
+**回落目标由调用方定**（`fallback=`）：产品那条传 Gradle（它一定会先编译，是「无论如何都能
+跑对」那条，见 `core.jvm_debug.default_launcher`），CLI/开发默认回落 `core.jvm_direct` 的
+直起（快，且 dump 新鲜时与 bat 逐字段一致）。
 
 ## 版本键
 
@@ -262,10 +263,10 @@ def _stop_port(port: int, pid: int) -> bool:
     先问身份再动手的理由：pid 会被系统复用，直接 kill 一个「恰好等于记录值」的 pid
     有误杀风险；从端口问身份没有。
 
-    **必须先试 `op=stop`**：常驻里浏览器是刻意留着的（`keepBrowserOpen`），而
-    TerminateProcess 不执行 `finally` —— 那个 Chromium 会活下来**继续占着 profile**，
-    之后任何一次抓页都「自愈」换临时 profile、**cookie 静默全丢**（实测：结论从 3 段
-    变 1 段，还白等 18s 超时）。所以能优雅停就优雅停。
+    **必须先试 `op=stop`**：`TerminateProcess` 不执行 `finally` —— 而 daemon 的 `finally`
+    里要关 server、收浏览器、清残留。正在跑的那一瞬间被硬杀，那个 Chromium 会活下来
+    **继续占着 profile**：之后任何一次抓页都「自愈」换临时 profile、**cookie 静默全丢**
+    （实测：结论从 3 段变 1 段，还白等 18s 超时）。所以能优雅停就优雅停。
     """
     got = ping(port, timeout=1.0)
     if not got or (pid and got.get("pid") != pid):
@@ -316,7 +317,7 @@ def _kill_proc() -> bool:
 
 
 def stop() -> bool:
-    """收掉我们记录的 daemon（界面/CLI 的「停掉常驻」）。"""
+    """收掉我们记录的 daemon（CLI `--daemon-stop` 用；界面还没有这个按钮）。"""
     with _LOCK:
         info = _read_info()
         ok = False

@@ -48,6 +48,7 @@ _inspect*.py
 
 # LLM 本地配置（含 API Key，禁止提交）
 data/config/
-# 2026-09-19 的设备实测产物（App 源清单备份 + searchBook 结果），
-# 产生它的脚本已删（步骤见 TODO「真机复检通道」），数据留着当证据。
+# 实测产物目录（设备探针 + JVM 调试/跑批 + 常驻日志）。**仍在写**：
+# core/jvm_debug.py、core/jvm_daemon.py、backend/api/jvm.py、
+# scripts/jvm_debug_run.py、scripts/jvm_debug_direct.py、tools/probe_app_debug.py。
 data/app_probe

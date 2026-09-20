@@ -40,7 +40,7 @@ Legado（阅读）书源管理工具链：CLI + FastAPI + SQLite + Vue 3。
     验过才显示「验过几条」，`@js:` 这类本地跑不了的会标明**只能连 App 试**
   - 支持 OpenAI 兼容接口及多种本地/云端模型配置
   - **调试的页面缓存**：抓过的页面 5 分钟内不重复联网（单页 0.8 秒 → 毫秒级），
-    调试卡片上可选「用缓存 / 只读缓存 / 忽略缓存重抓」，抽屉里每页都标着抓取时刻
+    调试卡片上可选「用缓存 / 只读缓存 / 忽略缓存」，抽屉里每页都标着抓取时刻
 
 - **导出与订阅**
   - 临时导出快照：适合生成二维码/链接分享
@@ -74,7 +74,8 @@ Legado（阅读）书源管理工具链：CLI + FastAPI + SQLite + Vue 3。
 .
 ├─ backend/                FastAPI 后端（**入口之一**）
 │  ├─ api/                 路由：sources/imports/export/feed/rules/llm/
-│  │                       jobs/settings/jvm/ops（共 10 个模块，不逐一列）
+│  │                       jobs/settings/jvm（**9 个挂路由的模块**，不逐一列；
+│  │                       `ops.py` 是后台任务的实现，本身不注册端点）
 │  ├─ jobs/                后台任务运行器 + SSE
 │  ├─ app.py               FastAPI 应用
 │  └─ __main__.py          后端启动入口
@@ -96,7 +97,10 @@ Legado（阅读）书源管理工具链：CLI + FastAPI + SQLite + Vue 3。
 ├─ tests/                  Python 测试
 ├─ tools/                  **开发与 agent 工具，不是运行时依赖**
 │  ├─ apply_edits.py       行级补丁应用器（绕开 shell 转义），见 skills/agent-write-safety
-│  └─ probe_app_debug.py   手工探测 App 调试 WS 推了什么
+│  ├─ probe_app_debug.py   手工探测 App 调试 WS 推了什么
+│  └─ check_copy.py        **界面文案机检**（术语表 + 标点规则；`README.md`/`WORKFLOW.md`
+│                          也在扫描范围内）——改这两份文档后跑
+│                          `python -m tools.check_copy --errors`，它同时挂在测试里
 ├─ skills/                 Agent / 开发技能文档
 ├─ deploy/fnos/            飞牛 NAS 书库部署示例
 ├─ data/                   运行时数据（已 gitignore）
@@ -249,23 +253,14 @@ python cli/main.py --help
 python cli/main.py
 ```
 
-### 常用命令速查
+### 常用命令
 
-| 命令 | 用途 |
-| :--- | :--- |
-| `check` | 高并发联网校验书源可用性/星级 |
-| `organize` | 按类型 + 健康状态重建分组 |
-| `report` | 生成 Markdown 诊断报告 |
-| `run` | 一条龙：校验 → 整理 → 报告 |
-| `merge` | 合并/更新多份书源 JSON |
-| `prepare` | 附件优先合并，生成完整候选版/快速使用版 |
-| `dedupe` | 按 URL/名称去重（写出新文件） |
-| `dups` | 找重复源：规则相同、只有地址/署名不同的（**只读清单**，缺省读管理库） |
-| `sanitize` | 清洗字段类型，兼容 Legado/Gson 导入 |
-| `add` | 给搜索 URL 自动推断规则生成书源 |
-| `reclassify` | 按实测信号重判书源类型 |
-| `diagnose` | 失效源归因 |
-| `repair` | AI 修复规则：证据 → 提议 → 回放器验证 → 重试 |
+每个子命令的用途**只在一处维护**：[`WORKFLOW.md`](WORKFLOW.md) 的「标准操作速查」
+（按场景列，含典型参数）。这里不抄第二份——两份清单必然有一份先过期。
+
+```powershell
+python cli/main.py -h          # 命令与选项
+python cli/main.py             # 无参数进交互菜单
 
 ### 示例
 
@@ -293,10 +288,10 @@ python cli/main.py merge -i a.json -i b.json -o merged.json --mode replace
 
 - 书源列表：搜索、筛选、排序、分页、批量打标签、批量校验、导出
 - 编辑源：类型、健康状态（自动跟随/锁定）、标签、规则编辑、连 App 调试（含推送）、快速生成
-- 分组/标签管理：标签总览、重命名、合并、删除、规范化
+- 分组管理：标签总览、重命名、合并、删除、规范化
 - 导入/导出：外部导入、导出快照、固定订阅二维码
-- 任务中心：校验、诊断、AI 修复等后台任务进度
-- 诊断看板：健康度、星级、失效归因统计
+- 任务：校验、诊断、AI 修复等后台任务进度（统计条右侧的「任务」按钮）
+- 统计条：健康度 / 星级 chip（点一下即按该档筛选）；失效归因在「整理源」与报告里
 - 模型设置：OpenAI 兼容模型配置、测试、激活
 
 ### 系统标签说明
@@ -310,19 +305,10 @@ python cli/main.py merge -i a.json -i b.json -o merged.json --mode replace
   `GET /api/sources/tags/meta` 拿，别自己抄）
 - 规则质量：规则完整
 
-六档按**下一步动作**划分——两档该不该合成一档，看动作是否相同：
-
-| 状态 | 下一步动作 |
-| :--- | :--- |
-| ✅可用 | 直接用 |
-| 🔒需登录 | 连 App 试（站点拒绝了我们：403/验证码/登录墙） |
-| 🌐需翻墙 | 挂代理复测 |
-| 🔐证书问题 | 关掉证书校验，或换 http |
-| ❓待验证 | 跑/重跑一次校验（超时、异常、从未校验都在这一档） |
-| ❌已失效 | 删 |
-
-> **「未校验」不是一种状态**，而是「没有校验记录」：统计条上是一个灰 chip、
-> 筛选项里可选，不进健康枚举。
+六档按**下一步动作**划分（两档该不该合成一档，看动作是否相同）——**动作表在
+[`WORKFLOW.md`](WORKFLOW.md) 的「第二层：健康度」**，那里是口径的权威。
+上面那行只列标签；「未校验」不是一种状态，而是「没有校验记录」（统计条上是灰 chip、
+筛选项里可选，不进健康枚举）。
 
 其中：
 
@@ -355,8 +341,16 @@ python cli/main.py merge -i a.json -i b.json -o merged.json --mode replace
 | POST /api/sources/tags/merge | 合并用户标签 |
 | POST /api/sources/tags/delete | 删除用户标签 |
 | POST /api/sources/tags/normalize | 全库规范化用户标签 |
+| GET /api/sources/stats | 统计条的数（总数 / 健康档位 / 星级分布），供 chip 下钻 |
+| GET /api/sources/deleted | 回收站列表 |
+| POST /api/sources/merge | 合并重复源（「整理源」抽屉） |
+| POST /api/sources/merge/undo | 撤销上一次合并 |
+| GET /api/sources/dups | 重复源候选（镜像 / 同域名 / 同名三档，只读） |
+| POST /api/sources/names/preview · /apply · /undo | 源名清洗（预览 / 应用 / 撤销） |
+| POST /api/rules/jvm-debug | **本机引擎调试**（在 JVM 里跑 App 真源码，含 JS 规则）；返回体与 `/api/rules/app-debug` 同形 |
 | POST /api/jobs | 提交后台任务 |
 | GET /api/jobs/{id}/events | SSE 任务进度 |
+| GET /api/jobs · POST /api/jobs/{id}/cancel | 任务列表 / 取消 |
 | POST /api/export | 创建导出快照 |
 | GET /api/export/{uid}.json | 获取导出 JSON |
 | GET /api/feed/ok.json | 固定订阅：仅可用源 |
@@ -400,20 +394,13 @@ python cli/main.py merge -i a.json -i b.json -o merged.json --mode replace
 cache/check_cache/imports/out/config/app_probe 等）——**新增子目录要自己补一条**，
 别以为整个 data/ 都被忽略了。
 
-| 路径 | 内容 |
-| :--- | :--- |
-| data/sources.sqlite3 | 管理库：源、校验缓存、诊断、修复、任务 |
-| data/check_cache/ | **遗留**的 NDJSON 校验缓存：现役缓存在管理库 `checks` 表
-（上一行），这里只在 `--legacy-cache` 与迁移/对拍时读 |
-| data/out/exports/ | 临时导出快照 |
-| data/backups/ | 软删除记录（`deleted.jsonl`，一行一次删除操作，含原因）/ 手动备份 |
-| data/imports/conflicts/ | 导入时规则冲突的源（原样留存，可回查） |
-| data/config/llm_profiles.json | LLM 模型配置（含 API Key，勿提交） |
-| data/config/settings.json | 全局设置：校验参数默认值（并发/超时/探测深度/代理等） |
-| data/candidates*.json | 候选源/导出产物 |
+**每个子目录的用途在 [`WORKFLOW.md`](WORKFLOW.md) 的「目录约定」**（那里是权威，
+含 CLI 产物该放哪）。这里只留三条不会变的事实：
 
-注意：candidates.json 通常是唯一候选主库，请单独备份。
-给 Legado 的 JSON 是交付格式，SQLite 才是管理事实来源。
+- **事实来源是 `data/sources.sqlite3`（管理库）**：源 / 校验缓存 / 任务 / 导出记录。
+  给 Legado 的 JSON 是**交付格式**，不是事实来源。
+- `data/candidates*.json` 是候选源与导出产物，**请单独备份**（运行时数据、不入库）。
+- `data/config/`（全局设置 + LLM 配置）含 API Key，**勿提交**。
 
 可通过环境变量覆盖数据目录：
 
@@ -462,26 +449,13 @@ $env:LEGADO_DATA_DIR = "D:\legado-data"
 
 ### 开发环境
 
-- 后端：uv run python -m backend
-- 前端：cd frontend && pnpm dev
-- Vite 代理 /api 到后端
+`uv run python -m backend` + `cd frontend && pnpm dev`（vite 把 `/api` 代理到后端）
+——完整步骤见上文「快速开始」。
 
 ### 生产 / 局域网部署
 
-1. 构建前端：
-
-```powershell
-cd frontend
-pnpm build
-```
-
-2. 启动后端：
-
-```powershell
-.\.venv\Scripts\python.exe -m backend
-```
-
-3. 使用 Nginx/Caddy 做同源反向代理：
+与开发唯一的区别是**前端不由 vite 提供**：`pnpm build` 出 `frontend/dist`，只启动后端
+（由后端托管），手机用局域网 IP + 同一端口访问。要放到别的机器/端口时再做同源反向代理：
 
 ```text
 /        -> frontend/dist 静态文件

@@ -13,14 +13,8 @@ import java.net.ServerSocket
 import java.net.SocketTimeoutException
 
 /**
- * 常驻调试服务（S5-A 第二期 D1）：**起一次**（JVM + Robolectric + App + Koin），之后每次
- * 调试只付站点的时间。
- *
- * ## 为什么值得存在（D0 实测，Echo 源）
- *
- * 单次调试的入场费 **10.7s**（JVM + Robolectric + App 初始化），而站点本身只要 0.7s；
- * 两条拉起方式（Gradle 全链 13.4s / `java` 直起 11.4s）里，Gradle 只占 2.0s——**贵的
- * 那段正是常驻能留住的**。编辑规则时同一条源要跑 2–4 次，省的是「10 秒 × 次数」。
+ * 常驻调试服务：**起一次**（JVM + Robolectric + App + Koin），之后每次调试只付站点的时间。
+ * 为什么值得存在、实测数字与取舍见 lessons §六十五 / §六十六 / §六十七（别在这儿抄）。
  *
  * ## 协议（与一次性那条**同形**，别另造一套）
  *
@@ -28,8 +22,8 @@ import java.net.SocketTimeoutException
  * 应答一行 JSON：`{"id":1,"code":0,"cost_ms":1234,"error":""}`
  *
  * **产物一字不变**：NDJSON 与侧车仍旧落到 `out` / `out.meta.json`，Python 侧
- * `core.jvm_debug` 的解析**一行不改**（D0 留的 `launcher=` 缝就是为这件事）——
- * daemon 只换「怎么拉起」，不换「跑了什么」。
+ * `core.jvm_debug` 的解析**一行不改**（`launcher=` 缝就是为这件事）——daemon 只换
+ * 「怎么拉起」，不换「跑了什么」。
  *
  * ## 串行是硬约束，不是保守
  *
@@ -43,11 +37,8 @@ import java.net.SocketTimeoutException
  *   （`runOnce` 开头的 `reset()`）——常驻会让它们跨请求累积，而侧车里的诊断判据
  *   （「普通源 shadow_calls 必须是 0」）会被累积值说反。
  * - **留**：cookie 与浏览器 profile（A3 的收益就靠它）。
- * - **浏览器进程照旧每请求收掉**：留着能省 **0.65s/次**（实测 0.7s → 0.05s），但它会
- *   一直占着 profile，另一个 JVM（跑批 / 一次性调试）撞上占用就「自愈」换临时 profile、
- *   **cookie 静默全丢**（实测：同一条源从 3 段变 1 段，还白等 18s）。那种错长得像
- *   「源坏了」（AGENTS #4），不值得拿 0.65s 去换。真要留，正确做法是「谁要用谁先让
- *   daemon 把 profile 交出来」——那是 D2 的题，不是默认占着。
+ * - **浏览器进程照旧每请求收掉**：留着能省 0.65s/次，但会一直占着 profile（取舍与实测
+ *   在 `DebugService.runOnce` 收尾那段——**那里是决策点**，理由别在这儿再抄一份）。
  */
 object DebugServiceDaemon {
 
@@ -96,7 +87,8 @@ object DebugServiceDaemon {
             }
         } finally {
             runCatching { server.close() }
-            // 退出前把浏览器收掉（常驻期间它是刻意留着的）
+            // 收尾：浏览器**每请求结束就已经关了**（`runOnce` 收尾），这里再兜一次是防
+            // 「请求正跑着时收到 stop」那一瞬间的残留会话
             runCatching { BrowserSession.close() }
         }
         return DebugService.OK
@@ -124,9 +116,9 @@ object DebugServiceDaemon {
             return true
         }
         // **优雅停止**（D1）：客户端不能只 kill 进程——`TerminateProcess` 不执行 `finally`，
-        // 于是「正跑着/浏览器正开着」的那一刻被 kill，那个 Chromium 会活下来**继续占着
-        // profile**：之后任何一次抓页都「自愈」换临时 profile、**cookie 静默全丢**
-        // （实测：结论从 3 段变 1 段、还白等 18s 超时）。走这一条就干干净净。
+        // 于是「正跑着」的那一刻被 kill，那个 Chromium 会活下来**继续占着 profile**：
+        // 之后任何一次抓页都「自愈」换临时 profile、**cookie 静默全丢**（代价与实测见
+        // `core.jvm_daemon._stop_port`，那里是决策点）。走这一条就干干净净。
         if (req.str("op") == "stop") {
             out.println(respond(id, DebugService.OK, 0, ""))
             out.flush()

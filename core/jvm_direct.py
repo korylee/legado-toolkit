@@ -1,26 +1,25 @@
-# -*- coding: utf-8 -*-
-"""「不起 Gradle 直起一次 JVM」的原语（S5-A 第二期 D0 的产物，D1 起被常驻 daemon 复用）。
+"""「不起 Gradle 直起一次 JVM」的原语（常驻 daemon 与 CLI 共用）。
 
-**为什么值得单独一个模块**：这套东西现在有两个消费方——CLI（`scripts/jvm_debug_direct.py`）
-与常驻 daemon 的客户端（`core/jvm_daemon.py`），而常驻那条是**产品路径**（后端要用），
-不能反过来 import `scripts/`。参数拼装（classpath / 系统属性 / jvmArgs / 堆）各写一份的
-后果与 `core/jvm_debug` 当初拆出来的理由一模一样：两处各写一遍就会漂，而漂的表现是
-「界面上跑出来的和命令行跑出来的不一样」。
+**为什么单独一个模块**：两个消费方——CLI（`scripts/jvm_debug_direct.py`）与
+`core/jvm_daemon.py`，而常驻那条是**产品路径**：`core/` 不能反过来 import `scripts/`。
+参数拼装（classpath / 系统属性 / jvmArgs / 堆）各写一份就会漂，漂的表现与
+`core/jvm_debug` 当初拆出来的理由一样（「界面上跑出来的和命令行跑出来的不一样」）。
 
 ## dump 是什么、为什么必须有它
 
-`appservice/legado-test.init.gradle` 里挂了 `doFirst`：按环境变量
-`LEGADO_TEST_JVM_ENV_OUT` 把**测试 JVM 的运行环境**（classpath / 系统属性 / jvmArgs /
-workingDir）写成 JSON。绕开 Gradle 直起就得拿这份 dump——尤其**系统属性**：
-Robolectric 靠 AGP 注入的那些定位 Android 资源，Gradle 里是隐式给的、看不见。
+`appservice/legado-test.init.gradle` 按环境变量 `LEGADO_TEST_JVM_ENV_OUT` 把**测试 JVM 的
+运行环境**（classpath / 系统属性 / jvmArgs / workingDir）写成 JSON。绕开 Gradle 直起就得拿
+这份 dump——尤其**系统属性**：Robolectric 靠 AGP 注入的那几个定位 Android 资源，
+Gradle 里是隐式给的、看不见。
 
-**dump 是编译后的产物**：改了 `appservice/` 的 Kotlin 要重新 `refresh()`，
-`dump_is_stale()` 就是干这个判断的。
+**dump 是编译后的产物**，所以「它比 `.kt` 新」等价于「这份类是新编译的」——
+`core.jvm_debug._run_launcher` 每次 Gradle 跑测都顺手刷它，靠的就是这条不变式
+（只改一边 = 常驻被永久挡住，或跑旧类）。
 
-## 三条实测细节（别改回去）
+## 三条平台事实（改回去会静默坏）
 
-- classpath 有 **625 项 / 75232 字符** → 直接拼命令行必撞 Windows 的 32767 上限，
-  所以走 `java @argfile`；argfile 里 `\\` 要翻倍（JDK 的 `@file` 解析把它当转义符）。
+- classpath 会长到**几万字符**（远超 Windows 命令行的 32767 上限）→ 走 `java @argfile`；
+  argfile 里 `\\` 要翻倍（JDK 的 `@file` 解析把它当转义符）。
 - `javaLauncher` 的 `installationPath` 是 **JDK 根目录**，不是可执行文件。
 - `maxHeapSize`（3g，为全量跑批 OOM 设的）**不在 jvmArgs 里**，得自己补 `-Xmx`。
 """

@@ -27,8 +27,9 @@ class ValidateServiceLauncher {
         // 传参走 appservice/args.properties（key=value：file/dir/keyword/out/
         // concurrency/timeout/limit/depth/noStripWebview）。比命令行转义可靠——
         // bash→cmd→gradle 三层引号转义已经坑过三轮。
-        // 文件定位（CWD → LEGADO_APPSERVICE_DIR 兜底）由 [AppserviceEnv] 统一负责：
-        // 它与 DebugServiceLauncher、两个探针**共用一份**，别再在这里抄第二遍。
+        // 文件定位（LEGADO_APPSERVICE_ARGS → LEGADO_APPSERVICE_DIR 两个候选，**没有 CWD
+        // 那条**——它 2026-09-20 已删）由 [AppserviceEnv] 统一负责：与 DebugServiceLauncher、
+        // 两个探针**共用一份**，别再在这里抄第二遍。
         val props = AppserviceEnv.loadArgs()
         if (props == null) {
             println("APPSERVICE-LAUNCHER: 找不到 args.properties（试过 " +

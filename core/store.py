@@ -860,7 +860,7 @@ class Store:
         锁定行也照改（钉住的是「状态」，不是「这个词怎么写」）。
 
         **与 CACHE_VERSION 的分工**：checks 是历史记录，映射后照常可读；探测缓存
-        是「当时的结论」，词表变了整体作废重探（checker.CACHE_VERSION 13）——
+        是「当时的结论」，词表变了整体作废重探（checker.CACHE_VERSION 14）——
         两边各管各的，不要在这里「顺手」清缓存。
         """
         if self.get_meta("health_tiers_v2"):

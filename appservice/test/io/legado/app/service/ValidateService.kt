@@ -42,12 +42,14 @@ import splitties.init.injectAsAppCtx
 import java.io.File
 
 /**
- * JVM 校验服务的核心（S1：搜索档；S3-1：目录段）。
+ * JVM 校验服务的核心。
  *
  * 输入：书源 JSON（单个文件 / 目录下批量 / stdin）。
- * 输出：每源一行 JSON 结论（NDJSON），供 Python 侧读回写 `checks`。
+ * 输出：每源一行 JSON 结论（NDJSON），由 Python 侧读回写 `meta`
+ * （`jvm_check:<批次>:<url>`，见 `backend/api/jvm.py` 的 `_write_meta`）——
+ * **不写 `checks`**：那是本地调试那份证据，混进同一个字段就分不出谁说的。
  *
- * **判定口径**（六态，与 S1 一致；段内失败不新造状态）：
+ * **判定口径**（六态；段内失败不新造状态）：
  * - `ok`             : 该深度的每一段都真实跑通（哪怕剥掉 webView 选项后才跑通——
  *                      剥选项是默认行为，见 [stripWebView]；结论带
  *                      `webview_stripped=true` 说明它是这么过的）
@@ -116,7 +118,7 @@ object ValidateService {
     //: 全在那里，连注释一起搬的；别在这里重新长一份。
 
     /**
-     * 进程级初始化（幂等）：Koin + appCtx。由 [main] 在跑批前调用一次。
+     * 进程级初始化（幂等：`main` 与调试的 `runOnce` 各调一次，第二次直接返回）：Koin + appCtx。由 [main] 在跑批前调用一次。
      *
      * [userAgent] 默认就是 [AppserviceEnv.USER_AGENT]——它是请求头里那条 UA
      * （`BaseSource.getHeaderMap` → `AppConst.UA_NAME`），**只能有一份**（那个常量上

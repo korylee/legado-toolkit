@@ -27,7 +27,11 @@ const width = computed(() => (props.compact ? "100%" : "160px"));
                      :min="limits[field.key]?.[0]" :max="limits[field.key]?.[1]" />
     <el-select v-else-if="field.type === 'depth'" v-model="value" size="small"
                :style="{ width: compact ? '100%' : '260px' }">
-      <el-option v-for="d in (limits.probe_depth || [1, 2, 3, 4])" :key="d" :value="d"
+      <!-- 选项**只来自后端 limits**（AGENTS #8）。这里故意不留本地兜底列表：原先写的是
+           `|| [1, 2, 3, 4]`，而 2026-09-20 撤掉主页档之后，那份兜底正好把 1 又发了回来
+           ——兜底列表就是第二份枚举，它必然会漂。limits 拿不到时下拉是空的，当前值仍以
+           文本显示（设置接口挂了本来就有别的地方报错）。 -->
+      <el-option v-for="d in (limits.probe_depth || [])" :key="d" :value="d"
                  :label="DEPTH_LABELS[d] || ('深度 ' + d)" />
     </el-select>
     <el-switch v-else-if="field.type === 'bool'" v-model="value" size="small" />

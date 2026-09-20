@@ -1,20 +1,18 @@
 # -*- coding: utf-8 -*-
-"""JVM 调试通道（S5-A4）：把 A1 那条 CLI 收成可复用的模块。
+"""JVM 调试通道：把「跑一次 App 调试链」收成可复用的模块。
 
-**为什么单开一个模块**：这条链现在有两个消费方——CLI（`scripts/jvm_debug_run.py`，
-A1–A3 的验收都跑它）与后端 `POST /api/rules/jvm-debug`（界面上选「本机引擎」）。
-参数拼装与产物解析各写一份就会漂（lessons §二十三），而漂的表现是「界面上跑出来的
-和命令行跑出来的不一样」——排查时根本想不到是两份实现。
+**为什么单开一个模块**：这条链有两个消费方——CLI（`scripts/jvm_debug_run.py`）与后端
+`POST /api/rules/jvm-debug`。参数拼装与产物解析各写一份就会漂，而漂的表现是「界面上跑
+出来的和命令行跑出来的不一样」——排查时根本想不到是两份实现（lessons §二十三）。
 
 **返回体与设备通道（`core/app_debug.run_app_debug`）同形状**
-（`source/steps/pages/all_ok/events/error`）——前端抽屉与卡片零改动就能吃。这是 A1 定的
-「NDJSON 与设备 WS 逐事件同构」的直接收益：`build_steps` 一行不改。
+（`source/steps/pages/all_ok/events/error`），且事件流与设备 WS **逐事件同构**——
+前端抽屉与卡片零改动就能吃（`build_steps` 一行不改）。
 
-**`pages` 用 `fetch_debug_pages` 补抓**，与设备通道同一口径：本批还没有把 JVM 里每段的
-真实 HTML 交回来（那是第三期 matched_html 回填），而抽屉「看源码改规则」需要 HTML。
-
-**不代用户登录**（A3 的边界）：登录态来自用户自己的浏览器 profile
-（`scripts/jvm_login.py` 预热一次）或 `cookie=` 手工给，这里只把它转发给 JVM 侧。
+**两条边界**：① `pages` 是 `fetch_debug_pages` **补抓**的（JVM 里每段的真实 HTML 还没交
+回来，见 TODO「第三期 matched_html 回填」），而抽屉「看源码改规则」需要 HTML；② **不代用户
+登录**：登录态来自用户自己的浏览器 profile（`scripts/jvm_login.py` 预热一次）或 `cookie=`
+手工给，这里只把它转发给 JVM 侧。
 """
 
 from __future__ import annotations
@@ -47,10 +45,12 @@ CODE_TEXT = {
     5: "事件流被截断（没等到终止事件）",
 }
 
-#: **跑批与调试共用一把锁**：两条链都写 `appservice/args.properties`、都拉同一个
-#: Gradle 任务。同时跑会互相踩（参数被改写、两个 Gradle 抢同一份构建产物），
-#: 而那种失败看起来像「JVM 坏了」。非阻塞获取——拿不到就直说，**不排队**：
-#: 排队会让界面上的一张卡片转十几分钟，那比一句「另一个任务在跑」糟得多。
+#: **跑批与调试共用一把锁**：两条链都写 `appservice/args.properties`（跑批写
+#: keyword/depth，调试写 file/key/out），而那个文件是**另一个进程**的入参入口——
+#: 同时跑会互相踩（参数被改写），那种失败看起来像「JVM 坏了」。D2 之后调试默认走常驻、
+#: 不碰 Gradle，所以「抢同一个 Gradle 任务」只对**回落那条路**成立；锁仍然必须有，
+#: 理由就是那个参数文件。非阻塞获取——拿不到就直说，**不排队**：排队会让界面上的一张
+#: 卡片转十几分钟，那比一句「另一个任务在跑」糟得多。
 #:
 #: **两侧都必须真拿这把锁**（`run_jvm_debug` 与 `backend/api/jvm.py` 的跑批）：
 #: 只有一侧拿，注释里那句「共用」就成了一个读起来像存在的保护（AGENTS #12）。
@@ -58,7 +58,7 @@ RUN_LOCK = threading.Lock()
 
 #: 拿不到 `RUN_LOCK` 时的**同一句话**。跑批与调试是同一把锁、同一个原因，
 #: 两处各写一份就会在界面上长得不一样，而用户看不出那其实是同一件事。
-BUSY_REASON = ("另一个 JVM 任务在跑（跑批与调试共用同一个 Gradle 任务与参数文件），"
+BUSY_REASON = ("另一个 JVM 任务在跑（跑批与调试共用同一个参数文件），"
                "等它跑完再来")
 
 
@@ -165,8 +165,8 @@ def run_jvm_debug(source: Dict[str, Any],
     ``out_path`` 只是给测试用的覆盖口（默认落在 `data/app_probe/jvm_debug.ndjson`）。
 
     ``launcher`` 是**「拉起那一步」的替换口**（签名同 :func:`_run_launcher`）：
-    默认走 Gradle（`legado-gradle.bat` + `--tests <启动器>`），第二期 D0 的
-    「不起 Gradle 直接 `java -cp`」与常驻 daemon 都从这里接进来。
+    不给就用 :func:`default_launcher`——**优先常驻 daemon、不可用回落 Gradle**（D2）。
+    直起（`java @argfile`）与常驻都从这条缝接进来。
     **参数拼装 / NDJSON 与侧车解析 / 结果组装只有这一份**——三条拉起方式各写一份，
     就会出现「命令行跑出来的和界面上跑出来的不一样」（这就是本模块存在的理由）。
     """
