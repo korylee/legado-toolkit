@@ -49,18 +49,26 @@ class OrganizerTests(unittest.TestCase):
         任何一张，症状都是"它悄悄落进「待验证」"——和三千多条从没校验过的源
         显示成同一个标签（CERT 就是这么被漏过一次）。
         """
-        for health in (Health.OK, Health.AUTH, Health.GFW, Health.DEAD, Health.CERT,
+        for health in (Health.OK, Health.AUTH, Health.GFW, Health.DEAD,
                        Health.PENDING):
             tag = group_title(0, health).split(",", 1)[1]
             self.assertEqual(infer_health_from_group(tag), health,
                              "「%s」往返后变了" % tag)
 
-    def test_cert_is_a_conclusion_not_pending(self) -> None:
-        """证书问题与「待验证」必须分开，理由同 AUTH 那条：
-        它是**有结论**的（站点可达、只是证书不被信任），落进「待验证」就等于
-        和从没校验过的源显示成同一个标签。"""
-        self.assertEqual(group_title(0, Health.CERT), "📖小说,证书问题")
-        self.assertNotEqual(group_title(0, Health.CERT), group_title(0, Health.PENDING))
+    def test_retired_cert_tag_becomes_pending_not_a_user_tag(self) -> None:
+        """「证书问题」已撤（2026-09-20，校验收成 App 引擎后它产不出来）。
+
+        旧分组里的这个词**既不许漏成用户标签**（前端认不出的旧词会被渲染成可编辑的
+        用户标签，实测栽过一次），也不该再推出一个不存在的档——它现在换名成
+        「待验证」（映射在 core/tags.RETIRED_STATUS_TAG_RENAMES，与存量迁移共用）。
+        """
+        from core.tags import RETIRED_STATUS_TAG_RENAMES
+
+        self.assertEqual(RETIRED_STATUS_TAG_RENAMES["证书问题"], "待验证")
+        # 旧分组读回来 → 「待验证」（**不是**一个不存在的档，也不是用户标签；
+        # 「不许漏成用户标签」那半由 tests/test_tags.py 遍历换词表钉着）
+        self.assertEqual(infer_health_from_group("📖小说,证书问题"), Health.PENDING)
+        self.assertEqual(group_title(0, Health.PENDING), "📖小说,待验证")
 
     def test_organize_removes_hit_marker_and_original_group_line(self) -> None:
         raw = source("📖小说/✅★★★★★,命中《斗破苍穹》,规则完整")
@@ -157,17 +165,11 @@ class HealthTableCoverageTests(unittest.TestCase):
         self.assertEqual(set(STATUS_GROUP_NAMES), set(HEALTH_NAMES),
                          "STATUS_GROUP_NAMES 与 HEALTH_NAMES 的键集必须一致")
 
-    def test_cert_sorts_before_pending(self) -> None:
-        """CERT 是「可达、有结论、能自己处理」的档，不该排在「待验证」之后。"""
-        from core.organizer import HEALTH_ORDER
-
-        self.assertLess(HEALTH_ORDER[Health.CERT], HEALTH_ORDER[Health.PENDING])
-
     def test_display_name_ends_with_the_group_tag(self) -> None:
         """一个状态只有一个名字：`HEALTH_NAMES` 必须就是「emoji + 分组标签」。
 
         这两张表描述同一件事的两个落点——统计条/报告读前者，写进 App 的分组读
-        后者。措辞一旦分叉（「需验证」vs「需登录」、「证书」vs「证书问题」），
+        后者。措辞一旦分叉（「需验证」vs「需登录」），
         用户就会在界面上看到同一个状态有两个名字，这正是本轮重设计要消掉的东西。
         """
         from core.models import HEALTH_NAMES

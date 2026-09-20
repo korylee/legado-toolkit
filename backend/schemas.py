@@ -31,6 +31,11 @@ class SourceOut(BaseModel):
     #: 同 star_basis：**必须声明在这里**，
     #: response_model 会按模型裁字段——之前 enrichment 在服务端明明算出来了，
     #: HTTP 响应里却全变空，查起来极像前端 bug。
+    #: 这一行的结论**是谁判的**（`checks.engine`：local/jvm/device）。
+    #: 界面用它标出处——藏"选择"不藏"证据来源"（口径见 lessons §七十二）。
+    #: **Optional**：没有 checks 行的源这一列是 NULL（同 health），
+    #: 声明成 `str` 会让「从未校验过的源」把整页的出参校验带走（AGENTS #22）
+    engine: Optional[str] = None
     jvm_state: str = ""
     #: 结论跑到的最深一段（search/toc/content）。列表 tooltip 按它决定展示哪几行：
     #: 「跑到搜索」的行不该显示「目录：未验证」——那是**没跑**，不是**跑了没过**
@@ -130,6 +135,16 @@ class JvmRunRequest(BaseModel):
     """
 
     urls: List[str] = Field(default_factory=list)
+    #: **本次跑批的参数覆盖**，只作用于这一次、**不写回全局设置**。
+    #: 只认 `JVM_RUN_PARAMS` 里那几项（关键词 / 超时 / 并发 / 挡位），值统一过
+    #: `settings_store.coerce` 收敛到合法区间——与本地那条路的 `check: {…}` 同一个
+    #: 形状与理由：区间与默认值只有 `settings_store` 一份定义（AGENTS #8），
+    #: 调用点传什么都不该绕过它。
+    params: Dict[str, Any] = Field(default_factory=dict)
+    #: 当前筛选（列表页的查询条件，形状同 `POST /api/export` 的 `filter`）。
+    #: **urls 优先**：勾选是明确意图，筛选是「这一屏里的」。
+    #: 有它才做得到「只重跑待验证那批」——全量一次十几分钟，而站点是按 IP 认人的。
+    filter: Dict[str, Any] = Field(default_factory=dict)
 
 
 class JvmDebugRequest(BaseModel):

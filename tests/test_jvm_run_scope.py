@@ -74,8 +74,8 @@ class _Base(unittest.TestCase):
             st.upsert_sources([{"bookSourceName": name, "bookSourceUrl": url,
                                 "enabled": True}])
 
-    def _call(self, urls=None) -> dict:
-        body = JvmRunRequest(urls=urls or [])
+    def _call(self, urls=None, filt=None) -> dict:
+        body = JvmRunRequest(urls=urls or [], filter=filt or {})
         with mock.patch.object(jvm_api, "Store", lambda *a, **kw: Store(self.db)):
             return asyncio.run(jvm_api.jvm_run(body))
 
@@ -121,6 +121,48 @@ class ScopeTests(_Base):
         self._call(urls=["https://a.com/"])
         first = [s["bookSourceUrl"] for s in self._batch()]
         self.assertEqual(first, ["https://A.com/"])
+
+
+class FilterScopeTests(_Base):
+    """范围也可以给「当前筛选」：一台引擎之后这是最省时间的杠杆。
+
+    全量一次十几分钟，而**站点按 IP 认人**（频繁跑全量会被封）——所以「只重跑待验证
+    那一批」不是锦上添花，是主要用法。形状与 `POST /api/export` 的 `filter` 一致，
+    前端把列表页那个查询对象原样递过来。
+    """
+
+    def _mark_all(self, health: str) -> None:
+        with Store(self.db) as st:
+            st.save_checks([{"url": u, "health": health,
+                             "checked_at": "2026-09-20 10:00:00"}
+                            for u in ("https://a.com", "https://b.com", "https://c.com")])
+
+    def test_filter_selects_the_matching_sources(self) -> None:
+        self._mark_all("gfw")
+        self._call(filt={"health": "gfw"})
+        self.assertEqual(sorted(s["bookSourceUrl"] for s in self._batch()),
+                         ["https://A.com/", "https://b.com", "https://c.com/"])
+
+    def test_filter_ignores_the_limit(self) -> None:
+        """与「选中」同一条：范围既然明确给了，再按条数上限截断就是一次看不出来的截断。"""
+        self._mark_all("pending")
+        self._call(filt={"health": "pending"})
+        self.assertEqual(len(self._batch()), 3, "limit=2 但筛选命中 3 条")
+
+    def test_filter_by_keyword(self) -> None:
+        self._call(filt={"q": "普通"})
+        self.assertEqual([s["bookSourceUrl"] for s in self._batch()], ["https://b.com"])
+
+    def test_empty_filter_is_refused_with_a_reason(self) -> None:
+        r = self._call(filt={"health": "dead"})
+        self.assertFalse(r["started"])
+        self.assertIn("筛选", r["reason"])
+        self.assertEqual(self.gradle_calls, 0, "筛选没命中就不该开跑")
+
+    def test_selection_wins_over_filter(self) -> None:
+        """两者都给时**勾选优先**：勾是明确意图，筛选是「这一屏里的」。"""
+        self._call(urls=["https://b.com"], filt={"q": "普通"})
+        self.assertEqual([s["bookSourceUrl"] for s in self._batch()], ["https://b.com"])
 
 
 class ExportTests(_Base):

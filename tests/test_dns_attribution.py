@@ -13,7 +13,7 @@ from __future__ import annotations
 import unittest
 
 from core import dns_check
-from core.checker import classify_transport_error
+from core.checker import classify_transport_error, err_desc
 from core.models import Health
 
 
@@ -135,11 +135,14 @@ class DnsHealthMappingTests(unittest.TestCase):
         """传输层分类里 DNS 仍然只是「待复检」——归因要外部视角才能做。"""
         self.assertEqual(classify_transport_error("dns"), Health.PENDING)
 
-    def test_certificate_error_has_its_own_bucket(self) -> None:
-        """证书错误单独一档：它是这批源里**唯一我们自己能处理**的一类
-        （站点是通的，关掉证书校验就能用），混进「待验证」等于把可操作的信息丢了。"""
-        self.assertEqual(classify_transport_error("cert"), Health.CERT)
-        self.assertNotEqual(classify_transport_error("cert"), Health.PENDING)
+    def test_certificate_error_is_conservative(self) -> None:
+        """证书不被信任**没有自己的档**（2026-09-20 撤）：它落「待验证」。
+
+        原因仍然单列（`cert` 这个码），那句「关掉证书校验就能用」写在 error 文案里
+        ——撤掉的是档位，不是这条信息。
+        """
+        self.assertEqual(classify_transport_error("cert"), Health.PENDING)
+        self.assertIn("证书", err_desc("cert"))
 
 
 class ClassifyDnsTests(unittest.TestCase):

@@ -242,6 +242,10 @@ class Store:
         # 180 条 5★ 有 170 条是后者（2026-09-17 全量；probe_depth 默认 1，
         # 目录/正文一次都没验）。
         ("star_basis", "TEXT DEFAULT ''"),
+        # 结论**是谁判的**（core/models.Engine：'' / local / jvm / device）。撤掉本地
+        # 引擎之后，存量行是本地判的、新行是本机引擎判的——两种证据等级的判据强度不同
+        # （本地跑不了 `@js:`、没有登录态），不记出处就是一份没有来源的结论
+        ("engine", "TEXT NOT NULL DEFAULT ''"),
     ], "jobs": [
         # 任务保留：对齐 exports（expires_at + pinned + sweep），**原来完全没有**——
         # list_jobs 只是显示时 LIMIT 50，表本身无限增长
@@ -254,7 +258,7 @@ class Store:
         SELECT s.id, s.source_url, s.name, s.source_type, s.group_name, s.enabled,
                s.user_tags, s.system_tags_locked, s.fingerprint, s.deleted_at, s.updated_at,
                c.health, c.stars, c.star_basis, c.checked_at, c.probe_depth,
-               c.toc_complete, c.content_ok, c.search_hit, c.quality_tags
+               c.toc_complete, c.content_ok, c.search_hit, c.quality_tags, c.engine
         FROM sources s
         LEFT JOIN checks c ON c.id = (
             SELECT id FROM checks WHERE source_url = s.source_url
@@ -307,6 +311,8 @@ class Store:
         self.conn.execute(self.VIEW_DDL)
         self.migrate_user_tags_once()
         self.migrate_health_tiers_once()
+        self.migrate_cert_tier_once()
+        self.migrate_checks_engine_once()
         self.cleanup_system_tags_once()
         self.fix_enabled_explore_once()
         self.fix_dirty_source_type_once()
@@ -874,6 +880,44 @@ class Store:
         self.set_meta("health_tiers_v2", now())
         return n > 0 or renamed > 0
 
+    def migrate_checks_engine_once(self) -> bool:
+        """Once-off：存量 checks 行补上 `engine='local'`。
+
+        `engine` 这一列是 2026-09-20（B1）才加的，而**在此之前只有本地引擎写 checks**
+        （本机引擎的结论落在 meta、只喂列表那一列）——所以空值就是"本地判的"，不是
+        "不知道"。不回填的话，列表 tooltip 会把三千多行历史结论显示成「未记录」。
+        """
+        if self.get_meta("checks_engine_backfilled"):
+            return False
+        with self.conn:
+            cur = self.conn.execute("UPDATE checks SET engine = 'local' WHERE engine = ''")
+            n = cur.rowcount
+        self.set_meta("checks_engine_backfilled", now())
+        return n > 0
+
+    def migrate_cert_tier_once(self) -> bool:
+        """Once-off：撤掉「证书问题」一档——存量 cert 行就地映射成 pending。
+
+        2026-09-20（TODO §一点九）：校验收成 App 引擎，而 App 侧**产不出 cert**——
+        它要么直接通过（不校验证书信任链），要么报 TLS 阻断（`Unable to parse TLS
+        packet header` → 需翻墙）。这一档因此不再存在，存量那几十行按「下一步动作
+        相同」并入 pending（重跑一次定案）。组名里的「证书问题」由
+        `_rename_retired_status_tags` 换词（映射在 core/tags.py 的换词表里）。
+
+        **与 CACHE_VERSION 的分工**同 `migrate_health_tiers_once`：checks 是历史记录，
+        就地映射、照常可读；探测缓存是「当时的结论」，词表少了一个取值 → 整体作废
+        重探（checker.CACHE_VERSION 16）。两边各管各的，别在这里顺手清缓存。
+        """
+        if self.get_meta("cert_tier_removed"):
+            return False
+        with self.conn:
+            cur = self.conn.execute(
+                "UPDATE checks SET health = 'pending' WHERE health = 'cert'")
+            n = cur.rowcount
+        renamed = self._rename_retired_status_tags()
+        self.set_meta("cert_tier_removed", now())
+        return n > 0 or renamed > 0
+
     def _rename_retired_status_tags(self) -> int:
         """把 `group_name` 里已退役的状态标签词换成现役词（映射见 core/tags.py）。
 
@@ -1305,6 +1349,7 @@ class Store:
                 r.get("content_response_ms"),
                 str(r.get("error", "") or ""),
                 str(r.get("checked_at", "") or ts),
+                str(r.get("engine", "") or ""),
             ))
         if not out:
             return 0
@@ -1312,8 +1357,8 @@ class Store:
             "INSERT INTO checks(source_url,fingerprint,cache_version,health,"
             "status_code,response_time_ms,search_hit,search_response_ms,search_probed,"
             "stars,star_basis,quality_tags,probe_depth,chapter_count,toc_complete,content_ok,"
-            "toc_fail_reason,content_fail_reason,content_response_ms,error,checked_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+            "toc_fail_reason,content_fail_reason,content_response_ms,error,checked_at,engine) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
         with self.conn:
             self.conn.executemany(sql, out)
         return len(out)

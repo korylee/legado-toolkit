@@ -1,6 +1,15 @@
 <script setup>
-// 试跑调试抽屉：把每一步的证据摊开。
+// 调试抽屉：把每一步的证据摊开。
 // 三个子页签：提取结果（全文）/ 命中源码 / 整页源码。
+//
+// **引擎只有一台**（App 引擎：连 App / 本机），判定与逐段结论都来自它——
+// 2026-09-20 起抽屉里**不再提供"本地跑一遍"这个动作**（原来那个「重新调试本页」
+// 按钮、候选规则的「试」都撤了：它们给的是离线引擎的判定，而这台引擎只是 App 的
+// 近似。要验一条规则就点「重新调试本步」，那是真引擎，D2 之后第二次约 1 秒）。
+//
+// **本地回放只剩一个用途**：「命中源码」那块 DOM 的投影——App 只推文本、不推 DOM
+// （`matched_html` 回填在 TODO §一点八 的第三期），所以拿我们补抓的页面把规则跑
+// 一遍，把选中片段画出来。它是**投影**不是判定，界面上这么标的。
 //
 // 设计取舍：**不对 HTML 注入换行**。
 // 虽然注入后按行渲染更省事，但用户会把这段源码复制去改规则——
@@ -53,13 +62,12 @@ const activeHit = ref(0);
 const steps = computed(() => (props.result && props.result.steps) || []);
 const pages = computed(() => (props.result && props.result.pages) || []);
 
-//: 结果来源。三层可信度差很多，**必须显式标出来**：三态视觉完全一样，不标就分不清
-//: 手里这份该信到什么程度——
+//: 结果来源。**两台都是 App 引擎**，差别只在环境，所以必须标出来：
 //:   - `app`：连 App 实测（手机上跑，登录态/网络出口都是真的）
 //:   - `jvm`：本机引擎（**同一段 App 代码**跑在本机：真规则、真 JS；差在环境——
 //:     登录态要预热、没有手机的网络出口）见 lessons §六十三
-//:   - 其它：本地回放（我们的离线引擎，跑不了 JS 规则）
-const channel = computed(() => String((props.result || {}).source || "local"));
+//: 本地回放不再是来源（它只在「命中源码」那里做 DOM 投影，不在结果链路上）
+const channel = computed(() => String((props.result || {}).source || ""));
 const isAppResult = computed(() => channel.value === "app");
 //: 跑的是不是「App 的真引擎」——连 App 与本机引擎都算。事件流页签、分段重跑、
 //: 「用实测值当基准」这些只对真引擎成立
@@ -246,6 +254,7 @@ const matchedHtml = computed(() => (current.value || {}).matched_html
 const matchedHint = computed(() => {
   if (!currentPage.value) return "这一步没有页面。App 只推文本，页面是我们另抓的";
   if (!canReplay.value) return "这一步的规则不支持本地调试";
+  if (replaying.value) return "正在读取…";
   if (replayResult.value) {
     // 回放不了（JS / xpath 等）时 `rule_error` 就是原因，别笼统说「没有命中」
     return (replayResult.value.rule_error || replayResult.value.detail
@@ -317,36 +326,18 @@ const hasWanted = computed(() => {
 });
 
 // —— 第 1 层：在页面上找目标 ——
+//: 候选从**补抓的那份 HTML** 里算（纯函数，不发请求、不调模型）。**没有「试」**：
+//: 验一条候选要走真引擎，也就是「用这条」填进表单 + 「重新调试本步」——本地跑一遍
+//: 给的是近似结论，撤掉它正是这一轮的目的。
 const candidates = ref([]);
-const tryResult = ref(null);
-const testing = ref(-1);
 
 watch([() => props.modelValue, activeStep, currentPage], () => {
-  tryResult.value = null;
-  testing.value = -1;
   candidates.value = (currentPage.value && want.value)
     ? findCandidates(currentPage.value.html, want.value.kind)
     : [];
 }, { immediate: true });
 
-//: 「试」：拿这条候选就地回放，看它到底取到什么。**不写表单**——
-//: 先看清楚再决定用不用，和「用这条」分开
-async function tryCandidate(c, i) {
-  if (!currentPage.value) return;
-  testing.value = i;
-  tryResult.value = null;
-  try {
-    const res = await replayStep(currentPage.value.html, c.rule,
-                                 (current.value || {}).name, props.sourceType);
-    tryResult.value = { rule: c.rule, values: res.values || [], rule_error: res.rule_error || "" };
-  } catch (e) {
-    ElMessage.error("调试失败：" + e.message);
-  } finally {
-    testing.value = -1;
-  }
-}
-
-/** 试出来的值能不能当链接打开，返回可打开的绝对地址（空串 = 打不开）。
+/** 取到的值能不能当链接打开，返回可打开的绝对地址（空串 = 打不开）。
  *
  *  **不能只认 `http(s)://`**：书源的 URL 规则取到的**大量是站内相对路径**
  *  （实测形态如 `/manhua/xxx-5QBQX/1.html`），那反而是最常见的。
@@ -367,12 +358,6 @@ function openableUrl(v) {
   }
   return "";
 }
-
-//: 试出来要展示的那几条（最多 3 条），顺带算好能不能打开
-const tryValues = computed(() => {
-  const vals = (tryResult.value ? tryResult.value.values : []).slice(0, 3);
-  return vals.map((v) => ({ text: v, href: openableUrl(v) }));
-});
 
 //: 「用这条」：只是把规则**填进表单**，不落库——保存由用户自己在弹窗里决定
 function useCandidate(c) {
@@ -418,15 +403,6 @@ const aiUsage = computed(() => {
   return u.prompt_tokens ? u : null;
 });
 
-//: 当前表现的**一句话**，进提示词——模型得知道现在错成什么样
-const replayNote = computed(() => {
-  if (!currentPage.value) return "这一步没有页面";
-  const r = replayResult.value;
-  if (!r) return "";
-  if (r.rule_error) return "本地调试不了（" + r.rule_error + "）";
-  return "本地调试取到 " + (r.values || []).length + " 条"
-    + (r.reason ? "（" + r.reason + "）" : "");
-});
 //: **真引擎**取到的值 = 「正确的规则应当取到形似的东西」。行首的 ┌└◇ 是事件流的
 //: 结构符号、不是内容，喂模型前先剥掉。
 //: ⚠️ **本地回放的结果不能当基准**：那批值正是**当前这条坏规则**的产物，拿它比
@@ -462,7 +438,6 @@ function suggestBody(step) {
     field: aiField.value,
     focus: focusRule.value,
     source_type: props.sourceType,
-    replay_note: replayNote.value,
     app_values: appValues.value,
     candidates: candidates.value.map((c) => c.rule),
     enabled_cookie_jar: !!props.enabledCookieJar,
@@ -621,22 +596,19 @@ async function copyMatched() {
 
 <template>
   <el-drawer v-model="visible" size="72%" destroy-on-close>
-    <!-- 来源必须写在标题旁：App 实测与本地回放的三态视觉完全一样，
-         不标就分不清手里这份结果该信到什么程度 -->
+    <!-- 来源必须写在标题旁：App 实测与本机引擎视觉完全一样，不标就分不清
+         手里这份结果是在哪儿跑出来的 -->
     <template #header>
       <span>调试</span>
-      <el-tag size="small" :type="isAppResult ? 'success' : isEngineResult ? 'primary' : 'info'"
-              style="margin-left: 8px">
-        {{ isAppResult ? "App 实测" : isEngineResult ? "本机引擎" : "本地调试 · 仅供参考" }}
+      <el-tag v-if="isEngineResult" size="small"
+              :type="isAppResult ? 'success' : 'primary'" style="margin-left: 8px">
+        {{ isAppResult ? "App 实测" : "本机引擎" }}
       </el-tag>
     </template>
 
     <el-empty v-if="!steps.length" description="没有调试结果" :image-size="80" />
 
     <template v-else>
-      <el-alert v-if="!isEngineResult" type="warning" :closable="false" show-icon
-                style="margin-bottom: 10px"
-                title="本地调试不支持 JS 规则，结果仅供参考。要确认请用「本机引擎」或「连 App 调试」。" />
       <div class="debug-step-tabs">
         <!-- 高亮要跟着「实际显示的那一步」（current 在 activeStep 失效时会回退到
              steps[0]），否则重跑后会出现「有内容、没有任何页签高亮」 -->
@@ -666,19 +638,6 @@ async function copyMatched() {
         <!-- 失败就直接把人送到对应的规则页签，省掉自己翻页签找字段 -->
         <el-button v-if="current.verdict === 'fail'" size="small" type="primary" plain
                    @click="gotoRuleField(current)">去改规则</el-button>
-        <!-- 用已抓到的 HTML 重放，**不发网络请求**：改完规则立刻看判定变没变 -->
-        <el-button size="small" :loading="replaying" :disabled="!canReplay"
-                   @click="doReplay">重新调试本页</el-button>
-      </div>
-
-      <div v-if="replayResult" class="replay-box">
-        <el-tag size="small" :type="tagType(replayResult)">{{ verdictText(replayResult) }}</el-tag>
-        <span class="muted">取到 {{ (replayResult.values || []).length }} 条</span>
-        <span v-if="replayResult.reason" class="muted">· {{ replayResult.reason }}</span>
-        <span v-if="isEngineResult" class="muted">
-          · 结果来自我们抓的 HTML，不是引擎看到的页面
-        </span>
-        <el-button link size="small" @click="replayResult = null">关闭</el-button>
       </div>
 
       <p v-if="current && current.reason" class="debug-reason">{{ current.reason }}</p>
@@ -707,45 +666,21 @@ async function copyMatched() {
         </div>
       </div>
 
-      <!-- 第 1 层：**在页面上找目标**。候选取自我们补抓的那份 HTML（与本地回放器
-           能跑的、以及 App 会看到的东西一致），每条都标出「选到几条 + 前几个值」——
-           不给样本等于让用户再猜一次。确定性的一层：不调模型、不发请求 -->
+      <!-- 第 1 层：**在页面上找目标**。候选取自我们补抓的那份 HTML（纯前端算，
+           不调模型、不发请求），每条都标出「选到几条 + 前几个值」——不给样本等于
+           让用户再猜一次。「用这条」只填表单，验证走「重新调试本步」（App 引擎） -->
       <div v-if="candidates.length" class="candidates">
         <div class="cand-head">
           <b>在页面上找「{{ (want && want.label) || "目标" }}」</b>
-          <span class="muted">（点「试」看它取到什么，再决定用不用）</span>
+          <span class="muted">（「用这条」只把它填进表单；要验就点「重新调试本步」，
+            那一步跑的是 App 引擎）</span>
         </div>
         <div v-for="(c, i) in candidates" :key="i" class="cand">
           <span class="mono rule">{{ c.rule }}</span>
           <el-tag size="small" :type="c.count ? 'success' : 'info'">{{ c.count }} 条</el-tag>
           <span class="muted samples">{{ (c.samples || []).join("  |  ") || "（无样本）" }}</span>
           <span class="grow" />
-          <el-button size="small" link :loading="testing === i"
-                     @click="tryCandidate(c, i)">试</el-button>
           <el-button size="small" type="primary" plain @click="useCandidate(c)">用这条</el-button>
-        </div>
-        <!-- 「试」的结果：**取到几条是判断这条候选行不行的唯一依据**，所以整块
-             独立成有底色的区域、条数做成彩签（0 条直接红），值用正常字重——
-             原来是灰色小字一行，正好把最该看见的东西做成了最不显眼的 -->
-        <div v-if="tryResult" class="try-result">
-          <div class="try-head">
-            <span class="mono">{{ tryResult.rule }}</span>
-            <el-tag v-if="tryResult.rule_error" size="small" type="warning">本地调试失败</el-tag>
-            <el-tag v-else size="small" :type="tryResult.values.length ? 'success' : 'danger'">
-              取到 {{ tryResult.values.length }} 条
-            </el-tag>
-            <span v-if="tryResult.rule_error" class="muted">{{ tryResult.rule_error }}</span>
-          </div>
-          <div v-for="(v, i) in tryValues" :key="i" class="try-value">
-            <span class="mono">{{ v.text }}</span>
-            <!-- 值是链接时给一个直接打开的入口。用 <a> 而不是 window.open：
-                 中键、右键复制链接这些原生行为都能用 -->
-            <a v-if="v.href" :href="v.href" target="_blank" rel="noopener noreferrer"
-               class="try-open">打开</a>
-          </div>
-          <div v-if="tryResult.values.length > 3" class="muted">
-            还有 {{ tryResult.values.length - 3 }} 条…
-          </div>
         </div>
       </div>
 
@@ -850,7 +785,13 @@ async function copyMatched() {
             这里是规则<b>实际取到的值</b>。正文规则通常只有 1 条、就是全文。
           </p>
           <div v-for="(v, i) in (current ? current.values : [])" :key="i" class="debug-value">
-            <div class="debug-value-idx">#{{ i + 1 }}（{{ v.length }} 字符）</div>
+            <div class="debug-value-idx">
+              #{{ i + 1 }}（{{ v.length }} 字符）
+              <!-- 值是链接时给个直接打开的入口（章节链接这类）。用 <a> 而不是
+                   window.open：中键、右键复制链接这些原生行为都能用 -->
+              <a v-if="openableUrl(v)" :href="openableUrl(v)" target="_blank"
+                 rel="noopener noreferrer" class="val-open">打开</a>
+            </div>
             <!-- 提取值经 replayer 的 text 动作把 \s+ 折成了空格，通常是一行超长文本，
                  必须和「命中源码」一样软换行，否则只能横向滚动阅读 -->
             <pre class="debug-pre debug-pre-wrap">{{ v }}</pre>
@@ -873,8 +814,6 @@ async function copyMatched() {
           </p>
           <!-- 没有命中片段时按钮禁用，避免「点一下复制了空串」 -->
           <div class="toolbar">
-            <el-button size="small" :loading="replaying" :disabled="!canReplay"
-                       @click="doReplay">重新提取</el-button>
             <el-button size="small" :disabled="!matchedHtml" @click="copyMatched">
               复制
             </el-button>
@@ -957,16 +896,7 @@ async function copyMatched() {
 .cand { display: flex; align-items: baseline; gap: 6px; padding: 2px 0; }
 .cand .rule { flex: 0 0 auto; }
 .cand .samples { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* 「试」的结果：独立底色 + 正常字重，别混进上面那排候选里 */
-.try-result {
-  margin: 8px 0 0; padding: 8px 10px;
-  background: #f5f7fa; border: 1px solid #e4e7ed; border-radius: 4px;
-}
-.try-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-.try-head .mono { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.try-value { display: flex; align-items: baseline; gap: 8px; margin-top: 6px; }
-.try-value .mono { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.try-open { flex: 0 0 auto; font-size: 12px; }
+.val-open { margin-left: 6px; font-size: 12px; }
 .diagnosis {
   margin: 8px 0;
   padding: 8px 10px;
@@ -985,12 +915,6 @@ async function copyMatched() {
 }
 .debug-step-tab.active { border-color: #409eff; color: #409eff; }
 .debug-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
-.replay-box {
-  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
-  padding: 6px 10px; margin: 4px 0 8px;
-  background: #f0f9eb; border: 1px solid #e1f3d8; border-radius: 4px;
-  font-size: 13px;
-}
 /* 原样渲染：App 给的行首已带对齐的 [mm:ss.SSS]，再叠一层我们自己量的耗时
    就是两套时间戳，反而更难读。pre-wrap 保住行内空格 */
 .debug-event {

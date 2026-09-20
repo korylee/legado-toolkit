@@ -57,7 +57,7 @@ def _jvm_content_note(ok: Any, length: Any) -> str:
 @router.get("", response_model=SourcePage)
 def list_sources(
     type: Optional[int] = Query(None, description="0小说 1听书 2漫画 3下载"),
-    health: str = Query("", description="ok/dead/auth/gfw/cert/pending/none"),
+    health: str = Query("", description="ok/dead/auth/gfw/pending/none"),
     group: str = "",
     tag: str = "",
     q: str = "",
@@ -75,8 +75,9 @@ def list_sources(
     items = st.query(source_type=type, group=group, health=health, q=q,
                      only_enabled=only_enabled, limit=limit, offset=offset, order=order,
                      include_deleted=include_deleted, user_tag=tag)
-    # 来源阶梯（S2）：给每行附上最近一批 JVM 结论（无则缺省）。
-    # **不写 checks**——JVM 与本地回放是两条证据，混在一个字段里就分不出谁说的。
+    # 来源阶梯（S2）：给每行附上最近一批本机引擎结论（无则缺省）。
+    # **`checks` 那边现在也由本机引擎写**（B1，2026-09-20）——两条路都留着出处：
+    # `checks.engine` 说这一行的健康/星级是谁判的，这里的 `jvm_*` 是逐段明细。
     try:
         jvm = st.latest_jvm_conclusions()
         for it in items:

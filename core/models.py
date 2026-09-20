@@ -32,17 +32,23 @@ class Health:
     DEAD = "dead"            # ❌ 已失效（域名不可达）——删
     GFW = "gfw"              # 🌐 需翻墙（DNS污染/连接重置/TLS阻断）——挂代理复测
     AUTH = "auth"            # 🔒 需登录（403/验证码/登录墙）——连 App 试
-    #: 🔐 证书问题（自签/过期/域名不匹配）。**单独一档**的理由：它是这批源里唯一
-    #: 「我们自己能处理」的一类——站点本身是通的，关掉证书校验（设置里的
-    #: verify_ssl）或用 http 就能用。混进「待验证」时用户只看到"没结论"，
-    #: 既不知道该翻墙、该删源，还是该关校验。实测 20 条异常抽样里有 1 条是它
-    CERT = "cert"
     #: ❓ 待验证——**我们没结论**。吸收旧档 timeout / error / no_search / skipped
     #: 和「从未校验」：它们的下一步动作完全相同（跑/重跑一次校验），分档只是在
     #: 罗列失败原因，用户分不出来也不该让他分。失败**原因**不丢——落在 checks
     #: 的 error 与 steps 里，列表 tooltip 仍可见。档名必须是「待验证」这类
     #: 非断言：「异常」是肯定断言，会把一次请求都没发过的新源凭空标成坏的。
     PENDING = "pending"
+
+
+#: 结论是谁判的（证据等级，来源阶梯 本地回放 < App 引擎 < 真机）。
+#: 存 `checks.engine`：撤掉本地引擎之后，存量行是本地判的、新行是 App 引擎判的，
+#: 两种证据等级**不能混成一份没有出处的结论**（AGENTS #4/#12 同族）。
+#: 取值只在这里定，别处引用常量（前端经接口取，不另写一份词表）。
+class Engine:
+    LOCAL = "local"      # 本地回放（规则回放器）
+    JVM = "jvm"          # 本机引擎（Robolectric 里跑 App 真源码）
+    DEVICE = "device"    # 真机（App + 真实环境，§二 那条通道）
+
 
 
 #: 健康状态中文名。**这是唯一一份**（`core/organizer.py` 拿它写书源分组名，
@@ -52,7 +58,6 @@ HEALTH_NAMES: Dict[str, str] = {
     Health.OK: "✅可用",
     Health.AUTH: "🔒需登录",
     Health.GFW: "🌐需翻墙",
-    Health.CERT: "🔐证书问题",
     Health.PENDING: "❓待验证",
     Health.DEAD: "❌已失效",
 }

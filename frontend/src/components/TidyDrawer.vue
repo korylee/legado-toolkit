@@ -437,7 +437,7 @@ watch(() => props.modelValue, (v) => {
       <div class="tidy-foot">
         <div class="foot">
           <el-button type="primary" @click="emit('requestCheck')">
-            去跑全量校验
+            去跑校验
           </el-button>
           <el-button @click="emit('changed'); visible = false">先不跑，关闭</el-button>
         </div>

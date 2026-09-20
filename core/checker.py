@@ -27,7 +27,7 @@ from urllib.parse import quote
 import aiohttp
 
 from core.models import (
-    Health, BookSourceRecord, ANTI_BOT_MARKERS, LOGIN_MARKERS,
+    Health, Engine, BookSourceRecord, ANTI_BOT_MARKERS, LOGIN_MARKERS,
     anti_bot_marker_of, login_marker_of,
     NOVEL_TEST_KEYWORDS, MANGA_TEST_KEYWORDS, TEST_TITLES, TOC_COMPLETE_THRESHOLD,
 )
@@ -99,7 +99,15 @@ from core.constants import DEFAULT_UA
 # 14：目录判定改在 **tocUrl 指向的目录页**上做（此前一律在详情页数章节）——
 # 「目录在独立页上」的源（实测 1617 条）从「解析为空＝失效」翻成真实章节数，
 # 结论方向变了，旧缓存的 toc/content 必须作废。
-CACHE_VERSION = 14
+# 16：**撤掉「证书问题」这一档**（校验收成 App 引擎后它产不出来：App 要么直接
+# 通过——不校验证书信任链，要么报 TLS 阻断 → 需翻墙）。存量 cert 行由
+# `Store.migrate_cert_tier_once` 就地映射成 pending（动作相同：重跑一次定案），
+# 缓存这边整体作废——**词表变了**（少了一个取值）。
+# 15：**多了一根轴：结论是谁判的**（`engine`，见 core/models.Engine）。本机引擎
+# （App 真源码）的结论写进同一张 checks 表，而它与本地回放的判据强度不同（本地跑不了
+# `@js:`、没有登录态、超时 8s vs App 60s）——缓存条目不记出处的话，换个引擎重跑会
+# **静默复用**另一台引擎的结论（AGENTS #5b）。
+CACHE_VERSION = 16
 
 #: 缓存有效期（天）：可用源留久一点，其余状态一律短 TTL——「待验证」「需翻墙」
 #: 长期停在旧结论上，比多校验几次更糟。
@@ -124,11 +132,24 @@ def classify_transport_error(error: str) -> str:
     """
     if error in ("reset", "tls"):
         return Health.GFW
-    if error == "cert":
-        return Health.CERT
     # timeout / proxy / dns / 其他传输层错误：都是「这次没测出结论」，
     # 下一步动作相同——重跑。原因留在 record.error。
     return Health.PENDING
+
+
+def dns_verdict_text(verdict: str, note: str) -> Tuple[str, str]:
+    """DNS 交叉验证的结论 → ``(健康态, 给用户看的一句话)``。
+
+    **判词只有这一份**：本地校验链路（``AsyncChecker._classify_dns``）与本机引擎
+    结论的映射（``core.jvm_health``）都用它。判定口径在 :mod:`core.dns_check`
+    （两个独立来源都同意才判死）；``note`` 说的是"我们观察到了什么"。
+    """
+    if verdict == dns_check.POLLUTED:
+        return (Health.GFW,
+                "本机解析失败，但%s，本地 DNS 疑似被污染，可开代理复检" % note)
+    if verdict == dns_check.GONE:
+        return Health.DEAD, "域名已注销（%s），建议删除" % note
+    return Health.PENDING, "DNS 解析失败待复检（%s）" % note
 
 
 def classify_http_status(status: Optional[int], text: str,
@@ -399,15 +420,16 @@ def is_cache_item_valid(
     要能看到「上次超时」），但复用它就等于把一次断网/抖动当成源的结论。原来这道防
     线是"干脆不写"，代价是那些源永远显示「未校验」；现在防线挪到了这里。
 
-    **证书问题也不复用**，理由不同：它是**改设置就能变好**的状态。复用的话，
-    用户关掉「校验 SSL」再点一次全量，那些源在 TTL（7 天）内根本不会被重测——
-    "修了等于没修"，而界面上看起来一切正常。每次重测它的代价是几十个请求。
-    （「需翻墙」不在此列：代理是全局开关，改它时本来就该勾「忽略缓存」；
-    两者形状相同，但证书这条更便宜、更容易踩，所以单独给个例外。）
     """
-    if is_inconclusive(str(item.get("health", ""))) or str(item.get("health", "")) == Health.CERT:
+    # 证书不被信任现在落 `pending`（那一档已撤，见 core/models.Health）：它本来就
+    # 属于「没结论」，上面这条就把它挡住了，不必再单列一个例外
+    if is_inconclusive(str(item.get("health", ""))):
         return False
     if item.get("v") != CACHE_VERSION:
+        return False
+    # **引擎是第二根轴**（v15 起）：本地回放写下的结论不能当本机引擎的结论复用。
+    # 缺这条（旧条目）按「不是本地引擎写的」处理——方向是保守重探，不是错误复用
+    if str(item.get("engine") or "") != Engine.LOCAL:
         return False
     if item.get("fingerprint") != fingerprint(record.raw):
         return False
@@ -771,6 +793,7 @@ class AsyncChecker:
         url_key = re.sub(r"[^\w\-.]", "_", record.url or f"idx{record.index}")[:80]
         item = {
             "v": CACHE_VERSION,
+            "engine": Engine.LOCAL,
             "url": record.url,
             "fingerprint": fingerprint(record.raw),
             "name": record.name,
@@ -890,9 +913,9 @@ class AsyncChecker:
             err = "dns"
             detail = type(e).__name__
         except aiohttp.ClientConnectorCertificateError as e:
-            # **证书问题单独一档**：站点是通的（TCP/TLS 都握上手了），只是证书不被
-            # 信任。它原来掉进 `ClientError` → "other" →「⚠️异常」——用户看不出
-            # "关掉证书校验就能用"。
+            # **证书不被信任单列一个原因**（不是档位）：站点是通的（TCP/TLS 都握上
+            # 手了），只是证书不被信任。它原来掉进 `ClientError` → "other" →
+            # 「⚠️异常」——用户从文案里看不出是哪一类。
             #
             # 顺序：它与 `ClientConnectorSSLError` 是同一层的两个具体类型（都直接
             # 继承 `ClientSSLError`，互不为子类），所以两者谁先都行；**但它们都必须
@@ -968,13 +991,7 @@ class AsyncChecker:
         host = domain_url.split("//", 1)[-1].split("/")[0]
         if host not in self._dns_verdicts:
             self._dns_verdicts[host] = await dns_check.probe(host)
-        verdict, note = self._dns_verdicts[host]
-        if verdict == dns_check.POLLUTED:
-            return (Health.GFW,
-                    "本机解析失败，但%s，本地 DNS 疑似被污染，可开代理复检" % note)
-        if verdict == dns_check.GONE:
-            return Health.DEAD, "域名已注销（%s），建议删除" % note
-        return Health.PENDING, "DNS 解析失败待复检（%s）" % note
+        return dns_verdict_text(*self._dns_verdicts[host])
 
 
     async def check_one(

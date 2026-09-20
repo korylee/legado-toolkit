@@ -3,7 +3,7 @@
 // 「设置 → 校验」（全量）与「校验参数 → 本次覆盖」（只含 perRun 的那些）
 // 都从这里渲染。之前两个组件各写了一遍字段列表，加了缓存有效期之后字段数
 // 就分家了（8 vs 6），而且**没有任何机制保证同步**——加第三个设置项要记得
-// 改三处（settings_store.DEFAULTS、CheckSettingsPanel、CheckOverrideForm）。
+// 改两处（settings_store.DEFAULTS、CheckSettingsPanel）。
 //
 // perRun 回答的是"这一项能不能被本次校验覆盖"，这个决定以前只隐含在
 // "两个组件各写了什么"里，现在写在字段上。

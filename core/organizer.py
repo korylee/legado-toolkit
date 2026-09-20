@@ -21,13 +21,8 @@ HEALTH_ORDER = {
     Health.OK: 0,
     Health.AUTH: 1,
     Health.GFW: 2,
-    # CERT 与 AUTH / GFW 同组：站点**可达**、有结论、而且**能自己处理**
-    # （关掉证书校验或换 http）。原来漏了它，`.get(..., 9)` 兜底让它排到
-    # 最后——「关掉校验就能用」的源被排在最后。
-    # **这张表必须覆盖 HEALTH_NAMES 的每个键**（tests/test_organizer.py 守着）。
-    Health.CERT: 3,
-    Health.PENDING: 4,
-    Health.DEAD: 5,
+    Health.PENDING: 3,
+    Health.DEAD: 4,
 }
 
 
@@ -47,11 +42,6 @@ HEALTH_ORDER = {
 STATUS_GROUP_NAMES = {
     Health.OK: "可用", Health.AUTH: "需登录", Health.GFW: "需翻墙",
     Health.DEAD: "已失效", Health.PENDING: "待验证",
-    # CERT 也是**有结论**的（站点可达，只是证书不被信任），不能落进「待验证」。
-    # 漏了它的后果与上面 AUTH 那段完全一样：分组名走 .get(..., '待验证') 兜底，
-    # 于是一批"证书有问题、关掉校验就能用"的源，在编辑弹窗里和从没校验过
-    # 的源显示成同一个标签。**新增健康态时这张表必须跟着加**
-    Health.CERT: "证书问题",
 }
 
 
@@ -69,8 +59,6 @@ def infer_health_from_group(group: str) -> str:
     if ("需翻墙" in value or "被墙" in value or "🌐" in value
             or "需代理复检" in value or "代理复检" in value):
         return Health.GFW
-    if "证书" in value or "🔐" in value:
-        return Health.CERT
     if "失效" in value or "❌" in value:
         return Health.DEAD
     if "需验证" in value or "需登录" in value or "🔒" in value:

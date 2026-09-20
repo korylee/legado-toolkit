@@ -69,12 +69,16 @@ def main() -> int:
                 "INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)",
                 (key, json.dumps(r, ensure_ascii=False)))
         st.conn.commit()
+        # 与产品那条路**同一份映射**（core/jvm_health）：结论写进 checks，六档 / 星级 /
+        # 深度才跟着更新（本脚本原来只写 meta，列表的健康列不认）
+        from core import jvm_health
+        n_checks = jvm_health.store_checks(rows, batch=batch_id, store=st)
     finally:
         st.close()
 
     dist = Counter(r.get("state") for r in rows)
     print("状态分布: %s" % dict(dist))
-    print("已写入 meta（batch=%s）。S2 的来源阶梯展示层会用这批数据。" % batch_id)
+    print("已写入 meta（batch=%s）与 checks %d 条（batch 同 id）。" % (batch_id, n_checks))
     return 0
 
 

@@ -245,7 +245,7 @@ defineExpose({ refresh: load });
   white-space: nowrap;
 }
 /* 配色与列表页的 healthType 同口径（SourcesView）：同一个状态在两处该长一样。
-   结论的两极是可用/已失效；需登录与证书问题是「能自己处理」的黄；
+   结论的两极是可用/已失效；需登录是「能自己处理」的黄；
    需翻墙与待验证是「等下一步」的灰。 */
 .job-detail .changes .chg .to-ok { color: var(--el-color-success); }
 .job-detail .changes .chg .to-dead { color: var(--el-color-danger); }

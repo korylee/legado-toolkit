@@ -30,7 +30,7 @@ from core.checker import (AsyncChecker, calc_stars, classify_http_status,
                           evaluate_stars, parse_search_request,
                           split_url_options)
 from core.loader import fingerprint
-from core.models import BookSourceRecord, Health, build_record
+from core.models import BookSourceRecord, Engine, Health, build_record
 
 
 # ------------------------------------------------------------ 固定页面
@@ -162,8 +162,14 @@ class CacheVersionTests(unittest.TestCase):
         v14：目录判定改在 **tocUrl 指向的目录页**上做（此前一律在详情页数章节）——
         「目录在独立页上」的源（实测 1617 条）从「解析为空＝失效」翻成真实章节数，
         方向变了，旧缓存的 toc/content 必须作废。
+        v15：**多了一根轴「结论是谁判的」**（`engine`）。本机引擎的结论写进同一张
+        checks 表，它的判据强度与本地回放不同（跑不了 `@js:`、有登录态、超时 60s
+        vs 8s）；缓存条目不记出处的话，换个引擎重跑会静默复用另一台的结论。
+        v16：**撤掉「证书问题」这一档**（校验收成 App 引擎后它产不出来：App 要么直接
+        通过——不校验证书信任链，要么报 TLS 阻断 → 需翻墙）。词表少了一个取值 →
+        整体作废；存量 checks 行由 Store.migrate_cert_tier_once 就地映射成 pending。
         """
-        self.assertEqual(checker.CACHE_VERSION, 14)
+        self.assertEqual(checker.CACHE_VERSION, 16)
 
     def test_old_cache_item_rejected(self):
         raw = {"bookSourceUrl": "https://a.com", "bookSourceName": "x",
@@ -183,6 +189,7 @@ class CacheVersionTests(unittest.TestCase):
         rec = BookSourceRecord(index=0, url="https://a.com", name="x", raw=raw)
         item = {
             "v": checker.CACHE_VERSION,
+            "engine": Engine.LOCAL,
             "fingerprint": fingerprint(raw),
             "checked_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "health": Health.OK,

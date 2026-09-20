@@ -20,12 +20,20 @@ export const HEALTH_LABELS = {
   dead: "❌已失效",
   auth: "🔒需登录",
   gfw: "🌐需翻墙",
-  cert: "🔐证书问题",
   pending: "❓待验证",
+};
+
+//: 结论是**谁判的**（`checks.engine`）。取值定义在 core/models.Engine，这里是
+//: 显示层副本（同 HEALTH_LABELS 的关系）；新增取值时两处一起改。
+export const ENGINE_LABELS = {
+  local: "本地引擎",
+  jvm: "本机引擎",
+  device: "真机",
 };
 
 //: 认不出的取值原样返回：宁可显示 "xxx" 也不要显示 undefined
 export const healthLabel = (health) => HEALTH_LABELS[health] || health || "未知";
+export const engineLabel = (engine) => ENGINE_LABELS[engine] || engine || "未记录";
 
 // 星级旁边那个「这一级是实测来的，还是按规则推的」。
 //

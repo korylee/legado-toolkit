@@ -13,7 +13,6 @@ SYSTEM_TYPE_TAGS = {"📖小说", "🎧听书", "🎨漫画", "📥下载"}
 #: 状态标签的顺序。**「需登录」是 AUTH 的标签**：站点拒绝了我们的请求
 #: （403/401/429/503、验证码页、登录墙），它有结论，与「待验证」（我们没结论）
 #: 是两回事。故意排在「需翻墙」旁边，两个都是「有结论、要人工处理」。
-#: 「证书问题」同理（站点可达、只是证书不被信任）——**排在最后是为了不动已有顺序**。
 #:
 #: 2026-09 改名：AUTH「需验证」→「需登录」、GFW「需代理复检」→「需翻墙」——
 #: 「待验证/需验证」一字之差分不清。旧写法由 `_is_legacy_system_segment` 的
@@ -25,7 +24,7 @@ SYSTEM_TYPE_TAGS = {"📖小说", "🎧听书", "🎨漫画", "📥下载"}
 #: 「📖小说,可用,证书问题」这种自相矛盾的状态）。`organizer.STATUS_GROUP_NAMES`
 #: 是写出去的那一侧，两张表必须同集合——`tests/test_tags.py` 有一致性用例钉着。
 SYSTEM_STATUS_TAG_ORDER: Tuple[str, ...] = ("可用", "待验证", "已失效", "需登录",
-                                            "需翻墙", "证书问题")
+                                            "需翻墙")
 SYSTEM_QUALITY_TAG_ORDER: Tuple[str, ...] = ("规则完整",)
 SYSTEM_STATUS_TAGS = set(SYSTEM_STATUS_TAG_ORDER)
 SYSTEM_QUALITY_TAGS = set(SYSTEM_QUALITY_TAG_ORDER)
@@ -44,6 +43,10 @@ SYSTEM_TAGS = SYSTEM_TYPE_TAGS | SYSTEM_STATUS_TAGS | SYSTEM_QUALITY_TAGS
 #:   - `_is_legacy_system_segment`：旧分组里的这些词不许漏成用户标签。
 #:     「代理复检」这个裸形式是旧分组真出现过的写法，单列一条。
 RETIRED_STATUS_TAG_RENAMES = {
+    #: 2026-09-20 撤「证书问题」一档：校验收成 App 引擎之后它**产不出来**了——
+    #: App 侧要么直接通过（它不校验证书信任链），要么报 TLS 阻断（→ 需翻墙）。
+    #: 站点本身的问题仍在（`err_desc("cert")` 那句留作失败原因），只是不再单独成档。
+    "证书问题": "待验证",
     "需验证": "需登录",
     "需代理复检": "需翻墙",     # copy-ok: 换词表的键，逐字保留（AGENTS #17/#18）
     "代理复检": "需翻墙",       # copy-ok: 同上

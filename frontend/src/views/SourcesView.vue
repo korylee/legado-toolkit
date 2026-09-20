@@ -6,7 +6,8 @@ import { listSources, listSourceUrls, listGroups, patchTags, deleteSources, list
 import { api, subscribeJob } from "../api/client";
 import { jvmRun } from "../api/jvm.js";
 import { ensureTagMeta, isQualityTag, isStatusTag, splitTags, tagOfType, sourceTypes } from "../utils/tags";
-import { HEALTH_LABELS, describeChanges, healthLabel, starBasisLabel } from "../utils/health";
+import { HEALTH_LABELS, describeChanges, engineLabel, healthLabel,
+         starBasisLabel } from "../utils/health";
 import { DEPTH_SHORT } from "../utils/checkFields";
 import { useMobile } from "../composables/useMobile";
 import SourceEditDialog from "../components/SourceEditDialog.vue";
@@ -16,7 +17,6 @@ import ExportDrawer from "../components/ExportDrawer.vue";
 import ImportDialog from "../components/ImportDialog.vue";
 import GroupManagerDrawer from "../components/GroupManagerDrawer.vue";
 import JobsDrawer from "../components/JobsDrawer.vue";
-import CheckOverrideForm from "../components/CheckOverrideForm.vue";
 import CheckJvmForm from "../components/CheckJvmForm.vue";
 
 const isMobile = useMobile();
@@ -74,10 +74,10 @@ const checkStatusText = computed(() => {
   return "正在校验 " + n + " 条";
 });
 
-// 批量校验的「本次覆盖」：只含与全局设置不同的键，空对象 = 全走全局设置。
-//: 「忽略缓存，全部重校」。**不是覆盖项**（没有全局对应值可比），是纯粹的本次动作。
-const refreshThisRun = ref(false);
-const checkOverride = ref({});
+//: 批量校验的**范围**（一台引擎之后，这里成了弹框里唯一的选择）：
+//:   selected（勾选的那几条）/ filtered（当前筛选命中的）/ all（全部在用源）
+//: 勾选优先于筛选：勾是明确意图，筛选是「这一屏里的」。
+const checkScope = ref("all");
 
 // 批量校验的确认弹框。**选项就长在这个框里**。
 //
@@ -88,16 +88,14 @@ const checkOverride = ref({});
 //
 // 单条校验（表格行 / 卡片图标）**不弹框**，直接用全局设置：单条本来就没什么可调的。
 const checkDialog = ref(false);
-const checkDialogRef = ref(null);
-//: 弹框确认后要校验的 URL 列表；空数组 = 全量
+//: 弹框确认后要校验的 URL 列表；空数组 = 不按勾选
 const pendingCheckUrls = ref([]);
 
 // 打开时才去拉全局设置（拿到的是最新全局值），所以必须等容器渲染完再调
-// **两个表单都要刷**：el-dialog 不销毁内容，上一次的选择与参数会留在 DOM 里
+// **表单要刷**：el-dialog 不销毁内容，上一次的参数会留在 DOM 里
 watch(checkDialog, (v) => {
   if (!v) return;
   nextTick(() => {
-    if (checkDialogRef.value) checkDialogRef.value.reload();
     if (jvmFormRef.value) jvmFormRef.value.reload();
   });
 });
@@ -120,47 +118,64 @@ const checkTipText = computed(() => {
   return bits.join(" · ");
 });
 
-const checkDialogTitle = computed(
-  () => (pendingCheckUrls.value.length ? "校验选中" : "全量校验"));
+const checkDialogTitle = computed(() => (
+  checkScope.value === "selected" ? "校验勾选的源"
+    : checkScope.value === "filtered" ? "校验当前筛选" : "全量校验"));
 
-//: 弹框里的引擎选择。**默认本地**：它不需要任何环境、几秒到几分钟就有结果；
-//: 「本机引擎」要装 JVM 环境且慢得多，是明确的选择而不是默认。
-//:
-//: 两个引擎产出的东西**落在不同的地方**（本地 → checks 表 → 健康档位/星级；
-//: 本机 → meta → 列表的 JVM 列），所以说明文字必须把这一点讲清楚——不然「校验完了
-//: 怎么那一列没变」看起来就是 bug。
-const checkEngine = ref("local");
+//: 校验只有**一台引擎**（本机引擎 = 在 JVM 里跑「阅读」App 的真源码）：
+//: 本地回放那条路 2026-09-20 撤了（判定口径见 TODO §一点九 / lessons §七十二），
+//: 所以弹框里不再有引擎选择——**可调的是「跑哪些」**。
 const jvmReady = ref(false);
 const jvmFormRef = ref(null);
-// 切到本机引擎时先清掉上一次的结论：新表单还在自检（1-2 秒），
-// **留着 true 会让「开始校验」先可点**——那正是自检这道闸门要挡的情况
-watch(checkEngine, (v) => { if (v === "jvm") jvmReady.value = false; });
 
-const checkDialogHint = computed(() => {
-  const n = pendingCheckUrls.value.length;
-  if (checkEngine.value === "jvm") {
-    return n
-      ? "将用「阅读」App 的真引擎校验选中的 " + n + " 条源。"
-      : "将用「阅读」App 的真引擎校验全部在用书源。";
-  }
-  if (n) return "将校验选中的 " + n + " 条源。";
-  const total = stats.value ? stats.value.sources : "?";
-  return "将校验全部未删除书源（共 " + total + " 条），可能耗时数分钟。";
+//: 当前有没有筛选条件（决定「当前筛选」这个范围出不出现）。
+//: 与列表查询同一个对象，所以不可能会漂。
+const hasFilter = computed(() => {
+  const q = query;
+  return !!(q.q || q.health || q.group || q.tag
+            || (q.type !== null && q.type !== ""));
+});
+//: 当前筛选命中的条数（分页总数就是它）
+const filterTotal = computed(() => total.value || 0);
+
+//: 本次要跑多少条（给表单与提示语共用一份口径）。
+const scopeCount = computed(() => {
+  if (checkScope.value === "selected") return pendingCheckUrls.value.length;
+  if (checkScope.value === "filtered") return filterTotal.value;
+  return stats.value ? stats.value.sources : 0;
 });
 
-/** 打开批量校验的弹框。批量入口都走这里，单条不走。 */
+
+const checkDialogHint = computed(() => {
+  if (checkScope.value === "selected") {
+    return "将校验勾选的 " + pendingCheckUrls.value.length + " 条源。";
+  }
+  if (checkScope.value === "filtered") {
+    return "将校验当前筛选命中的 " + filterTotal.value + " 条源（不受分页限制）。";
+  }
+  return "将校验全部在用书源。";
+});
+
+/** 打开批量校验的弹框。批量入口都走这里，单条不走。
+ *
+ * **弹框里不再有"范围"这个选择**：点开它的那一刻跑什么就已经定了——
+ * 勾选了就是那几条，有筛选就是筛选命中的那批，都没有才是全量。用户知道自己选了
+ * 哪些，不需要在弹框里再选一遍；而"全部在用源"更不该摆在勾选过的用户面前当选项
+ * （全量一次十几分钟，站点还按 IP 认人——能少跑就少跑）。
+ *
+ * 于是范围只跟着入口走，`urls` 就是入口带来的范围。
+ */
 function openCheckDialog(urls = []) {
   pendingCheckUrls.value = urls;
+  jvmReady.value = false;
+  checkScope.value = urls.length ? "selected"
+    : (hasFilter.value && filterTotal.value > 0 ? "filtered" : "all");
   checkDialog.value = true;
 }
 
 function startPendingCheck() {
   checkDialog.value = false;
-  if (checkEngine.value === "jvm") {
-    runJvmBatch();
-    return;
-  }
-  checkSources(pendingCheckUrls.value);
+  runJvmBatch();
 }
 
 //: 本机引擎跑批：一次同步调用（后端起 appservice 子进程，跑完才返回），没有逐条进度。
@@ -174,12 +189,19 @@ const jvmRunScope = ref("");
 async function runJvmBatch() {
   if (jvmRunning.value) return ElMessage.warning("已有本机引擎跑批在运行");
   if (checking.value) return ElMessage.warning("已有校验任务在运行");
-  const n = pendingCheckUrls.value.length;
-  jvmRunScope.value = n ? "选中的 " + n + " 条源" : "全部在用源（「条数上限」以内）";
+  const scope = checkScope.value;
+  // 三种范围各自的入参：勾选给 urls、筛选给 filter、全量什么都不给
+  // （「条数上限」只对全量生效——范围由勾选/筛选决定，否则会出现看不出来的截断）
+  const payload = scope === "selected" ? { urls: pendingCheckUrls.value }
+    : scope === "filtered" ? { filter: { q: query.q, type: query.type, health: query.health,
+                                        group: query.group, tag: query.tag } }
+      : {};
+  jvmRunScope.value = scope === "selected" ? "勾选的 " + pendingCheckUrls.value.length + " 条源"
+    : scope === "filtered" ? "当前筛选的 " + filterTotal.value + " 条源"
+      : "全部在用源（「条数上限」以内）";
   jvmRunning.value = true;
   try {
-    // 选中了就只跑选中的那几条；空数组 = 全部在用源（那时才看「条数上限」）
-    const r = await jvmRun({ urls: pendingCheckUrls.value });
+    const r = await jvmRun(payload);
     if (!r.started) {
       // 没起来的三种原因要分开说：另一个 JVM 任务在跑（reason）、自检没过（selftest）、
       // 选中的源一条都没匹配上（reason）——都说成「自检未通过」会把原因指反
@@ -190,8 +212,9 @@ async function runJvmBatch() {
       }
       return;
     }
-    ElMessage.success("跑批完成：" + (r.count || 0) + " 条结论已入库");
-    // 结论落在 meta、显示在 JVM 列——跑完必须重新拉列表，否则那一列还是旧的
+    // 结论写进 checks（健康档位 / 星级 / 深度）与 meta——跑完必须重新拉列表
+    ElMessage.success("跑批完成：" + (r.count || 0) + " 条结论已入库"
+                      + (r.checks ? "（健康档位 " + r.checks + " 条）" : ""));
     await load();
   } catch (e) {
     ElMessage.error("跑批失败：" + (e?.message || e));
@@ -219,12 +242,12 @@ const query = reactive({
   order: "-verified", limit: 50, offset: 0,
 });
 
-//: 健康态 → el-tag 配色。六档按「动作的紧急度」分色：
-//: 可用/已失效是结论的两极（success/danger），需登录/需翻墙/证书/待验证
+//: 健康态 → el-tag 配色。五档按「动作的紧急度」分色：
+//: 可用/已失效是结论的两极（success/danger），需登录/需翻墙/待验证
 //: 都是「还没到删的地步」（warning/info）。
 const healthType = {
   ok: "success", dead: "danger", auth: "warning", gfw: "info",
-  cert: "warning", pending: "info",
+  pending: "info",
 };
 const typeLabel = (v) => tagOfType(v) || ("类型" + v);
 
@@ -239,7 +262,7 @@ const typeLabel = (v) => tagOfType(v) || ("类型" + v);
 // 「未校验」（health IS NULL）不在这里：它不是状态而是数据缺失，统计条上另有
 // 一个灰 chip 展示、后端筛选取值 "none"。
 const HEALTH_OPTIONS = [
-  "ok", "auth", "gfw", "cert", "pending", "dead",
+  "ok", "auth", "gfw", "pending", "dead",
 ].map((value) => ({ value, label: HEALTH_LABELS[value] }));
 
 // stats.health 的键是 str(health)：没有校验记录时 health 为 NULL，键就是字符串 "None"
@@ -445,15 +468,8 @@ function depthClass(row) {
   return v ? (v.ok ? "v-ok" : "v-bad") : "";
 }
 
-//: JVM 结论的短文案与着色（S2 来源阶梯）。**没有结论就不显示**——空串和
-//: 「未校验」是一个意思，但每行都印一个「—」会把真正有结论的行淹没。
-//: 着色口径同 depthClass：绿=跑过且通过，红=跑过且失败；无果/空壳这类
-//: 「跑了但没结论」不着色，避免看起来像失败。
-const JVM_SHORT = {
-  ok: "JVM✓", no_result: "无果", empty_js_shell: "空壳", login_wall: "需登录",
-  timeout: "超时", error: "JVM✗", invalid: "无效",
-};
-//: 结论按**段**展开成若干行，供 tooltip 逐行显示。
+//: 结论按**段**展开成若干行，供 tooltip 逐行显示（原来这些只喂 JVM 列那一格，
+//: 现在「验证」列一列一结论，明细全在它的 tooltip 里）。
 //:
 //: **只显示跑到的段**：跑到搜索档的行不该出现「正文：未验证」——那是**没跑**，
 //: 不是**跑了没过**，摆在一起会让人以为源有问题（S3-3 的核心取舍）。
@@ -463,7 +479,8 @@ function jvmSteps(row) {
   if (!stage) return [];
   const out = [{
     label: "搜索",
-    text: row.jvm_hit != null ? "命中 " + row.jvm_hit + " 本" : (row.jvm_state || "—"),
+    text: row.jvm_hit != null ? "命中 " + row.jvm_hit + " 本"
+      : (jvmStateLabel(row.jvm_state) || "—"),
     ok: row.jvm_state === "ok" ? true : null,
   }];
   if (stage === "toc" || stage === "content") {
@@ -488,21 +505,7 @@ const JVM_STATE_LABELS = {
   login_wall: "页面要求登录（不是源坏了）",
   timeout: "超时", error: "报错", invalid: "规则无效",
 };
-function jvmText(row) {
-  const base = JVM_SHORT[row.jvm_state] || "";
-  // 跑到目录档的补一个章数（列表上就能看出"这个源有八百多章"），
-  // 正文档只补 ✓ —— 字数放 tooltip，列宽有限
-  if (base === "JVM✓" && row.jvm_stage === "toc" && row.jvm_toc_count != null) {
-    return "JVM✓ " + row.jvm_toc_count + "章";
-  }
-  return base;
-}
 function jvmStateLabel(state) { return JVM_STATE_LABELS[state] || state; }
-function jvmClass(row) {
-  if (row.jvm_state === "ok") return "v-ok";
-  if (["error", "timeout", "invalid"].includes(row.jvm_state)) return "v-bad";
-  return "";
-}
 
 function lockedStatus(row) {
   if (!row.system_tags_locked) return "";
@@ -638,8 +641,9 @@ async function checkSources(urls = []) {
     // refresh_cache：忽略有效期内的缓存，全部重新请求。
     // 校验参数（并发/超时/深度/代理等）不再写死在这里——不传就由后端取全局设置，
     // 只有「本次覆盖」的那几项才进 payload
-    const payload = { urls, refresh_cache: refreshThisRun.value };
-    if (Object.keys(checkOverride.value).length) payload.check = checkOverride.value;
+    // 参数全走全局设置：单条校验本来就不弹框、也没有「本次覆盖」这一层
+    // （覆盖项原来长在全量弹框里，却会顺手影响行按钮——那一层随弹框里的本地分支一起撤了）
+    const payload = { urls };
     const r = await api.post("/jobs", { kind: "check", payload });
     checkJobId.value = r.job_id;
     // **不弹「已提交」的 toast**：上面那条状态条已经在说「正在校验 N 条」了，
@@ -816,8 +820,8 @@ onUnmounted(() => {
         <el-button size="small" :icon="Plus" @click="openNew">新建源</el-button>
         <!-- 本次的选项（参数覆盖 + 忽略缓存）在点开后的弹框里，不再单独占一个按钮 -->
         <el-button size="small" :icon="Refresh" :disabled="checking || jvmRunning"
-                   @click="openCheckDialog([])">
-          全量校验
+                   @click="openCheckDialog([...selected])">
+          {{ selected.length ? "校验选中" : "全量校验" }}
         </el-button>
         <span class="grow" />
         <el-button size="small" :icon="Upload" @click="exportVisible = true">导出/订阅</el-button>
@@ -911,6 +915,8 @@ onUnmounted(() => {
               <span class="stars" v-if="row.probe_depth" :class="depthClass(row)">
                 验到{{ depthText(row) }}
               </span>
+              <!-- 结论**来自谁**（与表格 tooltip 同一件事）：卡片窄，只放出处不放第二份结论 -->
+              <span class="muted nowrap" v-if="row.engine">{{ engineLabel(row.engine) }}</span>
             </div>
             <div class="host mono">{{ row.source_url }}</div>
             <div class="meta">
@@ -920,10 +926,6 @@ onUnmounted(() => {
               </el-tag>
               <el-tag v-else-if="row.health" size="small" :type="healthType[row.health] || 'info'">
                 {{ healthLabel(row.health) }}
-              </el-tag>
-              <!-- 与表格同口径：证据阶梯第二层（JVM 引擎） -->
-              <el-tag v-if="row.jvm_state" size="small" :type="row.jvm_state === 'ok' ? 'success' : (['error','timeout','invalid'].includes(row.jvm_state) ? 'danger' : 'info')">
-                {{ jvmText(row) }}
               </el-tag>
               <span class="muted nowrap" v-if="row.toc_complete !== null || row.content_ok !== null">
                 {{ row.toc_complete === 1 ? "目录✓" : row.toc_complete === 0 ? "目录✗" : "" }}
@@ -978,34 +980,25 @@ onUnmounted(() => {
             <span v-else class="muted">未校验</span>
           </template>
         </el-table-column>
-        <el-table-column label="验证" width="96" align="center">
+        <!-- 「验证」是**一列一结论**：引擎只剩一台，所以不再并排一列「JVM」。
+             单元格仍是「验到哪一步 + 过没过」，明细进 tooltip；tooltip 第一行写清
+             **结论来自谁**（checks.engine）——藏的是"选择"，不是"证据来源"。
+             原来还有一列「目录/正文」专门显示明细，那与「实测 / 仅规则」是同一件事的
+             摘要与明细，两列并排是重复的：留下摘要，明细收进这里。 -->
+        <el-table-column label="验证" width="112" align="center">
           <template #default="{ row }">
-            <!-- 悬停看明细：原来有一列「目录/正文」专门显示这些，但它和
-                 「实测 / 仅规则」是同一件事的明细与摘要，两列并排是重复的。
-                 留下摘要（一眼看可信度），明细收进 tooltip -->
             <el-tooltip placement="top" :show-after="200">
               <template #content>
+                <div class="muted">结论来自：{{ engineLabel(row.engine) }}</div>
                 <div>健康：{{ lockedStatus(row) ? lockedStatus(row) + "（手动）" : (row.health ? healthLabel(row.health) : "未校验") }}</div>
                 <div>搜索：{{ row.search_hit ? "命中《" + row.search_hit + "》" : "未命中" }}</div>
                 <div>目录：{{ row.toc_complete === 1 ? "完整 ✓" : row.toc_complete === 0 ? "不完整 ✗" : "未验证" }}</div>
                 <div>正文：{{ row.content_ok === 1 ? "可用 ✓" : row.content_ok === 0 ? "不可用 ✗" : "未验证" }}</div>
                 <div v-if="row.stars">星级：{{ row.stars }}★ {{ starBasisLabel(row.star_basis) }}</div>
-              </template>
-              <!-- 显示**验到哪一步**而不是星级：星级里大部分是「按规则推的」
-                   （实测 static 占多数），而「验到哪一步」是用户真正能据此判断的东西；
-                   星级与「实测/仅规则」收进同一个 tooltip，信息不丢 -->
-              <span v-if="row.probe_depth" :class="depthClass(row)">{{ depthText(row) }}</span>
-              <span v-else class="muted">未校验</span>
-            </el-tooltip>
-          </template>
-        </el-table-column>
-        <el-table-column label="JVM" width="84" align="center">
-          <template #default="{ row }">
-            <!-- 证据阶梯的第二层（本地回放 → JVM 引擎 → 真机）。悬停给全称：
-                 缩写文案是为扫视设计的，但「空壳」这种词第一次见到的人读不懂 -->
-            <el-tooltip v-if="row.jvm_state" placement="top" :show-after="200">
-              <template #content>
-                <div>JVM 引擎校验：{{ jvmStateLabel(row.jvm_state) }}</div>
+                <!-- 本机引擎那一层（证据阶梯的第二层）：同一台引擎的逐段明细，
+                     跑到的段才显示（没跑的不写"未验证"——那是**没跑**，不是**跑了没过**） -->
+                <template v-if="row.jvm_state">
+                <div>本机引擎：{{ jvmStateLabel(row.jvm_state) }}</div>
                 <!-- 逐段结果：跑到哪一段就显示哪几行（没跑的不显示"未验证"） -->
                 <div v-for="s in jvmSteps(row)" :key="s.label" class="jvm-step">
                   {{ s.label }}：{{ s.text }}
@@ -1031,8 +1024,13 @@ onUnmounted(() => {
                   登录态：本次未带 cookie——先在浏览器里登录一次，之后按源自动复用
                 </div>
                 <div v-if="row.jvm_batch" class="muted">批次：{{ row.jvm_batch }}</div>
+                </template>
               </template>
-              <span :class="jvmClass(row)">{{ jvmText(row) }}</span>
+              <!-- 显示**验到哪一步**而不是星级：星级里大部分是「按规则推的」
+                   （实测 static 占多数），而「验到哪一步」是用户真正能据此判断的东西；
+                   星级与「实测/仅规则」收进同一个 tooltip，信息不丢 -->
+              <span v-if="row.probe_depth" :class="depthClass(row)">{{ depthText(row) }}</span>
+              <span v-else class="muted">未校验</span>
             </el-tooltip>
           </template>
         </el-table-column>
@@ -1129,8 +1127,8 @@ onUnmounted(() => {
             导入书源
           </el-button>
           <el-button :icon="Refresh" :loading="checking"
-                     @click="openCheckDialog([]); filterVisible = false">
-            全量校验
+                     @click="openCheckDialog([...selected]); filterVisible = false">
+            {{ selected.length ? "校验选中" : "全量校验" }}
           </el-button>
           <el-button :icon="Delete" @click="trashVisible = true; filterVisible = false">
             回收站
@@ -1156,37 +1154,22 @@ onUnmounted(() => {
     <JobsDrawer ref="jobsRef" v-model="jobsVisible" :focus-job-id="focusJobId"
                 @running-change="jobBadge = $event" />
 
-    <!-- 批量校验的确认弹框：选项 + 开始。桌面与移动端共用（移动端宽度由
-         styles.css 的媒体查询压到 94vw）。单条校验不弹框，直接用全局设置。 -->
+    <!-- 批量校验的确认弹框：**一台引擎**（在 JVM 里跑「阅读」App 的真源码）。
+         这里可调的是「跑哪些」——勾选的 / 当前筛选的 / 全部在用源；校验参数在设置里改，
+         这里只**只读展示**本次会用哪套（两处都能改就会漂成「显示的和实际跑的不是一套」）。
+         桌面与移动端共用（移动端宽度由 styles.css 的媒体查询压到 94vw）；
+         单条校验不弹框，直接用全局设置。 -->
     <el-dialog v-model="checkDialog" :title="checkDialogTitle" width="460px" top="4vh"
                append-to-body class="check-dialog" modal-class="check-dialog-overlay">
       <div class="muted" style="margin-bottom: 12px">{{ checkDialogHint }}</div>
 
-      <!-- 引擎选择。**一个入口、两个引擎**：原先本机引擎的跑批按钮长在「设置 → JVM 校验」
-           页签上，而它的结论显示在这一页的 JVM 列——动作与结果分在两屏，正是这次搬家的
-           理由（见 component/CheckJvmForm.vue 的注释）。 -->
-      <el-radio-group v-model="checkEngine" size="small" style="margin-bottom: 10px">
-        <el-radio-button value="local">本地引擎</el-radio-button>
-        <el-radio-button value="jvm">本机引擎</el-radio-button>
-      </el-radio-group>
-      <div class="muted" style="font-size: 12px; margin-bottom: 12px">
-        <template v-if="checkEngine === 'local'">
-          最快。本地跑规则，验不了 JS 规则；结论进「健康档位」。
-        </template>
-        <template v-else>
-          最准，也最慢。跑的是「阅读」App 的真源码；结论进列表的「JVM」列。
-        </template>
-      </div>
 
-      <CheckOverrideForm v-if="checkEngine === 'local'" ref="checkDialogRef"
-                         v-model="checkOverride" v-model:refresh="refreshThisRun" />
-      <CheckJvmForm v-else ref="jvmFormRef" :selected-count="pendingCheckUrls.length"
+      <CheckJvmForm ref="jvmFormRef" :scope="checkScope" :scope-count="scopeCount"
                     @ready="jvmReady = $event" />
 
       <template #footer>
         <el-button @click="checkDialog = false">取消</el-button>
-        <el-button type="primary"
-                   :disabled="checking || jvmRunning || (checkEngine === 'jvm' && !jvmReady)"
+        <el-button type="primary" :disabled="checking || jvmRunning || !jvmReady"
                    @click="startPendingCheck">
           开始校验
         </el-button>

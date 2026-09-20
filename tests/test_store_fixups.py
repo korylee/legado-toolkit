@@ -299,6 +299,53 @@ class HealthTierMigrationTests(unittest.TestCase):
                 "SELECT group_name FROM sources WHERE source_url='https://a.com'").fetchone()
             self.assertEqual(row["group_name"], "📖小说,需登录")
 
+    def test_legacy_checks_rows_are_marked_local(self) -> None:
+        """`engine` 是 B1 才加的列：存量行是**本地判的**（那时只有它在写 checks），
+        不是"不知道"——不回填的话列表会把三千多行历史结论显示成「未记录」。"""
+        with Store(self.db) as st:
+            self._seed(st, ["ok", "gfw"])
+            st.conn.execute("UPDATE checks SET engine = ''")
+            st.conn.execute("DELETE FROM meta WHERE key='checks_engine_backfilled'")
+            st.conn.commit()
+            self.assertTrue(st.migrate_checks_engine_once())
+            self.assertEqual(
+                [r["engine"] for r in st.conn.execute("SELECT engine FROM checks")],
+                ["local", "local"])
+            self.assertFalse(st.migrate_checks_engine_once(), "只跑一次")
+
+    def test_cert_rows_become_pending(self) -> None:
+        """撤「证书问题」一档：存量 cert 行并入 pending（动作相同：重跑一次定案）。
+
+        2026-09-20（TODO §一点九）：校验收成 App 引擎，而 App 侧产不出 cert——
+        要么直接通过（不校验证书信任链），要么报 TLS 阻断（→ 需翻墙）。
+        """
+        with Store(self.db) as st:
+            self._seed(st, ["ok", "gfw", "cert", "dead"])
+            st.conn.execute("DELETE FROM meta WHERE key='cert_tier_removed'")
+            st.conn.commit()
+            self.assertTrue(st.migrate_cert_tier_once())
+            self.assertEqual(self._healths(st), ["ok", "gfw", "pending", "dead"])
+
+    def test_cert_word_in_group_is_renamed(self) -> None:
+        """组名里的「证书问题」跟着换词——留着会被前端当成用户标签（AGENTS #17）。"""
+        with Store(self.db) as st:
+            st.upsert_sources([make_source("https://a.com")])
+            st.conn.execute("UPDATE sources SET group_name='📖小说,证书问题'")
+            st.conn.execute("DELETE FROM meta WHERE key='cert_tier_removed'")
+            st.conn.commit()
+            st.migrate_cert_tier_once()
+            row = st.conn.execute(
+                "SELECT group_name FROM sources WHERE source_url='https://a.com'").fetchone()
+            self.assertEqual(row["group_name"], "📖小说,待验证")
+
+    def test_cert_migration_runs_only_once(self) -> None:
+        with Store(self.db) as st:
+            self._seed(st, ["cert"])
+            st.conn.execute("DELETE FROM meta WHERE key='cert_tier_removed'")
+            st.conn.commit()
+            self.assertTrue(st.migrate_cert_tier_once())
+            self.assertFalse(st.migrate_cert_tier_once())
+
     def test_rename_keeps_the_state_and_the_other_tags(self) -> None:
         """**换名不等于重算状态**：其余标签与那个源自己的状态一个都不能动。
 

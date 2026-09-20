@@ -490,7 +490,7 @@ class TransportCodeParityTests(unittest.TestCase):
     """传输层错误码：校验链路产出的，归因链路必须认。
 
     `checker._request` 与 `reclassify._get` 是同一条链路的两个入口，码表不一致的
-    代价是「同一个源，校验说🔐证书、归因说可能是临时故障」——而用户是照着归因
+    代价是「同一个源，校验说证书不被信任、归因说可能是临时故障」——而用户是照着归因
     报告决定删源的。
 
     实测过的现场：`ClientConnectorCertificateError` 没被 `_get` 单独接住。它与

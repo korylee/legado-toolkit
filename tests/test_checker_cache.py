@@ -12,7 +12,7 @@ from core import checker
 from core.checker import (classify_transport_error, is_cache_item_valid,
                           is_inconclusive)
 from core.loader import fingerprint
-from core.models import Health, build_record
+from core.models import Engine, Health, build_record
 from cli.main import _resolve_check_cache, build_parser
 
 
@@ -33,6 +33,8 @@ def make_cache_item(source: dict, health: str, checked_at: str) -> dict:
     # 「版本不符」这条捷径——指纹比对和有效期这两条真实断言会被恒定短路。
     return {
         "v": checker.CACHE_VERSION,
+        # v15 起多一根轴：结论是谁判的（本地回放写下的条目只对本地引擎有效）
+        "engine": Engine.LOCAL,
         "url": source["bookSourceUrl"],
         "fingerprint": fingerprint(source),
         "health": health,
@@ -64,9 +66,6 @@ class CacheValidityTests(unittest.TestCase):
         """
         self.assertTrue(is_inconclusive(Health.PENDING))
         self.assertFalse(is_inconclusive(Health.OK))
-        # 证书问题不是「没结论」：站点是可达的，只是证书不被信任——所以它照常
-        # 缓存（另有自己的短 TTL 与「关掉校验就能变好」的不复用理由）
-        self.assertFalse(is_inconclusive(Health.CERT))
         source = make_source()
         item = make_cache_item(source, Health.PENDING, "2026-08-21 11:00:00")
         self.assertFalse(is_cache_item_valid(build_record(source, 0), item, now=NOW),

@@ -55,6 +55,11 @@ STATE_LABEL = {
 }
 
 
+#: 允许**本次覆盖**的参数。刻意做成白名单：`app_repo` 是环境配置、`limit` 由「范围」
+#: 表达，都不该被一次跑批改掉；其余键走 `settings_store.coerce` 收敛。
+JVM_RUN_PARAMS = ("keyword", "timeout", "concurrency", "depth")
+
+
 def _launcher() -> Path:
     p = _AGSVC / "legado-gradle.bat"
     if not p.exists():
@@ -90,17 +95,36 @@ def _write_args(keyword: str, timeout: int, concurrency: int, limit: int,
         "\n".join(lines) + "\n", encoding="utf-8", newline="\n")
 
 
-def _export_sources_file(st, urls: Optional[List[str]] = None) -> Path:
+def _export_sources_file(st, urls: Optional[List[str]] = None,
+                         filt: Optional[Dict[str, Any]] = None) -> Path:
     """把管理库在用源导出成 JVM 侧可吃的 JSON 文件（与 S1 手工导出同一形状）。
 
-    `urls` 非空 = **只导出这几条**（列表页勾选的源）。**两边都先归一再比**（AGENTS #5）：
-    前端给的是库里归一化过的 `source_url`，而这里读的是源 JSON 里 `bookSourceUrl` 的原文
-    ——不归一就会一条都匹配不上，而表现是「跑完了但 JVM 列没变」，不报错。
+    **三种范围，顺序即优先级**：
+
+    1. `urls` 非空 —— 只导出这几条（列表页勾选的源）。**两边都先归一再比**（AGENTS #5）：
+       前端给的是库里归一化过的 `source_url`，而这里读的是源 JSON 里 `bookSourceUrl`
+       的原文——不归一就会一条都匹配不上，而表现是「跑完了但列没变」，不报错。
+    2. `filt` 非空 —— 当前筛选命中的全部源（复用 `Store.export_by_filter`，不受分页限制）。
+       形状与 `POST /api/export` 的 `filter` 一致（同一个前端对象直接递过来）。
+    3. 都没有 —— 全部在用源。
     """
     import io
     want = {_normalize_url(u) for u in (urls or []) if str(u or "").strip()}
+    if want:
+        views = st.export_sources()
+    elif filt:
+        views = st.export_by_filter(
+            source_type=(int(filt["type"]) if filt.get("type") not in (None, "") else None),
+            group=str(filt.get("group") or ""),
+            health=str(filt.get("health") or ""),
+            q=str(filt.get("q") or ""),
+            only_enabled=bool(filt.get("only_enabled")),
+            user_tag=str(filt.get("tag") or ""),
+        )
+    else:
+        views = st.export_sources()
     out = []
-    for view in st.export_sources():
+    for view in views:
         if not view.get("enabled", 1):
             continue
         # `export_sources()` 给的是**解析好的书源对象**（`Store._source_view` 的输出，
@@ -191,6 +215,8 @@ async def jvm_run(body: Optional[JvmRunRequest] = None):
 
     #: 只跑这几条源（列表页勾选的）。空 = 全部在用源
     want_urls = [u for u in ((body.urls if body else []) or []) if str(u or "").strip()]
+    want_filter = dict((body.filter if body else None) or {})
+    want_params = dict((body.params if body else None) or {})
 
     # **与调试共用一把锁**（`core.jvm_debug.RUN_LOCK`）：两条链都写同一个参数文件，
     # 同时跑会互相踩。锁的理由、`BUSY_REASON` 那句话与「为什么非阻塞」都在
@@ -200,7 +226,7 @@ async def jvm_run(body: Optional[JvmRunRequest] = None):
         return {"started": False, "reason": BUSY_REASON}
     try:
         st = Store()
-        src_file = _export_sources_file(st, want_urls)
+        src_file = _export_sources_file(st, want_urls, want_filter)
         st.close()
         rows = json.loads(src_file.read_text(encoding="utf-8"))
         if want_urls and not rows:
@@ -208,10 +234,22 @@ async def jvm_run(body: Optional[JvmRunRequest] = None):
             return {"started": False,
                     "reason": "选中的 %d 条源一条都没匹配上（可能已被删除，或 URL 改过）"
                               % len(want_urls)}
+        if want_filter and not want_urls and not rows:
+            return {"started": False, "reason": "当前筛选没有命中任何源，不用跑"}
+        # **本次覆盖**：逐键过 coerce（未知键丢弃、越界收敛到区间内），
+        # 只作用于这一次跑批。`app_repo` / `limit` 不在里面——前者是环境配置，
+        # 后者现在由「范围」表达（见 `_export_sources_file`）
+        eff = dict(conf)
+        for key in JVM_RUN_PARAMS:
+            if key in want_params:
+                got = settings_store.coerce("jvm", key, want_params[key])
+                if got is not None:
+                    eff[key] = got
+
         limit = int(conf.get("limit", 0) or 0)
-        # **选了具体几条就不再看条数上限**：范围由选中决定，否则会出现
+        # **给了范围就不再看条数上限**：范围由选中/筛选决定，否则会出现
         # 「选了 20 条只跑了 3 条」这种看不出来的截断
-        if limit > 0 and not want_urls:
+        if limit > 0 and not want_urls and not want_filter:
             rows = rows[:limit]
             src_file.write_text(json.dumps(rows, ensure_ascii=False),
                                 encoding="utf-8", newline="\n")
@@ -220,9 +258,9 @@ async def jvm_run(body: Optional[JvmRunRequest] = None):
         out_path = data_dir() / "app_probe" / "jvm_results.jsonl"
         if out_path.exists():
             out_path.unlink()
-        _write_args(conf.get("keyword", "我"), int(conf.get("timeout", 25)),
-                    int(conf.get("concurrency", 8)), 0, out_path, src_file,
-                    str(conf.get("depth", "search")))
+        _write_args(eff.get("keyword", "我"), int(eff.get("timeout", 25)),
+                    int(eff.get("concurrency", 8)), 0, out_path, src_file,
+                    str(eff.get("depth", "search")))
 
         def _blocking() -> Dict[str, Any]:
             code = _run_gradle()
@@ -231,9 +269,14 @@ async def jvm_run(body: Optional[JvmRunRequest] = None):
                         "reason": "启动器没有产出结果文件（看 Gradle 输出定位）"}
             rows = _read_results(out_path)
             batch = _write_meta(rows)
+            # 结论同时按 checks 的口径落库（六档 / 星级 / 深度）——列表与筛选读的是
+            # checks，不落这一步的话健康列会在撤掉本地引擎之后断供（TODO §一点九）。
+            # 映射与判据都在 core/jvm_health，**别在这里另写一份**。
+            from core import jvm_health
+            n_checks = jvm_health.store_checks(rows, batch=batch)
             dist = Counter(r.get("state") for r in rows)
             return {"started": True, "ok": code == 0, "exit": code, "batch": batch,
-                    "count": len(rows), "dist": dict(dist)}
+                    "count": len(rows), "dist": dict(dist), "checks": n_checks}
 
         # FastAPI 的线程池里跑，不卡事件循环（全量 17 分钟，HTTP 超时是客户端的事）
         return await run_in_threadpool(_blocking)
