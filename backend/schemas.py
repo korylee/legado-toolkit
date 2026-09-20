@@ -118,6 +118,20 @@ class RuleChainTest(BaseModel):
     pick: int = 1
 
 
+class JvmRunRequest(BaseModel):
+    """跑一批 JVM 校验（S5-A 第二期：支持只跑选中的几条）。
+
+    `urls` 是**书源 URL 列表**（列表页勾选的那几条，前端给的是归一化过的 `source_url`）。
+    空 = 全部在用源（此时受设置里的「条数上限」约束）；**给了它就不再看条数上限**——
+    范围由选中的条数决定，否则会出现「选了 20 条只跑了 3 条」。
+
+    **两侧都必须归一 URL 再比**（AGENTS #5 的坑）：前端给的是库里归一化过的值，而导出
+    的是源 JSON 里的原文——不归一就一条都对不上，而且**不报错**（跑出一批空结论）。
+    """
+
+    urls: List[str] = Field(default_factory=list)
+
+
 class JvmDebugRequest(BaseModel):
     """在本机引擎里跑一次调试（S5-A4）：不填 IP、不推送，直接出分段结果。
 

@@ -4,6 +4,7 @@ import { ElMessage, ElMessageBox } from "element-plus";
 import { Search, Plus, Upload, Download, Delete, Filter, Refresh, Monitor, MagicStick } from "@element-plus/icons-vue";
 import { listSources, listSourceUrls, listGroups, patchTags, deleteSources, listTags, getStats } from "../api/sources";
 import { api, subscribeJob } from "../api/client";
+import { jvmRun } from "../api/jvm.js";
 import { ensureTagMeta, isQualityTag, isStatusTag, splitTags, tagOfType, sourceTypes } from "../utils/tags";
 import { HEALTH_LABELS, describeChanges, healthLabel, starBasisLabel } from "../utils/health";
 import { DEPTH_SHORT } from "../utils/checkFields";
@@ -16,6 +17,7 @@ import ImportDialog from "../components/ImportDialog.vue";
 import GroupManagerDrawer from "../components/GroupManagerDrawer.vue";
 import JobsDrawer from "../components/JobsDrawer.vue";
 import CheckOverrideForm from "../components/CheckOverrideForm.vue";
+import CheckJvmForm from "../components/CheckJvmForm.vue";
 
 const isMobile = useMobile();
 const loading = ref(false);
@@ -58,6 +60,9 @@ function isRowChecking(url) {
 
 //: 总数优先用后端报的（提交列表与"全量"的实际条数可能不同，比如回收站/禁用的源）
 const checkStatusText = computed(() => {
+  // 本机引擎跑批：一次同步调用、没有逐条进度（后端跑完才返回），所以只报状态不报分数
+  // ——编一个假进度比不报更糟（用户会盯着一个不动的数字）
+  if (jvmRunning.value) return "正在用本机引擎跑批：" + jvmRunScope.value;
   const n = checkTotal.value || (checkingAll.value ? 0 : checkingUrls.value.size);
   // 全量校验是十几分钟的长任务，**带上跑动中的计数**：只有「正在校验全部 3861 条」
   // 这句时，跑与没跑、跑到哪了在界面上完全看不出来（原话是"进度没更新"）。
@@ -88,8 +93,13 @@ const checkDialogRef = ref(null);
 const pendingCheckUrls = ref([]);
 
 // 打开时才去拉全局设置（拿到的是最新全局值），所以必须等容器渲染完再调
+// **两个表单都要刷**：el-dialog 不销毁内容，上一次的选择与参数会留在 DOM 里
 watch(checkDialog, (v) => {
-  if (v) nextTick(() => { if (checkDialogRef.value) checkDialogRef.value.reload(); });
+  if (!v) return;
+  nextTick(() => {
+    if (checkDialogRef.value) checkDialogRef.value.reload();
+    if (jvmFormRef.value) jvmFormRef.value.reload();
+  });
 });
 
 //: 结果条上那一行字。**行内与 tooltip 共用同一份**——各写一遍必然漂成两句不同的话。
@@ -112,12 +122,30 @@ const checkTipText = computed(() => {
 
 const checkDialogTitle = computed(
   () => (pendingCheckUrls.value.length ? "校验选中" : "全量校验"));
+
+//: 弹框里的引擎选择。**默认本地**：它不需要任何环境、几秒到几分钟就有结果；
+//: 「本机引擎」要装 JVM 环境且慢得多，是明确的选择而不是默认。
+//:
+//: 两个引擎产出的东西**落在不同的地方**（本地 → checks 表 → 健康档位/星级；
+//: 本机 → meta → 列表的 JVM 列），所以说明文字必须把这一点讲清楚——不然「校验完了
+//: 怎么那一列没变」看起来就是 bug。
+const checkEngine = ref("local");
+const jvmReady = ref(false);
+const jvmFormRef = ref(null);
+// 切到本机引擎时先清掉上一次的结论：新表单还在自检（1-2 秒），
+// **留着 true 会让「开始校验」先可点**——那正是自检这道闸门要挡的情况
+watch(checkEngine, (v) => { if (v === "jvm") jvmReady.value = false; });
+
 const checkDialogHint = computed(() => {
-  if (pendingCheckUrls.value.length) {
-    return "将校验选中的 " + pendingCheckUrls.value.length + " 条源。";
+  const n = pendingCheckUrls.value.length;
+  if (checkEngine.value === "jvm") {
+    return n
+      ? "将用「阅读」App 的真引擎校验选中的 " + n + " 条源。"
+      : "将用「阅读」App 的真引擎校验全部在用书源。";
   }
-  const n = stats.value ? stats.value.sources : "?";
-  return "将校验全部未删除书源（共 " + n + " 条），可能耗时数分钟。";
+  if (n) return "将校验选中的 " + n + " 条源。";
+  const total = stats.value ? stats.value.sources : "?";
+  return "将校验全部未删除书源（共 " + total + " 条），可能耗时数分钟。";
 });
 
 /** 打开批量校验的弹框。批量入口都走这里，单条不走。 */
@@ -128,7 +156,48 @@ function openCheckDialog(urls = []) {
 
 function startPendingCheck() {
   checkDialog.value = false;
+  if (checkEngine.value === "jvm") {
+    runJvmBatch();
+    return;
+  }
   checkSources(pendingCheckUrls.value);
+}
+
+//: 本机引擎跑批：一次同步调用（后端起 appservice 子进程，跑完才返回），没有逐条进度。
+//: **不做成 job**：它是「一条命令跑完一批」，与本地那套 SSE 进度不是一回事；
+//: 界面上只给一句「正在跑」+ 完成的落库条数。
+const jvmRunning = ref(false);
+//: 跑动中的状态条要写清**这次跑的是哪些**（全量还是选中的几条）——同一句话糊过去的话，
+//: 「我明明只选了 20 条」这种疑问在跑动期间无法自证
+const jvmRunScope = ref("");
+
+async function runJvmBatch() {
+  if (jvmRunning.value) return ElMessage.warning("已有本机引擎跑批在运行");
+  if (checking.value) return ElMessage.warning("已有校验任务在运行");
+  const n = pendingCheckUrls.value.length;
+  jvmRunScope.value = n ? "选中的 " + n + " 条源" : "全部在用源（「条数上限」以内）";
+  jvmRunning.value = true;
+  try {
+    // 选中了就只跑选中的那几条；空数组 = 全部在用源（那时才看「条数上限」）
+    const r = await jvmRun({ urls: pendingCheckUrls.value });
+    if (!r.started) {
+      // 没起来的三种原因要分开说：另一个 JVM 任务在跑（reason）、自检没过（selftest）、
+      // 选中的源一条都没匹配上（reason）——都说成「自检未通过」会把原因指反
+      if (r.reason) {
+        ElMessage.warning(r.reason);
+      } else {
+        ElMessage.warning("环境自检未通过，不能跑批");
+      }
+      return;
+    }
+    ElMessage.success("跑批完成：" + (r.count || 0) + " 条结论已入库");
+    // 结论落在 meta、显示在 JVM 列——跑完必须重新拉列表，否则那一列还是旧的
+    await load();
+  } catch (e) {
+    ElMessage.error("跑批失败：" + (e?.message || e));
+  } finally {
+    jvmRunning.value = false;
+  }
 }
 
 // 统计条（替代已删掉的「诊断」页）与「任务」抽屉
@@ -746,7 +815,7 @@ onUnmounted(() => {
       <div class="bar-row">
         <el-button size="small" :icon="Plus" @click="openNew">新建源</el-button>
         <!-- 本次的选项（参数覆盖 + 忽略缓存）在点开后的弹框里，不再单独占一个按钮 -->
-        <el-button size="small" :icon="Refresh" :disabled="checking"
+        <el-button size="small" :icon="Refresh" :disabled="checking || jvmRunning"
                    @click="openCheckDialog([])">
           全量校验
         </el-button>
@@ -1084,13 +1153,35 @@ onUnmounted(() => {
 
     <!-- 批量校验的确认弹框：选项 + 开始。桌面与移动端共用（移动端宽度由
          styles.css 的媒体查询压到 94vw）。单条校验不弹框，直接用全局设置。 -->
-    <el-dialog v-model="checkDialog" :title="checkDialogTitle" width="420px" append-to-body>
+    <el-dialog v-model="checkDialog" :title="checkDialogTitle" width="460px" append-to-body>
       <div class="muted" style="margin-bottom: 12px">{{ checkDialogHint }}</div>
-      <CheckOverrideForm ref="checkDialogRef" v-model="checkOverride"
-                         v-model:refresh="refreshThisRun" />
+
+      <!-- 引擎选择。**一个入口、两个引擎**：原先本机引擎的跑批按钮长在「设置 → JVM 校验」
+           页签上，而它的结论显示在这一页的 JVM 列——动作与结果分在两屏，正是这次搬家的
+           理由（见 component/CheckJvmForm.vue 的注释）。 -->
+      <el-radio-group v-model="checkEngine" size="small" style="margin-bottom: 10px">
+        <el-radio-button value="local">本地引擎</el-radio-button>
+        <el-radio-button value="jvm">本机引擎</el-radio-button>
+      </el-radio-group>
+      <div class="muted" style="font-size: 12px; margin-bottom: 12px">
+        <template v-if="checkEngine === 'local'">
+          最快。本地跑规则，验不了 JS 规则；结论进「健康档位」。
+        </template>
+        <template v-else>
+          最准，也最慢。跑的是「阅读」App 的真源码；结论进列表的「JVM」列。
+        </template>
+      </div>
+
+      <CheckOverrideForm v-if="checkEngine === 'local'" ref="checkDialogRef"
+                         v-model="checkOverride" v-model:refresh="refreshThisRun" />
+      <CheckJvmForm v-else ref="jvmFormRef" :selected-count="pendingCheckUrls.length"
+                    @ready="jvmReady = $event" />
+
       <template #footer>
         <el-button @click="checkDialog = false">取消</el-button>
-        <el-button type="primary" :disabled="checking" @click="startPendingCheck">
+        <el-button type="primary"
+                   :disabled="checking || jvmRunning || (checkEngine === 'jvm' && !jvmReady)"
+                   @click="startPendingCheck">
           开始校验
         </el-button>
       </template>

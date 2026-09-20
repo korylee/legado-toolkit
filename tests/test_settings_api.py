@@ -98,7 +98,10 @@ class PatchSemanticsTests(SettingsApiTestCase):
                           "jvm_timeout", "jvm_concurrency", "jvm_limit",
                           # 枚举型：前端据此渲染深度下拉，不在 JS 里再写一份（AGENTS #8）
                           "jvm_depth"})
-        self.assertEqual(got["limits"]["probe_depth"], (1, 2, 3, 4))
+        # 主页档（1）不在下发的那份里（2026-09-20 撤掉）：下拉只给 搜索/目录/正文，
+        # 与 JVM 的 jvm_depth 三项一一对应。值 1 仍然合法（历史结论/迁移产物），
+        # 那条不变式在 tests/test_settings_store.py 里钉着。
+        self.assertEqual(got["limits"]["probe_depth"], (2, 3, 4))
 
     def test_reset_endpoint_restores_defaults(self) -> None:
         reset_settings()
@@ -142,6 +145,14 @@ class PayloadShapeTests(SettingsApiTestCase):
     def test_get_payload_shape(self) -> None:
         self.assertEqual(set(_payload(S.load())),
                          {"values", "defaults", "limits"})
+
+    def test_limits_do_not_offer_the_home_tier(self) -> None:
+        """界面那个「探测深度」下拉的选项**就是这里下发的**（前端不自己列一份，AGENTS #8）
+        ——所以撤掉主页档要在这一层撤。值 1 仍然合法（历史结论 / 迁移产物），只是不再可选。"""
+        limits = _payload(S.load())["limits"]
+        self.assertEqual(list(limits["probe_depth"]), [2, 3, 4])
+        self.assertNotIn(S.DEPTH_HOME, limits["probe_depth"])
+        self.assertIn(S.DEPTH_SEARCH, limits["probe_depth"], "搜索档是最浅的一档，别一起删了")
 
 
 if __name__ == "__main__":

@@ -119,6 +119,30 @@ class SettingsStoreTests(unittest.TestCase):
             with self.subTest(const=name):
                 self.assertIs(getattr(checker, name), getattr(S, name))
 
+    def test_home_tier_is_not_offered_but_still_legal(self) -> None:
+        """**「不展示」与「不合法」是两件事**（2026-09-20 撤掉主页档）。
+
+        下发给界面渲染下拉的那份从搜索档起；而值 1 必须继续合法、也继续是非法值的兜底：
+        ① `_migrate_legacy` 把「没开搜索探测」的 v1 配置映射成它；② 历史
+        `checks.probe_depth` 行里存着它；③ 列表页还要靠它把老结论的档位写出来
+        （`DEPTH_SHORT[probe_depth]`）。**编号也不许平移**——一平移，整列历史值的含义
+        就变了（AGENTS #5b），所以下面把编号一起钉住。
+        """
+        self.assertEqual(S.PROBE_DEPTH_CHOICES, (2, 3, 4))
+        self.assertNotIn(S.DEPTH_HOME, S.PROBE_DEPTH_CHOICES)
+        self.assertIs(S.LIMITS["probe_depth"], S.PROBE_DEPTH_CHOICES,
+                      "界面渲染下拉读的就是 limits，别让它继续下发四档")
+        # 「1 还合法」这件事**没法用 coerce 的返回值来钉**：值与兜底值都是 1，
+        # 所以 `coerce(1) == 1` 在「1 被拒绝、走了兜底」时也照样绿。要钉就钉集合成员
+        # ——它才是「合法档位」这件事本身（`PROBE_DEPTHS` 一行解包四个常量，
+        # 真删掉 1 会当场炸在 import 上，所以这条断言更像一张写着原因的告示）。
+        self.assertIn(S.DEPTH_HOME, S.PROBE_DEPTHS, "1 必须继续是合法档位（历史结论/迁移产物）")
+        self.assertEqual(S.DEPTH_HOME, 1, "编号不许平移——它一直是 1")
+        self.assertEqual(S.coerce("check", "probe_depth", 9), S.DEPTH_HOME,
+                         "非法输入的落点仍是主页档（与 AsyncChecker 同一口径）")
+        self.assertEqual(S.DEFAULTS["check"]["probe_depth"], S.DEPTH_SEARCH,
+                         "默认档位本来就落在搜索档——撤掉主页档不该改默认行为")
+
     def test_bool_accepts_word_forms(self) -> None:
         self.assertFalse(S.coerce("check", "verify_ssl", "false"))
         self.assertTrue(S.coerce("check", "verify_ssl", "on"))

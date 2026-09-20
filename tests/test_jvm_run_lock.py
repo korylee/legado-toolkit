@@ -66,7 +66,10 @@ class _Base(unittest.TestCase):
             p.start()
             self.addCleanup(p.stop)
 
-    def _fake_export(self, st) -> pathlib.Path:
+    def _fake_export(self, st, urls=None) -> pathlib.Path:
+        # 签名要与真的一致（跑批现在会传「只跑这几条」）：少了这个参数，
+        # 打桩就成了「只有测试里才成立的那种函数」（实测踩过：TypeError）
+        self.seen_urls = urls
         f = self.tmp / "batch_src.json"
         f.write_text(json.dumps([{"bookSourceUrl": "https://a.com"}]), encoding="utf-8")
         return f

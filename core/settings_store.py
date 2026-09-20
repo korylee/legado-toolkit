@@ -42,6 +42,26 @@ VERSION = 2
 PROBE_DEPTHS = (1, 2, 3, 4)
 DEPTH_HOME, DEPTH_SEARCH, DEPTH_TOC, DEPTH_CONTENT = PROBE_DEPTHS
 
+#: **下发给界面渲染下拉**的那份（``LIMITS["probe_depth"]`` 用它）：从搜索档起，
+#: **不含主页档**。
+#:
+#: 为什么主页档不再作为选项（2026-09-20 定）：每一档本来都**先打主页探测**
+#: （``checker.check_one`` 第一步就是域名探测，判不可达就直接停、不再发搜索请求），
+#: 所以「谁不可达 / 证书坏 / 需翻墙」这套产出，搜索档拿到的与主页档**逐字相同**，
+#: 对不可达的源花的请求数也一样；主页档唯一独有的只是「可达的源也省掉后续请求」这种
+#: 更快的扫地（而它本来也不是默认档）。删掉它换来的是**两个引擎的挡位词表对齐**——
+#: 本地剩 搜索/目录/正文，与 ``JVM_DEPTHS`` 三项一一对应，界面上不再出现实现分叉。
+#:
+#: ⚠️ **这与「合法性」是两件事，别合并**（``PROBE_DEPTHS`` 不动）：
+#: ① ``_migrate_legacy`` 把「没开搜索探测」的 v1 配置映射成 :data:`DEPTH_HOME`；
+#: ② :func:`_to_probe_depth` 对非法值（5/0/None）的兜底也落在它上面；③ 历史
+#: ``checks.probe_depth`` 行里存着 1。删掉合法性会同时打断这三条。
+#:
+#: **编号也不许平移**（2/3/4 → 1/2/3）：``checks.probe_depth`` 记的是「当时实际跑到
+#: 第几档」，一平移整列历史值的含义就变了（AGENTS #5b）。所以这一改动**不涉及
+#: ``CACHE_VERSION``**：编号含义没变、历史缓存仍然可比。
+PROBE_DEPTH_CHOICES = (DEPTH_SEARCH, DEPTH_TOC, DEPTH_CONTENT)
+
 #: JVM 校验的探测深度（S3）。**与上面的 ``PROBE_DEPTHS`` 是两根轴**：那根是本地
 #: 回放的（1/2/3/4，按星级口径），这根是 App 真引擎跑到哪一段——两者编号独立，
 #: 不要互相换算（深度轴的含义一平移，历史结论整列都会变意思，AGENTS #5b）。
@@ -98,7 +118,7 @@ DEFAULTS: Dict[str, Dict[str, Any]] = {
 LIMITS: Dict[str, tuple] = {
     "concurrency": (1, 200),
     "timeout": (1.0, 120.0),
-    "probe_depth": PROBE_DEPTHS,
+    "probe_depth": PROBE_DEPTH_CHOICES,
     "cache_ttl_ok": (1, 365),
     "cache_ttl_other": (1, 365),
     "cache_ttl_auth": (0, 365),
@@ -383,6 +403,6 @@ def resolve_check(override: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
 
 
 __all__ = ["DEFAULTS", "DEPTH_CONTENT", "DEPTH_HOME", "DEPTH_SEARCH", "DEPTH_TOC",
-           "LIMITS", "PROBE_DEPTHS", "SETTINGS_NAME", "VERSION",
+           "LIMITS", "PROBE_DEPTHS", "PROBE_DEPTH_CHOICES", "SETTINGS_NAME", "VERSION",
            "coerce", "load", "reset", "resolve_check", "settings_path",
            "update"]

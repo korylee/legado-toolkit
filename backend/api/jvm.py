@@ -23,11 +23,12 @@ import sys
 import time
 from collections import Counter
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
 from fastapi.concurrency import run_in_threadpool
 
+from backend.schemas import JvmRunRequest
 from core.paths import data_dir
 from core.store import Store
 from core import settings_store
@@ -88,21 +89,28 @@ def _write_args(keyword: str, timeout: int, concurrency: int, limit: int,
         "\n".join(lines) + "\n", encoding="utf-8", newline="\n")
 
 
-def _export_sources_file(st) -> Path:
-    """把管理库在用源导出成 JVM 侧可吃的 JSON 文件（与 S1 手工导出同一形状）。"""
+def _export_sources_file(st, urls: Optional[List[str]] = None) -> Path:
+    """把管理库在用源导出成 JVM 侧可吃的 JSON 文件（与 S1 手工导出同一形状）。
+
+    `urls` 非空 = **只导出这几条**（列表页勾选的源）。**两边都先归一再比**（AGENTS #5）：
+    前端给的是库里归一化过的 `source_url`，而这里读的是源 JSON 里 `bookSourceUrl` 的原文
+    ——不归一就会一条都匹配不上，而表现是「跑完了但 JVM 列没变」，不报错。
+    """
     import io
+    want = {_normalize_url(u) for u in (urls or []) if str(u or "").strip()}
     out = []
     for view in st.export_sources():
         if not view.get("enabled", 1):
             continue
-        raw = view.get("raw_json")
-        if isinstance(raw, str):
-            try:
-                d = json.loads(raw)
-            except Exception:
-                continue
-        else:
-            d = raw
+        # `export_sources()` 给的是**解析好的书源对象**（`Store._source_view` 的输出，
+        # 已并入 group_name/user_tags），不是带 `raw_json` 的包装。
+        # 原先是 `raw = view.get("raw_json")`（恒为 None）→ `d = raw` → `d.get(...)`：
+        # **任何有在用源的库都会在这里抛异常**（实测：真库副本上 TypeError）。
+        # 之前没暴露，是因为它的测试把这个函数整个打桩了、而历史上的批量是走 CLI + 导出
+        # 文件那条路（库里那几千条 jvm_check 结论不是这个端点写的）。
+        d = view
+        if want and _normalize_url(str(d.get("bookSourceUrl") or "")) not in want:
+            continue
         out.append({k: d.get(k) for k in (
             "bookSourceName", "bookSourceUrl", "searchUrl", "exploreUrl",
             "ruleSearch", "ruleBookInfo", "ruleToc", "ruleContent",
@@ -172,7 +180,7 @@ def jvm_selftest():
 
 
 @router.post("/run")
-async def jvm_run():
+async def jvm_run(body: Optional[JvmRunRequest] = None):
     conf = settings_store.load().get("jvm", {})
     if not conf.get("app_repo"):
         raise HTTPException(400, "JVM 校验未配置：请先在设置里填 App 源码目录并自检")
@@ -181,6 +189,9 @@ async def jvm_run():
     st_conf = selftest(conf.get("app_repo", ""))
     if not st_conf["ok"]:
         return {"started": False, "selftest": st_conf}
+
+    #: 只跑这几条源（列表页勾选的）。空 = 全部在用源
+    want_urls = [u for u in ((body.urls if body else []) or []) if str(u or "").strip()]
 
     # **与调试共用一把锁**（`core.jvm_debug.RUN_LOCK`）：跑批与调试都写
     # `appservice/args.properties`、都 `--rerun` 同一个 Gradle 任务，同时跑会互相踩
@@ -191,12 +202,20 @@ async def jvm_run():
         return {"started": False, "reason": BUSY_REASON}
     try:
         st = Store()
-        src_file = _export_sources_file(st)
+        src_file = _export_sources_file(st, want_urls)
         st.close()
+        rows = json.loads(src_file.read_text(encoding="utf-8"))
+        if want_urls and not rows:
+            # 一条都没匹配上：**说清楚**，别开一次空跑（那会让用户以为「跑过了、源没问题」）
+            return {"started": False,
+                    "reason": "选中的 %d 条源一条都没匹配上（可能已被删除，或 URL 改过）"
+                              % len(want_urls)}
         limit = int(conf.get("limit", 0) or 0)
-        if limit > 0:
-            data = json.loads(src_file.read_text(encoding="utf-8"))[:limit]
-            src_file.write_text(json.dumps(data, ensure_ascii=False),
+        # **选了具体几条就不再看条数上限**：范围由选中决定，否则会出现
+        # 「选了 20 条只跑了 3 条」这种看不出来的截断
+        if limit > 0 and not want_urls:
+            rows = rows[:limit]
+            src_file.write_text(json.dumps(rows, ensure_ascii=False),
                                 encoding="utf-8", newline="\n")
         # 绝对路径的理由同 _export_sources_file：这个路径是给**另一个进程**
         # （CWD = App 仓库根）用的，相对路径会落到 App 仓库里去
@@ -204,7 +223,7 @@ async def jvm_run():
         if out_path.exists():
             out_path.unlink()
         _write_args(conf.get("keyword", "我"), int(conf.get("timeout", 25)),
-                    int(conf.get("concurrency", 8)), limit, out_path, src_file,
+                    int(conf.get("concurrency", 8)), 0, out_path, src_file,
                     str(conf.get("depth", "search")))
 
         def _blocking() -> Dict[str, Any]:
