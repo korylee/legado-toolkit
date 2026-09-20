@@ -251,6 +251,35 @@ class HealthTierMigrationTests(unittest.TestCase):
             self.assertTrue(st.migrate_health_tiers_once())
             self.assertFalse(st.migrate_health_tiers_once())
 
+    def test_every_retired_word_is_renamed(self) -> None:
+        """换词表里的**每一个**键都要真的换成它对应的现役词。
+
+        **跟着表长，不要写死具体某个词**：写死「需验证 / 需代理复检」的后果是
+        下次改词时新词不进覆盖，而这条用例仍然全绿（它只验那两个）。所以这里遍历
+        `RETIRED_STATUS_TAG_RENAMES`。
+
+        两个方向都断言：既验「旧词没了」，也验「换成的是映射里写的那个新词」——
+        只验前者的话，映射写成「一律 → 待验证」也会全绿，而那是把状态改错。
+        """
+        from core.tags import RETIRED_STATUS_TAG_RENAMES
+
+        pairs = [("https://r%d.example" % i, old)
+                 for i, old in enumerate(RETIRED_STATUS_TAG_RENAMES)]
+        with Store(self.db) as st:
+            st.upsert_sources([make_source(url) for url, _ in pairs])
+            for url, old in pairs:
+                st.conn.execute("UPDATE sources SET group_name=? WHERE source_url=?",
+                                ("📖小说,%s" % old, url))
+            st.conn.execute("DELETE FROM meta WHERE key='health_tiers_v2'")
+            st.conn.commit()
+            st.migrate_health_tiers_once()
+            for url, old in pairs:
+                row = st.conn.execute(
+                    "SELECT group_name FROM sources WHERE source_url=?", (url,)).fetchone()
+                self.assertEqual(row["group_name"],
+                                 "📖小说," + RETIRED_STATUS_TAG_RENAMES[old],
+                                 "「%s」没有换成映射里的现役词" % old)
+
     def test_group_name_words_are_renamed(self) -> None:
         """组名要跟着换词：旧词留在 group_name 里会被前端当成**用户标签**。
 

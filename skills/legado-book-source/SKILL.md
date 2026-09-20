@@ -115,7 +115,6 @@
   },
   "ruleContent": {
     "content": "@js:result.split('\\n').filter(function(x){return x;}).map(function(x){return '<img src=\"'+x+',{\\\"headers\\\":{\\\"Referer\\\":\\\"https://站点域名/\\\"}}\">';}).join('')",
-    "webView": true,
     "webJs": "var imgs = document.querySelectorAll('图片容器 img'); var urls = []; for (var i = 0; i < imgs.length; i++) { var u = imgs[i].src || imgs[i].getAttribute('data-original') || ''; if (u && u.indexOf('http') === 0) urls.push(u); } result = urls.join('\\n');",
     "imageStyle": "FULL"
   }
@@ -233,6 +232,43 @@ if (imgs && imgs.length > 0) {
     result = '';
 }
 ```
+
+**三件必知的事（2026-09-19 实测 `koudaimh.com` 后补）**：
+
+1. **`params` 是全局变量**，页面自己的 JS 是 `params = this.decrypt(params)`（无 `var`）
+   ——所以 `webJs` 里**直接读 `params`** 就行，不必自己实现 AES。
+   先判类型：解密前它是**字符串**，`typeof params === 'object'` 才是解好的。
+   这一条正好吃住 App 的重试纪律（结果空 → 1 秒后重试，至多 30 次）：
+   还没解好时 `result = ''`，App 会自己重试。
+2. **webJs 要生效，`chapterUrl` 必须挂 `webView`**。Legado 的 `webView` 是
+   **URL 规则的选项**（`ContentRule` 里**没有** `webView` 字段，写在那里会被
+   静默丢掉），写法是给章节地址追加选项：
+
+   ```json
+   "chapterUrl": "tag.a@href##$##,{\"webView\":true}"
+   ```
+
+   `##$##` 是「在串尾追加」——`$` 命中结尾，于是地址变成
+   `https://…/1.html,{"webView":true}`。**校验工具会自动剥掉这段**再请求；
+   别在 `chapterUrl` 里手写整串（那样正则替换会把它当字面量）。
+3. **`xhr_mode: true` 时 DOM 里没有图片地址**：页面用 XHR 拉图再挂
+   `blob:`，`document.querySelectorAll('img')` 拿到的 src 是 blob 或空。
+   所以**不要**「渲染后读 img.src」，只能读解密后的 `params.chapter_images`。
+
+`content` 用 `@js:` 把地址行转成 `<img>`。**要滤掉不像地址的行**（含空白或
+尖括号的都不认）：webJs 万一没跑起来（例如手填章节 URL 漏了 webView 选项），
+整页 HTML 会被逐行包成 `<img>`——「静默产出垃圾」比返回空更难查：
+
+```json
+"ruleContent": {
+  "webJs": "result = (params && typeof params === 'object' && params.chapter_images) ? params.chapter_images.join(String.fromCharCode(10)) : '';",
+  "content": "@js:var a = String(result).split(String.fromCharCode(10)), o = [];for (var i = 0; i < a.length; i++) {var s = a[i].trim();if (s && !/[\\s<>]/.test(s)) o.push('<img src=\"' + s + '\">');}result = o.join(String.fromCharCode(10));",
+  "imageStyle": "FULL"
+}
+```
+
+> JS 里**尽量不写反斜杠转义**：换行用 `String.fromCharCode(10)`，
+> 这样 JSON 只过一层转义，不会在「JSON → JS 字符串 → 正则」中被吃掉。
 
 ### 场景 2：`C_DATA` 深度混淆加密
 
@@ -356,26 +392,33 @@ result = JSON.stringify(Object.keys(params));
 
 | API | 用途 |
 | :--- | :--- |
-| `java.ajax(url)` | 同步请求，返回 HTML |
-| `java.ajax(url, header)` | 带请求头请求 |
+| `java.ajax(url)` | 同步请求，返回 HTML；`url` 字符串可带 `,{"headers":{...}}` 选项传请求头 |
+| `java.ajax(url, timeout)` | 第二参数是**超时毫秒**，不是请求头（要显式传 header 用 `java.connect(url, header)`） |
 | `java.get(url)` / `java.post(url, body)` | 更细粒度的请求 |
-| `legado.log(msg)` | 输出日志 |
-| `legado.toast(msg)` | 弹提示 |
-| `legado.sleep(ms)` | 阻塞等待（慎用） |
-| `legado.browser.run(url, js, opt)` | 独立浏览器环境执行 JS |
+| `java.log(msg)` / `java.logType(...)` | 输出日志 |
+| `java.toast(msg)` / `java.longToast(msg)` | 弹提示 |
 | `baseUrl` | 当前页面 URL |
 | `result` | `webJs` 的返回值 |
 
-### `legado.browser.run` 参数
+> **JS 里的绑定根只有 `java` / `cookie` / `cache` / `source` / `book` / `chapter` /
+> `title` / `src` / `result` / `baseUrl` / `nextChapterUrl` 这些**（`AnalyzeRule.kt`
+> 的 `buildScriptBindings`）——**没有 `legado` 这个根**。写成 `legado.xxx` 会在运行期
+> 报错，而规则看起来没问题。
 
-```js
-legado.browser.run(url, jsCode, {
-    waitUntil: 'load',  // 'load' | 'domcontentloaded' | 'networkidle'
-    timeout: 30000      // 超时毫秒
-})
-```
+### 独立浏览器环境（`webView`）
 
-> `networkidle` 在广告/统计脚本多的站点会永远等不到，建议用 `load`。
+Legado **没有** `legado.browser.run`。要拿渲染后的 DOM，用这两个（都挂在 `java` 上）：
+
+| API | 签名要点 |
+| :--- | :--- |
+| `java.webView(html, url, js)` | 在 WebView 里跑 `js` 并返回字符串；`html` 与 `url` 至少给一个 |
+| `java.startBrowserAwait(url, title)` | 打开系统浏览器、等用户过验证码，返回 `StrResponse` |
+
+> 这与 §五 是同一件事的两面：`webView` 的真身是**URL 规则的选项**（章节地址后面追加）
+> 和 `java.*` 方法，写进 `ruleContent` 或写成 `legado.browser.*` 都会被静默丢掉。
+> 可用 JS 方法的权威清单在 `help/JsExtensions.kt`（`ajax`/`connect`/`webView`/
+> `startBrowserAwait`/`log`/`toast`/`cacheFile`/`getCookie`…）——**没有 `sleep`，
+> 也没有 `browser`**。
 
 ## 八、图片处理进阶
 
@@ -453,6 +496,7 @@ window.scrollTo(0, document.body.scrollHeight);
 
 | 站点 | 类型 | 关键点 |
 | :--- | :--- | :--- |
+| 口袋漫画 | 加密+webView | `params` AES 加密且 `xhr_mode:true`（DOM 无图片地址）；`chapterUrl` 挂 `webView`，`webJs` 读全局 `params.chapter_images`；目录用 `#chapter-grid`（详情页另有一个「最新章节」列表，选错会重复 30 章）；老章节图片签名会过期 → 403 |
 | 漫画号 | 动态 | `chapterUrl` 加 `webView`，`params.chapter_images` |
 | 豆包漫画 | 动态 | `coverUrl` 用 `data-original`，章节列表 `ewave-playlist-sort-content` |
 | 零搬运 | 静态 | 直接抓 `src`，加 `Referer` |

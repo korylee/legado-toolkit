@@ -8,7 +8,8 @@ import unittest
 from argparse import Namespace
 
 from core import checker
-from core.checker import classify_transport_error, is_cache_item_valid, is_transient
+from core.checker import (classify_transport_error, is_cache_item_valid,
+                          is_inconclusive)
 from core.loader import fingerprint
 from core.models import Health, build_record
 from cli.main import _resolve_check_cache, build_parser
@@ -50,8 +51,8 @@ class CacheValidityTests(unittest.TestCase):
         self.assertEqual(classify_transport_error("dns"), Health.PENDING)
         self.assertEqual(classify_transport_error("other"), Health.PENDING)
 
-    def test_transient_network_result_is_never_reused(self) -> None:
-        """瞬时错误**照写但绝不复用**。
+    def test_inconclusive_result_is_never_reused(self) -> None:
+        """没结论的**照写但绝不复用**。
 
         原来这条断言的是「不写」（`should_cache_result`）。改成"照写、不复用"之后：
         要防的事没变（一次断网/抖动不能变成源的结论），但那些源不再永久显示
@@ -60,14 +61,15 @@ class CacheValidityTests(unittest.TestCase):
         **两个方向都要断言**：只断言"不复用"的话，把写库那道门加回来照样绿，
         而界面上那些源又会全部变回「未校验」。
         """
-        self.assertTrue(is_transient(Health.PENDING))
-        self.assertFalse(is_transient(Health.OK))
-        # 证书问题不是瞬时的（站点证书不会自己变好），所以照常缓存、照常复用
-        self.assertFalse(is_transient(Health.CERT))
+        self.assertTrue(is_inconclusive(Health.PENDING))
+        self.assertFalse(is_inconclusive(Health.OK))
+        # 证书问题不是「没结论」：站点是可达的，只是证书不被信任——所以它照常
+        # 缓存（另有自己的短 TTL 与「关掉校验就能变好」的不复用理由）
+        self.assertFalse(is_inconclusive(Health.CERT))
         source = make_source()
         item = make_cache_item(source, Health.PENDING, "2026-08-21 11:00:00")
         self.assertFalse(is_cache_item_valid(build_record(source, 0), item, now=NOW),
-                         "瞬时错误的缓存一定不能复用——它就在 TTL 内也一样")
+                         "没结论的缓存一定不能复用——它就在 TTL 内也一样")
 
     def test_cache_with_changed_rule_fingerprint_is_not_reused(self) -> None:
         source_a = make_source()

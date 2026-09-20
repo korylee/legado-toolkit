@@ -8,16 +8,19 @@ description: 本仓库 Legado 书源工具链的用法——13 个 CLI 命令、
 ## 一、目录结构
 
     core/          领域逻辑（零 Web 依赖）
-      models loader sanitize organizer reporter registry checker
+      models loader sanitize organizer reporter checker tags
       constants.py  fetch.py  analyzer.py  build.py  verify.py
-      urls.py  paths.py
+      urls.py  paths.py  dns_check.py  quality.py  settings_store.py
       rules/replayer.py       Legado 规则回放器
       repair/{llm,evidence,loop}.py   AI 修复循环
-      classify.py(reclassify) store.py  store_migrate.py  cache_parity.py
-    services/add_source.py   加源流程（向导 / run_add / sitemap）
+      reclassify.py  store.py  store_migrate.py  cache_parity.py  dups.py
+    services/                加源/合并流程（add_source.py、merge_sources.py）
     cli/main.py              13 个命令入口
     data/                    运行时数据（gitignore）
     tools/apply_edits.py     行级补丁应用器
+
+> 目录清单**只列常用的那几个**（`ls core/` 为准）。它是文档，不跟着模块增删走——
+> 具体有哪些模块，看代码。
 
 ## 二、命令速查
 
@@ -29,7 +32,8 @@ description: 本仓库 Legado 书源工具链的用法——13 个 CLI 命令、
 | `run` | 一条龙：校验 → 整理 → 报告 |
 | `add` | 给搜索 URL，自动推断规则生成书源 |
 | `reclassify` | 按实测信号重判类型（修正漫画/小说错标） |
-| `diagnose` | 失效归因：死站/规则漂移/站点转型/需登录 |
+| `diagnose` | 失效归因：死站/需翻墙/规则漂移/站点转型/需登录 |
+| `dups` | 找重复源（同站点 / 镜像 / 同名），只读 |
 | `repair` | AI 修复循环：抓证据 → 提议 → 回放验证 → 重试 |
 | `merge` / `prepare` / `dedupe` | 合并 / 生成候选版 / 去重 |
 | `sanitize` | 清洗字段类型脏值（Legado 导入前必跑） |
@@ -76,11 +80,17 @@ description: 本仓库 Legado 书源工具链的用法——13 个 CLI 命令、
 ## 五、规则回放器（core/rules/replayer.py）
 
 支持：`class.`/`id.`/`tag.` 简写、`@` 链式、`.0`/`.-1` 索引、
-`##正则##替换`（支持 $1）、`@css:`/`@json:`/`@html:`、JSONPath 子集
+`##正则##替换`（支持 $1）、`@css:`/`@json:`、JSONPath 子集
 `$.data.list[*].name`、取值动作 `text`/`textNodes`/`ownText`/`html`/任意属性。
 
-**不支持的语法返回明确原因而不是空列表**：`@js:`、`<js>`、`@xpath:`、
-`||` 备选规则、JSONPath 递归下降 `..`。调用方据此判为「无法验证」而非「规则失效」。
+> **没有 `@html:` 前缀**：Legado 的 `@html`（没有冒号）是**取值动作**，不是前缀。
+> 带冒号的那个当年被误放成合法前缀（返回整份响应体），已随前缀分支一起删掉
+> （见 `replayer.RULE_PREFIXES` 的注释与 `parse_rule` 的 `unsupported` 文案）。
+
+**不支持的语法返回明确原因而不是空列表**（`@js:`、`<js>`、`@xpath:`、`||` 备选规则、
+JSONPath 递归下降 `..` 等）。**完整清单以 `parse_rule(...).unsupported` 的返回为准**，
+不在文档里维护第二份枚举——每条未实现的分支都带自己的原因码。调用方据此判为
+「无法验证」而非「规则失效」。
 
     from core.rules.replayer import extract_all_ex, parse_list, parse_field
     values, err = extract_all_ex(html, rule)   # err 非空 = 无法回放

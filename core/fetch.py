@@ -258,9 +258,8 @@ def fetch_ex(url: str, timeout: int = 15,
         body 不是 JSON / XML 时，那两种 App 也各按字面 Content-Type 发）
       - ``proxy``：形如 ``http://host:port``；留空走直连。
         **只支持 http 代理**——urllib 的 ProxyHandler 不认 ``socks5://``
-        （会抛 ``unknown url type: socks5``）。项目别处（cli/main.py --proxy 帮助、
-        WORKFLOW.md、checker.py 注释）宣传的 socks5 同样不成立，是既有的文档失实，
-        不属本模块要修的范围，但这里**不要**再写 socks5 以免加深误导。
+        （会抛 ``unknown url type: socks5``）。**别处已经全部对齐**（CLI 帮助、WORKFLOW、
+        `settings_store._PROXY_SCHEMES` 都只认 http/https）；这里只作复述，不要新增说法。
       - ``source``：完整的书源 dict。传了才会遵守它自己声明的 ``concurrentRate``
         限速（见文件头的「限速」一节）。**调用方应当传**——不传不会报错，只是
         那条链路不受限速约束，而这是静默的。

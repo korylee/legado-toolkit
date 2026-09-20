@@ -175,6 +175,11 @@ SQL JOIN 自然对不上。
 共用的小函数抽成独立模块（`core/urls.py`、`quality.rate_interval_ms`），
 需要「同一份定义」的东西一律上移，不下沉。
 
+**已知的两处例外（2026-09-20 实测，别当成漏网之鱼去「修」）**：
+`core/repair/evidence.py` 与 `core/repair/loop.py` 各有一处**函数内惰性 import**
+`services.add_source`（复用 `verify_chain` 做证据链）。它们是有意破环、不是待清理的
+违规：修的方向是把 `verify_chain` 上移进 core，属重构不是清理。**除这两处外仍是硬约束。**
+
 ## 十一、验证手段的优先级
 
 
@@ -222,7 +227,7 @@ SQL JOIN 自然对不上。
 - **红的用例集合与预期不符时，先怀疑变异写坏了**：变异写重了（例如改列名却没同步
   占位符数量），红的理由就不指向被测对象。
 
--> 本节开头的「变异窗口内绝不 `git add`」已提炼为 AGENTS #13
+-> 本节开头的「变异窗口内绝不 `git add`」已提炼为 AGENTS #14
 
 ## 十三、前端改动的四个静默坑
 
@@ -236,8 +241,18 @@ SQL JOIN 自然对不上。
    而 `overflow: hidden` 会把超出部分**直接裁掉、连滚动条都没有**，被裁的正是排在最
    底部的那个卡片。**动 overflow 之前先确认父容器有确定高度。**
 2. **el-dialog / el-drawer 是 teleport 到 body 的，组件内的 scoped 样式够不到它内部。**
-   改它们的内边距、布局要写进全局 `frontend/src/styles.css`，并用 class 前缀限定、
-   别污染其它弹窗。本项目已为此把 `.dot` 系列样式上移到全局一次。
+   改它们的内边距、布局，要在组件里单开一个**不带 scoped** 的 `<style>` 块、用 class
+   前缀限定住作用域；**只有跨组件共用的才上全局** `frontend/src/styles.css`
+   （`.dot` 系列就是这样上去的，它是弹窗与调试抽屉共用的）。
+   **`:deep()` 也救不回来**（整理源抽屉三栏布局的实测）：`:deep(.el-drawer__body)`
+   编译出 `.tidy-drawer[data-v-x] .el-drawer__body`，而那个带 `tidy-drawer` class 的
+   元素**身上没有任何 `data-v-*`**——el-drawer 的根是 Teleport，父组件的 scope id
+   落不到里面真正带 class 的元素上，前缀就永远匹配不上。**分界不在「抽屉内外」，
+   而在「谁写的」**：我们自己写进抽屉的元素（插槽内容，如 `.row`）照常带 scope id、
+   scoped 样式对它们有效；够不到的只有**组件自己的内部结构**（`.el-drawer__body` 等）。
+   症状同样是「代码写了、build 过了、界面没变」——那次抽屉退化成整个 body 一个
+   滚动条（列表撑到 1.4 万 px，步骤条与底部按钮全被滚出视野），computed `display`
+   仍是 `block`。
 3. **scoped 规则与全局规则特异性相同时，胜负取决于注入顺序。**
    `.source-tabs[data-v-x]`（0,2,0）与 `.edit-dialog .source-tabs`（0,2,0）同级，
    想稳定覆盖就**多带一级选择器**拿到 0,3,0。
@@ -245,7 +260,7 @@ SQL JOIN 自然对不上。
    后者当标签，而且**转义成 HTML 实体也救不回来**（编译发生在实体解码之后）。
    要原样显示这类清单，用 `v-pre` 让整段跳过编译。
 
--> 第 2 条（scoped 样式够不到 teleport 出去的弹窗）已提炼为 AGENTS #14
+-> 第 2 条（scoped 样式够不到 teleport 出去的弹窗）已提炼为 AGENTS #15
 
 ## 十四、App 调试的 tag 是「去 App 库里查」，不是「告诉它跑哪个源」
 
@@ -414,7 +429,7 @@ group 是 `organizer.group_title` / `store._system_group_for` **按 `bookSourceT
 **我们的结论**。归档 / 整理 / 标注类功能最容易造这种环——分组、缓存、指纹、
 报表、质量标签全是候选。判据要经得起「把派生字段全清掉，结论还成立吗」。
 
--> 已提炼为 AGENTS #10
+→ 已提炼为 AGENTS #11
 
 **变异要成对**：这次的两条变异 `M6 还原循环`（三条循环用例红）与
 `M7 把 group 整个丢掉`（反向断言 `test_user_tags_still_count` 红）是一对。
@@ -440,7 +455,7 @@ group 是 `organizer.group_title` / `store._system_group_for` **按 `bookSourceT
 `test_image_rule_worth_three` → `test_rule_content_image_is_not_a_signal`
 （改成的断言是「带这个字段的源必须和不带时判得一样」）。
 
--> 已提炼为 AGENTS #11
+→ 已提炼为 AGENTS #12
 
 **推论**：判断一段代码死没死，**别靠读，去数**。这次是一行搞定的：
 
@@ -467,7 +482,7 @@ group 是 `organizer.group_title` / `store._system_group_for` **按 `bookSourceT
 不是写得不认真，是**它的定位本身在漂**。
 
 **结论**：文档按**性质**分层，不按重要程度（重要程度只决定要不要收）。
-判据写进了 `AGENTS.md` 硬性约定 #9：约束进 AGENTS、论证进 lessons、
+判据写进了 `AGENTS.md` 硬性约定 #10：约束进 AGENTS、论证进 lessons、
 用法进 README/WORKFLOW、待办进 `TODO.md`。**一处写，别处只留指针。**
 
 **推论：待办要按「现在还能触发吗」过，不是按时间过。**
@@ -480,7 +495,7 @@ group 是 `organizer.group_title` / `store._system_group_for` **按 `bookSourceT
 **能力撤了、条目还在**，是待办清单特有的腐烂方式——按时间排序看不出来，
 按「现在还能触发吗」一问就问出来。
 
--> 已提炼为 AGENTS #9（文档也只有一个事实来源）
+→ 已提炼为 AGENTS #10（文档也只有一个事实来源）
 
 ## 二十一、测试要防的是「形状」，不是「这一条」
 
@@ -651,6 +666,7 @@ fixture 跟错语义时，绿是假的，而且它会在修对的那一刻集体
 | **给 fork 加 `WS /sourceTest` 口子**（原方案二） | 它要解决的问题是「不落库地跑内联书源」。而 JVM 服务路线已经用**零入侵挂载**（源码在我们仓库、init 脚本挂进编译）达到了同样效果，还不用跟 fork 同步、不用重编译。**收益已由另一条路拿到，成本不必再付** |
 | **逐源调试 WS 当批量校验通道** | 每轮要 `saveBookSource`（REPLACE）+ 逐源开连接，**慢且仍写库**；被 JVM 服务取代。调试 WS 仍是「调试单个源」的入口 |
 | **(A) 把引擎抽成独立 JVM 工程** | 那等于**自己养一个引擎分叉**（要 stub WebView / ExoPlayer / Glide / CacheManager…），正是「别重新实现 App 已有的东西」要逃离的事。Robolectric 路线用 App 仓库本身当引擎，零分叉 |
+| **`appservice/` 拆成独立仓库 / 独立 Gradle 工程**（2026-09-20 评估） | **编译耦合拆不掉**：appservice 必须在 App 仓库的 test 任务里编译——init 脚本顶注释记过血泪（往 `sourceSets` 挂外部目录会让 Gradle 测试发现整个失效），代码放哪个仓库约束都一样，拆库只是把目录搬远。而 NDJSON schema / args 键表 / key 方言每条都**横跨 Kotlin 与 Python 两侧**，今天能在同一个提交里改齐；拆开后版本漂移正是 AGENTS #5 那类「两侧不一致且不报错」的新入口。该隔离的是**进行中的工作**（分支/worktree，AGENTS #14/#19），不是代码的位置；面积也小（5 个 kt + 三四个 py），拆分的管理成本大于收益 |
 | **合并后给 App 的「旧地址清单」** | App 的导入只按 `bookSourceUrl` 匹配三态（New/Update/Existing），**从不删除**——被合并掉的旧地址确实会留在 App 里。但本机的做法是**全删后重新导入整份导出**，覆盖面更大（连「库里早删、App 还留着」的一起清）。专项清单只是把同一件事做小（2026-09-17 定案，见 §三十四） |
 | **星级收紧**（未实测的维度不给对应星） | **2026-09-17 定案：不收紧。** 列表的「★」列已换成**验证深度 + 实测结果**（主页/搜索/目录/正文），星级里真正有信息量的那一维有了自己的位置，「静态推定」不再冒充结论。收紧会改掉一大片（实测 5★static 170 / 3★static 1227），而 `3★ static` 是「没命中测试作品」——按既定原则**未命中 ≠ 源差**。同理，0★ 那 1043 条里绝大多数是「这次没测通」（timeout 711 / dead 173 / gfw 98 / error 61），与「确实死了」同档也不改：星级不区分「没验」和「验了不行」是**已知且接受**的边界。真要动，属重大口径变化，须配 `CACHE_VERSION` + 一次全量重跑 |
 
@@ -1115,7 +1131,7 @@ Linux/macOS 复现不出来）：注册表把 `.js` 关联成 `text/plain`，Pyt
 
 **根因**：那条估算**没有任何测量支撑**——是从协议（"每次调试要跑完整链路"）
 推出来的想象。而它长得非常具体（给了区间、给了总时长），**会被当成依据**
-去否掉一条本来可行的路。同 §三十三「数字口径必须带环境」。
+去否掉一条本来可行的路。同 §三十一「数字口径必须带环境」。
 
 **做法**：性能断言要么带实测（环境 + 样本 + 数字），要么明说"没测过"。
 **"我不知道"比一个编出来的区间有用得多**——后者会把讨论带偏一整个回合。
@@ -1560,3 +1576,80 @@ SnifferWebClient（网络嗅探语义），首版 shadow 不做，显式报不�
 - 落主干时若做了适配，**适配就是主干的事实**，分支里那份作废。
 
 → 已提炼为 AGENTS #19（摘进主干的分支要删掉）
+
+## 五十八、两条「把我们的问题说成源的问题」的静默错（2026-09-19，修口袋漫画时暴露）
+
+修 `口袋漫画`（`www.koudaimh.com`）时同时踩出两条：**都不是「少验一点」，
+是结论说反**。两条的共同点是**判据的来源被认错了**——一条把「App 才懂的
+URL 选项」当成了地址的一部分，一条把「属性名」当成了标签名。
+
+### 一、URL 选项没剥 → 我们把地址拼错，归因写成「源坏了」
+
+**症状**：修好的源在真机（App 引擎）上四段全通，本地 `check --probe-depth 4`
+却写 `content_fail_reason = 正文请求失败(status=404)`。
+
+**根因**：`_probe_content` 拿到规则产出的章节地址后直接 `_abs_url` 就发请求，
+而那个地址尾部挂着 Legado 的 `,{"webView":true}`。选项里装的是 **App 才懂的
+东西**（`webView` / `method` / `body`），是给 `AnalyzeUrl` 解析的，**不是地址**。
+实测对照（同一次请求、同一个站点）：
+
+    .../1.html                         → 200
+    .../1.html,{"webView":true}        → 404
+
+于是校验器把「我们拼错了地址」写成「正文请求失败(status=404)」——读起来像
+源坏了（AGENTS #4 的同一类错）。改前的记录里 46 条源的 `bookUrl`、60 条
+`tocUrl`、64 条 `chapterUrl` 带选项，都在同一条链上。
+
+**做法**：`core.urls.rule_url(base, raw)` = 先 `split_url_options` 再 `abs_url`，
+`checker`（详情/正文）、`toc_page`（tocUrl 的规则分支）、`verify`（bookUrl/章节）
+四处统一走它。**与 `core/app_debug.py` 里那条「保留选项尾巴」的用法不冲突**：
+那边要把 URL 连同选项当**身份**存起来（`absolute + tail`），这里只要一个能发的
+地址——两件事，别互相套用。
+
+**留下的诚实结论**：同一个源改完后再跑，正文段变成
+`content_ok=None` + 「JS 规则需要 Legado 的 Rhino 引擎，无法离线回放」。
+**这才是对的说法**——「我们验不了」和「源坏了」是两件事。
+
+### 二、`title` / `style` / `label` 被当标签 → 取值规则静默取空
+
+**症状**：`class.a@title` 恒返回空，而 App 用同一条规则取得到书名。
+
+**根因**：这三个词**同时**在 `COMMON_ATTRS` 与 `HTML_TAGS` 里，而回放器的
+`_is_selector_like` 先判 HTML_TAGS，于是 `class.a@title` 被解成
+「在 `a` 里再选一个 `title` 元素」→ 永远匹配不到。
+
+**依据是 Legado 的语义，且要说准是哪一半**：取值规则走
+`getResultList` → 末段交给 `getResultLast`，那里除
+`text`/`textNodes`/`ownText`/`html`/`all` 五个动作外**一律** `element.attr(末段)`
+（`AnalyzeByJSoup.kt` 的 `getResultLast`）。所以末段是**属性名**，不是选择器。
+实测末段为 `title` 的取值规则约 **170 条**（`ruleToc.chapterName: "@title"` 这种
+「取当前节点的 title 属性」的惯用写法就在其中），改前全被静默算成「取不到」。
+
+**别改宽**：**列表**规则不走这条路——`getElements` 把每个 `@` 段都当选择器，
+`class.chapter-list@tag.a` 必须仍能跑出章节。所以修复只落在
+「末段 + 单段」两个位置（`_is_attr_or_action_name`），实测列表字段
+（bookList/chapterList）末段用这三个词的规则 **0 条**，碰不到。
+
+### 三、顺带修掉的工具坑：`tools/apply_edits.py` 会把整文件转成 CRLF
+
+它用 `read_text`/`write_text` 往返，而 Windows 上 `write_text` 把 `\n` 全翻成
+`\r\n`——本仓库源码是 LF，于是**改一个字就整文件换行尾**，且 diff 看不出来
+（两边都归一化）。已改成按文件自身行尾读回写回（读时先归一成 LF 再匹配锚点，
+写时还原）。这条本来就在 `agent-write-safety` §三的表里，只是那个「可复用的
+应用器」自己没遵守。
+
+### 四、站点侧的事实（不是我们的问题，但要知道）
+
+`口袋漫画` 的图片走 `params` 加密 + `xhr_mode`：章节页里
+`var params = '<base64>'`，由 `cms.min.js`（jsjiami 混淆）用 **AES-CBC** 解出
+`{chapter_images, images_hosts, images_base64, xhr_mode, ...}`；`xhr_mode=true`
+时页面用 XHR 拉图再挂 blob，**DOM 里根本没有图片地址**——所以
+「渲染后读 `img.src`」这条路是死的，必须读解密后的 `params`。
+
+**另一个必须知道的事实**：它的图片是**带签名的 CDN 直链**（`x-expires` /
+`x-signature`），**老章节的签名已经过期**（实测 `海贼王` 第1话 8/8 张 403，
+而它的最新话 8/8 张 200）。所以"这本漫画打不开"未必是源的错——先看是不是
+只剩老章节。浏览器里同样打不开（页面自己会显示「加载失败，无效图片」），
+**不是我们抓不到，是站点确实没有**。
+
+→ 已提炼为 AGENTS #20（规则产出的 URL 要剥选项）、#21（取值规则末段是属性名）

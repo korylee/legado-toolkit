@@ -100,7 +100,8 @@ echo 'https://www.koudaimh.com/search?q=%E7%BB%8D%E5%AE%8B' |
 
 > **Web 上不用敲这些命令**：管理台的「校验 / 整理 / 报告」按钮跑的是同一条链
 > （同一个 `core/` 实现），结论写回管理库。本节是**离线/批量**形态——操作对象是
-> JSON 文件，缓存是 `--cache-dir` 指向的目录。
+> JSON 文件。**校验缓存默认在管理库**（`data/sources.sqlite3` 的 `checks` 表）——
+`--cache-dir` / `-r` 只在 `--legacy-cache` 下才被读写，默认传了也是空转。
 
 附件或自用源需要高优先级时，可一条命令生成三个产物：
 
@@ -179,7 +180,8 @@ python cli/main.py report -i out/organized.json -r check_cache -o out/final_repo
 | 2★ | +搜索连通：有搜索规则且搜索请求有响应 |
 | 3★ | +弱证据档：命中测试集作品（实测搜索成功）**或** 规则完整（目录+正文规则齐全） |
 | 4★ | +目录完整：命中源实测目录章节数 ≥ 参考表阈值（小说 80% / 漫画 60%） |
-| 5★ | +正文可用：命中源抽样章节能解析出正文（文本>100字符 或 图片≥3张） |
+| 5★ | +正文可用：命中源抽样章节能解析出正文（**非空即通过**；<500 字符会附一句
+「正文较短」的注，不因此扣分） |
 
 - **分档逻辑（宽松边界）**：
   - 未命中测试集的源**最高 3★**——测试集仅覆盖大众作品，未命中≠源差，规则齐全即给 3★；
@@ -225,7 +227,9 @@ python cli/main.py report -i out/organized.json -r check_cache -o out/final_repo
 
 1. **新增源走 `add`（CLI）或 Web 的「新增」；外部源走 Web 的「导入」**。不要用 `merge --mode replace` 直接覆盖管理库里的源。
 2. **规则冲突要人工判断**：先用 `check` 看外部那版的实测结果，确实更好再用导入对话框的 `overwrite` 覆盖；覆盖后指纹变化会强制复检。
-3. **缓存会自动过期**：可用源 14 天后复检；待验证、需翻墙及其他状态 7 天后复检；旧版本缓存也会自动复检。
+3. **缓存会自动过期**：可用源 14 天、其余状态 7 天；其中「需登录」单独 1 天（它常由
+   当时的页面启发式判出，锁久了点重校验只会看到复用缓存）；「证书问题」**永不复用**
+   （关掉证书校验就能变好，复用等于修了没修）。旧版本缓存也会自动复检。
 4. **被墙源**（🌐）可加 `--proxy` 复检：`python cli/main.py check -i x.json --proxy http://127.0.0.1:7890`
    （原先这里写的 `socks5://` 是失实示例——urllib 与 aiohttp 都不认，会直接连接失败。
    代理只支持 `http://` / `https://`。）
@@ -259,7 +263,8 @@ python cli/main.py report -i out/organized.json -r check_cache -o out/final_repo
 | 路径 | 用途 |
 |---|---|
 | `out/` | 所有 `-o` 产物（`organized.json`/`check_*.json`/`report.md`） |
-| `check_cache/` | CLI 的校验缓存目录（`--cache-dir`）。**不要再建 `check_cache_full`/`_deep3` 变体** |
+| `check_cache/` | **遗留** NDJSON 校验缓存：现役缓存在管理库 `checks` 表，这里只在
+`--legacy-cache` 与迁移/对拍时才读。**不要再建 `check_cache_full`/`_deep3` 变体** |
 | `archive/` | 历史产物归档，**可回溯不删除** |
 
 约定：
@@ -306,7 +311,9 @@ python cli/main.py reclassify -i candidates.json --write
 - 域名活着但页面改版、规则过期的源（**可修，不该删**）
 - 域名活着但已转型（如漫画站变综合站，该改类型）
 
-`diagnose` 对失效源重新探测，输出四类归因：
+`diagnose` 对失效源重新探测，按归因分桶（完整清单以 `core/reclassify.py` 的
+`ACTION_OF` 为准）：死站 / 需翻墙 / 需登录 / 规则漂移 / 站点转型 / 疑似可用，
+另有兜底的「其他」。
 
 ```powershell
 # 只探测非可用源，输出 Markdown 报告
@@ -328,11 +335,14 @@ python cli/main.py diagnose -i out/checked.json -o out/diagnose.md --only-dead -
 - `class.xxx` / `id.xxx` / `tag.a` 选择器简写
 - `class.item@tag.a@href` 链式选择、`.-1` / `.0` 索引
 - `##正则##替换`（支持 `$1` 反向引用）
-- `@css:` / `@json:` / `@html:` 前缀；JSONPath 子集 `$.data.list[*].name`
-- 取值动作 `text` / `textNodes` / `ownText` / `html` / 任意属性
+- `@css:` / `@json:` 前缀；JSONPath 子集 `$.data.list[*].name`
+- 取值动作 `text` / `textNodes` / `ownText` / `html`（**没有冒号**）/ 任意属性
+  > `@html:`（带冒号）**不是前缀**，早已删掉；混了会回空。
 
 **明确不支持的语法会返回原因（而不是静默返回空）**，调用方据此判为「无法验证」
-而非「规则失效」，避免误杀：`@js:`、`<js>`、`@xpath:`、`||` 备选规则、JSONPath `..`。
+而非「规则失效」，避免误杀（`@js:`、`<js>`、`@xpath:`、`||` 备选规则、JSONPath `..` 等）。
+**完整清单以 `parse_rule(...).unsupported` 的返回为准**——每条未实现的分支都带自己的
+原因码，不在文档里维护第二份枚举。
 
 > 注意：`beautifulsoup4` 是必需依赖（`pyproject.toml` 已加）。此前缺失导致所有规则
 > 解析静默失败、深度验证（`--probe-depth` 3/4）实际未生效。

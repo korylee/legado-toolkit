@@ -94,22 +94,20 @@ class OrganizerTests(unittest.TestCase):
         self.assertEqual(infer_health_from_group("📖小说/🔒需验证"), Health.AUTH)
         self.assertEqual(infer_health_from_group("📖小说/🌐需翻墙"), Health.GFW)
 
-    def test_retired_tag_names_stay_system(self) -> None:
-        """改名的旧标签必须继续被认成系统侧，不能漏成用户标签。
+    def test_retired_tag_names_still_read_back(self) -> None:
+        """旧分组里的退役词，`infer_health_from_group` 仍要认出来。
 
-        `_is_legacy_system_segment` 漏认的后果：旧分组里的它被当用户标签写进
-        `user_tags` 且不再纠正（core/tags.py 判定表注释里的坑）。
+        这是**导入/迁移期读旧分组**那条路：认不出就落到兜底「待验证」，把本来能
+        确认的状态降级（`test_unrecognizable_group_is_pending_not_auth` 说的是
+        另一件事——真认不出来的才该保守）。
 
-        「代理复检」这个裸形式是旧分组真出现过的写法，单列一条——集合里
-        「需代理复检」在、裸形式漏掉时，上面的断言仍然全绿。
+        「代理复检」这个裸形式是旧分组真出现过的写法，所以断言它而不只是
+        「需代理复检」。至于「旧词不许漏成用户标签」那一侧，由
+        `tests/test_tags.py` 遍历 `RETIRED_STATUS_TAG_RENAMES` 守着，不在这里重复。
         """
-        from core.tags import extract_user_tags_from_group
-
+        self.assertEqual(infer_health_from_group("📖小说,需验证"), Health.AUTH)
         self.assertEqual(infer_health_from_group("📖小说,需代理复检"), Health.GFW)
-        self.assertEqual(extract_user_tags_from_group("📖小说,需验证"), [])
-        self.assertEqual(extract_user_tags_from_group("📖小说,需代理复检"), [])
-        self.assertEqual(extract_user_tags_from_group("📖小说,代理复检"), [])
-        self.assertEqual(extract_user_tags_from_group("📖小说,需翻墙"), [])
+        self.assertEqual(infer_health_from_group("📖小说,代理复检"), Health.GFW)
 
     def test_unrecognizable_group_is_pending_not_auth(self) -> None:
         """认不出来的分组 = **我们不知道**，不能推断成「需登录」。

@@ -186,11 +186,15 @@ def is_login_wall(text: str, enabled_cookie_jar: bool = False) -> bool:
     return classify_http_status(200, text, enabled_cookie_jar) == Health.AUTH
 
 
-def is_transient(health: str) -> bool:
-    """这次失败是「瞬时网络错误」吗（待验证档：超时 / 异常等没结论的失败）。
+def is_inconclusive(health: str) -> bool:
+    """这个结论是「我们没测出来」吗（待验证档：超时、异常、从未校验…）。
 
-    **这个判定只用来决定"能不能复用"，不再用来决定"要不要写"。**
-    原来它叫 `should_cache_result`，同时管着写库那道门——结果是超时/异常的源
+    **名字说的是这件事本身，不是它的成因**：早先叫 `is_transient`（瞬时网络
+    错误），但档位收成六档后这一档的含义就是「没有结论」——它既包含瞬时抖动，
+    也包含「压根没跑过」。留着旧名会让人以为它在判「瞬时性」，从而照它加条件。
+
+    它只用来决定"能不能复用"，不再用来决定"要不要写"。
+    再早它叫 `should_cache_result`，同时管着写库那道门——结果是超时/异常的源
     **一条都不落库**，而列表是按"有没有 checks 行"算「未校验」的，于是这些源永久
     显示成「未校验」：明明刚跑过，界面上却像没跑（实测 3861 条里有 1222 条是
     这个状态，占 31.7%），而且每次全量都会把它们的请求重打一遍。
@@ -391,7 +395,7 @@ def is_cache_item_valid(
     调用方——CLI 的 organize/report、cache_parity 的两库比对——只是拿缓存算标签和
     报告，重跑不了探测，保持默认（``DEPTH_HOME``）即「不因探测能力作废」。
 
-    **瞬时网络错误一律不复用**（见 :func:`is_transient`）：它们照常写进缓存（界面
+    **没结论的一律不复用**（见 :func:`is_inconclusive`）：它们照常写进缓存（界面
     要能看到「上次超时」），但复用它就等于把一次断网/抖动当成源的结论。原来这道防
     线是"干脆不写"，代价是那些源永远显示「未校验」；现在防线挪到了这里。
 
@@ -401,7 +405,7 @@ def is_cache_item_valid(
     （「需翻墙」不在此列：代理是全局开关，改它时本来就该勾「忽略缓存」；
     两者形状相同，但证书这条更便宜、更容易踩，所以单独给个例外。）
     """
-    if is_transient(str(item.get("health", ""))) or str(item.get("health", "")) == Health.CERT:
+    if is_inconclusive(str(item.get("health", ""))) or str(item.get("health", "")) == Health.CERT:
         return False
     if item.get("v") != CACHE_VERSION:
         return False
@@ -631,7 +635,7 @@ class AsyncChecker:
         self.keyword = keyword
         self.verify_ssl = verify_ssl
         self.cache_dir = cache_dir
-        self.proxy = proxy  # 可选代理（socks5:///http://），用于翻墙源复检
+        self.proxy = proxy  # 可选代理，只支持 http/https（见 settings_store._PROXY_SCHEMES）
         # 测试集：{"novel": [...], "manga": [...]}，缺省使用内置
         self.testset = testset or {}
         self.novel_keywords = self.testset.get("novel") or NOVEL_TEST_KEYWORDS

@@ -78,7 +78,9 @@ Legado（阅读）书源管理工具链：CLI + FastAPI + SQLite + Vue 3。
 │  ├─ app.py               FastAPI 应用
 │  └─ __main__.py          后端启动入口
 ├─ cli/main.py             CLI 入口（**入口之二**）
-├─ core/                   核心引擎——**不依赖上面两个入口，也不依赖 services**
+├─ core/                   核心引擎——**不依赖上面两个入口**；对 services 只有
+│                         `core/repair/{evidence,loop}.py` 两处**惰性 import** 的例外
+│                         （复用 `services.add_source.verify_chain`，见 lessons §十）
 │  ├─ rules/               Legado 规则回放器
 │  ├─ repair/              AI 修复循环
 │  ├─ store.py             SQLite 管理库

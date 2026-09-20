@@ -7,7 +7,7 @@
 | :--- | :--- | :--- |
 | agent-write-safety | 受限沙箱里的写入通道与改代码纪律 | 需要创建/修改文件、或传多行代码时 |
 | legado-book-source | Legado 书源规则分析、生成、调试 | 新增/修复一个漫画或小说站时 |
-| legado-source-toolchain | 本仓库 14 个 CLI 命令、SQLite 管理库、AI 修复循环 | 批处理书源、校验、归因、修复 |
+| legado-source-toolchain | 本仓库 13 个 CLI 命令、SQLite 管理库、AI 修复循环 | 批处理书源、校验、归因、修复 |
 | legado-source-lessons | 本项目的架构决策与踩过的坑 | 改动核心逻辑前，避免重犯 |
 
 ## 给 agent harness 的接入方式

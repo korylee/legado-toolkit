@@ -666,7 +666,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_check.add_argument("--max-keywords", type=int, default=2, help="每个源最多尝试测试集关键词数（默认 2）")
     p_check.add_argument("--probe-depth", type=int, choices=list(PROBE_DEPTHS),
                          default=DEPTH_SEARCH, help=DEPTH_HELP)
-    p_check.add_argument("--proxy", default="", help="代理地址（如 socks5://127.0.0.1:1080 或 http://127.0.0.1:7890），用于对疑似被墙源复检")
+    p_check.add_argument("--proxy", default="", help="代理地址，形如 http://127.0.0.1:7890（**只支持 http/https**，socks5 不成立——aiohttp 与 urllib 都不认）")
     p_check.add_argument("--limit", type=int, default=0, help="只处理前 N 个源（测试用）")
     p_check.add_argument("--insecure", action="store_true", help="不校验证书（规避 SSL 报错）")
     p_check.add_argument("--keep-disabled", action="store_true", help="输出时保留 enabled=false 的源")

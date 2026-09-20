@@ -7,7 +7,7 @@
 | 文档 | 内容 |
 | :--- | :--- |
 | `skills/agent-write-safety/SKILL.md` | **动手改文件前必读**：受限环境下的可靠写入通道与纪律 |
-| `skills/legado-source-toolchain/SKILL.md` | 14 个 CLI 命令、SQLite 管理库、AI 修复循环的用法 |
+| `skills/legado-source-toolchain/SKILL.md` | 13 个 CLI 命令、SQLite 管理库、规则回放器、失效归因、AI 修复循环的用法 |
 | `skills/legado-source-lessons/SKILL.md` | 架构决策与踩过的坑 |
 | `skills/legado-book-source/SKILL.md` | 书源规则语法、站点分析流程、调试方法 |
 | `WORKFLOW.md` | 书源「新增 / 导入 → 校验 → 整理 → 报告」完整链路 |
@@ -99,9 +99,13 @@
     ——本仓库真的发生过一次：HEAD 上出现一个自相矛盾的提交（源码写着 `"detail"`，
     同一个提交里的测试断言它必须是 `"explore"`）。变异前先把当前状态提交成 WIP，
     或用 `git worktree` 隔离出干净副本；**变异窗口内不做任何 git 操作**。见 lessons §十二。
-15. **前端改弹窗/抽屉的样式，要写全局 `frontend/src/styles.css`。**
+15. **弹窗/抽屉内部结构的样式，只能写在 scoped 之外。**
     el-dialog / el-drawer 是 **teleport 到 body** 的，组件内的 scoped 样式
-    **够不到**它内部——写了不生效，而且不报错。见 lessons §十三。
+    **够不到**它内部——写了不生效，而且不报错；**`:deep()` 也救不回来**：那个带前缀
+    class 的元素身上根本没有 `data-v-*`。写法是组件里单开一个**不带 scoped** 的
+    `<style>` 块、用 class 前缀限定；**只有跨组件共用的才上全局**
+    `frontend/src/styles.css`（`.dot` 系列就是共用才上去的），单组件自己的规则别丢进去。
+    见 lessons §十三。
 
 16. **界面由后端托管在 `/`**（`backend/app.py` 末尾把 `frontend/dist` 挂成静态目录，
     目录不存在时不挂并打提示）。所以**新增路由/中间件必须写在那个挂载之前**，
@@ -143,6 +147,26 @@
     等于静默改了闸门口径**，看不出来。落完就 `git branch -D`；要备查的是提交信息
     与 lessons，不是那个分支。见 lessons §五十七。
 
+20. **规则产出的 URL，发请求前必须剥掉尾部的 `,{json}` 选项**（`core.urls.rule_url`，
+    先 `split_url_options` 再 `abs_url`）。选项装的是 **App 才懂的东西**
+    （`webView` / `method` / `body`），带上它去请求**必然拿不到页面**：实测
+    `.../1.html,{"webView":true}` 返回 **404**、同一个地址剥掉选项返回 **200**。
+    危险不在请求失败，在于**归因会说反**——`_probe_content` 会写下
+    「正文请求失败(status=404)」，读起来像源坏了，其实是我们拼错了地址，
+    与 #4 是同一类错。凡是「规则 → 地址 → 发请求」这条链上的新调用点都要走它；
+    `bookUrl`（46 条源带选项）/ `tocUrl`（60 条）/ `chapterUrl`（64 条）都在其中。
+    见 lessons §五十八。
+
+21. **取值规则末段是「属性名或取值动作」，不是选择器**（`_is_attr_or_action_name`）。
+    Legado 的取值路径是 `getResultList` → 末段交给 `getResultLast`，那里除
+    `text`/`textNodes`/`ownText`/`html`/`all` 外**一律**取属性。
+    `title` / `style` / `label` **同时**是 HTML 标签名与常见属性名，一旦按标签判，
+    `class.a@title` 就成了「在 a 里再选一个 title 元素」→ **恒取空**，
+    而调用方看到的是「源没取到书名」，不是「工具不会算」（同 #4）。
+    实测末段为 `title` 的取值规则约 170 条。**列表规则不走这条**：
+    `getElements` 把每个 `@` 段都当选择器（`class.list@tag.a` 必须仍是选择器）。
+    见 lessons §五十八。
+
 ## 上游 App 源码（查证用）
 
 代码注释里大量 `Xxx.kt:行号` 指向「阅读」App 的源码。本地在
@@ -170,10 +194,16 @@
     $code = @'
     import pathlib
     p = pathlib.Path("core/xxx.py")
-    t = p.read_text(encoding="utf-8")
+    t = p.read_bytes().decode("utf-8")   # 字节进出：行尾原样保留
     # 唯一性断言 + 定位 + 修改
-    # 全部断言通过后才 write_text
+    # 全部断言通过后才写回
+    p.write_bytes(t.encode("utf-8"))
     ' @
     $code | & .venv/Scripts/python.exe -
+
+**写回一律走 `write_bytes`，不要用 `write_text`**：它在 Windows 上把 `\n` 写成
+`\r\n`，改一个字就把整个文件的行尾翻掉，而 `git diff` 看不出来（两边都归一化），
+只在 `git add` 时冒一句 warning。也可以直接用 `tools/apply_edits.py`（行级补丁、
+保留原行尾、锚点不唯一就报错）。
 
 详见 `skills/agent-write-safety/SKILL.md`。

@@ -82,6 +82,38 @@ class SystemStatusTableTests(unittest.TestCase):
                 group = organizer.group_title(0, health)
                 self.assertEqual(tags.extract_user_tags_from_group(group), [], group)
 
+    def test_retired_words_map_onto_current_tags(self):
+        """退役词 → 现役词的表：**值必须是现役标签，键不能是现役标签**。
+
+        这张表有两个用法（存量换词迁移 + 旧分组回读），写错的后果与上面那条同源：
+        值不在 `SYSTEM_STATUS_TAG_ORDER` 里 → 迁移把一个**判定表不认的词**写进
+        group_name，前端随即把它当用户标签——正是这张表要修的那件事。
+        键是现役标签的话，「换名」就成了把 A 状态改成 B 状态，属于改词写反了。
+        """
+        from core import tags
+
+        bad_values = (set(tags.RETIRED_STATUS_TAG_RENAMES.values())
+                      - set(tags.SYSTEM_STATUS_TAG_ORDER))
+        self.assertEqual(bad_values, set(),
+                         "映射值不是现役状态标签 → 换完会落进 user_tags")
+        bad_keys = (set(tags.RETIRED_STATUS_TAG_RENAMES)
+                    & set(tags.SYSTEM_STATUS_TAG_ORDER))
+        self.assertEqual(bad_keys, set(), "映射的键是现役标签 → 改词写反了")
+
+    def test_every_retired_word_is_recognized_as_system(self):
+        """退役词必须仍被认成系统侧——**遍历映射表**，不写死具体词。
+
+        漏认的后果不是「显示错」，而是旧分组里的它被 `extract_user_tags_from_group`
+        当成用户标签写进 user_tags 且不再纠正。写死「需验证 / 需代理复检」时，
+        下次改词新词不进覆盖而用例照旧全绿，所以这里跟着表长。
+        """
+        from core import tags
+        for old in tags.RETIRED_STATUS_TAG_RENAMES:
+            with self.subTest(word=old):
+                self.assertEqual(
+                    tags.extract_user_tags_from_group("📖小说,%s" % old), [],
+                    "「%s」被当成用户标签了" % old)
+
 
 if __name__ == "__main__":
     unittest.main()

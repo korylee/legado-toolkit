@@ -111,7 +111,7 @@ LIMITS: Dict[str, tuple] = {
 
 #: 代理只认 http/https。**故意不含 socks5**：aiohttp 原生不支持（要 ``aiohttp_socks``，
 #: 本项目未装），``core/fetch.py`` 的 ``proxy`` 说明已就此立过规矩——「不要再写 socks5
-#: 以免加深误导」（CLI 帮助与 WORKFLOW.md 里那处 socks5 是既有的文档失实）。
+#: 以免加深误导」。CLI 帮助与 WORKFLOW 里的 socks5 示例已按此改掉。
 #: API 层会在写入前拦下 socks5 并给出明确报错，这里只是手改文件时的最后一道兜底。
 _PROXY_SCHEMES = ("http://", "https://")
 
