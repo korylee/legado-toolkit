@@ -75,6 +75,12 @@ class _RunCase(unittest.TestCase):
         self._patch("_env_error", lambda: "")
         self._patched_pages = []
         self._patch("fetch_debug_pages", self._fetch_pages)
+        #: 把「用哪个拉起方式」钉回 `_run_launcher`：它只是常驻不可用时的**回落**，
+        #: 而本类里那几处桩打的是它——有 daemon 的机器上 `default_launcher` 会直接
+        #: 用 daemon、桩整个被绕过，测试**真的跑一次调试**（实测：3 条断言失败、
+        #: 还真的连了 example.com）。选常驻还是选 Gradle 由 `DefaultLauncherTests`
+        #: 单独测（它打的是 dump 的桩），这里只关心「拉起之后的组装」。
+        self._patch("default_launcher", lambda notes: jvm_debug._run_launcher)
         self.launcher_calls = []
 
     def _fetch_pages(self, steps, source, proxy="", cache="auto"):

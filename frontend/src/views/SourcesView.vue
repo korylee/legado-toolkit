@@ -1050,10 +1050,15 @@ onUnmounted(() => {
           </template>
         </el-table-column>
         <el-table-column prop="source_url" label="域名" min-width="190" show-overflow-tooltip>
-          <template #default="{ row }"><span class="mono">{{ row.source_url }}</span></template>
+          <template #default="{ row }">
+            <!-- 空 URL 不给 <a>：href="" 会重载当前页。点开的是显示的那个地址
+                 （库里的 source_url 已归一化），不是只取域名 -->
+            <a v-if="row.source_url" class="mono" :href="row.source_url"
+               target="_blank" rel="noopener noreferrer">{{ row.source_url }}</a>
+          </template>
         </el-table-column>
         <el-table-column prop="checked_at" label="校验时间" width="146" />
-        <el-table-column label="操作" width="140" align="center">
+        <el-table-column label="操作" width="140" fixed="right" align="center">
           <template #default="{ row }">
             <el-button link size="small" :loading="isRowChecking(row.source_url)"
                        @click="checkSources([row.source_url])">校验</el-button>
@@ -1153,7 +1158,8 @@ onUnmounted(() => {
 
     <!-- 批量校验的确认弹框：选项 + 开始。桌面与移动端共用（移动端宽度由
          styles.css 的媒体查询压到 94vw）。单条校验不弹框，直接用全局设置。 -->
-    <el-dialog v-model="checkDialog" :title="checkDialogTitle" width="460px" append-to-body>
+    <el-dialog v-model="checkDialog" :title="checkDialogTitle" width="460px" top="4vh"
+               append-to-body class="check-dialog" modal-class="check-dialog-overlay">
       <div class="muted" style="margin-bottom: 12px">{{ checkDialogHint }}</div>
 
       <!-- 引擎选择。**一个入口、两个引擎**：原先本机引擎的跑批按钮长在「设置 → JVM 校验」
@@ -1260,5 +1266,27 @@ onUnmounted(() => {
   .stats-bar { gap: 6px; padding: 6px 10px; }
   .stats-bar .chips { flex-wrap: nowrap; overflow-x: auto; -webkit-overflow-scrolling: touch; }
   .stats-bar .chip { min-height: 32px; }
+}
+</style>
+<!-- 全量校验弹框：只允许 body 内部滚动，弹窗自己不滚。弹窗内部是 teleport 到 body 的，
+     scoped 样式够不到，所以这块不带 scoped、用 .check-dialog 前缀限定（AGENTS #15）；
+     .el-dialog.check-dialog 多一级是刻意的——与 Element Plus 的 .el-dialog 同特异性时
+     要赌样式注入顺序，而那条赌不起（轻则没有内滚动，重则底部被裁掉） -->
+<style>
+.check-dialog-overlay .el-overlay-dialog { overflow: hidden; }
+.el-dialog.check-dialog {
+  display: flex;
+  flex-direction: column;
+  max-height: 90vh;
+  margin-bottom: 0;
+  overflow: hidden;
+}
+.check-dialog .el-dialog__header,
+.check-dialog .el-dialog__footer { flex: 0 0 auto; }
+.check-dialog .el-dialog__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 </style>
