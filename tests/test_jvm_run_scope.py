@@ -74,10 +74,23 @@ class _Base(unittest.TestCase):
             st.upsert_sources([{"bookSourceName": name, "bookSourceUrl": url,
                                 "enabled": True}])
 
-    def _call(self, urls=None, filt=None) -> dict:
-        body = JvmRunRequest(urls=urls or [], filter=filt or {})
-        with mock.patch.object(jvm_api, "Store", lambda *a, **kw: Store(self.db)):
-            return asyncio.run(jvm_api.jvm_run(body))
+    def _call(self, urls=None, filt=None, params=None, run_job=True) -> dict:
+        """请求（预检：范围 / 空范围原因 / 建任务）**+ 把任务跑完**。
+
+        「跑完」这一步不能省：`gradle_calls` 这类断言看的是任务体做了什么，
+        不驱动它就只是"没报错"（实测踩过：一条断言因此恒真）。`store_checks`
+        打桩的理由见 test_jvm_run_lock 的同名注释（它会开真管理库）。
+        """
+        body = JvmRunRequest(urls=urls or [], filter=filt or {}, params=params or {})
+
+        async def go():
+            r = await jvm_api.jvm_run(body)
+            if run_job and r.get("job_id"):
+                await jvm_api.run_jvm_job("testjob", None, {"prep": {}})
+            return r
+
+        with mock.patch.object(jvm_api, "Store", lambda *a, **kw: Store(self.db)),              mock.patch("core.jvm_health.store_checks", lambda *a, **kw: 0):
+            return asyncio.run(go())
 
     def _batch(self) -> list:
         f = self.probe / "data" / "app_probe" / "jvm_batch.json"
@@ -158,6 +171,29 @@ class FilterScopeTests(_Base):
         self.assertFalse(r["started"])
         self.assertIn("筛选", r["reason"])
         self.assertEqual(self.gradle_calls, 0, "筛选没命中就不该开跑")
+
+    def test_run_params_override_the_settings(self) -> None:
+        """**本次参数覆盖设置**，而且只影响这一次。
+
+        设置里 `limit = 2`（`_Base` 的桩），这次传 `limit = 0` → 不该再截断。
+        这条正是"参数该长在动作旁边"的理由：留在设置页时，「全部在用源」会被一个
+        看不见的上限悄悄截成 2 条，界面上只显示「全部在用源」。
+        """
+        self._call(params={"limit": 0})
+        self.assertEqual(len(self._batch()), 3, "本次给了 0 就该跑全部")
+
+    def test_depth_param_reaches_the_args_file(self) -> None:
+        """参数要真的落到给 JVM 的那份 `args.properties` 上——不落就是"填了没用"。"""
+        self._call(params={"depth": "content"})
+        args = (self.probe / "appservice" / "args.properties").read_text(encoding="utf-8")
+        self.assertIn("depth=content", args)
+
+    def test_unknown_param_key_is_dropped(self) -> None:
+        """未知键丢掉、不报错（`settings_store.coerce` 的契约）；合法键照常生效。"""
+        self._call(params={"nope": 1, "depth": "toc"})
+        args = (self.probe / "appservice" / "args.properties").read_text(encoding="utf-8")
+        self.assertIn("depth=toc", args)
+        self.assertNotIn("nope", args)
 
     def test_selection_wins_over_filter(self) -> None:
         """两者都给时**勾选优先**：勾是明确意图，筛选是「这一屏里的」。"""

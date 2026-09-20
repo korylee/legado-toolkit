@@ -29,6 +29,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException
 from fastapi.concurrency import run_in_threadpool
 
+from backend.jobs import runner
 from backend.schemas import JvmRunRequest
 from core.paths import data_dir
 from core.store import Store
@@ -55,9 +56,11 @@ STATE_LABEL = {
 }
 
 
-#: 允许**本次覆盖**的参数。刻意做成白名单：`app_repo` 是环境配置、`limit` 由「范围」
-#: 表达，都不该被一次跑批改掉；其余键走 `settings_store.coerce` 收敛。
-JVM_RUN_PARAMS = ("keyword", "timeout", "concurrency", "depth")
+#: 允许**本次覆盖**的参数（白名单）。`app_repo` 是环境配置，不该被一次跑批改掉；
+#: 其余键走 `settings_store.coerce` 收敛（未知键丢弃、越界收到区间内）。
+#: `limit` 在里面：范围（勾选 / 筛选）优先，而"只跑前 N 条"只有它能表达——
+#: 设置页放开它的时候，界面上写着「全部在用源」而实际被截成 N 条，看不出来。
+JVM_RUN_PARAMS = ("keyword", "timeout", "concurrency", "depth", "limit")
 
 
 def _launcher() -> Path:
@@ -221,68 +224,97 @@ async def jvm_run(body: Optional[JvmRunRequest] = None):
     # **与调试共用一把锁**（`core.jvm_debug.RUN_LOCK`）：两条链都写同一个参数文件，
     # 同时跑会互相踩。锁的理由、`BUSY_REASON` 那句话与「为什么非阻塞」都在
     # `core.jvm_debug`（**一处写**，别在这里再抄一份因果）。
+    # 这里只是**先看一眼**（别白建一条任务、别白导出文件）；真正拿锁在任务体里，
+    # 那时拿不到就把它记进 job 结果——两个请求同时挤进来时谁拿到算谁的。
     from core.jvm_debug import BUSY_REASON, RUN_LOCK
-    if not RUN_LOCK.acquire(blocking=False):
+    if RUN_LOCK.locked():
         return {"started": False, "reason": BUSY_REASON}
-    try:
-        st = Store()
-        src_file = _export_sources_file(st, want_urls, want_filter)
-        st.close()
-        rows = json.loads(src_file.read_text(encoding="utf-8"))
-        if want_urls and not rows:
-            # 一条都没匹配上：**说清楚**，别开一次空跑（那会让用户以为「跑过了、源没问题」）
-            return {"started": False,
-                    "reason": "选中的 %d 条源一条都没匹配上（可能已被删除，或 URL 改过）"
-                              % len(want_urls)}
-        if want_filter and not want_urls and not rows:
-            return {"started": False, "reason": "当前筛选没有命中任何源，不用跑"}
-        # **本次覆盖**：逐键过 coerce（未知键丢弃、越界收敛到区间内），
-        # 只作用于这一次跑批。`app_repo` / `limit` 不在里面——前者是环境配置，
-        # 后者现在由「范围」表达（见 `_export_sources_file`）
-        eff = dict(conf)
-        for key in JVM_RUN_PARAMS:
-            if key in want_params:
-                got = settings_store.coerce("jvm", key, want_params[key])
-                if got is not None:
-                    eff[key] = got
+    st = Store()
+    src_file = _export_sources_file(st, want_urls, want_filter)
+    st.close()
+    rows = json.loads(src_file.read_text(encoding="utf-8"))
+    if want_urls and not rows:
+        # 一条都没匹配上：**说清楚**，别开一次空跑（那会让用户以为「跑过了、源没问题」）
+        return {"started": False,
+                "reason": "选中的 %d 条源一条都没匹配上（可能已被删除，或 URL 改过）"
+                          % len(want_urls)}
+    if want_filter and not want_urls and not rows:
+        return {"started": False, "reason": "当前筛选没有命中任何源，不用跑"}
+    # **本次覆盖**：逐键过 coerce（未知键丢弃、越界收敛到区间内），只作用于
+    # 这一次跑批，不写回设置（理由见 schemas）。白名单见 JVM_RUN_PARAMS
+    eff = dict(conf)
+    for key in JVM_RUN_PARAMS:
+        if key in want_params:
+            got = settings_store.coerce("jvm", key, want_params[key])
+            if got is not None:
+                eff[key] = got
 
-        limit = int(conf.get("limit", 0) or 0)
-        # **给了范围就不再看条数上限**：范围由选中/筛选决定，否则会出现
-        # 「选了 20 条只跑了 3 条」这种看不出来的截断
-        if limit > 0 and not want_urls and not want_filter:
-            rows = rows[:limit]
-            src_file.write_text(json.dumps(rows, ensure_ascii=False),
-                                encoding="utf-8", newline="\n")
-        # 绝对路径的理由同 _export_sources_file：这个路径是给**另一个进程**
-        # （CWD = App 仓库根）用的，相对路径会落到 App 仓库里去
-        out_path = data_dir() / "app_probe" / "jvm_results.jsonl"
-        if out_path.exists():
-            out_path.unlink()
-        _write_args(eff.get("keyword", "我"), int(eff.get("timeout", 25)),
-                    int(eff.get("concurrency", 8)), 0, out_path, src_file,
-                    str(eff.get("depth", "search")))
+    limit = int(eff.get("limit", 0) or 0)
+    # **给了范围就不再看条数上限**：范围由选中/筛选决定，否则会出现
+    # 「选了 20 条只跑了 3 条」这种看不出来的截断
+    if limit > 0 and not want_urls and not want_filter:
+        rows = rows[:limit]
+        src_file.write_text(json.dumps(rows, ensure_ascii=False),
+                            encoding="utf-8", newline="\n")
+    # 绝对路径的理由同 _export_sources_file：这个路径是给**另一个进程**
+    # （CWD = App 仓库根）用的，相对路径会落到 App 仓库里去
+    out_path = data_dir() / "app_probe" / "jvm_results.jsonl"
+    if out_path.exists():
+        out_path.unlink()
+    _write_args(eff.get("keyword", "我"), int(eff.get("timeout", 25)),
+                int(eff.get("concurrency", 8)), 0, out_path, src_file,
+                str(eff.get("depth", "search")))
 
-        def _blocking() -> Dict[str, Any]:
+    # 交给任务跑（分钟级）：预检里已经算好的那几项回给前端做进度条，
+    # 也让 job 结果的形状与旧版一致（`count` / `dist` / `checks` 都是任务体填的）
+    prep = {"started": True, "count": len(rows)}
+    job_id = runner.submit("jvm_run", {"prep": prep})
+    return dict(prep, **{"job_id": job_id})
+
+
+@runner.register("jvm_run")
+async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[str, Any]:
+    """跑批任务体。`payload`：`out_path`（结果文件）+ `prep`（预检里算好的摘要，原样回给前端）。
+
+    **跑批是分钟级的**（全量十几分钟），所以它是一条 job 而不是一个长 HTTP 请求：
+    关掉页面、刷新、断网都不再让那十几分钟白等（结论本来就会落库，但界面从此知道
+    它跑完了）。形状与本地校验那条 `check` 一样：POST /api/jobs → SSE 订阅。
+
+    **锁在这个线程里拿、也在它里面放**：原来锁挂在 HTTP 处理函数上，客户端一断开
+    Starlette 会取消那个协程，`finally` 就提前把锁放了，而 Gradle 还在跑——下一个请求
+    立刻能进来踩同一份 `args.properties`（TODO 里记着的那处）。搬进任务体之后，取消
+    最多把这条 job 记成 cancelled，锁仍跟着**执行它的线程**走（它跑完才放）。
+    """
+    from core.jvm_debug import BUSY_REASON, RUN_LOCK
+
+    # 绝对路径的理由同 `_export_sources_file`：这个路径是给**另一个进程**（CWD =
+    # App 仓库根）用的；两边都从 `data_dir()` 算，免得把它塞进 payload 再复制一遍
+    out_path = data_dir() / "app_probe" / "jvm_results.jsonl"
+    prep = dict(payload.get("prep") or {})
+
+    def _work() -> Dict[str, Any]:
+        if not RUN_LOCK.acquire(blocking=False):
+            return dict(prep, **{"ok": False, "reason": BUSY_REASON})
+        try:
             code = _run_gradle()
             if not out_path.exists():
-                return {"started": True, "ok": False, "exit": code,
-                        "reason": "启动器没有产出结果文件（看 Gradle 输出定位）"}
+                return dict(prep, **{"ok": False, "exit": code,
+                                    "reason": "启动器没有产出结果文件（看 Gradle 输出定位）"})
             rows = _read_results(out_path)
             batch = _write_meta(rows)
             # 结论同时按 checks 的口径落库（六档 / 星级 / 深度）——列表与筛选读的是
             # checks，不落这一步的话健康列会在撤掉本地引擎之后断供（TODO §一点九）。
             # 映射与判据都在 core/jvm_health，**别在这里另写一份**。
             from core import jvm_health
-            n_checks = jvm_health.store_checks(rows, batch=batch)
+            n_checks = jvm_health.store_checks(rows, batch=batch, store=st)
             dist = Counter(r.get("state") for r in rows)
-            return {"started": True, "ok": code == 0, "exit": code, "batch": batch,
-                    "count": len(rows), "dist": dict(dist), "checks": n_checks}
+            return dict(prep, **{"ok": code == 0, "exit": code, "batch": batch,
+                                "count": len(rows), "dist": dict(dist),
+                                "checks": n_checks})
+        finally:
+            RUN_LOCK.release()
 
-        # FastAPI 的线程池里跑，不卡事件循环（全量 17 分钟，HTTP 超时是客户端的事）
-        return await run_in_threadpool(_blocking)
-    finally:
-        # `threading.Lock` 不绑持有者，跨线程释放是合法的（跑在哪个线程都归还）
-        RUN_LOCK.release()
+    return await run_in_threadpool(_work)
 
 
 @router.get("/results")

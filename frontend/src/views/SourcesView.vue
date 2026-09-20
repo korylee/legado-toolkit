@@ -182,9 +182,11 @@ function startPendingCheck() {
 //: **不做成 job**：它是「一条命令跑完一批」，与本地那套 SSE 进度不是一回事；
 //: 界面上只给一句「正在跑」+ 完成的落库条数。
 const jvmRunning = ref(false);
-//: 跑动中的状态条要写清**这次跑的是哪些**（全量还是选中的几条）——同一句话糊过去的话，
+//: 跑动中的状态条要写清**这次跑的是哪些、多少条**——同一句话糊过去的话，
 //: 「我明明只选了 20 条」这种疑问在跑动期间无法自证
 const jvmRunScope = ref("");
+//: 跑批任务的 SSE 句柄（关掉订阅用；任务本身在后端跑，关页面也不会丢）
+let stopJvm = null;
 
 async function runJvmBatch() {
   if (jvmRunning.value) return ElMessage.warning("已有本机引擎跑批在运行");
@@ -192,34 +194,56 @@ async function runJvmBatch() {
   const scope = checkScope.value;
   // 三种范围各自的入参：勾选给 urls、筛选给 filter、全量什么都不给
   // （「条数上限」只对全量生效——范围由勾选/筛选决定，否则会出现看不出来的截断）
-  const payload = scope === "selected" ? { urls: pendingCheckUrls.value }
+  // 本次参数（关键词 / 超时 / 并发 / 挡位 / 条数上限）跟着请求走、**不写回设置**：
+  // 形状同本地校验的 `check: {...}`，表单那边已经把它们做成可编辑的
+  const params = jvmFormRef.value ? jvmFormRef.value.params() : {};
+  const payload = scope === "selected" ? { urls: pendingCheckUrls.value, params }
     : scope === "filtered" ? { filter: { q: query.q, type: query.type, health: query.health,
-                                        group: query.group, tag: query.tag } }
-      : {};
-  jvmRunScope.value = scope === "selected" ? "勾选的 " + pendingCheckUrls.value.length + " 条源"
-    : scope === "filtered" ? "当前筛选的 " + filterTotal.value + " 条源"
-      : "全部在用源（「条数上限」以内）";
+                                        group: query.group, tag: query.tag }, params }
+      : { params };
   jvmRunning.value = true;
   try {
     const r = await jvmRun(payload);
     if (!r.started) {
-      // 没起来的三种原因要分开说：另一个 JVM 任务在跑（reason）、自检没过（selftest）、
-      // 选中的源一条都没匹配上（reason）——都说成「自检未通过」会把原因指反
-      if (r.reason) {
-        ElMessage.warning(r.reason);
-      } else {
-        ElMessage.warning("环境自检未通过，不能跑批");
-      }
+      // 没起来的几种原因要分开说：另一个 JVM 任务在跑（reason）、自检没过（selftest）、
+      // 选中的源一条都没匹配上 / 筛选没命中（reason）——都说成「自检未通过」会把原因指反
+      ElMessage.warning(r.reason || "环境自检未通过，不能跑批");
+      jvmRunning.value = false;
       return;
     }
-    // 结论写进 checks（健康档位 / 星级 / 深度）与 meta——跑完必须重新拉列表
-    ElMessage.success("跑批完成：" + (r.count || 0) + " 条结论已入库"
-                      + (r.checks ? "（健康档位 " + r.checks + " 条）" : ""));
-    await load();
+    // 任务的**条数**用预检算好的那个（已经过了「条数上限」）：界面上说"全量"而实际
+    // 跑了 3 条，是设置页时代最难发现的一处截断
+    jvmRunScope.value = (scope === "selected" ? "勾选的" : scope === "filtered" ? "当前筛选的" : "全部在用源")
+      + "（" + (r.count || 0) + " 条）";
+    // 跑批是分钟级的：**提交任务 + 订阅**（与本地校验同一条链路）。原来是一个挂到
+    // 跑完的长请求——关掉页面/刷新就白等；结论照落库，但界面不知道它跑完了
+    if (stopJvm) stopJvm();
+    stopJvm = subscribeJob(
+      r.job_id,
+      // 跑批没有逐条进度（一次 Gradle 调用跑一批），**不编假进度**：只报状态
+      () => {},
+      async (data) => {
+        jvmRunning.value = false;
+        let res = {};
+        try { res = JSON.parse((data && data.result_json) || "{}"); } catch (e) { /* 非 JSON 就当空 */ }
+        if (data.status === "done") {
+          if (res.ok === false) {
+            ElMessage.warning(res.reason || "跑批没跑成");
+          } else {
+            // 结论写进 checks（健康档位 / 星级 / 深度）与 meta——跑完必须重新拉列表
+            ElMessage.success("跑批完成：" + (res.count || 0) + " 条结论已入库"
+                              + (res.checks ? "（健康档位 " + res.checks + " 条）" : ""));
+          }
+          await load();
+        } else if (data.status === "failed") {
+          ElMessage.error("跑批失败：" + (res.error || "看任务详情"));
+        } else if (data.status === "cancelled") {
+          ElMessage.info("跑批已取消");
+        }
+      });
   } catch (e) {
-    ElMessage.error("跑批失败：" + (e?.message || e));
-  } finally {
     jvmRunning.value = false;
+    ElMessage.error("跑批失败：" + (e?.message || e));
   }
 }
 
@@ -748,6 +772,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
   if (stopCheck) stopCheck();
+  if (stopJvm) stopJvm();   // 只关订阅：任务在后端继续跑完并落库
 });
 </script>
 

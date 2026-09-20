@@ -9,36 +9,14 @@
           其余环境（JDK / Android SDK / Gradle 目录）由「自检」自动推导，不需要填
         </div>
       </el-form-item>
-      <el-form-item label="测试关键词">
-        <el-input v-model="conf.keyword" style="width: 200px" :disabled="saving" />
-      </el-form-item>
-      <el-form-item label="超时(秒)/并发">
-        <el-input-number v-model="conf.timeout" :min="limits.jvm_timeout?.[0] ?? 5"
-                         :max="limits.jvm_timeout?.[1] ?? 120" :disabled="saving" />
-        <el-input-number v-model="conf.concurrency" :min="limits.jvm_concurrency?.[0] ?? 1"
-                         :max="limits.jvm_concurrency?.[1] ?? 32" class="ml8" :disabled="saving" />
-      </el-form-item>
-      <!-- 标签**不能也叫「探测深度」**：本地回放那一页已经有一个同名的（那是
-           1/2/3/4 一根轴，与这里 search/toc/content 完全不同的两根轴）。
-           同名不同物＝用户按一个改、另一个没动，还以为是 bug -->
-      <el-form-item label="校验深度">
-        <!-- 取值来自后端 limits.jvm_depth（AGENTS #8：枚举只在后端定义） -->
-        <el-select v-model="conf.depth" style="width: 220px" :disabled="saving">
-          <el-option v-for="d in depthOptions" :key="d.value" :value="d.value" :label="d.label" />
-        </el-select>
-        <div class="muted" style="font-size: 12px; margin-top: 2px">
-          {{ depthHint }}
-        </div>
-      </el-form-item>
-      <el-form-item label="条数上限">
-        <el-input-number v-model="conf.limit" :min="0" :max="100000" :disabled="saving" />
-        <span class="muted ml8" style="font-size: 12px">0 = 全部在用源</span>
-      </el-form-item>
+      <!-- **跑批参数不在这里**（2026-09-20 搬走）：测试关键词 / 超时 / 并发 / 挡位 /
+           条数上限都是"这次怎么跑"，跟着动作走——它们在书源列表的「全量校验」弹框里，
+           改一次只影响那一次。这一页只留**配置**：环境 + 自检 + 最近一次的结果 -->
     </el-form>
 
     <div style="display: flex; gap: 8px; margin: 4px 0 12px; align-items: center">
       <el-button size="small" :loading="checking" @click="doSelftest">自检环境</el-button>
-      <el-button size="small" type="primary" :loading="saving" @click="save">保存参数</el-button>
+      <el-button size="small" type="primary" :loading="saving" @click="save">保存配置</el-button>
       <span v-if="saving" class="muted" style="font-size: 12px">保存中…</span>
     </div>
 
@@ -105,25 +83,19 @@ import { ref, reactive, computed, onMounted } from "vue";
 import { ElMessage } from "element-plus";
 import { getSettings, patchSettings } from "../api/settings";
 import { jvmSelftest, jvmResults } from "../api/jvm.js";
-import { depthHintText, depthOptions } from "../utils/jvmDepth";
 
-const conf = reactive({ app_repo: "", keyword: "我", timeout: 25, concurrency: 8,
-                        limit: 0, depth: "search" });
-const limits = ref({});
+//: 这一页只剩**配置**一项（App 源码目录）；跑批参数在列表页的弹框里，不在这
+const conf = reactive({ app_repo: "" });
 const selftest = ref(null);
 const checking = ref(false);
 const saving = ref(false);
 const lastRun = ref(null);
 const r2 = ref({ count: 0, dist: {} });
 
-const options = computed(() => depthOptions(limits.value));
-const depthHint = computed(() => depthHintText(conf.depth));
-
 onMounted(async () => {
   try {
     const s = await getSettings();
-    Object.assign(conf, s.values.jvm || {});
-    limits.value = s.limits || {};
+    conf.app_repo = (s.values.jvm || {}).app_repo || "";
   } catch (e) { /* 设置接口挂了就保持默认，自检按钮仍可用 */ }
   try {
     r2.value = await jvmResults();
@@ -148,10 +120,10 @@ async function save() {
   saving.value = true;
   try {
     // 以后端收敛后的值为准（填了越界的值会被收掉，界面要跟着变）
-    const s = await patchSettings({ jvm: { app_repo: conf.app_repo, keyword: conf.keyword,
-                                          timeout: conf.timeout, concurrency: conf.concurrency,
-                                          limit: conf.limit, depth: conf.depth } });
-    Object.assign(conf, s.values.jvm || {});
+    // 只发**这一页编辑的**那一个键：PATCH 的 exclude_unset 语义保证其余键不动
+    // （跑批参数那几项仍然存在设置里，只是不再有界面）
+    const s = await patchSettings({ jvm: { app_repo: conf.app_repo } });
+    conf.app_repo = (s.values.jvm || {}).app_repo || "";
     ElMessage.success("已保存，下次跑批生效");
   } catch (e) {
     ElMessage.error("保存失败：" + e);

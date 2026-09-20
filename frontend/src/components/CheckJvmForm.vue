@@ -17,29 +17,46 @@
     <el-alert v-if="selftest && !selftest.ok" type="error" :closable="false" show-icon
               style="margin: 8px 0" :title="blockReason" />
 
-    <!-- 本次要用的参数：**只读展示**。它们存在设置里（那一页能改），这里不重复放一份
-         编辑框——两处都能改就会漂，而漂的表现是「弹框里显示的和实际跑的不是一套」。 -->
-    <el-descriptions v-if="conf" :column="2" size="small" border style="margin: 8px 0">
-      <el-descriptions-item label="测试关键词">{{ conf.keyword || "我" }}</el-descriptions-item>
-      <el-descriptions-item label="超时 / 并发">{{ conf.timeout }}s / {{ conf.concurrency }}</el-descriptions-item>
-      <el-descriptions-item label="校验深度">{{ depthLabel(conf.depth) }}</el-descriptions-item>
-      <el-descriptions-item label="范围">
-        <!-- 范围由弹框那一行单选决定（勾选 / 当前筛选 / 全部）。后两种**不受「条数上限」
-             约束**：范围既然明确给了，再截断就会出现「选了 20 条只跑了 3 条」这种
-             看不出来的事 -->
+    <!-- 本次怎么跑：**在这里调**（原来只读、得去设置页改——那是"配置"的住法，
+         而这些是"这次动作"的参数）。默认值来自后端（`settings_store.DEFAULTS`），
+         上下界也由后端下发（AGENTS #8），**本次改动不写回设置**。 -->
+    <el-form v-if="conf" label-width="96px" size="small" style="margin: 8px 0">
+      <el-form-item label="测试关键词">
+        <el-input v-model="run.keyword" style="width: 160px" placeholder="我" />
+      </el-form-item>
+      <el-form-item label="超时 / 并发">
+        <el-input-number v-model="run.timeout" :min="limits.jvm_timeout?.[0] ?? 5"
+                         :max="limits.jvm_timeout?.[1] ?? 120" :step="5" />
+        <span class="muted" style="margin: 0 6px">秒 /</span>
+        <el-input-number v-model="run.concurrency" :min="limits.jvm_concurrency?.[0] ?? 1"
+                         :max="limits.jvm_concurrency?.[1] ?? 32" />
+      </el-form-item>
+      <el-form-item label="校验深度">
+        <el-select v-model="run.depth" style="width: 200px">
+          <el-option v-for="d in depthOpts" :key="d.value" :value="d.value" :label="d.label" />
+        </el-select>
+      </el-form-item>
+      <el-form-item label="条数上限">
+        <el-input-number v-model="run.limit" :min="limits.jvm_limit?.[0] ?? 0"
+                         :max="limits.jvm_limit?.[1] ?? 100000" />
+        <span class="muted" style="margin-left: 6px">0 = 不限</span>
+      </el-form-item>
+      <el-form-item label="范围">
+        <!-- 范围由**入口**决定（勾选 / 当前筛选 / 全部）
+             「条数上限」只对最后那种生效：范围既然明确给了，再截断就会出现
+             「选了 20 条只跑了 3 条」这种看不出来的事 -->
         <template v-if="scope === 'selected'">勾选的 {{ scopeCount }} 条源</template>
         <template v-else-if="scope === 'filtered'">当前筛选的 {{ scopeCount }} 条源</template>
-        <template v-else-if="conf.limit > 0">{{ conf.limit }} 条（不是全部！）</template>
+        <template v-else-if="run.limit > 0">{{ run.limit }} 条（不是全部！）</template>
         <template v-else>全部在用源</template>
-      </el-descriptions-item>
-    </el-descriptions>
+      </el-form-item>
+    </el-form>
 
     <div class="muted hint">
-      {{ depthHintText(conf?.depth) }}
+      {{ depthHintText(run.depth) }}
     </div>
     <div class="muted hint">
-      预计耗时：{{ costText }}；跑批期间不要关闭后端。
-      这几项在「设置 → JVM 校验」里改。
+      预计耗时：{{ costText }}；跑批期间不要关闭后端。参数只作用于这一次。
     </div>
   </div>
 </template>
@@ -52,12 +69,15 @@
 // 2026-09-20 起引擎也只有一台（本地回放那条路撤了，见 TODO §一点九），
 // 所以弹框里可调的是「跑哪些」而不是「用哪台引擎」。
 //
-// 参数**不在这里编辑**：那是设置页的职责（AGENTS #8：默认值与取值范围只在后端定义，
-// 前端只拿值）。弹框负责把「这次会用哪套参数、要跑多久」说清楚，并挡住环境没配好的情况。
+// **参数在这里编辑**（2026-09-20 用户提出后改的）：测试关键词 / 超时 / 并发 / 挡位 /
+// 条数上限都是"这次怎么跑"，长在动作旁边才对；设置页只留**配置**（App 源码目录 + 自检）。
+// 默认值与取值范围仍然只有后端一份（AGENTS #8）：这里从 `GET /api/settings` 取
+// `values`（当默认值用）与 `limits`（渲染上下界），**不硬编码**。
+// 本次改动**不写回设置**——形状同本地校验的 `check: {...}`。
 import { ref, computed, onMounted } from "vue";
 import { getSettings } from "../api/settings";
 import { jvmSelftest } from "../api/jvm.js";
-import { depthCost, depthHintText, depthLabel } from "../utils/jvmDepth";
+import { depthCost, depthHintText, depthOptions } from "../utils/jvmDepth";
 
 const props = defineProps({
   //: 本次范围（弹框那一行单选）：selected / filtered / all。**只影响展示**——
@@ -68,6 +88,12 @@ const props = defineProps({
 });
 const emit = defineEmits(["ready"]);
 const conf = ref(null);
+const limits = ref({});
+//: 挡位选项：**枚举来自后端**（`limits.jvm_depth`），后端没给才退回默认文案
+const depthOpts = computed(() => depthOptions(limits.value));
+//: 本次跑批的参数（可编辑）。种子来自 `settings.values.jvm`——那是用户在设置页
+//: 时代留下的那套值，仍然当基准用；这里改了只影响这一次
+const run = ref({ keyword: "我", timeout: 25, concurrency: 8, depth: "search", limit: 0 });
 const selftest = ref(null);
 const checking = ref(false);
 
@@ -84,6 +110,15 @@ async function load() {
   try {
     const s = await getSettings();
     conf.value = s.values.jvm || {};
+    limits.value = s.limits || {};
+    // 种子：设置里那套值（没有的键用后端默认值兜底）
+    run.value = {
+      keyword: conf.value.keyword || s.defaults?.jvm?.keyword || "我",
+      timeout: conf.value.timeout ?? s.defaults?.jvm?.timeout ?? 25,
+      concurrency: conf.value.concurrency ?? s.defaults?.jvm?.concurrency ?? 8,
+      depth: conf.value.depth || s.defaults?.jvm?.depth || "search",
+      limit: conf.value.limit ?? s.defaults?.jvm?.limit ?? 0,
+    };
   } catch (e) { /* 设置接口挂了就只跑自检，参数留空 */ }
   await runSelftest();
 }
@@ -108,11 +143,12 @@ const costText = computed(() => {
   if (props.scope !== "all") {
     return "起停约十几秒，外加每源约 0.3 秒（按全量实测折算）";
   }
-  return depthCost(conf.value?.depth);
+  return depthCost(run.value.depth);
 });
 
 onMounted(load);
-defineExpose({ reload: load });
+//: 父组件在「开始校验」时取走**本次参数**（形状与 `/api/jvm/run` 的 `params` 一致）
+defineExpose({ reload: load, params: () => ({ ...run.value }) });
 </script>
 
 <style scoped>

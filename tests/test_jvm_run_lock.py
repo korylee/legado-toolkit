@@ -85,7 +85,24 @@ class _Base(unittest.TestCase):
         return 0
 
     def _call(self) -> dict:
-        return asyncio.run(jvm_api.jvm_run())
+        """走一遍产品链路：请求（预检 + 建任务）→ 把任务跑完 → 返回任务结果。
+
+        任务体直接调、不经过 runner：异常能原样冒出来，`FreeTests` 里那条
+        「Gradle 炸了」才断得住。**`store_checks` 打桩**——它真的会去开管理库落库，
+        不打桩就写进用户的数据（实测踩过：真库里攒下 183 行假的 a.com 结果，
+        而 `_FakeStore` 的注释早写着"测试不许开真管理库"）。落库那步本身由
+        `test_jvm_health` 用真临时库盖着。
+        """
+        async def go():
+            r = await jvm_api.jvm_run()
+            if not r.get("job_id"):
+                return r
+            got = await jvm_api.run_jvm_job("testjob", _FakeStore(), {"prep": {}})
+            # 前端看到的是两份拼起来：`started` 来自请求（预检），其余来自任务结果
+            return dict(r, **got)
+
+        with mock.patch("core.jvm_health.store_checks", lambda *a, **kw: 0):
+            return asyncio.run(go())
 
     def _args_file(self) -> pathlib.Path:
         return self.agsvc / "args.properties"

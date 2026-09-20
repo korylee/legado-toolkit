@@ -220,11 +220,12 @@ pnpm build
 1. 设置 → 「JVM 校验」页签 → 只填**一个**路径：App 源码目录。
    JDK / Android SDK / Gradle 用户目录**全部自动推导**，不用填。
 2. 同一个页签里点「自检环境」：逐项全绿才能跑批。首次编译要十几分钟（在下载依赖），
-   属正常现象。跑批要用的关键词 / 超时 / 并发 / 校验深度 / 条数上限也在这页填，
-   填完点「保存参数」。
+   属正常现象。**这一页只配环境**（App 源码目录 + 自检 + 最近一次的结果）。
 3. **跑批的入口在书源列表**：工具栏「全量校验」（或先勾选几条 → 「校验选中」）→
-   弹框里引擎选「本机引擎」→「开始校验」。一次调用跑完即退（后端起 `appservice` 子进程）。
+   「开始校验」。一次调用跑完即退（后端起 `appservice` 子进程）。
    没勾选 = 全部在用书源（受「条数上限」约束）；勾了 = 只跑这几条（那时条数上限不参与）。
+4. **参数在弹框里填**（测试关键词 / 超时 / 并发 / 校验深度 / 条数上限）：它们是"这次怎么跑"，
+   跟着动作走，**只作用于这一次、不写回设置**；默认值与取值范围仍由后端一份定义。
 
 **本机引擎调试**（与跑批共用同一套 JVM 环境，但快得多）：调试抽屉里选「本机引擎」——
 第一次约 10 秒（要把 JVM 起起来），**之后每次约 1 秒**。它会把那个 JVM 留在后台
@@ -362,9 +363,9 @@ python cli/main.py merge -i a.json -i b.json -o merged.json --mode replace
 | POST /api/rules/app-preflight | 调试前预检：连不上 / App 里没有这个源 / 可以调试 |
 | POST /api/rules/app-push | 把源推送到 App（幂等，会改动 App 数据，需显式触发） |
 | GET /api/jvm/selftest | JVM 校验的环境自检（App 源码目录 / 启动器 / JDK / Android SDK / gradle-home 逐项） |
-| POST /api/jvm/run | 跑批：后端起 `appservice` 子进程，跑完即退出；结论落 meta（`jvm_check:<批次>:<URL>`） |
+| POST /api/jvm/run | 跑批：**建一条任务**（`kind=jvm_run`，与校验同一条 SSE 链路，关页面不丢）；后端起 `appservice` 子进程，跑完即退出。范围给 `urls`（勾选）或 `filter`（当前筛选），都不给才是全部；**本次参数**走 `params`（关键词 / 超时 / 并发 / 挡位 / 条数上限，只作用于这一次）。结论同时落 `checks`（健康 / 星级 / 深度 + `engine`）与 meta（逐段明细） |
 | GET /api/jvm/results | 每源最深的一条 JVM 结论（深者胜、同深取新），供列表与面板展示 |
-| POST /api/rules/replay-step | 用已抓到的 HTML 重新调试一步规则（不联网） |
+| POST /api/rules/replay-step | 用已抓到的 HTML 跑一遍规则（不联网）——只服务「命中源码」那块 DOM 的投影（App 只推文本、不推 DOM），不是调试引擎 |
 | POST /api/rules/suggest-rule | 让 AI 给某一步提候选规则（只提议；每条都过规则回放器，验不了的单独标「只能连 App 试」） |
 | GET /api/llm/profiles | LLM 模型配置 |
 | GET /api/settings | 全局设置（校验参数的默认值），同时下发 defaults 与 limits |

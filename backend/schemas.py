@@ -145,6 +145,11 @@ class JvmRunRequest(BaseModel):
     #: **urls 优先**：勾选是明确意图，筛选是「这一屏里的」。
     #: 有它才做得到「只重跑待验证那批」——全量一次十几分钟，而站点是按 IP 认人的。
     filter: Dict[str, Any] = Field(default_factory=dict)
+    #: **本次跑批的参数**（keyword / timeout / concurrency / depth / limit）。
+    #: 与本地校验的 `check: {...}` 同形：只作用于这一次，**不写回全局设置**——
+    #: 这些是"这次怎么跑"，不是"这台机器的配置"（配置只有环境目录那几项）。
+    #: 每个键都过 `settings_store.coerce`，取值范围仍然只有后端那一份（AGENTS #8）。
+    params: Dict[str, Any] = Field(default_factory=dict)
 
 
 class JvmDebugRequest(BaseModel):
