@@ -7,9 +7,10 @@
 // 按钮、候选规则的「试」都撤了：它们给的是离线引擎的判定，而这台引擎只是 App 的
 // 近似。要验一条规则就点「重新调试本步」，那是真引擎，D2 之后第二次约 1 秒）。
 //
-// **本地回放只剩一个用途**：「命中源码」那块 DOM 的投影——App 只推文本、不推 DOM
-// （`matched_html` 回填在 TODO §一点八 的第三期），所以拿我们补抓的页面把规则跑
-// 一遍，把选中片段画出来。它是**投影**不是判定，界面上这么标的。
+// **本地回放只剩一个用途**：「命中源码」那块 DOM——引擎现在自己会把它带回来
+// （`steps[].matched_html`，第三期回填），**只有引擎没覆盖的段**（详情段、末段是
+// 属性名的规则）才退回本地投影：拿我们补抓的页面把规则跑一遍。两者来源不同，
+// 界面上分别标着（引擎给的 = App 选中的；投影 = 可能不一样）。
 //
 // 设计取舍：**不对 HTML 注入换行**。
 // 虽然注入后按行渲染更省事，但用户会把这段源码复制去改规则——
@@ -235,19 +236,22 @@ const canReplay = computed(
     && !!STEP_RULE_TAB[(current.value || {}).name],
 );
 
-//: 「命中源码」要显示的那段 DOM。两个来源：
-//:   - 本地试跑（`/rules/chain`）：结果里直接带 `matched_html`
-//:   - **连 App 调试**：App 只推文本、不给 DOM（`core/app_debug.py` 里根本没有
-//:     hits），所以拿**我们补抓的页面本地回放一遍**算出来。
-//:
-//: 原来这个 tab 只读 `current.matched_html`，于是它在唯一的调试入口下**永远是空的**，
-//: 而旁边的文案还写着「规则选中的那块 DOM」——那是句假话。
+//: 「命中源码」要显示的那段 DOM。**两个来源，标签必须分清**：
+//:   - **引擎给的**（`steps[].matched_html`）：连 App / 本机都会带回来，那就是 App
+//:     自己选中的那块 DOM；
+//:   - **本地投影**（`replayResult`）：引擎没覆盖这一段时的退路，拿我们补抓的页面
+//:     把规则跑一遍——它是投影不是判定，所以标成警告色。
 //:
 //: 顺带说一句用途：本地回放结果正是「让 AI 改规则」要喂给模型的东西（规则 + 它
 //: 选中的 DOM），所以两者摆在同一屏上。
 const matchedFrom = computed(() => {
-  if ((current.value || {}).matched_html) return "本地调试";
+  if ((current.value || {}).matched_html) return isAppResult.value ? "App 实测" : "本机引擎";
   return replayResult.value ? "本地调试" : "";
+});
+//: 来源标签的配色跟着来源走（本地投影只是投影，用警告色）
+const matchedFromType = computed(() => {
+  if (matchedFrom.value === "本地调试") return "warning";
+  return isAppResult.value ? "success" : "primary";
 });
 const matchedHtml = computed(() => (current.value || {}).matched_html
   || (replayResult.value || {}).matched_html || "");
@@ -805,9 +809,7 @@ async function copyMatched() {
             当前规则<b>选中了哪块 DOM</b>。改规则时看这里，比在整页里猜快得多。
           </p>
           <p v-if="matchedFrom" class="muted" style="margin: 6px 0">
-            <el-tag size="small" :type="matchedFrom === '本地调试' ? 'success' : 'warning'">
-              {{ matchedFrom }}
-            </el-tag>
+            <el-tag size="small" :type="matchedFromType">{{ matchedFrom }}</el-tag>
             <span v-if="matchedFrom === '本地调试'" style="margin-left: 6px">
               跑不了 JS 规则，可能与 App 的实际命中不同
             </span>

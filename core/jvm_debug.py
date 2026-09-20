@@ -9,9 +9,9 @@
 （`source/steps/pages/all_ok/events/error`），且事件流与设备 WS **逐事件同构**——
 前端抽屉与卡片零改动就能吃（`build_steps` 一行不改）。
 
-**两条边界**：① `pages` 是 `fetch_debug_pages` **补抓**的（JVM 里每段的真实 HTML 还没交
-回来，见 TODO「第三期 matched_html 回填」），而抽屉「看源码改规则」需要 HTML；② **不代用户
-登录**：登录态来自用户自己的浏览器 profile（`scripts/jvm_login.py` 预热一次）或 `cookie=`
+**两条边界**：① `pages` 是 `fetch_debug_pages` **补抓**的（抽屉的「整页源码」需要整页 HTML；
+而**规则命中的那块 DOM** 现在由本机引擎自己带回来——侧车里的 `matched_html`，见
+`build_steps` 的 `matched` 参数）；② **不代用户登录**：登录态来自用户自己的浏览器 profile（`scripts/jvm_login.py` 预热一次）或 `cookie=`
 手工给，这里只把它转发给 JVM 侧。
 """
 
@@ -25,7 +25,7 @@ import threading
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from core.app_debug import build_steps, fetch_debug_pages
+from core.app_debug import build_steps, fetch_debug_pages, matched_map
 from core.fetch import CACHE_AUTO
 from core.paths import data_path
 
@@ -237,7 +237,9 @@ def run_jvm_debug(source: Dict[str, Any],
         out["error"] = "本机引擎一条事件都没收到。" + out["hint"]
         return out
 
-    steps = build_steps(events_raw)
+    # 第三期 matched_html 回填（TODO §一点八）：本机引擎会把每段规则命中的 DOM 带回来，
+    # 形状 {url: {step: html}}——**过一道显式闸门**（AGENTS #22），不合法就整块忽略并留日志
+    steps = build_steps(events_raw, matched=matched_map(meta.get("matched_html")))
     # 拉起方式的痕迹进附注（回落了要说出来；正常走常驻时这里是空的）。
     # 放最后一段附注**之前**：先讲「这次是怎么跑起来的」，再讲「跑的过程中缺了什么」
     if launch_notes and steps:

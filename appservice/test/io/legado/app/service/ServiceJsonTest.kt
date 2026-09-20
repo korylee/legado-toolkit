@@ -45,7 +45,23 @@ class ServiceJsonTest {
     fun numbers_and_booleans_stay_primitives_and_everything_else_is_stringified() {
         assertEquals("""{"i":1,"l":9223372036854775807,"b":true}""",
             encode(linkedMapOf("i" to 1, "l" to Long.MAX_VALUE, "b" to true)))
-        // 其余类型（嵌套 Map 等）照原样转字符串：不猜结构，猜错会静默丢字段
-        assertEquals("""{"x":"{k=v}"}""", encode(linkedMapOf("x" to mapOf("k" to "v"))))
+        // 其余类型照原样转字符串：不猜结构，猜错会静默丢字段
+        // （**原来这条钉的是 Map**——那时它落到 toString() 上、变成 `{k=v}`；
+        //  第三期给侧车加 `matched_html` 时才发现那正是它的形状，见下一条）
+        val weird = object { override fun toString() = "w" }
+        assertEquals("""{"x":"w"}""", encode(linkedMapOf("x" to weird)))
+    }
+
+    @Test
+    fun nested_map_becomes_a_json_object_not_a_kotlin_map_to_string() {
+        // 侧车里的 `matched_html` 是 `{url: {step: html}}`。落到 `toString()` 会是
+        // `{http://a/x={search=<div/>}}`，Python 侧的形状闸门（`matched_map`）只能
+        // 报「形状不对」并把整块丢掉——证据永远空着，而两侧都不报错（AGENTS #22）
+        assertEquals(
+            """{"matched_html":{"http://a/x":{"search":"<div class='b'></div>"}}}""",
+            encode(linkedMapOf("matched_html" to
+                linkedMapOf("http://a/x" to linkedMapOf("search" to "<div class='b'></div>")))))
+        // 空 map 也是对象，不是 "{}" 这个字符串
+        assertEquals("""{"m":{}}""", encode(linkedMapOf("m" to emptyMap<String, String>())))
     }
 }

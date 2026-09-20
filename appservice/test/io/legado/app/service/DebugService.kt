@@ -2,6 +2,10 @@ package io.legado.app.service
 
 import io.legado.app.data.entities.BookSource
 import io.legado.app.model.Debug
+import io.legado.app.model.analyzeRule.AnalyzeRule
+import io.legado.app.model.analyzeRule.AnalyzeRule.Companion.setCoroutineContext
+import io.legado.app.model.analyzeRule.AnalyzeUrl
+import io.legado.app.model.analyzeRule.RuleData
 import io.legado.app.utils.GSON
 import io.legado.app.utils.fromJsonObject
 import kotlinx.coroutines.CoroutineScope
@@ -11,6 +15,8 @@ import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import org.jsoup.nodes.Element
+import kotlin.coroutines.coroutineContext
 import java.io.BufferedWriter
 import java.io.File
 
@@ -31,7 +37,9 @@ import java.io.File
  *    session.send(...)`），所以**设备 WS 里从来没有这几条**——那正是
  *    `matched_html` 恒空的原因。我们跟着丢掉，才谈得上「同构」；把原始 HTML
  *    塞进 NDJSON 会让 `values` 混进整页 HTML，还会与设备侧对不上。
- *    「看规则命中了什么」是第三期的活（shadow/OkHttp 环形缓冲回填），不是这里。
+ *    「看规则命中了什么」由**事件流跑完之后的命中回填**带回来（[collectMatched]）：
+ *    按事件里的 URL 自己再抓一遍、用 App 的解析器跑该页的规则——它是侧车里的
+ *    `matched_html`，不进 NDJSON。
  * 2. **不注入合成事件行**。超时/零事件**只**通过退出码 + stderr 表达，
  *    不往 NDJSON 里塞一行假的 Error——否则同一件事在两个通道里长得不一样，
  *    而「同构」是不变量；超时这件事由退出码承担。
@@ -62,7 +70,8 @@ import java.io.File
  *
  * - `<out>`：NDJSON 事件流（与设备 WS 同构，只含非 payload 事件）
  * - `<out>.meta.json`：**侧车诊断**（退出码含义、事件数、payload 数、是否收到终止、
- *   是否超时、webView 警告、错误原文）。存在的理由：Gradle 默认**只在测试失败时**
+ *   是否超时、webView 警告、错误原文）+ **`matched_html`**（`{url: {段名: 命中 DOM}}`，
+ *   形状的闸门在 Python 侧 `core/app_debug.matched_map`）。存在的理由：Gradle 默认**只在测试失败时**
  *   回显被测进程的 stdout/stderr，通过时全吞掉——调用方不能依赖 stderr 拿结论。
  */
 object DebugService {
@@ -80,6 +89,25 @@ object DebugService {
 
     /** 整次调试的墙钟上限（秒）。比跑批的 30 宽：调试一条含正文段的链要渲染页面。 */
     const val DEFAULT_TIMEOUT_SEC = 60L
+
+    /**
+     * 命中回填的总预算（毫秒）。它在事件流跑完之后**另付**，所以要有自己的上限：
+     * 调用方的等待是「调试预算 + 这一段」，而常驻那条链的读超时只留了 90s 余量
+     * （`core/jvm_daemon.launcher_from_args` 的 `slack_sec`）。用尽就停，剩下的
+     * URL 记进侧车（`matched_skipped`）——**不静默少记**。
+     */
+    const val MATCH_BUDGET_MS = 30_000L
+
+    /** 单个页面取数的上限（毫秒）：一个 URL 卡住不该把整段回填拖到预算用尽。 */
+    const val MATCH_FETCH_TIMEOUT_MS = 10_000L
+
+    /**
+     * 每段最多记几个命中节点。**与 `core.quality.MATCHED_NODES_LIMIT` 同一个数**：
+     * 抽屉里那块 DOM 原来由本地投影算（也是取前 N 个节点的 outerHTML 拼起来），
+     * 数不一样两边就没法对着看。逐词比对钉在
+     * `tests/test_jvm_debug_contract.py::TestMatchedStepNameParity`。
+     */
+    const val MATCHED_NODES_LIMIT = 3
 
     /**
      * 零事件是这条链最典型的**静默失败**，两种成因：
@@ -246,6 +274,9 @@ object DebugService {
         // 所以：**收集放后台线程，主线程负责 idle 主 looper**。这与 `Debug` 管线
         // 只能照抄、不能重实现（那是 App 的方言）是同一件事的两面——环境得我们补。
         val done = java.util.concurrent.atomic.AtomicBoolean(false)
+        // 命中回填要抓哪些页面：事件里的 `≡获取成功:<URL>`，**按出现顺序、去重**
+        // （详情页与目录页常常是同一个 URL，去重后只抓一次）。
+        val urls = java.util.Collections.synchronizedSet(linkedSetOf<String>())
         val collector = Thread {
             runBlocking {
                 try {
@@ -256,6 +287,9 @@ object DebugService {
                                 return@collect
                             }
                             if (event.kind.isTerminal) sawTerminal.set(true)
+                            // 收集在 payload 过滤**之后**：那一类事件的 text 是整页 HTML，
+                            // 页面正文里出现「≡获取成功」这四个字是完全可能的
+                            gotUrlOf(event.message)?.let { urls.add(it) }
                             // 逐行 flush：崩了/超时也要留得下已经收到的那部分
                             synchronized(writer) {
                                 writer.write(encodeLine(event))
@@ -280,15 +314,8 @@ object DebugService {
         collector.name = "a1-event-collector"
         collector.start()
 
-        val deadline = System.currentTimeMillis() + timeoutSec * 1000 + 5_000
-        while (!done.get() && System.currentTimeMillis() < deadline) {
-            // idle() 把主 looper 上已排队的任务就地跑掉（它会在**当前线程**执行）。
-            // 循环 + 小睡：App 的协程会一批批往 Main 上投任务，idle 一次不够
-            runCatching {
-                org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
-            }
-            Thread.sleep(5)
-        }
+        // 事件流的上限就是 `--timeout`，再加 5s 是它的收尾余量
+        driveMainLooperUntil(done, System.currentTimeMillis() + timeoutSec * 1000 + 5_000)
         // 收集线程可能还在等 withTimeout 收尾（最多再等 2s），别把它抛在后面
         runCatching { collector.join(2_000) }
 
@@ -305,6 +332,24 @@ object DebugService {
         // 一次性进程不需要（进程都没了），常驻需要（TODO §一点八「请求间清状态」）。
         // 无条件调用：`cancel` 内部按 session id 判重，重复/已取消都是 no-op。
         runCatching { session.cancel() }
+
+        // ---------------------------------------------------------------- 命中回填（第三期）
+        //
+        // 事件流跑完之后**自己再抓一遍**：用 App 自己的客户端（cookie / UA / 代理都还是
+        // 这一次的那一套）与 App 自己的解析器，把 URL 上「规则选中的 DOM」带回来。它是
+        // 侧车里的 `matched_html`，**不进 NDJSON**——那份流要与设备 WS 逐事件同构。
+        //
+        // 放在这里而不是塞进事件流期间：`Debug.log` 只在 `debugSource == sourceUrl` 时
+        // emit，我们另发的请求不带那个会话；而收尾的 `session.cancel()` 已经跑过，App
+        // 那边的协程不会与这一段抢浏览器和 cookie 通道。
+        //
+        // 浏览器收掉之前做：URL 带 webView 选项时要用它，此时还热着（省一次 0.65s 的
+        // 启动）；收尾那段的取舍见下面。
+        val matchFails = mutableListOf<String>()
+        val matchSkipped = java.util.concurrent.atomic.AtomicInteger(0)
+        val matched = if (urls.isEmpty()) emptyMap()
+        else runMatched(source, urls.toList(), matchSkipped, matchFails)
+
         // 浏览器进程要收掉：A2 起它可能被 shadow 拉起过。**常驻也收**（实测取舍见下）：
         // 留着能省 0.65s/次（实测 0.7s → 0.05s），但它会**一直占着浏览器 profile**
         // ——另一个 JVM（跑批、一次性调试）撞上占用就「自愈」换临时 profile，
@@ -355,6 +400,15 @@ object DebugService {
             "key" to key,
             "source_name" to (source.bookSourceName ?: ""),
             "source_url" to (source.bookSourceUrl ?: ""),
+            // 命中回填（形状闸门在 Python 侧：`core/app_debug.matched_map`）。
+            // 四个计数是给排障的人看的：`urls` 是事件里出现过的 URL 数，`hits` 是真正
+            // 记下来的（URL, 段名）对数——两个数差太远说明规则没命中或页面取不到，
+            // 原因在 `matched_fail` 里。
+            "matched_html" to matched,
+            "matched_urls" to urls.size,
+            "matched_hits" to matched.values.sumOf { it.size },
+            "matched_skipped" to matchSkipped.get(),
+            "matched_fail" to matchFails,
             "error" to failure.get(),
             "hint" to if (code == ZERO_EVENT) ZERO_EVENT_HINT else "",
         ))
@@ -362,7 +416,212 @@ object DebugService {
         System.err.println(
             "[appservice] 调试结束：事件 $n 条（payload ${dropped.get()} 条按 App 的口径丢弃），" +
                 "终止事件=${if (sawTerminal.get()) "有" else "无"}，超时=${timedOut.get()}，退出码=$code")
+        System.err.println(
+            "[appservice] 命中回填：${urls.size} 个 URL 里记下 ${matched.values.sumOf { it.size }} 段命中" +
+                (if (matchSkipped.get() > 0) "（预算用尽，跳过 ${matchSkipped.get()} 个）" else "") +
+                (if (matchFails.isNotEmpty()) "；没记成的：${matchFails.joinToString(" / ")}" else ""))
         return code
+    }
+
+    /**
+     * 在本线程驱动主 looper，直到 [done] 置位或到了 [deadline]（毫秒时间戳）。
+     *
+     * 为什么必须驱动：见 [runOnce] 里收集事件那段（实测记录在那儿）。收集事件与命中
+     * 回填都走它——两段的后台线程都会等 App 往 Main 上投的任务。
+     */
+    private fun driveMainLooperUntil(
+        done: java.util.concurrent.atomic.AtomicBoolean,
+        deadline: Long,
+    ) {
+        while (!done.get() && System.currentTimeMillis() < deadline) {
+            // idle() 把主 looper 上已排队的任务**就地**跑掉；循环 + 小睡是因为
+            // App 的协程会一批批往 Main 上投，idle 一次不够
+            runCatching {
+                org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+            }
+            Thread.sleep(5)
+        }
+    }
+
+    // ---------------------------------------------------------------- 命中回填
+
+    /** 事件里的 `≡获取成功:<URL>`：App 每取到一页就打一条（列表 / 详情 / 目录 / 正文
+     *  四处各一处）。URL 连 `,{...}` 选项都还在，正好原样交给 `AnalyzeUrl`（它认选项）。 */
+    private val GOT_URL_RE = Regex("≡获取成功[:：](.+)$")
+
+    private fun gotUrlOf(text: String): String? =
+        GOT_URL_RE.find(text)?.groupValues?.get(1)?.trim()?.takeIf { it.isNotEmpty() }
+
+    /**
+     * 能记命中 DOM 的段名（= `core/app_debug.SEGMENT_NAMES` 的取值；**没有 `bookUrl`**：
+     * 详情段是 `ruleBookInfo.*` 那一族字段规则，不是一条列表/正文规则，本批不覆盖）。
+     *
+     * 段名是 **Python 那边的词汇**——跨语言没法共享代码，逐词比对钉在
+     * `tests/test_jvm_debug_contract.py::TestMatchedStepNameParity`（加一个名字就要加
+     * [matchedRuleOf] 的分支，否则这个名字永远记不出东西来）。
+     */
+    private val MATCHED_STEP_NAMES = listOf("search", "explore", "toc", "content")
+
+    /**
+     * 段名 → 该段的取值规则。**这里只按「哪条规则命中」命名，不解析事件流的分段**
+     * （分段语义只有 Python 那一份）。
+     *
+     * `search` 与 `explore` 共用 `bookList`：App 里搜索页与发现页走的是同一个解析器。
+     * 本侧认不出手里这个 URL 是哪一种，所以两个名字都记；Python 按**每段自己的 url +
+     * 段名**取，键里本来就带 url，串不了。
+     */
+    private fun matchedRuleOf(source: BookSource, step: String): String = when (step) {
+        "search", "explore" -> source.ruleSearch?.bookList.orEmpty()
+        "toc" -> source.getTocRule().chapterList.orEmpty()
+        "content" -> source.getContentRule().content.orEmpty()
+        else -> ""
+    }
+
+    /**
+     * 跑命中回填：**后台线程 + 本线程驱动主 looper**（同收集事件那段），预算用尽就停。
+     *
+     * 失败一律吞成 `fails` 里的一行：它是**附加证据**，取不到只该让「命中源码」那块空着，
+     * 不能把已经跑完的调试结果带走（同「补抓页面失败不动判定」那条纪律）。
+     */
+    private fun runMatched(
+        source: BookSource,
+        urls: List<String>,
+        skipped: java.util.concurrent.atomic.AtomicInteger,
+        fails: MutableList<String>,
+    ): Map<String, Map<String, String>> {
+        val done = java.util.concurrent.atomic.AtomicBoolean(false)
+        val out = java.util.concurrent.atomic.AtomicReference<Map<String, Map<String, String>>>(emptyMap())
+        val worker = Thread {
+            runBlocking {
+                try {
+                    out.set(collectMatched(source, urls, skipped, fails))
+                } catch (e: Throwable) {
+                    fails.add("整段失败 — ${e::class.simpleName}: ${e.message?.take(120)}")
+                }
+            }
+            done.set(true)
+        }
+        worker.isDaemon = true
+        worker.name = "matched-html"
+        worker.start()
+        // 预算 + 收尾余量：worker 到点该自己停了，这里多给一点是让它的 finally 跑完
+        driveMainLooperUntil(done, System.currentTimeMillis() + MATCH_BUDGET_MS + 5_000)
+        runCatching { worker.join(2_000) }
+        return out.get()
+    }
+
+    /**
+     * 逐个 URL：取一次页面（**每个 URL 只取一次**，详情页与目录页常常同 URL），在上面跑
+     * 该源每条取值规则，命中就记 `out[url][段名]`。返回 `{url: {段名: 命中 DOM}}`。
+     */
+    private suspend fun collectMatched(
+        source: BookSource,
+        urls: List<String>,
+        skipped: java.util.concurrent.atomic.AtomicInteger,
+        fails: MutableList<String>,
+    ): Map<String, Map<String, String>> {
+        val rules = MATCHED_STEP_NAMES.map { it to matchedRuleOf(source, it) }
+            .filter { (_, rule) -> rule.isNotBlank() }
+        if (rules.isEmpty()) return emptyMap()
+        val out = LinkedHashMap<String, Map<String, String>>()
+        val deadline = System.currentTimeMillis() + MATCH_BUDGET_MS
+        for (url in urls) {
+            val left = deadline - System.currentTimeMillis()
+            if (left <= 0) {
+                skipped.incrementAndGet()
+                continue
+            }
+            try {
+                val body = withTimeout(minOf(left, MATCH_FETCH_TIMEOUT_MS)) {
+                    fetchForMatch(source, url)
+                }
+                if (body.isBlank()) {
+                    noteFail(fails, url, "取到的页面是空的")
+                    continue
+                }
+                val perStep = LinkedHashMap<String, String>()
+                for ((step, rule) in rules) {
+                    try {
+                        hitOf(source, body, url, rule)?.let { perStep[step] = it }
+                    } catch (e: Throwable) {
+                        // 规则本身跑不动（不支持的选择器 / `@js:` 抛错…）：只影响这一段
+                        noteFail(fails, url, "$step 段规则没跑成（${e::class.simpleName}: " +
+                            "${e.message?.take(80)}）")
+                    }
+                }
+                if (perStep.isNotEmpty()) out[url] = perStep
+            } catch (e: Throwable) {
+                noteFail(fails, url, "${e::class.simpleName}: ${e.message?.take(100)}")
+            }
+        }
+        return out
+    }
+
+    /** 用 App 自己的客户端取这一页：cookie / UA / 代理都是这次调试的同一套。
+     *  非 200 直接抛（带状态码）——由调用方记进 `matched_fail`。 */
+    private suspend fun fetchForMatch(source: BookSource, url: String): String {
+        val analyzeUrl = AnalyzeUrl(
+            mUrl = url, baseUrl = source.bookSourceUrl.orEmpty(),
+            source = source, ruleData = RuleData())
+        val res = analyzeUrl.getStrResponseAwait()
+        if (res.code() != 200) throw IllegalStateException("HTTP ${res.code()}")
+        return res.body.orEmpty()
+    }
+
+    /** 上游 `getResultLast` 的 `when` 里那几个**只当取值动作**的末段（其余末段取属性）。 */
+    internal val VALUE_ACTION_TAILS = listOf("text", "textNodes", "ownText", "html", "all")
+
+    /**
+     * 取值规则的**元素部分**：末段是取值动作时把它去掉（`#nr1@p@html` → `#nr1@p`）。
+     *
+     * 为什么必须去掉：`getElements` 把**每个** `@` 段都当选择器（上游
+     * `AnalyzeByJSoup.getElements`），而取值规则的末段是**动作或属性名**——两边语义
+     * 不同（上游 `getResultList` → `getResultLast`），所以这类规则用 `getElements`
+     * 直接跑恒取空。去掉末段取出来的，正是 App 取值时选中的那些节点。
+     *
+     * **只认那五个动作词**，末段是属性名时返回 null：属性名与标签名同形（`title` /
+     * `style`），猜不了（AGENTS #21 那一类）。返回 null = 这条规则不适用这个兜底。
+     */
+    internal fun elementsPartOf(rule: String): String? {
+        // `##替换` 不是元素部分（上游 SourceRule.splitRegex 就是先切它的）
+        val body = rule.substringBefore("##").trim()
+        val idx = body.lastIndexOf('@')
+        if (idx <= 0) return null
+        if (body.substring(idx + 1).trim() !in VALUE_ACTION_TAILS) return null
+        return body.substring(0, idx).trim().takeIf { it.isNotEmpty() }
+    }
+
+    /**
+     * 在这份页面上跑一条取值规则，返回命中节点的 HTML（没命中返回 null）。
+     *
+     * 末段是取值动作的规则（[elementsPartOf]）**直接用元素部分**，不先跑原样那次：
+     * 那次必然拿不到东西（末段被当成选择器），而带 `##替换` 的形态实测还会让 jsoup
+     * 收到空选择器、抛 `SelectorParseException`——先跑一次等于给失败留个位置。
+     */
+    private suspend fun hitOf(source: BookSource, body: String, url: String, rule: String): String? =
+        htmlOn(source, body, url, elementsPartOf(rule) ?: rule)
+
+    /**
+     * 按一条规则取元素，返回命中节点的 HTML（没命中返回 null）。
+     *
+     * 取前 [MATCHED_NODES_LIMIT] 个拼起来、不注入换行：与本地投影
+     * （`core/rules/replayer.py`）同一口径——列表规则下只看第一条看不出「混进了
+     * 导航栏」这类问题。JSON 规则下节点不是 Element，退化成 `toString()`。
+     */
+    private suspend fun htmlOn(source: BookSource, body: String, url: String, rule: String): String? {
+        val analyzeRule = AnalyzeRule(RuleData(), source)
+        analyzeRule.setContent(body, url)
+        // `@js:` 里的 `java.ajax` 要协程上下文；不设它 Rhino 那边取不到
+        analyzeRule.setCoroutineContext(coroutineContext)
+        val html = analyzeRule.getElements(rule).take(MATCHED_NODES_LIMIT).joinToString("") { node ->
+            (node as? Element)?.outerHtml() ?: node.toString()
+        }
+        return html.takeIf { it.isNotBlank() }
+    }
+
+    /** 失败原因留一行（最多 5 条）：侧车是给排障的人看的，不刷屏。 */
+    private fun noteFail(fails: MutableList<String>, url: String, reason: String) {
+        if (fails.size < 5) fails.add("$url — $reason")
     }
 
     private fun codeText(code: Int): String = when (code) {

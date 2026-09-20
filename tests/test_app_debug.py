@@ -18,8 +18,8 @@ from unittest.mock import patch
 
 from core import quality as Q
 from core.app_debug import (
-    MAX_PAGES, PAGE_IDS, build_steps, collect_debug_events, fetch_debug_pages,
-    run_app_debug,
+    MAX_MATCHED_CHARS, MAX_PAGES, PAGE_IDS, build_steps, collect_debug_events,
+    fetch_debug_pages, matched_map, run_app_debug,
 )
 from core.fetch import CacheMiss, Fetched
 
@@ -117,6 +117,54 @@ EMPTY_CONTENT_SAMPLE = [
 ]
 
 EMPTY_CONTENT_CHAPTER_URL = "https://a.com/book/1/c1.html"
+
+class MatchedHtmlTests(unittest.TestCase):
+    """第三期 `matched_html` 回填（TODO §一点八）：**按每段自己的 url + 段名取**。
+
+    引擎那侧只记 `{url: {step: html}}`（Kotlin 不认"段"这个语义，分段逻辑只有一份、
+    在 Python 这边），所以这两条钉的是：填对了段、以及**段名对不上的不许乱填**。
+    """
+
+    #: SAMPLE 里搜索段与目录段各自的页面（见文件头的夹具）
+    SEARCH_URL = "https://www.52shuku.net/so/search.php?q=我"
+    TOC_URL = "https://www.52shuku.net/bjUIK.html"
+
+    def test_fills_the_segment_that_owns_that_url_and_step(self):
+        steps = build_steps(SAMPLE, matched={self.SEARCH_URL: {"search": "<div class='so'></div>"}})
+        self.assertEqual(step_of(steps, "search")["matched_html"], "<div class='so'></div>")
+        self.assertEqual(step_of(steps, "toc")["matched_html"], "", "别的段不许被填")
+
+    def test_step_name_must_match_the_segment(self):
+        """同一页可能既是详情页又是目录页（PAGE_IDS 里两者共用 detail）：段名对不上就不填。
+
+        乱填的后果不是"少显示"，而是**把另一段的 DOM 当成这一段命中给用户看**——
+        照着它改规则会改错地方（与 §六十三 那类"看着正常、答的不是你问的"同族）。
+        """
+        steps = build_steps(SAMPLE, matched={self.TOC_URL: {"content": "<p>正文</p>"}})
+        self.assertEqual(step_of(steps, "toc")["matched_html"], "")
+
+    def test_bad_shape_is_dropped_whole(self):
+        """形状不对整块丢掉**并留日志**（AGENTS #22：跨语言字段要在入口有显式闸门）。
+
+        它只是抽屉里的一块证据，不该把整个结果带走；也不该静默——静默的后果是
+        「看规则命中了什么」永远空白而没人知道为什么。
+        """
+        with patch("sys.stderr") as err:
+            self.assertEqual(matched_map("nope"), {})
+            self.assertEqual(matched_map([{"a": "b"}]), {})
+            self.assertEqual(matched_map(None), {})
+            self.assertIn("形状不对", err.write.call_args_list[0][0][0])
+        # 半个形状也不行：url 对、值不是 dict → 丢掉那一条
+        self.assertEqual(matched_map({"u": "not-a-dict"}), {})
+
+    def test_over_long_html_is_truncated_with_a_note(self):
+        got = matched_map({"u": {"s": "a" * (MAX_MATCHED_CHARS + 5)}})["u"]["s"]
+        self.assertLess(len(got), MAX_MATCHED_CHARS + 100)
+        self.assertIn("已截断", got)
+
+    def test_blank_html_is_dropped(self):
+        self.assertEqual(matched_map({"u": {"s": "   ", "t": "<i></i>"}}), {"u": {"t": "<i></i>"}})
+
 
 def step_of(steps, name):
     return next(s for s in steps if s["name"] == name)

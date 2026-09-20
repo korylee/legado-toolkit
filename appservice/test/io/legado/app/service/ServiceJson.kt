@@ -37,6 +37,11 @@ object ServiceJson {
         is Number -> JsonPrimitive(v)
         is Boolean -> JsonPrimitive(v)
         is List<*> -> JsonArray(v.map { element(it) })
+        // 嵌套结构必须递归，不能落到下面那句 toString()：侧车里的 `matched_html`
+        // 是 `{url: {step: html}}`，被转成 Kotlin 的 map 语法（`{k=v}`）之后
+        // Python 侧的形状闸门只会说「形状不对」，那块证据就永远空着、也不报错
+        // （`core/app_debug.matched_map`；AGENTS #22）
+        is Map<*, *> -> JsonObject(v.entries.associate { (k, item) -> k.toString() to element(item) })
         // 其余类型照原样转字符串：不猜结构，猜错会静默丢字段
         else -> JsonPrimitive(v.toString())
     }

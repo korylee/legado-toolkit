@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
 """fetch 的请求头 / 编码 / 代理支持。"""
 
+import gzip
 import io
 import unittest
+import zlib
 from urllib.error import HTTPError
 from unittest.mock import patch
 
@@ -684,3 +686,88 @@ class MethodBodyTests(CacheIsolatedTestCase):
         # method 大小写不改变身份（与 fetch_ex 里的 upper 归一口径一致）
         self.assertEqual(F._cache_key("https://a.com/x", h, "", "", "post", ""),
                          F._cache_key("https://a.com/x", h, "", "", "POST", ""))
+
+
+class DecompressTests(CacheIsolatedTestCase):
+    """gzip / deflate 响应体：**不解压不报错，只给一屏乱码**（2026-09-21 实测）。
+
+    来源：抽屉「整页源码」一屏 U+FFFD，同一页的「提取结果」却是好的——那条走 App 引擎
+    （OkHttp 自动解压），「整页源码」走我们这条 urllib 补抓。而 urllib 认
+    `Content-Encoding` 但**不替我们解**（与 requests / OkHttp 不同）。
+    """
+
+    HTML = "<html><body>绍宋</body></html>"
+
+    def _resp(self, body, encoding=""):
+        class FakeResp:
+            headers = {"Content-Encoding": encoding} if encoding else {}
+
+            def read(self): return body
+
+            def __enter__(self): return self
+
+            def __exit__(self, *a): return False
+
+        return FakeResp()
+
+    def _fetch(self, body, encoding="", url="https://a.com/gz"):
+        with patch("urllib.request.urlopen", return_value=self._resp(body, encoding)):
+            return F.fetch(url)
+
+    def test_requests_accept_encoding_gzip(self):
+        """默认头要带 Accept-Encoding（与浏览器 / OkHttp 一致）。
+
+        不发这一行时，有些 CDN 照样回 gzip 变体（实测那个站 `X-Cache-Status: HIT`），
+        而我们要了就得自己解——两件事是一对，改一处要改另一处。
+        """
+        sent = {}
+
+        class FakeResp:
+            def read(self): return b"x"
+
+            def __enter__(self): return self
+
+            def __exit__(self, *a): return False
+
+        def fake_urlopen(req, timeout=None):
+            sent["req"] = req
+            return FakeResp()
+
+        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            F.fetch("https://a.com/enc")
+        self.assertIn("gzip", sent["req"].headers["Accept-encoding"])
+
+    def test_gzip_body_is_decompressed(self):
+        body = gzip.compress(self.HTML.encode("utf-8"))
+        self.assertEqual(self._fetch(body, "gzip"), self.HTML)
+
+    def test_gzip_magic_without_header_is_still_decompressed(self):
+        """头里不写、字节却是 gzip → 也要解（防回压缩变体却不说的站点）。"""
+        body = gzip.compress(self.HTML.encode("utf-8"))
+        self.assertEqual(self._fetch(body, ""), self.HTML)
+
+    def test_deflate_in_both_forms(self):
+        zlib_form = zlib.compress(self.HTML.encode("utf-8"))
+        raw_form = zlib.compressobj(wbits=-zlib.MAX_WBITS)
+        raw_deflate = raw_form.compress(self.HTML.encode("utf-8")) + raw_form.flush()
+        for name, body in (("zlib 头", zlib_form), ("裸 deflate", raw_deflate)):
+            with self.subTest(name=name):
+                F.page_cache_clear()
+                self.assertEqual(self._fetch(body, "deflate"), self.HTML)
+
+    def test_plain_body_is_untouched(self):
+        self.assertEqual(self._fetch(self.HTML.encode("utf-8")), self.HTML)
+
+    def test_gzip_header_on_plain_body_returns_it_unchanged(self):
+        """服务器配置错（头说 gzip、正文是明文）：退回原文，别报失败。"""
+        self.assertEqual(self._fetch(self.HTML.encode("utf-8"), "gzip"), self.HTML)
+
+    def test_broken_gzip_raises_instead_of_showing_garbage(self):
+        """字节是 gzip 但解不开 → **抛**，让调用方走「抓取失败」那条路。
+
+        退回原文在这里等于把一屏乱码说成「源的内容」，调用方无从分辨（AGENTS #4）。
+        """
+        body = bytes((0x1f, 0x8b)) + b"not really gzip"
+        with self.assertRaises(ValueError) as ctx:
+            self._fetch(body, "gzip")
+        self.assertIn("gzip", str(ctx.exception))

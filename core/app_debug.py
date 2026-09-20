@@ -41,6 +41,7 @@ import os
 import re
 import socket
 import struct
+import sys
 import time
 import urllib.error
 import urllib.parse
@@ -513,8 +514,48 @@ def _split_segments(texts: Sequence[str]) -> List[Dict[str, Any]]:
     return segments
 
 
-def build_steps(events: Sequence[Any]) -> List[Dict[str, Any]]:
+#: ``matched_html`` 的落库上限：命中的是**整棵子树**，一个 `<div>` 包住整页很常见。
+#: 抽屉里是给人看的（还要能复制去改规则），几万字没有意义、只会把 tooltip 拖垮。
+MAX_MATCHED_CHARS = 20000
+
+
+def matched_map(raw: Any) -> Dict[str, Dict[str, str]]:
+    """把侧车里的 ``matched_html`` 收敛成 ``{url: {step: html}}``。
+
+    **形状不对就整块丢掉并说一声**（AGENTS #22：跨语言的字段要在入口有一道显式闸门
+    并留下日志）——它只是调试抽屉里的一块证据，不该把整个结果带走，也不该静默
+    （静默的后果是"看规则命中了什么"永远空白而没人知道为什么）。
+    超长按 :data:`MAX_MATCHED_CHARS` 截断，并在末尾写一行说明。
+    """
+    if not isinstance(raw, dict):
+        if raw:
+            print("[app_debug] matched_html 形状不对（期望 {url: {step: html}}，实测 %s），"
+                  "已忽略" % type(raw).__name__, file=sys.stderr)
+        return {}
+    out: Dict[str, Dict[str, str]] = {}
+    for url, per_step in raw.items():
+        if not isinstance(per_step, dict):
+            continue
+        kept = {}
+        for step, html in per_step.items():
+            if not isinstance(html, str) or not html.strip():
+                continue
+            if len(html) > MAX_MATCHED_CHARS:
+                # 明确用 LF（`os.linesep` 在 Windows 上是 CRLF，而全仓统一 LF）
+                html = html[:MAX_MATCHED_CHARS] + chr(10) +                     "…（已截断：命中子树 %d 字符）" % len(html)
+            kept[str(step)] = html
+        if kept:
+            out[str(url)] = kept
+    return out
+
+
+def build_steps(events: Sequence[Any], matched: Optional[Dict[str, Dict[str, str]]] = None
+                ) -> List[Dict[str, Any]]:
     """**纯函数**：事件列表 → ``steps[]``（只做分段与判定，不抓页面）。
+
+    ``matched``：``{url: {step: html}}``——**本机引擎**把每段规则命中的 DOM 记下来带回来
+    （第三期 `matched_html` 回填，见 TODO §一点八）。按**每段自己的 url + 段名**取，
+    所以分段语义只有这一份（Kotlin 那边只记 URL，不认段）。
 
     ``events`` 可以是 ``collect_debug_events`` 的返回值（``{"t","text"}``），
     也可以是裸文本列表——聚合只用到文本，这样测试不必构造事件字典。
@@ -526,7 +567,7 @@ def build_steps(events: Sequence[Any]) -> List[Dict[str, Any]]:
       - ``verdict``：段内有错误行 → fail；有 ``︽X页解析完成`` → pass；否则 unknown
       - ``values``：该段内所有事件原文（已去耗时前缀，保留 ┌/└ 成对结构）
       - ``url``：段内 ``≡获取成功:<URL>`` 的 URL（没有则空）
-      - ``matched_html``：**恒为空串**——App 只推文本，不给 HTML
+      - ``matched_html``：本机引擎那一路带回来的命中 DOM（没有则空串——设备 WS 只推文本）
       - ``notes``：该段里的 ``◇`` 统计行
     """
     texts = [(_event_text(e)) for e in (events or [])]
@@ -557,7 +598,10 @@ def build_steps(events: Sequence[Any]) -> List[Dict[str, Any]]:
         detail = j.reason or ("；".join(notes) if notes else "%d 条事件" % len(values))
         steps.append(j.as_step_dict(
             name, url=url, page_id=PAGE_IDS.get(name, ""),
-            values=values, matched_html="", detail=detail,
+            values=values,
+            # 按**这一段自己的 url + 段名**取，取不到就是空（设备通道、或引擎没回填）
+            matched_html=((matched or {}).get(url) or {}).get(name, ""),
+            detail=detail,
         ))
     return steps
 

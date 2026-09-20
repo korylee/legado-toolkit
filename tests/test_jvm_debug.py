@@ -157,6 +157,30 @@ class RunJvmDebugTests(_RunCase):
                         "事件形状要与设备通道一致：[{t: 秒, text: 原文}]")
         self.assertEqual(len(r["pages"]), 1, "补抓要接上（抽屉靠它看源码）")
 
+    def test_matched_html_from_the_sidecar_reaches_the_right_step(self) -> None:
+        """第三期：侧车里的 `matched_html` 按**每段自己的 url + 段名**落到 steps 上。
+
+        形状不对整块丢掉的闸门由 `test_app_debug.MatchedHtmlTests` 管，这里只钉跨模块那
+        一段（Kotlin 写侧车 → 这里读 → `build_steps`）。fixture 里**详情页与目录页是同一个
+        URL**（真实产出就是这样）：两条段各取自己那段名，不许互相串。
+        """
+        detail = "https://www.52shuku.net/wuxia/hqOD.html"
+        self._patch("_run_launcher", self._fake_launcher(
+            events=self._fixture_events(),
+            meta={"code": 0, "hint": "", "error": "", "matched_html": {
+                detail: {"toc": "<div id='chapter-grid'></div>",
+                         "search": "<div class='leak'></div>"},
+                "https://www.52shuku.net/so/search.php?q=斗破苍穹": {
+                    "search": "<div class='book'></div>"},
+            }}))
+        r = self._run()
+        by_name = {s["name"]: s for s in r["steps"]}
+        self.assertEqual(by_name["toc"]["matched_html"], "<div id='chapter-grid'></div>")
+        self.assertEqual(by_name["search"]["matched_html"], "<div class='book'></div>",
+                         "同 URL 上的另一个段名不许串到搜索段来")
+        self.assertEqual(by_name["bookUrl"]["matched_html"], "",
+                         "详情段没有对应的取值规则（`bookUrl` 不在 MATCHED_STEP_NAMES 里）")
+
     def test_timeout_keeps_partial_result(self) -> None:
         """超时/截断：**部分结果不能丢**，状态写进第一条 step 的附注。"""
         self._patch("_run_launcher", self._fake_launcher(

@@ -170,5 +170,56 @@ class TestLoginMarkerParity(unittest.TestCase):
                          "两侧的登录墙特征词漂了：改一边就得改另一边（权威在 core/models.py）")
 
 
+class TestMatchedStepNameParity(unittest.TestCase):
+    """命中回填（第三期）的**词汇与上限**两侧必须一致。
+
+    为什么要有这条：`matched_html` 的形状是 `{url: {段名: DOM}}`，**段名由 Kotlin 写、
+    由 Python 取**（`core/app_debug.build_steps` 按每段自己的 url + 段名查）。跨语言没法
+    共享代码，两边各改一边的后果不是报错，是**那块证据永远空着**——抽屉里显示成「这条
+    规则没有选中任何 DOM」，而其实是没人去取（AGENTS #4 / #22⑤ 那一类）。
+
+    对照的是**源码字面量**（不跑 Kotlin），与 `TestLoginMarkerParity` 同一个套路。
+    """
+
+    KOTLIN = (pathlib.Path(__file__).parent.parent /
+              "appservice/test/io/legado/app/service/DebugService.kt")
+
+    def _names_and_text(self):
+        text = self.KOTLIN.read_text(encoding="utf-8")
+        block = text.split("private val MATCHED_STEP_NAMES = listOf(", 1)
+        self.assertEqual(len(block), 2, "DebugService.kt 里找不到 MATCHED_STEP_NAMES")
+        body = block[1].split(")", 1)[0]
+        return re.findall(r'"([^"]*)"', body), text
+
+    def test_step_names_are_names_python_actually_asks_for(self):
+        """本机侧记的每个段名，Python 都得真的会去取（权威词表在 SEGMENT_NAMES）。"""
+        from core.app_debug import SEGMENT_NAMES
+        names, _ = self._names_and_text()
+        self.assertTrue(names, "MATCHED_STEP_NAMES 不该是空的")
+        unknown = [n for n in names if n not in set(SEGMENT_NAMES.values())]
+        self.assertEqual(unknown, [], "这些段名 Python 永远不会取：%s" % unknown)
+        # 三条列表/正文段一个都不能少：少一个就是「那条规则命中的 DOM 交不回来」
+        self.assertLessEqual({"search", "explore", "toc", "content"}, set(names))
+
+    def test_every_name_has_a_rule_branch(self):
+        """**记了名字就得有规则**：没有分支的段名恒不命中，而它看起来像「规则没选中」。"""
+        names, text = self._names_and_text()
+        block = text.split("private fun matchedRuleOf(", 1)
+        self.assertEqual(len(block), 2, "DebugService.kt 里找不到 matchedRuleOf")
+        body = block[1].split('else -> ""', 1)[0]
+        branches = set(re.findall(r'"([a-zA-Z]+)"', body))
+        self.assertEqual(set(names) - branches, set(),
+                         "这些段名在 matchedRuleOf 里没有分支，永远记不出东西来")
+
+    def test_node_limit_matches_the_python_side(self):
+        """每段记几个节点：本地投影那份在 `core/quality.py`（两侧的 DOM 要能对着看）。"""
+        from core.quality import MATCHED_NODES_LIMIT
+        text = self.KOTLIN.read_text(encoding="utf-8")
+        block = text.split("const val MATCHED_NODES_LIMIT = ", 1)
+        self.assertEqual(len(block), 2, "DebugService.kt 里找不到 MATCHED_NODES_LIMIT")
+        got = int(re.match(r"\d+", block[1]).group(0))
+        self.assertEqual(got, MATCHED_NODES_LIMIT, "两侧的命中节点上限漂了")
+
+
 if __name__ == "__main__":
     unittest.main()

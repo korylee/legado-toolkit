@@ -2,9 +2,11 @@
 """由 services/add_source.py 拆分而来。"""
 
 import collections
+import gzip
 import hashlib
 import threading
 import time
+import zlib
 from typing import Any, Dict, Optional, Tuple
 
 from core.constants import *
@@ -241,6 +243,47 @@ def fetch(url: str, timeout: int = 15,
     return fetch_ex(url, timeout, headers, charset, proxy, source).html
 
 
+def _decompress(raw: bytes, resp: Any) -> bytes:
+    """按响应头解压（gzip / deflate）——**不解压的后果是乱码，不是报错**。
+
+    实测（2026-09-21）：某站的 CDN 对**没带** `Accept-Encoding` 的请求也回 gzip 变体
+    （`X-Cache-Status: HIT`），于是抽屉「整页源码」一屏 U+FFFD，而同一页的「提取结果」
+    是好的（那条走 App 引擎，OkHttp 自动解压）——两个页签对不上，读起来却像源的毛病。
+
+    两条边界：
+      - **头里没写、但字节以 gzip 魔数开头**也解：防的是回压缩变体却不说的站点
+      - **解不开且字节确实是 gzip** 时**抛**（调用方各自的「抓取失败」路径接得住，
+        见 `core/app_debug.fetch_debug_pages` / `core/verify.verify_chain`）；
+        头里写了 gzip 但发的是普通正文（服务器配置错）按原样返回——那种情况退回
+        原文比报失败有用
+    """
+    enc = ""
+    headers = getattr(resp, "headers", None)
+    if headers is not None:
+        try:
+            enc = str(headers.get("Content-Encoding", "") or "").strip().lower()
+        except Exception:
+            enc = ""
+    looks_gzip = raw[:2] == b"\x1f\x8b"
+    if not enc and looks_gzip:
+        enc = "gzip"
+    try:
+        if enc in ("gzip", "x-gzip"):
+            return gzip.decompress(raw)
+        if enc == "deflate":
+            try:
+                return zlib.decompress(raw)
+            except zlib.error:
+                # 裸 deflate（不带 zlib 头）也是一种合法发法：负 wbits 再来一次
+                return zlib.decompress(raw, -zlib.MAX_WBITS)
+    except Exception as e:
+        if looks_gzip:
+            raise ValueError("正文是 gzip 压缩的但解不开（Content-Encoding=%r）：%s"
+                             % (enc, e))
+        return raw
+    return raw
+
+
 def fetch_ex(url: str, timeout: int = 15,
              headers: dict = None, charset: str = "", proxy: str = "",
              source: Optional[Dict[str, Any]] = None,
@@ -283,7 +326,12 @@ def fetch_ex(url: str, timeout: int = 15,
 
     h = {"User-Agent": DEFAULT_UA,
          "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
-         "Accept-Language": "zh-CN,zh;q=0.9"}
+         "Accept-Language": "zh-CN,zh;q=0.9",
+         # 与浏览器 / OkHttp 一样要 gzip：**不是可选优化**——站点回压缩正文时，
+         # 不解压拿到的是 gzip 字节被当文本强解的一屏乱码（urllib 认
+         # `Content-Encoding` 但**不替我们解**），而它看起来像「源的内容就这样」。
+         # 要了就得自己解，见 `_decompress`
+         "Accept-Encoding": "gzip, deflate"}
     if headers:
         # 值为空（含纯空白）的键不覆盖默认值。用 if v 挡不住 " "，而 urllib 发送前
         # 会 strip，结果服务端收到空 UA —— 与换行写法（已 strip）行为不一致。
@@ -335,7 +383,7 @@ def fetch_ex(url: str, timeout: int = 15,
 
     open_fn = opener.open if opener is not None else urllib.request.urlopen
     with open_fn(req, timeout=timeout) as resp:
-        raw = resp.read()
+        raw = _decompress(resp.read(), resp)
 
     # charset 优先，其次按常见编码回退
     order = []
