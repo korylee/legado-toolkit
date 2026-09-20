@@ -3,16 +3,10 @@
 > **分工**：本文件只放**要做什么**（动作 + 够动手用的依据）。可复用的机制与踩坑
 > 写进 `skills/legado-source-lessons`，这里只留一行指针；**已完成的事项从这里删掉**。
 >
-> **最近已修**（09-19 这批，细节看 `git log`，机制见 lessons §四十八～§五十一）：
-> 回放边界判定（简写/索引式/排除索引/XPath 一律 unknown，顺带修掉 JSON 下标取不到值
-> 的路由 bug）、`tocUrl` 按规则在详情页求值、**取值类规则末段语义**（290 条误放项）、
-> `HEALTH_ORDER` 补 CERT、**修复循环接登录墙**（evidence 用 `checker.is_login_wall`）、
-> **JVM 校验探针跑通**（零入侵挂载，App 仓库 `git status` 恒为空）、
-> **S2 完成**：JVM 校验接进设置与界面（selftest/run/results 三接口 + 「JVM 校验」
-> 页签 + 列表 JVM 列；response_model 裁字段坑二次踩中，形状测试已钉，lessons §二）、
-> **S4 完成**：健康档位 9 档 + 未校验收成 6 档（判据：下一步动作相同），
-> 存量迁移与组名换词一次做完（lessons §五十二）。
-> 更早的以 lessons 与 git 历史为准——这份清单只回答「这条是不是刚做过」。
+> **已完成**（09-19，细节看 `git log` 与路线图 ✅ 行，机制见 lessons §四十八～§五十四）：
+> S0 提交收尾、S1 JVM 搜索档全量（3774 条，环境缺口 0）、S2 接进产品（设置/自检/
+> 列表 JVM 列）、S4 健康档位六档重设计（存量迁移一次做完）、回放边界判定、
+> 死代码与文档清理。更早的以 lessons 与 git 历史为准。
 >
 > **已定决策：缓存不做向后兼容**（`CACHE_VERSION`）。它是纯派生数据，口径一变就整体
 > 作废；做兼容反而危险——旧缓存里的结论是旧逻辑的产物，混着用就是「修了等于没修」。
@@ -25,11 +19,10 @@
 
 | 阶段 | 做什么 | 依赖 | 完成判据 |
 |---|---|---|---|
-| **S0 收尾**（立刻） | 提交当前这批（改动文件 + `appservice/`）；`cd frontend && pnpm build` | —— | `git status` 干净、745 个测试绿、前端产物与源码一致 |
-| **S1 服务化·搜索档闭环** ✅（2026-09-19，剩全量跑） | ValidateService（收源 → searchBookAwait → 结论 NDJSON）+ Launcher（参数走 `appservice/args.properties`）；(a) 剥 webView 选项 ✅；(a2) 壳归因 ✅（empty_js_shell）；100 条验收：46 ok / 18 no_result / 35 error（归因细分见 lessons §五十二）/ 1 empty_js_shell；结论已写 meta（`jvm_check:<batch>:<url>`） | S0 | **✅ 全量已跑完（2026-09-19，17 分钟/3774 条，8 并发 + 3g 堆）**：ok 1324 / no_result 935 / error 1444（被墙重置 462、JS 失败 313、DNS 死亡 291、JSONPath 不符 152、超时 66、其他 220）/ timeout 61 / empty_js_shell 10；剥 webView 的 147 条里 16 条被救回 ok；**环境缺口 0** |
+| **S1 服务化·搜索档闭环** ✅（2026-09-19） | ValidateService（收源 → searchBookAwait → 结论 NDJSON）+ Launcher（参数走 `appservice/args.properties`）；(a) 剥 webView 选项 ✅；(a2) 壳归因 ✅（empty_js_shell） | S0 | **✅ 全量跑完**：3774 条 / 17 分钟 / 环境缺口 0；结论分布与归因细分见 lessons §五十三；剥 webView 救回 16 条 ok |
 | **S2 接进产品** ✅（2026-09-19） | 设置项（App 源码目录 + JDK/SDK/gradle-home 自动推导）+ **自检接口/按钮** + 前端页签 + **列表 JVM 阶梯列**（不写 checks——JVM 与本地回放是两条证据，meta `jvm_check:<batch>:<url>` 每源每 URL 取最新批次） | S1 | ✅ 界面上能配、能自检、列表上能看见 JVM 结论（tooltip 给命中率与批次） |
-| **S3 补深度** | 目录段 + 正文段（`getBookInfoAwait` → `getChapterListAwait` → `getContentAwait(needSave=false)`）；**(b) 浏览器桥**（复用本机 Edge/Chrome + CDP） | S2 | 全链路可跑；(b) 上线后那批 webView 源不再是盲区 |
-| **S4 清存量** ✅（2026-09-19） | Health 档位重设计 **+** 分类侧可行动性（**同一件事的两面，必须一起做**） | 可与 S3 并行 | **✅ 9 档 + 未校验 → 6 档**（ok/auth/gfw/cert/pending/dead，按「下一步动作」合并）；「未校验」降为派生筛选（`health=none`）；CACHE_VERSION 13；`checks` 旧值一次性映射 + 组名换词（`Store.migrate_health_tiers_once`）。**残留**：unknown 的产品出口、标签快照过期 → 见 §四 |
+| **S3 补深度** | 目录段 + 正文段 + **(b) 浏览器桥**——**动手计划见 §一点五**（分四批，每批独立可验） | S2 ✅ | 全链路可跑；(b) 上线后那批 webView 源不再是盲区 |
+| **S4 清存量** ✅（2026-09-19） | Health 档位重设计 + 分类侧可行动性（同一件事的两面，必须一起做） | 可与 S3 并行 | **✅ 9 档 + 未校验 → 6 档**（ok/auth/gfw/cert/pending/dead，判据：下一步动作相同）；「未校验」降为派生筛选（`health=none`）；CACHE_VERSION 13；存量映射 + 组名换词（lessons §五十二）。**残留**：unknown 的产品出口、标签快照过期 → 见 §四 |
 | **S5 按需** | 真机复检通道（只读那条先做）、本地回放的 `bookUrl` 作用域、体验类 P2 | —— | —— |
 
 > ⚠️ **CACHE_VERSION 合并 bump**：S3/S4/S5 里凡是翻转判定结论的改动，**做完一批
@@ -39,211 +32,99 @@
 
 ---
 
-## 一、JVM 校验服务（主线；下一个动手的就是它）
+## 一、JVM 校验服务（S1/S2 已落地；机制与环境坑全在 lessons §四十八～§五十三）
 
-**探针结论（2026-09-19，代码在本仓库 `appservice/`）：通了。**
-Robolectric 下对一条真源（天堂深圳，无 JS 的 CSS 源）调 `WebBook.searchBookAwait`
-**真实联网返回 8 本书**——App 的规则引擎在纯 JVM（无设备、无模拟器）里跑得起来。
+**现状**：搜索档全量已跑完（3774 条，结论分布与归因口径见 lessons §五十三）；
+设置/自检/跑批/列表阶梯列都在界面上（S2）。探针故事、零入侵挂载、环境一次性成本、
+四个工具链坑——**全部已在 lessons §四十八/§四十八点五，此处不再重复**。
 
-**要补的依赖尾巴 = 全部代价，实测只有三项**（探针是一路撞出来的，每次都记了）：
+**换机器 / 新用户上手清单**（操作性内容，唯一留档处）：
 
-| # | 缺口 | 补法 | 平台 |
-|---|---|---|---|
-| 1 | Koin 未启动（`AnalyzeUrl` 要 `DownloadCacheSettingsGateway`） | 测试里 `startKoin { modules(module { single<DownloadCacheSettingsGateway> { stub } }) }`——**纯数据类**（UA/线程数），约 5 行 | 全平台 |
-| 2 | `appCtx` 未初始化（`appDb`/`CacheManager` 依赖它） | `RuntimeEnvironment.getApplication().injectAsAppCtx()`——splitties 的**公开 API**，1 行 | 全平台 |
-| 3 | **9 处 assets 路径用 `File.separator` 拼接**（`DefaultData.kt` ×8、`DirectLinkUpload.kt` ×1）——JVM 跑在 Windows 时它是 `\`，而 `AssetManager` 只认 `/` | **已改成零入侵：测试侧 shadow 垫片**（`appservice/test/io/legado/app/probe/WindowsPathAssetManagerShadow.java`）——继承 Robolectric 的 `ShadowArscAssetManager14`，只把 `nativeOpenAsset` 等五个静态 native 的**路径归一成 `/`**，其余透传。**App 源码一行不动**。⚠️ 用 **Java** 写：该链路上拦的是静态 native 方法，Kotlin 覆盖不了静态方法（先试过 Kotlin 版，`Unresolved reference`）。**升级 Robolectric 时要一起看**：shadow 继承的类名（`ShadowArscAssetManager14`）随版本会变，失效时改用备用补丁 | **仅 Windows**（Linux 上本 shadow 无害） |
+    前置：App 仓库（github 本地克隆）+ JDK 21 + Android SDK + Gradle 缓存（同盘）
+    路径只填一个：设置 → 「JVM 校验」页签 → App 源码目录；JDK/SDK/gradle-home 自动推导
+    先点「自检」：四项全绿才能跑批（缺 SDK/Gradle 时首次编译十几分钟，是正常现象）
+    跑批形态：一次性调用（后端 subprocess 调 appservice/legado-gradle.bat，跑完退出）
 
-> **「不入侵阅读源码」已达成并验证（2026-09-19）**：App 仓库 `git status` **恒为空**
-> （无已跟踪改动、也无未跟踪文件）——我们的全部代码住在 `legado-source/appservice/`，
-> 由 init 脚本在构建时挂进去，App 仓库只被「读 + 构建」（唯一写入是它自己的
-> `build/`，本来就 gitignore）。跟上游同步零冲突。
+**来源阶梯与产品定位（已定，不再展开论证）**：
 
-**环境一次性成本（已在本机装好，记录备查）**：
+- 每源结论带来源阶梯：**本地回放 < JVM(App 引擎) < 真机(App + 真实环境)**；
+  JVM 结论存 meta（`jvm_check:<batch>:<url>`），**不写 checks**——与本地回放是
+  两条证据，混在一个字段里就分不出谁说的。
+- 三条通道各管一段：**校验/调试归 JVM**（调试那条它能交回 HTML，设备 WS 给不了）、
+  **真机只做复检**（登录墙 / WebView 依赖 / 用户网络出口，见 §二）。
+  设置抽屉的「App 连接」页签已改为复检通道占位。
 
-    JDK 17  D:\Program Files\Java\jdk-17          （sdkmanager 用）
-    JDK 21  D:\Program Files\Java\jdk-21.0.12.1+1 （Gradle daemon 要 21；清华 Adoptium 镜像）
-    SDK     D:\Android\Sdk                        （cmdline-tools + platforms;android-37.0
-                                                   + build-tools;37.0.0 + platform-tools）
-    Gradle  D:\.gradle                           （**GRADLE_USER_HOME 必须在 D 盘**）
+**S3 之后悬着的两个设计**（都不阻塞 S3，做真机通道或结论互通时再回来）：
 
-**我们的代码全在本仓库 `appservice/`，App 仓库里一个文件都没有（2026-09-19 达成）**：
+- **「没结果」二义性**：JVM 搜索对单关键词跑，某源没结果可能是「没这本书」——
+  缓解靠多词复核（全不命中才判坏），落地点在做 `no_result` 复核批次时。
+- **JVM 结论要不要反向喂给本地口径**（health/stars 的映射与来源标注）：
+  那是「结论互通」的事，S4 已把 health 侧收干净（六档），等 S3 三段结论稳定后再议，
+  **动本地口径才涉及 CACHE_VERSION**。
 
-    appservice/
-      legado-gradle.bat              启动器：设好四个环境变量 → pushd 进 App 仓库 → 调它的 gradlew
-      legado-test.init.gradle        init 脚本：把下面的源码/资源挂进 :app 的 test 编译
-      test/io/legado/app/WebBookProbeTest.kt
-      test/io/legado/app/probe/WindowsPathAssetManagerShadow.java
-      test/resources/probe_source.json
-      windows-assets-portability.patch   备用：9 行 File.separator→/（shadow 失效时才用）
+## 一点五、S3 动手计划（2026-09-19 定；下一个动手的就是它）
 
-    跑法（在 appservice 目录下，或写成绝对路径）：
-        legado-gradle.bat :app:testDebugUnitTest --tests io.legado.app.WebBookProbeTest
+**目标**：JVM 校验从「搜索档」扩到「目录 + 正文」全链路，并用本机浏览器把 JS 壳源
+从盲区里捞出来。**复用 S1/S2 的全部骨架**（ValidateService、launcher、args.properties、
+meta 落库、列表阶梯列）——S3 只往里加深度，不另起炉灶。
 
-    ✅ 已验证：`git status` 在 App 仓库里**恒为空**（无 M、无 ??），跑通探针返回 8 本书。
-    换机器只需改启动器里的 LEGADO_REPO / JAVA_HOME / GRADLE_USER_HOME / ANDROID_HOME。
+**四个上游接口已核过签名**（`WebBook.kt`，App 仓库当前版本）：
+`searchBookAwait(source, keyword)` → `getBookInfoAwait(source, book, canReName=true): Book`
+→ `getChapterListAwait(source, book, runPerJs=false): Result<List<BookChapter>>` →
+`getContentAwait(source, book, chapter, nextChapterUrl, needSave=false): String`。
+链路形态照抄 `Debug.kt` 的 `searchDebug → infoDebug → tocDebug → contentDebug`：
+**book 由搜索第一条结果来**（`toBook()`），`book.tocUrl` 由详情段填（空则回退 bookUrl），
+正文段的 `nextChapterUrl` 取目录第二条（Debug.kt:353 的口径）。**needSave 必须 false**
+——不落 App 数据库，与零入侵边界一致（`getContentAwait` 内部 `needSave=true` 会走
+`BookHelp` 落盘缓存）。
 
-**四个必须知道的坑（全部实测踩过）**：
+**分四批，每批独立可验、独立提交**：
 
-1. **`GRADLE_USER_HOME` 必须与项目同盘**。默认在 `C:\Users\<u>\.gradle` 时 KSP 报
-   `this and base files have different roots`（跨盘符无法相对化路径）——把整个
-   `.gradle` 移到 `D:\.gradle` 即解，与代码无关。
-2. **sdkmanager 自带的下载器会卡死**（实测卡在 16MB 不动），curl 直接拉包正常。
-   手动装法：下 `platform-37.0_r02.zip` + `build-tools_r37_windows.zip` 解压到
-   `platforms/android-37.0`、`build-tools/37.0.0` 即可（`source.properties` 自带）。
-3. **挂载外部源码只能用「编译任务 `.source(dir)`」，不能碰 `android.sourceSets`**：
-   后者会让 Gradle 的**测试发现**整个失效——连 App 自带的测试都报
-   「No tests found for given includes」。原因：测试识别依赖「类文件 ↔ 源码路径」的
-   相对映射，源码根一旦跑出项目根，映射就断。init 脚本里已按前者实现。
-4. **启动 App 仓库的构建必须让 CWD 就是仓库根**（`pushd` 进去），**不能用 `-p`**：
-   同理，`-p` 下 CWD 停在别处会让测试发现静默失效。另外从 git bash 调 `.bat` 时
-   **不要给 `--tests` 的值加引号**——MSYS 会把 `"` 转义成 `\"` 原样传进去，Gradle
-   收到的过滤串带反斜杠 → 同样报「No tests found」（在 cmd/PowerShell 里没这个问题）。
-
-**保真度分层（探针只验证了第一层，别当成全通）**：
-
-| 层 | 内容 | 状态 |
+| 批 | 做什么 | 验收判据 |
 |---|---|---|
-| 已验证 | 无 JS 的 CSS 源：`AnalyzeUrl` → okhttp → `BookList` 解析 | ✅ 返回 8 本书 |
-| 大概率可用 | `{{}}` 模板 / `@js:` 纯文本后处理（Rhino 在 JVM 已由仓库自带
-  `JsTest`/`RhinoContextEntryTest` 证明）；`java.ajax`（OkHttp 可实现） | 未实测 |
-| 存疑 | `cacheFile` / `androidId`（Robolectric 有 shadow，行为未必等价）；
-  `webView` / `startBrowserAwait`（要真浏览器，JVM 里结构性跑不了） | 未实测 |
+| **S3-1 目录段** | `validateOne` 加 `depth` 参数：`toc` 档在搜索 ok 后接 `getBookInfoAwait` + `getChapterListAwait`。结论加字段：`toc_count`（目录条数，过滤卷标）、`toc_complete`、`book_url`/`toc_url`（供调试）。**toc_complete 的 JVM 口径**：本地回放是「与参考表比对比例」（小说 ≥80%，`TOC_COMPLETE_THRESHOLD`）——JVM 拿到的是真实目录，没有「应有多少章」的参考，退化为**绝对下限**（≥10 章且首末章 url 非空）；两者口径不同，对比矛盾率时按此解读 | 100 条抽样（搜索档 ok 的源里随机）：目录段结论与本地回放的 `toc_complete` 矛盾率 < 15%；`--depth toc` 全量跑一遍无环境缺口 |
+| **S3-2 正文段** | `depth=content`：取目录第 1 章（`nextChapterUrl` 取第 2 章），`getContentAwait(needSave=false)`。结论加 `content_len`、`content_ok`。**判定复用 `core.quality.judge_content` 的口径**（非空即通过 + 形状嗅探）——但那是 Python 实现，JVM 侧按同样语义重写（≥200 字、无「章节错误」类特征词），**语义对齐、代码不共享**（跨 JVM/Python 没法直接 import，别假装能复用） | 同一 100 条抽样：正文段结论与本地回放 `content_ok` 矛盾率 < 15%；正文字符数分布合理（中位数 > 500） |
+| **S3-3 结论落库 + 界面** | meta 键升级为 `jvm_check:<batch>:<url>` 内含 `depth` 字段（**键格式不变**，读侧按 depth 取最深一条）；`/api/jvm/results` 与列表回填带 `jvm_toc`/`jvm_content`；列表 JVM 列 tooltip 显示「搜索✓ 目录 856 章 正文 ✓」；JvmSettingsPanel 加「探测深度」选择（枚举进 `settings_store.LIMITS`，AGENTS #8） | 界面上能选深度、能看见三段结论；`settings limits` 测试同步更新 |
+| **S3-4 浏览器桥 (b)** | **先做「检测」再做「渲染」**：① (a2) 的空壳判定从「特征词猜测」升级为「用浏览器渲染一次再判」——`empty_js_shell` 的源自动进浏览器复验，渲染后规则跑出内容 → 结论改 ok（带 `rendered: true` 标注）。⚠️ **壳判定需要页面 HTML，而 `searchBookAwait` 只回 BookList 不回页面**——复验路径要么直接 `AnalyzeUrl(searchUrl).getStrResponse()` 拿渲染后页面再喂 `AnalyzeRule`，要么走 shadow 后的完整链路（② 做完 ① 自动获得），动手时先确认取页面这条最短路径；② shadow `BackstageWebView.getStrResponse()`：拦截点在 `AnalyzeUrl.kt:440-470` 的两处 `BackstageWebView(` 构造（POST 与 GET 分支）——shadow 类转发给本机 Edge（`C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe` 已确认存在）起 CDP：`Page.navigate` → 等 load → `Runtime.evaluate('document.documentElement.outerHTML')` → 包成 `StrResponse`（构造它要先建 okhttp `Response`，`StrResponse.kt` 的 `raw` 字段是必填）。**专用 user-data-dir**（新 Chrome 安全加固），profile 可持久化放 cookie。**Edge 不可用时显式报 `browser_unavailable`**，不静默退回空壳判定 | 全量重跑后 `empty_js_shell` 从 11 条降到 ≤3 条（其余转 ok 或有结论的 error）；带 `rendered: true` 的源在 tooltip 里标注「浏览器渲染」；App 仓库 `git status` 恒为空 |
 
-**下一步（服务化，真做时按此动手）**：把 `WebBookProbeTest` 从「测试方法」变成
-「常驻 JVM 服务」——Ktor（仓库已在用）+ 一个 `/validate` 端点，收内联书源 JSON +
-关键词 → 依次调 `searchBookAwait` / `getBookInfoAwait` / `getChapterListAwait` /
-`getContentAwait(needSave = false)` → 返回我们设计的结论结构。放进 `app/src/test/`
-保持「**不改 App 源码**」的边界（已由 shadow 垫片证明可行，见上表第 3 行）。
+**关键约束（动手时重读）**：
 
-**为什么它是当前推荐（2026-09-19 定，含产品侧的取舍）**：
+- **零入侵边界不放松**：shadow 只在测试编译里挂（`@Config(shadows=[])` 加一行），
+  App 源码一行不动；跑完每批都验 App 仓库 `git status` 为空。
+- **结论带 stage、六态不新造、`needSave=false`、每源总预算**——机制与理由见
+  lessons §五十四，此处只留一句：目录/正文段失败落 `no_result`/`error`/`timeout`
+  带 `stage: "toc"/"content"`，不往 App 数据库写任何东西。
+- **CACHE_VERSION 不动**：JVM 结论在 meta，不在探测缓存；本地回放的缓存口径没变。
+  若之后本地回放也复用 JVM 的目录/正文结论，再议 bump。
+- **并发与超时沿用现有参数**：目录+正文比搜索慢 2-4 倍，全量跑之前先用 `--limit 200`
+  试跑估时。
+- **浏览器桥是最后一批**：它依赖 (a2) 的空壳名单当输入，且 CDP 会话管理（启动/复用/
+  崩溃回收）是新的失败面——单独一批，出问题不拖累前三批的结论。
 
-- **技术侧**：批量、无人值守、CI 可跑、不碰任何 App 数据、不需要设备；规则语义是
-  App 的（不是我们复刻的），失真只剩「环境差异」这一小截。
-- **产品侧（决定性理由）**：它是**唯一能当"功能"而不是"流程"的那条**。校验在界面上
-  就是一个按钮——点、等、看结果；而连真机那条要求「设备在同一局域网 + App 在跑 +
-  先备份后还原」，任何一环缺了，用户看到的是"工具坏了"，不是"这个源有问题"。
-  一个**随时能用**的校验器，比一个**绝对准确但设备在场才能用**的校验器更常被用，
-  而"常被用"决定数据是否新鲜、决定这个功能有没有价值。
-- **真机那条的定位（不是淘汰，是升级成"复检"）**：它有两个 JVM 给不了的东西——
-  ① **登录态**（`loginUrl` 491 条 / `enabledCookieJar` 2004 条）：JVM 无 cookie，
-  登录墙后的源一律判「需验证」，而那批源在用户的 App 里可能完全好用；
-  ② **真实阅读面**（书架加权健康度：我在读的书，源还好吗）——这是 JVM 结构上
-  拿不到的、也最贴近用户价值的一层。
-- **要落到数据模型上的**：每源结论带**来源阶梯**——`本地回放 < JVM(App 引擎) <
-  真机(App + 真实环境)`，与既有的 `measured / static` 是同一件事的延伸。界面按
-  这个阶梯展示，用户才知道该不该信、以及「要不要连手机复检一次」。
+**风险与预案**：
 
-**服务化与设置项（2026-09-19 定，✅ 已按此实现——S2）**：
-
-- **App 源码目录进全局设置**（`core/settings_store.DEFAULTS` 新增一个 section，前端经
-  `GET /api/settings` 读写；**不在前端硬编码、不写死在本仓库的脚本里**——现在的
-  `appservice/legado-gradle.bat` 里那几个路径是开发期的临时形态）。路径这类
-  「算不出来的状态」才让用户填（AGENTS #13）。
-- **但只能要一个路径，其余全部推导**：JDK 走 `JAVA_HOME` → 常见安装目录扫描；
-  Android SDK 走 `local.properties 的 sdk.dir` → `ANDROID_HOME` → 常见默认路径；
-  **Gradle 用户目录由仓库路径推导**（必须与仓库同盘，跨盘会触发 KSP 那个
-  `different roots` 的坑）——让用户填一个「必须与另一个字段同盘」的字段，
-  本身就是让手工维护一个能算出来的状态。
-- **必须有「自检」**（一个接口 + 一个按钮）：首次使用要下 SDK/Gradle、首次编译十几
-  分钟，用户必须能看见「缺什么、在装什么」。✅ 已做：`GET /api/jvm/selftest` +
-  前端自检按钮（App 仓库/JDK/Android SDK/Gradle 缓存四项）。
-- **形态先做一次性调用**（我们后端 subprocess 调服务，跑完退出），别一上来就做常驻：
-  常驻要管生命周期、端口、守护进程回收，等确实嫌慢（增量 ~15s/次）再说。✅ 即如此实现。
-
-**App 连接的定位修正（2026-09-19）：校验不再必需它，调试也不是它更好**：
-
-| | 谁主 | 理由 |
-|---|---|---|
-| 校验 | **JVM** | 语义是 App 的，且链路比设备那条短（无备份还原） |
-| 调试 / AI 修复 | **JVM**（新结论） | **JVM 能给 HTML，设备调试 WS 给不了**——`build_steps` 的 `matched_html` 恒为空串（lessons §五十一 已记），模型在设备那条路上是失明的；JVM 服务是我们自己写的，可以直接交回抓到的 HTML 与命中节点 |
-| 兜底复检 | **真机** | 三类只有它覆盖：① **登录墙**（loginUrl 491 / cookieJar 2004 / 判出 auth 1051——JVM 无 cookie，这批在用户手机上可能是好的）；② **WebView 依赖**（JVM 结构性跑不了）；③ **用户自己的网络出口**（IP / 代理 / DNS 与电脑可能不同） |
-
-→ 所以**不删 App 连接**，把它从「必经环节」降级为「复检通道」，并**顺手把那个悬着的
-设置页签做成它的配置页**（正好解掉 P2 里「要么实现要么撤承诺」那条）。
-
-**WebView 依赖：机制、规模与结论（2026-09-19 调研，全库 3774 在用源）**：
-
-**① 机制（读 `BackstageWebView.kt` 查清）**：WebView 只是**取数层**的替代品，不参与
-规则求值——接口收口在 **一个类、一个方法**（`BackstageWebView(...).getStrResponse()`）。
-缺省行为就一句话：**加载页面 → 执行 JS（默认 `document.documentElement.outerHTML`）
-→ 把渲染后的 DOM 当作响应体返回**，顺带把浏览器 cookie 写回 `CookieStore`。
-两个例外：`sourceRegex`/`overrideUrlRegex` 走嗅探模式（返回命中的**资源 URL**）；
-`isRule=true` 时会往页面里注入 `java.*` / `source` / `cache` 三个 JS 接口。
-
-**② 数量与真相（实测）**：
-
-| | 数 | 说明 |
-|---|---|---|
-| 触碰 WebView 的源 | **324（8.6%）** | `webView` 选项 224 / `startBrowser` 95 / `sourceRegex` 17（有重叠） |
-| 其中**自带页面 JS**（URL 选项 `"js"`） | **仅 3 条** | → **「要复刻 `java.*` 注入」的长尾几乎不存在**，替代只要「加载+取 DOM」 |
-| 其中 health=**ok**（真正在用的） | **102**（5★ 18 条） | 其余：auth 121 / timeout 61 / gfw 12 / dead 10 / error 2 —— 那些本来就不是 WebView 能救的 |
-
-**③ 反直觉的坑：JVM 服务照抄 App 代码，会比现在的本地校验**更差**。**
-本地校验（Python）**从来没实现 webView 语义**——URL 选项里的 `webView` 被解析后
-直接忽略，一律当普通 HTTP 请求。也就是说那 18 条 5★ **恰恰是「忽略 webView 之后
-仍然跑得通」的证明**（站点对普通客户端本来就返回可用 HTML）。而 JVM 服务跑的是
-App 的真代码，它会**忠实地**走 `BackstageWebView` → Robolectric 下是空实现 → 失败。
-
-→ **所以 `strip_webview_option`（剥掉该选项再跑）不是优化项，是必需的补偿项**：
-不做的话，JVM 服务上线第一天就会在这 102 条 ok 源上集体退步。
-报告里要**显式标注**「该源带 webView 标记，本次按普通 HTTP 验证」——现状是静默忽略，
-用户看到 5★ 不知道它是这么来的（与「把工具的能力边界说出来」是同一条原则）。
-
-**④ 四条解法与取舍**：
-
-| 解法 | 成本 | 何时用 |
-|---|---|---|
-| **(a) 剥掉选项**（默认开） | 0 | **先做这个**。证据表明大部分 webView 标记是冗余的 |
-| **(a2) JS 壳检测 → 判 `unknown`（不是 fail）** | 小 | **与 (a) 同批做，且不可省**：剥掉选项后若页面是 JS 壳，规则会跑出空 → 那是**误判成「源坏了」**，正是本项目反复修的「把工具的欠缺说成源的问题」。判据：拿到页面但正文/列表为空 + 命中 JS 壳特征（`noscript`/"enable javascript"/脚本挂载点）→ unknown。**它保证不管有多少条，都不会被冤枉** |
-| **(b) 浏览器桥**：shadow `BackstageWebView` → **驱动本机已装的 Edge/Chrome（CDP）** | **比原先估的低**：**不用下 Playwright 那 300MB Chromium**——用机器上已有的浏览器二进制（`--headless=new --remote-debugging-port=9222 --user-data-dir=<专用 profile>`），我们走 CDP：`Page.navigate` → `Runtime.evaluate('document.documentElement.outerHTML')`。因为只有 3 条源自带页面 JS，不需要注入 `java.*` 会话。⚠️ 新 Chrome 要求**非默认 user-data-dir** 才允许远程调试（安全加固），所以是专用 profile；好处是那个 profile 里可以放 cookie（对 121 条 auth 源有帮助） | **排期做，不再挂「等服务跑一遍看有多少条」这个条件**——理由见下 |
-| **(b′) 把渲染抛给「网页前端」的浏览器** | **不可行（已否决）** | 卡浏览器**同源策略**：`fetch` 跨域读不到响应体；`<iframe>` 跨域**会渲染、JS 也会执行，但 `contentDocument` 读不到**——渲染发生了，结果取不回来。这是安全边界，不是工程问题。唯一绕法是浏览器扩展（要用户安装 + 按浏览器维护），门槛比 (b) 高 | 不做 |
-| **(c) 真机兜底** | 已具备 | `startBrowserAwait` 那类（规则主动要浏览器：过挑战/拿 cookie）+ (b) 判定为真的 JS 壳 |
-
-> ⚠️ **为什么 (b) 不能再等「数据」**（2026-09-19 订正，此前的「先不做」是错的）：
-> ① **循环论证**——「还剩多少条真需要浏览器」这个数，**只有具备该能力之后才测得到**；
-> 用带着缺口的工具去量缺口，量到的永远是「没被挡住的那部分」。那「几十条」是我拍的，
-> 不是测的。
-> ② **缺口会自我固化**——进不了验证的源要么被误判成「坏了」（用户可能误删可用源），
-> 要么永远挂在「待验证」。这类源只会**累积**，没有任何机制让它自愈；而库是持续导入的
-> （社区源越来越常带 webView 过反爬），方向只会更糟。本库 `created_at` 全是同一个月
-> （一次批量导入），**趋势测不出来**，所以更不能拿快照当依据。
-> ③ 成本已降到「复用本机 Edge + 替换一个类」，为「这一类源不再进盲区」付这点成本是值的。
-> → 顺序：**(a) + (a2) 与服务化同批；(b) 排在服务化之后、作为独立一步**。
-
-**⑤ 「是不是空需求」的答案**：**不是空需求**。已确认至少有 18 条 5★ 靠「忽略
-webView」就能过（说明那批标记是冗余的），但**「真需要浏览器的还剩多少」这个数，
-只有具备该能力之后才测得出来**（见上面 ④ 的订正：拿带缺口的工具量缺口是循环论证）。
-所以结论不是「按今天的数决定做不做」，而是：**(a)+(a2) 立即做，(b) 排期做**——
-前者保证不冤枉，后者保证这一类源不再进盲区。
-
-**待设计**（与「四、Health 档位重设计」是同一件事，要一起做）：
-
-- 路一的**「没结果」二义性**：流里只推**新命中**，所以「某源没出现」既可能是源坏了、
-  也可能是它没这本书。缓解：多用几个词，某源全不命中才判坏。
-- **结论怎么进 `checks`**：App 的三态（通过/失效/超时）与我们现有的
-  `health`/`probe_depth`/`star_basis` 口径怎么映射、要不要记「结论来自 App」。
-  来源阶梯（本地回放 < JVM < 真机）也落在这里。
+| 风险 | 预案 |
+|---|---|
+| 目录段触发 `startBrowserAwait` 类规则（正文分页常带 JS） | S3-1/2 先不接浏览器，这类源落 `empty_js_shell`（stage: toc/content），等 S3-4 兜住——**不冤枉优先于验完** |
+| 正文段某些源要下载图片/分页 N 次，单源拖全场 | `content` 档只验第 1 章 + `nextChapterUrl` 探测；`withTimeout` 是硬上限，超时落 `timeout`（stage: content） |
+| CDP 端口冲突 / Edge 被占用 | 每批起独立端口（9223 起递增）+ 专用 profile；进程退出时 `taskkill` 兜底回收 |
+| 渲染后仍空（真死源 vs 需要交互） | 渲染后规则仍跑不出 → 维持 `empty_js_shell` 但加 `rendered: true` 标注，与「没渲染过」区分——这批归 (c) 真机兜底 |
 
 
 ## 二、真机复检通道（原「让 App 承担校验」的归宿）
 
-**定位（2026-09-19）**：不再是校验主力——**主线是 JVM 服务**（见上）。真机只在
-下面三类上不可替代，所以保留为**用户主动触发的「复检」**：
+**定位（2026-09-19）**：不再是校验主力——**主线是 JVM 服务**。真机只在三类上
+不可替代，保留为**用户主动触发的「复检」**：① **登录墙**（`loginUrl` 491 /
+`enabledCookieJar` 2004 / 判出 auth 1051——JVM 无 cookie，这批在手机上往往好用）；
+② **WebView 依赖**（JVM 结构性缺浏览器，S3-4 浏览器桥能兜一部分）；③ **用户自己的
+网络出口**（IP / 代理 / DNS 与电脑不同）。
 
-1. **登录墙**：库里 `loginUrl` 491 条 / `enabledCookieJar` 2004 条、校验判出 `auth` 1051 条。
-   JVM 无 cookie，这批在电脑上一律「需验证」，而在用户手机上往往好用——这个偏差最伤信任。
-2. **WebView 依赖**：JVM 结构性缺浏览器（见「JVM 校验服务」里的 (b)）。
-3. **用户自己的网络出口**：IP / 代理 / DNS 与电脑可能不同。
+**回推 vs 收割**：**优先做只读的那条**——`WS /searchBook` 搜 App 自己的库 + 读回
+App 自带的校验结果，**一行 App 数据都不写**。回推（备份 → `/saveBookSources` 推 →
+推回备份）唯一的真损失是「同 URL 两边版本不同」，设备兼职日常使用才保留。
+接口能力清单、实测数据形状、备份/还原判据——**全在 lessons §五十一**。
 
-**回推 vs 收割**：设备侧有两条可做的事，**优先做只读的那条**。
-- **只读（推荐先做）**：`WS /searchBook` 搜 App 自己的库 + 读回 App 自带的校验结果
-  （分组标签 / `respondTime` / `// Error:`），**一行 App 数据都不写**；参数与实测数据见
-  lessons §五十一。
-- **回推（要写 App 数据）**：`/getBookSources` 备份 → `/saveBookSources` 推我们的源 →
-  跑 → 推回备份。REPLACE 按 `bookSourceUrl` 精确匹配，**唯一的真损失是「同 URL 两边版本
-  不同」**（推送覆盖掉 App 侧的修改）。设备兼职日常使用就保留这套；纯测试机可省。
-
-**怎么做一次复检**（脚本已删，步骤留在这里；协议细节与实测数据见 lessons §五十一）：
+**怎么做一次复检**（脚本已删，步骤留档；协议细节见 lessons §五十一）：
 
 1. 设备与电脑同网段，App 开 Web 服务（HTTP 1122 / WS 1123）；**先 `GET /getBookSources`
    备份落盘**——回推路线靠它还原。
@@ -254,7 +135,6 @@ webView」就能过（说明那批标记是冗余的），但**「真需要浏�
    重建分组**（分组是它的地盘）。
 4. 回推路线额外两步：`POST /saveBookSources` 推我们的源 → 跑完推回备份 →
    `GET /getBookSources` 与第 1 步对拍。
-5. 从 git bash 调 `.bat` 时别给 `--tests` 的值加引号；`.bat` 必须全 CRLF（见 lessons §四十八）。
 
 **判定**：真机结论的**证据等级最高**（真引擎 + 真环境 + 真 cookie），落 `checks` 时要
 按来源阶梯标注（本地回放 < JVM < 真机），别和另外两条混成一个数。
@@ -318,7 +198,7 @@ dead 173 / gfw 98 / error 61 —— 而 **cert 0、no_search 0、skipped ≈0**�
 
 </details>
 - **unknown 缺产品出口**：界面上只有解释文案，没有转化动作（如「连 App 验一次」）——
-  与下面「App 连接」页签那条是同一件事的两面。
+  归宿是真机复检通道（§二，S5）。
 - **标签是快照，导入即开始过期**：写进 App 的分组标签是校验瞬间的结论，App 侧
   无刷新通道；叠加 ok 档 14 天 TTL，最坏差两周以上。要动它属于大改（反向同步
   通道），先记录不排期。
@@ -359,100 +239,26 @@ lessons §三十四；「明确不做」的五条也在那一节（不自动合�
   （改一个数字的事，但得先定 N 定多大、以及它带来的库增长），见 lessons §二十八
 - `TrashDrawer` 的批量恢复对齐同一套 URL 语义（它仍是页级勾选 + 行对象，
   与列表页 `ec93ad4` 之后的 URL 语义不一致）
-
----
-
-方向可行，但有个前提：**试跑的是表单里当前的规则**，未保存时 `fingerprint` 与库里
-不一致，缓存写了也用不上（`is_cache_item_valid` 要比 fingerprint）。所以只对
-**已保存的源**有意义。口径上没问题——项目已做「判定收拢到 `core.quality`」。
-时效已有：`cache_ttl_ok`(14天) / `cache_ttl_other`(7天) / `cache_ttl_auth`(1天)，
-**都已在设置里可改**
-（键在 `core/settings_store.DEFAULTS["check"]`；这里不写行号——它每轮都漂）。
-
----
+- **调试抽屉的「试跑规则」只对已保存的源有意义**：试跑用的是表单里当前的规则，
+  未保存时 `fingerprint` 与库里不一致，缓存写了也用不上（`is_cache_item_valid`
+  要比 fingerprint）。时效已可改（`cache_ttl_*` 在设置里）——这条只是边界说明，
+  不是缺陷。
 
 
 ## 七、需先调研（**不要直接动手**）
 
+两块调研证据与实测数据都在 lessons §五十五，这里只留动作与卡点：
 
-> 顺着「取值类末段语义」那条（已修）发现的，先记在这里：
-> `infer_type_static` 里 `declared == 2 → manga +1`、`declared == 0 → novel +1`
-> （reclassify.py 打分段）——**被审对象给自己投票**：声明的类型正是要被推翻的
-> 结论，却参与计分。权重低、方向上多数时候无害，但与 AGENTS #11「判定输入不能是
-> 我们自己写进去的结论」有张力。调研换判据时应顺手拿掉，不必单独立项。
+**调研一：类型判定补齐**——`infer_type_static` 判不出音频/下载源（出口只有 2/0/-1），
+真正的解法是 `book.isWebFile`（`downloadUrls` 决定），但实测库里带它的 **0 条**。
+**先摸清 3861 条里有哪些能定案的结构信号，再谈判据换不换**；在那之前不要动出口
+（没有信号就加出口 = 把「猜域名」换成「猜别的东西」）。换判据时顺手拿掉
+「被审对象给自己投票」（declared 参与计分，AGENTS #11）。
+`reclassify --write` 在那之前仍只能在 0/2 之间翻转。
 
-现状的六个问题：
-
-| # | 问题 | 位置 |
-|---|---|---|
-| ① | **数学上判不出 1（音频）和 3（下载源）**——`infer_type_static` 只有 `2`/`0`/`-1` 三个出口 | `core/reclassify.py:121-127` |
-| ④ | 已声明的 1 / 3 被完全无视——只处理 `declared == 2` 和 `declared == 0` | `core/reclassify.py:116-120` |
-| ⑤ | `-1`（证据不足）的语义是「保持原样」，而多数源本来就是默认 `0` → **"保持原样"就是保持错误**；且没有任何路径能产出 `4`（❓未知） | `core/reclassify.py:127` |
-| ⑥ | 根本问题：`bookSourceType` 决定的是**阅读器走哪条渲染路径**（`BookSourceType.kt` 的 `@IntDef` + `BookSourceExtensions.getBookType()`），而现有判据全是「域名/名称像什么」——**用内容线索猜渲染路径** | `core/reclassify.py:34-50` |
-
-要做的两件事（**都需先调研**）：
-
-| # | 推迟项 | 依据 | 卡在哪 |
-|---|---|---|---|
-| 1 | 补齐音频 / 下载源的静态出口 | ①④⑤ | 要产出 `1`/`3` 得先有信号 |
-| 2 | 判据从「域名/名称」改为「**规则形状**」 | ⑥ | 同上，且见下面的实测 |
-
-**第 2 项才是真正的解法**，思路是对齐 Legado 的 `Debug.kt:329-332`——用
-`book.isWebFile`（由 `downloadUrls` 存在决定，`BookExtensions.kt:94`）判下载源，
-**不是猜的**。
-
-> ⚠️ **但这条思路现在搬不过来**：实测**管理库**（3861 条，2026-09-17 复测）里，
-> **带 `downloadUrls` 的是 0 条**。（`data/candidates.json` 仍在，23MB——旧说法
-> 说它已不存在，是错的；但类型判定的取样已统一到管理库，别再拿 JSON 当样本。）
-> 所以两项都必须**先做一次调研**：摸清 3861 条里到底存在哪些**能定案**的结构信号，
-> 再谈判据换不换。
-> **在此之前不要动 `infer_type_static` 的出口**——没有信号就加出口，只会把
-> 「猜域名」换成「猜别的东西」。
-
-`reclassify --write` 在那之前仍只能在 `0` / `2` 之间翻转。
-推迟的代价：`organizer.group_title` 与 `store._system_group_for` 都用
-`BOOK_SOURCE_TYPE_NAMES` 生成类型标签，所以类型判定不补齐，App 里的类型分类就会
-一直带着 ①④⑤ 的偏差。当时提供的是「人主动纠正单条源」的通道，不是批量修正。
-
-
-
-App 用它们改写正文（去广告、拼副文、二次解密图片），**我们一条都不用**——
-这比 `webView` 更直接地构成「同源不同判」。
-
-**2026-09-16 逐个核过源码，全部在用**（引用补全）：
-
-| 字段 | App 在哪用 | 干什么 |
-|---|---|---|
-| `replaceRegex` | `BookContent.kt:190` | 正文替换 |
-| `subContent` | `BookContent.kt:144` | 副文规则，拼在正文后（或取歌词） |
-| `nextContentUrl` | `BookContent.kt:254` | 下一页（**这个我们已建模**） |
-| `sourceRegex` | `WebBook.kt:430` → `AnalyzeUrl.kt` | 页面源码正则（WebView 分支） |
-| `callBackJs` | `SourceCallBack.kt:53,92` | 事件回调 JS |
-| `payAction` | `MangaReaderActionRepository.kt:237-244` | 漫画购买操作（evalJS） |
-| `imageDecode` | `BookHelp.kt:367-389` | 图片 bytes 二次解密 |
-
-**实测使用率**（2026-09-16，全库 3861 条）：
-
-| 字段 | 非空 | 说明 |
-|---|---|---|
-| **`replaceRegex`** | **1024 条（26.5%）** | App 在正文提取**之后**做全文替换：`analyzeRule.getString(replaceRegex, contentStr)`（`BookContent.kt:191`），走的是**规则引擎**不是裸正则 |
-| `title` | 41（1.1%） | 有些站只能在正文里取标题 |
-| `sourceRegex` | 19（0.5%） | 键出现 667 次，绝大多数是空串 |
-| `payAction` | 13（0.3%） | |
-| `imageDecode` | 11（0.3%） | |
-| `callBackJs` | 1 | |
-| `subContent` | **0** | |
-
-**优先看 `replaceRegex`**：26.5% 的覆盖面，但**风险方向单一**——我们判「非空即通过」，
-只有「替换后变空」才会构成误放（替换多是去广告，正文仍在）。所以大概率是
-**低风险、高覆盖**，值得评估但不必恐慌。其余几个都是个位数，按需。
-
-**未评估前不要动手。**
-
----
-
-> **已明确不做的项**（附当时砍掉的理由）在 `skills/legado-source-lessons` §二十六——
-> 那是**决策记录**，不是待办。放这里会和「还没做」混成一片。
+**调研二：正文后处理字段**（`replaceRegex` 26.5% 覆盖、其余个位数）——
+App 用、我们不用，构成「同源不同判」。`replaceRegex` 风险方向单一（替换后变空
+才误放），低风险高覆盖。**未评估前不要动手**。
 
 ---
 

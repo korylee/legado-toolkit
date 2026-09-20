@@ -87,14 +87,13 @@ from core.constants import DEFAULT_UA
 # 出现要好。
 # 12：本地回放的能力边界补了两类写法（`text.` / `children.` 简写、方括号索引式
 # `[-1]` / `[0]` / `[1,3]` / `[!0]`）。它们此前被判成「解析为空」＝**源失效**，
-# 现在一律 unknown（无法离线回放）。判定变了，旧缓存里的 toc/content 结论作废。
+# 现在一律 unknown（无法离线回放）；同批还修了取值类末段语义（对齐 getResultLast）
+# 与 tocUrl 进探针。判定变了，旧缓存里的 toc/content 结论作废。
 # 13：健康档位收成六档——timeout / error / no_search / skipped 并入 pending
 # （「待验证」），判据是下一步动作相同；AUTH / GFW 的标签改名「需登录 / 需翻墙」。
 # 结论词表变了：旧缓存里的 health 是旧词表的产物，必须整体作废（checks 表的
 # 历史值由 Store.migrate_health_tiers_once 一次性映射——纯子集合并、观测不变；
 # 缓存这边直接重探，重跑是已知代价）。
-# 12：回放边界判定——跑不了的写法显式 unknown、末段语义对齐 getResultLast、
-# tocUrl 进探针（旧缓存大量 fail 是冤枉，整体作废）。
 CACHE_VERSION = 13
 
 #: 缓存有效期（天）：可用源留久一点，其余状态一律短 TTL——「待验证」「需翻墙」
