@@ -120,12 +120,20 @@ def _export_sources_file(st) -> Path:
 
 
 def _run_gradle(timeout_min: int = 90) -> int:
-    """调启动器跑批（阻塞直到 Gradle 退出）。返回退出码。"""
+    """调启动器跑批（阻塞直到 Gradle 退出）。返回退出码。
+
+    **顺手刷新 dump**（与 `core.jvm_debug._run_launcher` 同一条不变式）：Gradle 一定会先
+    编译，所以它跑完之后「dump 比 .kt 新」= 「这份类是新编译的」——调试那条常驻链
+    （`core.jvm_debug.default_launcher`）就是靠这个判据决定敢不敢用常驻进程。
+    少了这一步，跑完一次批也会让常驻被「类可能是旧的」挡在外面。
+    """
     exe = _launcher()
+    env = {**os.environ,
+           "LEGADO_TEST_JVM_ENV_OUT": str(data_dir() / "app_probe" / "test_jvm_env.json")}
     proc = subprocess.run(
         ["cmd", "/c", str(exe), ":app:testAppDebugUnitTest",
          "--tests", "io.legado.app.service.ValidateServiceLauncher", "--rerun"],
-        cwd=str(_AGSVC), capture_output=True, text=True,
+        cwd=str(_AGSVC), env=env, capture_output=True, text=True,
         timeout=timeout_min * 60, errors="replace",
     )
     return proc.returncode
@@ -174,37 +182,47 @@ async def jvm_run():
     if not st_conf["ok"]:
         return {"started": False, "selftest": st_conf}
 
-    st = Store()
-    src_file = _export_sources_file(st)
-    st.close()
-    limit = int(conf.get("limit", 0) or 0)
-    if limit > 0:
-        data = json.loads(src_file.read_text(encoding="utf-8"))[:limit]
-        src_file.write_text(json.dumps(data, ensure_ascii=False),
-                            encoding="utf-8", newline="\n")
-    # 绝对路径的理由同 _export_sources_file：这个路径是给**另一个进程**（CWD = App
-    # 仓库根）用的，相对路径会落到 App 仓库里去
-    out_path = data_dir() / "app_probe" / "jvm_results.jsonl"
-    if out_path.exists():
-        out_path.unlink()
-    _write_args(conf.get("keyword", "我"), int(conf.get("timeout", 25)),
-                int(conf.get("concurrency", 8)), limit, out_path, src_file,
-                str(conf.get("depth", "search")))
+    # **与调试共用一把锁**（`core.jvm_debug.RUN_LOCK`）：跑批与调试都写
+    # `appservice/args.properties`、都 `--rerun` 同一个 Gradle 任务，同时跑会互相踩
+    # （参数被改写、两个 Gradle 抢同一份构建产物），而那种失败看起来像「JVM 坏了」。
+    # 非阻塞拿不到就直说，不排队——跑批本身十几分钟，排队会把界面卡死。
+    from core.jvm_debug import BUSY_REASON, RUN_LOCK
+    if not RUN_LOCK.acquire(blocking=False):
+        return {"started": False, "reason": BUSY_REASON}
+    try:
+        st = Store()
+        src_file = _export_sources_file(st)
+        st.close()
+        limit = int(conf.get("limit", 0) or 0)
+        if limit > 0:
+            data = json.loads(src_file.read_text(encoding="utf-8"))[:limit]
+            src_file.write_text(json.dumps(data, ensure_ascii=False),
+                                encoding="utf-8", newline="\n")
+        # 绝对路径的理由同 _export_sources_file：这个路径是给**另一个进程**
+        # （CWD = App 仓库根）用的，相对路径会落到 App 仓库里去
+        out_path = data_dir() / "app_probe" / "jvm_results.jsonl"
+        if out_path.exists():
+            out_path.unlink()
+        _write_args(conf.get("keyword", "我"), int(conf.get("timeout", 25)),
+                    int(conf.get("concurrency", 8)), limit, out_path, src_file,
+                    str(conf.get("depth", "search")))
 
-    def _blocking() -> Dict[str, Any]:
-        code = _run_gradle()
-        if not out_path.exists():
-            return {"started": True, "ok": False, "exit": code,
-                    "reason": "启动器没有产出结果文件（看 Gradle 输出定位）"}
-        rows = _read_results(out_path)
-        batch = _write_meta(rows)
-        dist = Counter(r.get("state") for r in rows)
-        return {"started": True, "ok": code == 0, "exit": code, "batch": batch,
-                "count": len(rows), "dist": dict(dist)}
+        def _blocking() -> Dict[str, Any]:
+            code = _run_gradle()
+            if not out_path.exists():
+                return {"started": True, "ok": False, "exit": code,
+                        "reason": "启动器没有产出结果文件（看 Gradle 输出定位）"}
+            rows = _read_results(out_path)
+            batch = _write_meta(rows)
+            dist = Counter(r.get("state") for r in rows)
+            return {"started": True, "ok": code == 0, "exit": code, "batch": batch,
+                    "count": len(rows), "dist": dict(dist)}
 
-    # FastAPI 的线程池里跑，不卡事件循环（全量 17 分钟，HTTP 超时是客户端的事）
-    result = await run_in_threadpool(_blocking)
-    return result
+        # FastAPI 的线程池里跑，不卡事件循环（全量 17 分钟，HTTP 超时是客户端的事）
+        return await run_in_threadpool(_blocking)
+    finally:
+        # `threading.Lock` 不绑持有者，跨线程释放是合法的（跑在哪个线程都归还）
+        RUN_LOCK.release()
 
 
 @router.get("/results")

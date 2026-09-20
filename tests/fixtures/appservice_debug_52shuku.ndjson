@@ -1,0 +1,69 @@
+{"kind":"Message","elapsed_ms":20,"text":"[00:00.020] ⇒开始搜索关键字:斗破苍穹"}
+{"kind":"Message","elapsed_ms":21,"text":"[00:00.021] ︾开始解析搜索页"}
+{"kind":"Message","elapsed_ms":9926,"text":"[00:09.926] ≡获取成功:https://www.52shuku.net/so/search.php?q=斗破苍穹"}
+{"kind":"Message","elapsed_ms":9935,"text":"[00:09.935] ┌获取书籍列表"}
+{"kind":"Message","elapsed_ms":10089,"text":"[00:10.089] └列表大小:7"}
+{"kind":"Message","elapsed_ms":10095,"text":"[00:10.095] ┌获取书名"}
+{"kind":"Message","elapsed_ms":10117,"text":"[00:10.117] └斗破苍穹前传之药老传奇_天蚕土豆【完结】"}
+{"kind":"Message","elapsed_ms":10117,"text":"[00:10.117] ┌获取作者"}
+{"kind":"Message","elapsed_ms":10118,"text":"[00:10.118] └"}
+{"kind":"Message","elapsed_ms":10118,"text":"[00:10.118] ┌获取分类"}
+{"kind":"Message","elapsed_ms":10118,"text":"[00:10.118] └武侠玄幻"}
+{"kind":"Message","elapsed_ms":10118,"text":"[00:10.118] ┌获取字数"}
+{"kind":"Message","elapsed_ms":10120,"text":"[00:10.120] └"}
+{"kind":"Message","elapsed_ms":10120,"text":"[00:10.120] ┌获取最新章节"}
+{"kind":"Message","elapsed_ms":10120,"text":"[00:10.120] └"}
+{"kind":"Message","elapsed_ms":10120,"text":"[00:10.120] ┌获取简介"}
+{"kind":"Message","elapsed_ms":10124,"text":"[00:10.124] └　　《斗破苍穹前传之药老传奇》作者：天蚕土豆【完结】　　《斗破苍穹前传之药老传奇》是《斗破苍穹》的前传 。　　本书介绍了： 坐落于斗气大陆边缘的药族相传是由远古药族斗 (所属栏目：武侠玄幻 获赞：2762 )"}
+{"kind":"Message","elapsed_ms":10124,"text":"[00:10.124] ┌获取封面链接"}
+{"kind":"Message","elapsed_ms":10124,"text":"[00:10.124] └"}
+{"kind":"Message","elapsed_ms":10124,"text":"[00:10.124] ┌获取详情页链接"}
+{"kind":"Message","elapsed_ms":10124,"text":"[00:10.124] └https://www.52shuku.net/wuxia/hqOD.html"}
+{"kind":"Message","elapsed_ms":10157,"text":"[00:10.157] ◇书籍总数:7"}
+{"kind":"Message","elapsed_ms":10163,"text":"[00:10.163] ︽搜索页解析完成"}
+{"kind":"Message","elapsed_ms":10163,"text":""}
+{"kind":"Message","elapsed_ms":10166,"text":"[00:10.166] ︾开始解析详情页"}
+{"kind":"Message","elapsed_ms":10743,"text":"[00:10.743] ≡获取成功:https://www.52shuku.net/wuxia/hqOD.html"}
+{"kind":"Message","elapsed_ms":10743,"text":"[00:10.743] ┌获取书名"}
+{"kind":"Message","elapsed_ms":10760,"text":"[00:10.760] └斗破苍穹前传之药老传奇_天蚕土豆【完结】"}
+{"kind":"Message","elapsed_ms":10760,"text":"[00:10.760] ┌获取作者"}
+{"kind":"Message","elapsed_ms":10760,"text":"[00:10.760] └"}
+{"kind":"Message","elapsed_ms":10760,"text":"[00:10.760] ┌获取分类"}
+{"kind":"Message","elapsed_ms":10764,"text":"[00:10.764] └"}
+{"kind":"Message","elapsed_ms":10764,"text":"[00:10.764] ┌获取字数"}
+{"kind":"Message","elapsed_ms":10764,"text":"[00:10.764] └"}
+{"kind":"Message","elapsed_ms":10764,"text":"[00:10.764] ┌获取最新章节"}
+{"kind":"Message","elapsed_ms":10764,"text":"[00:10.764] └"}
+{"kind":"Message","elapsed_ms":10764,"text":"[00:10.764] ┌获取简介"}
+{"kind":"Message","elapsed_ms":10766,"text":"[00:10.766] └《斗破苍穹前传之药老传奇》作者：天蚕土豆【完结】　　《斗破苍穹前传之药老传奇》是《斗破苍穹》的前传 。　　本书介绍了： 坐落于斗气大陆边缘的药族相传是由远古药族斗"}
+{"kind":"Message","elapsed_ms":10766,"text":"[00:10.766] ┌获取封面链接"}
+{"kind":"Message","elapsed_ms":10766,"text":"[00:10.766] └"}
+{"kind":"Message","elapsed_ms":10766,"text":"[00:10.766] ┌获取目录链接"}
+{"kind":"Message","elapsed_ms":10766,"text":"[00:10.766] └https://www.52shuku.net/wuxia/hqOD.html"}
+{"kind":"Message","elapsed_ms":10774,"text":"[00:10.774] ︽详情页解析完成"}
+{"kind":"Message","elapsed_ms":10774,"text":""}
+{"kind":"Message","elapsed_ms":10774,"text":"[00:10.774] ︾开始解析目录页"}
+{"kind":"Message","elapsed_ms":10782,"text":"[00:10.782] ≡获取成功:https://www.52shuku.net/wuxia/hqOD.html"}
+{"kind":"Message","elapsed_ms":10783,"text":"[00:10.783] ┌获取目录列表"}
+{"kind":"Message","elapsed_ms":10791,"text":"[00:10.791] └列表大小:126"}
+{"kind":"Message","elapsed_ms":10791,"text":"[00:10.791] ┌解析目录列表"}
+{"kind":"Message","elapsed_ms":10820,"text":"[00:10.820] └目录列表解析完成"}
+{"kind":"Message","elapsed_ms":10821,"text":"[00:10.821] ≡首章信息"}
+{"kind":"Message","elapsed_ms":10822,"text":"[00:10.822] ◇章节名称:第1页"}
+{"kind":"Message","elapsed_ms":10822,"text":"[00:10.822] ◇章节链接:https://www.52shuku.net/wuxia/hqOD_2.html"}
+{"kind":"Message","elapsed_ms":10822,"text":"[00:10.822] ◇章节信息:"}
+{"kind":"Message","elapsed_ms":10822,"text":"[00:10.822] ◇是否VIP:false"}
+{"kind":"Message","elapsed_ms":10822,"text":"[00:10.822] ◇是否购买:false"}
+{"kind":"Message","elapsed_ms":10824,"text":"[00:10.824] ◇目录总数:126"}
+{"kind":"Message","elapsed_ms":10851,"text":"[00:10.851] ︽目录页解析完成"}
+{"kind":"Message","elapsed_ms":10851,"text":""}
+{"kind":"Message","elapsed_ms":10851,"text":"[00:10.851] ︾开始解析正文页"}
+{"kind":"Message","elapsed_ms":12735,"text":"[00:12.735] ≡获取成功:https://www.52shuku.net/wuxia/hqOD_2.html"}
+{"kind":"Message","elapsed_ms":12743,"text":"[00:12.743] ┌获取正文下一页链接"}
+{"kind":"Message","elapsed_ms":12751,"text":"[00:12.751] └https://www.52shuku.net/wuxia/hqOD_3.html"}
+{"kind":"Message","elapsed_ms":12752,"text":"[00:12.752] ◇本章总页数:1"}
+{"kind":"Message","elapsed_ms":12752,"text":"[00:12.752] ┌获取章节名称"}
+{"kind":"Message","elapsed_ms":12753,"text":"[00:12.753] └第1页"}
+{"kind":"Message","elapsed_ms":12753,"text":"[00:12.753] ┌获取正文内容"}
+{"kind":"Message","elapsed_ms":12753,"text":"[00:12.753] └\n"}
+{"kind":"Error","elapsed_ms":12781,"text":"[00:12.781] io.legado.app.exception.ContentEmptyException: 内容为空\r\n\tat _COROUTINE._BOUNDARY._(CoroutineDebugging.kt:42)\r\n\tat io.legado.app.help.coroutine.Coroutine$executeInternal$1.invokeSuspend(Coroutine.kt:267)\r\nCaused by: io.legado.app.exception.ContentEmptyException: 内容为空\r\n"}

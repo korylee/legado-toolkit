@@ -162,6 +162,12 @@ async function doRun() {
                                limit: conf.limit, depth: conf.depth } });
     const r = await jvmRun();
     if (!r.started) {
+      // 没起来的两种原因要分开说：另一个 JVM 任务在跑（带 reason）、自检没过（带 selftest）。
+      // 都说成「自检未通过」会把原因指反——用户会去查环境，而其实只要等对方跑完。
+      if (r.reason) {
+        ElMessage.warning(r.reason);
+        return;
+      }
       selftest.value = r.selftest;
       ElMessage.warning("自检未通过，不能开跑");
       return;

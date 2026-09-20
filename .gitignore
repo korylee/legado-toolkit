@@ -11,6 +11,10 @@ auto_added.json
 shareBookSource*.json
 book_sources.sqlite3
 *.ndjson
+# 例外：**测试夹具**不是运行时数据。`test_jvm_debug*.py` 拿一份真实产出的 NDJSON
+# 钉两侧同构（Kotlin 落盘 ↔ Python 解析），它必须随仓库走——否则干净检出下那 15 条
+# 全红，而「同构」这条唯一的钉子在任何别的机器上都不存在（本机绿只是因为文件恰好在）。
+!tests/fixtures/*.ndjson
 index.json
 
 # ---- Python ----

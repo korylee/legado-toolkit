@@ -2038,8 +2038,16 @@ JVM 里每段的真实 HTML 交回来（那是第三期 `matched_html` 回填）
 （参数被改写、两个 Gradle 抢同一份构建产物），而那种失败看起来像「JVM 坏了」。
 
 做法：`core/jvm_debug.RUN_LOCK` 一把锁，**非阻塞获取**——拿不到就直接返回一句
-「另一个 JVM 任务在跑，等它跑完再来」。**不排队**：排队会让界面上的一张卡片转十几分钟
-（跑批 17 分钟），那比一句实话糟得多。跑批那条路之后也应接同一把锁。
+「另一个 JVM 任务在跑，等它跑完再来」（那句话收成 `BUSY_REASON` 一处，两处各写一份
+就会在界面上长得不一样）。**不排队**：排队会让界面上的一张卡片转十几分钟
+（跑批 17 分钟），那比一句实话糟得多。
+
+**跑批那条路在同一天也接了同一把锁**：`backend/api/jvm.py` 非阻塞 acquire，
+拿不到回 `{started:false, reason}`（前端据此分支——原先所有 `!started` 都说
+「自检未通过」，会把「等对方跑完」说成「去查环境」）。两侧各有一条接线测试：
+调试侧在 `tests/test_jvm_debug.py`，跑批侧 `tests/test_jvm_run_lock.py`
+（含一条最容易犯的错：**忙时不许误释放别人的锁**——误释放一次之后「忙」就再也
+挡不住并发了）。
 
 ### 坑二（顺带修）：界面上「程序先挑」的基准会**自证循环**
 
@@ -2072,3 +2080,179 @@ JVM 里每段的真实 HTML 交回来（那是第三期 `matched_html` 回填）
 截图留在 `data/app_probe/gui-shots/t1_jvm_debug_result.png`。
 
 → 无新增 AGENTS 级规矩：坑一是这一层的实现细节，坑二/坑三分别落在 #10/#18 的既有要求里。
+
+## 六十五、D0：不起 Gradle 直起一次调试 —— 入场费 **10.7s**，而 configuration cache 会静默吃掉构建脚本里的 dump（2026-09-20）
+
+**要解决的问题**：第二期常驻 daemon 值不值，取决于「拉起这一步到底多少钱」。而
+①（`legado-gradle.bat` 全链）里混着 Gradle 自己的开销与 JVM 启动，必须拆开才谈得上判断。
+TODO §一点八 定的判据是 `②−③ ≥ 5s 就做`，其中 ③（常驻单请求）要先把 daemon 写出来——
+所以 D0 换了个能立刻量的代理量：**②b「空转」**（拿一条连不上的源走直起，剩下就是
+初始化本身），它就是 ③ 能省掉的那一段。
+
+### 拆法：把「测试 JVM 的运行环境」dump 成 JSON，再绕开 Gradle 直起
+
+`appservice/legado-test.init.gradle` 里给 `test.*UnitTest` 挂一个 `doFirst`，把
+classpath / 系统属性 / jvmArgs / workingDir / 环境变量写成一份 JSON；`scripts/jvm_debug_direct.py`
+拿它拼 `java @argfile` 起 `org.junit.runner.JUnitCore <启动器>`——**入口现成**，启动器
+本来就是 JUnit4 测试类（`DebugServiceLauncher`），不必另写 `main`。
+
+**为什么 dump 的是系统属性，不只是 classpath**：Robolectric 要靠 AGP 注入的那些
+`android_*` 定位资源，在 Gradle 里是隐式给的、看不见；dump 出来才发现这个任务里
+`systemProperties` 其实只有 1 条（AGP 走的是 classpath 上的
+`test_config.properties`）——**结论靠 dump 才知道，靠猜会白调半天**。
+
+**开关只认环境变量**（`LEGADO_TEST_JVM_ENV_OUT`），不设就与现在完全一样。
+
+### 坑：configuration cache 把 dump **静默**吃掉了
+
+- **症状**：dump 文件没生成，但构建成功、退出码 0、全量跑测一点事没有；Gradle 输出里
+  唯一的痕迹是 `Configuration cache entry discarded with 1 problem` 一行字。
+- **根因**：App 仓库 `gradle.properties` 开着 `org.gradle.configuration-cache=true`，
+  而 `doFirst` 是**执行期**的闭包——在里面引用 `gradle` 这种脚本对象直接抛
+  `InvalidUserCodeException: Invocation of 'gradle' references a Gradle script object
+  from a Groovy closure at execution time`。它**不**让构建失败（我那个 try/catch 兜住了，
+  警告也只打在 Gradle 日志里）。
+- **改法**：环境变量走 `providers.environmentVariable(...)` 在**配置期**取值（CC 于是把它
+  记成输入，改了环境变量就重新配置）、`logger` 换成 `it.logger`、`mkdirs` 挪到配置期；
+  执行期只读任务自己的属性。
+- **可复用的判据**：**「构建成功」不等于「改动生效」**——这和 AGENTS #12 是同一条
+  （别读代码判断生没生效，去数产物）。以后往 init 脚本里加东西，先问「这个仓库开 CC 吗」，
+  再问「它没生效的话，我会不会看见」。
+
+### 三个数（echo 源：站点耗时≈0，所以①/②几乎全是拉起开销；2026-09-20 实测）
+
+| 量 | 秒 |
+| :--- | ---: |
+| ① `legado-gradle.bat` 全链 | **13.4**（另一次 14.9） |
+| ② `java @argfile` 直起 | **11.4** |
+| ②b 空转（不可达源 = 入场费） | **10.7** |
+
+- **①−② = 2.0s**：Gradle 配置阶段只占这么点——贵的**不是** Gradle，是
+  JVM + Robolectric + App 初始化（10.7s）。所以 daemon 要留住的是**那一段**，
+  也所以「只优化 Gradle」这条路不值得走。
+- **②−②b = 0.7s**：站点耗时（echo 源几乎为零，符合预期）。
+- 判据 **②b = 10.7s ≥ 5s → 做 daemon**（TODO §一点八 由「预测 ≥8s」改为实测落地）。
+
+### 两条实施细节（都是实测才暴露的）
+
+- **classpath 625 项 / 75232 字符**：直接拼命令行必撞 Windows 的 32767 上限，走
+  `java @argfile`；argfile 里 `\` 要翻倍（JDK 的 `@file` 解析把 `\` 当转义符），
+  实测能正确解析 Windows 路径。
+- **两个「不在 jvmArgs 里」的东西**：`javaLauncher` 的 `installationPath` 是 **JDK 根目录**
+  而不是可执行文件（要自己拼 `bin/java`）；`maxHeapSize`（3g，为全量跑批 OOM 设的）
+  是 Test 任务的**另一个属性**，直起时要自己补 `-Xmx3g`——漏了就等于悄悄换了条链，
+  量到的时长不是同一条链的数。
+
+### 验收：与 bat 路径**逐字段一致**
+
+同一源、同 key，两条拉起方式各跑一次：退出码 / `cookie_len` / 每段的 ok / 事件数 / kind
+序列**全等**（`--measure` 会打这张对拍表）；换一条真站点（`新百强小说`）直起也是四段
+全通、**77 条事件与 A1 那次一致**。`core/jvm_debug.run_jvm_debug(launcher=...)` 是那份
+「只换拉起方式、不换解析」的缝，契约测试守着它（给了 launcher 就不许再拉 Gradle——
+否则一次调试起两个 JVM，正是 RUN_LOCK 要挡的互相踩）。
+
+→ 无新增 AGENTS 级规矩：CC 那条落在这里；「构建成功 ≠ 改动生效」是 AGENTS #12 的同一条。
+
+## 六十六、D1：常驻 daemon —— 入场费从 9.7s 掉到 0.8s，以及「占着 profile」这条静默错（2026-09-20）
+
+**要解决的问题**：D0 量出单次调试的入场费（JVM + Robolectric + App 初始化）10.7s，而站点
+只要 0.7s。D1 把入场费摊到多次请求上：起一次，之后每次只付站点的时间。
+
+### 形态：接在既有的缝上，不是新开一条链路
+
+- **Kotlin**：`DebugService` 拆出 `runOnce(cfg)`（一次性 `main` 与常驻共用同一份）；
+  新增 `DebugServiceDaemon`（只监听 `127.0.0.1`、一行 JSON 请求 / 一行 JSON 应答、**串行**）
+  与它的启动器（JUnit4 + Robolectric，端口/空闲秒/版本键走环境变量——`args.properties`
+  是「每次调试」的参数文件，常驻活得比它久，不该读它）。
+- **Python**：`core/jvm_direct.py`（D0 原语从 `scripts/` 收进 `core/`——常驻那条是产品路径，
+  不能反过来 import scripts）、`core/jvm_daemon.py`（拉起 / 探活 / 请求 / 版本键 / **回落**）。
+- **产物一字不变**：NDJSON 与侧车仍旧落到原来的路径，`core.jvm_debug` 的解析一行不改
+  ——它就靠 D0 留的 `launcher=` 缝接进来。于是三条拉起方式（Gradle / `java` 直起 / 常驻）
+  **差别只有拉起**，结论不可能因为换了拉起方式而不同。
+
+实测（echo 源，同一条源连跑；`--daemon-measure` 打的就是这张表）：
+
+| | 秒 |
+| :--- | ---: |
+| 各起一次 JVM | 9.7 / 9.5（每次都付入场费） |
+| 常驻 | 9.3（首次含拉起）/ **0.8** |
+
+对拍：常驻 #2 与新 JVM #2 **逐字段一致**（退出码 / cookie_len / 每段 ok / 事件数 / kind 序列）；
+常驻两次之间也一致——「请求间清状态」是有效的（收尾 `session.cancel()` 清 `Debug.debugSource`、
+开头 `ShadowBackstageWebView.reset()` 清计数）。
+
+### 坑一：常驻「留着浏览器」会**静默偷走别人的 cookie**
+
+浏览器 profile 是**独占**的（A2 已记）。daemon 若把浏览器留着（省 0.65s/次：实测
+0.7s → 0.05s），它就**一直占着 profile**；这时任何另一个 JVM（跑批、一次性调试）的
+`BrowserSession.get()` 会走自愈路径换 `<base>-run<ts>` 临时 profile，而那个 profile
+**没有任何登录态**：
+
+- 侧车 `cookie_len` 从 11 变 0；结论从「3 段」变「1 段」（后面的段因为拿不到数据而失败）；
+- 还白等一次浏览器启动超时（实测 29s vs 9.7s）。
+
+而报告读起来是「这条源不行了」——AGENTS #4 的同一类。**取舍：拿 0.65s 换掉一个静默错
+是划算的**，所以常驻也每请求收掉浏览器。真要留着，正确做法是「谁要用谁先让 daemon 把
+profile 交出来」（D2 的题，不是默认占着）。
+
+### 坑二：kill 掉 daemon 会留一个**孤儿 Chromium**，继续占着 profile
+
+`TerminateProcess` 不执行 `finally`，于是常驻里那台浏览器活了下来（实测见到两个孤儿 Edge，
+各带一串 gpu/renderer/utility 子进程）。修法：客户端**先发 `op=stop`**（优雅退出：关 server、
+收浏览器）再等端口变静；只有「问不到身份」或「它不认这个指令」时才动手 kill。
+
+### 坑三（我自己犯的）：「收到应答」不等于「停成功了」
+
+第一版 `_stop_port` 只看「有没有应答」就报成功——而当时那个 daemon 跑的是**旧类**、根本不认
+`op=stop`：它把指令当成调试请求回了一句「缺参数」，**那也是一条应答**。于是我打印了
+「已停：True」而进程还在跑。判据改成「**端口真的静了**才报成功」，配了一条测试
+（假 daemon 忽略 stop → `stop()` 必须返回 False）。这与 AGENTS #12 是同一条：
+**别把「有个信号」当成「那件事发生了」**。
+
+→ 无新增 AGENTS 级规矩：坑一 / 坑二是 profile 独占性的推论（A2 已记），坑三是 #12 的又一次实例。
+
+## 六十七、D2：把常驻接进产品 —— 靠的是「编译过」这条代理量，不是时间戳（2026-09-20）
+
+D1 交付了常驻 daemon（§六十六），但产品那条链当时还走 Gradle。D2 把它接上：默认拉起
+方式变成「**优先常驻、失败回落 Gradle**」，界面上点调试从 ~10s 变 ~1s。
+
+### 判据一：`dump` 比 `.kt` 新 ⇔ 「这份类是新编译的」
+
+常驻进程里跑的是**加载时那份字节码**。改了 `appservice/` 的 Kotlin 却不重启进程，表现是
+「规则改了没生效」——读起来像源的问题，其实是我们在跑旧代码（AGENTS #4 的同一类）。
+所以 `core.jvm_debug.default_launcher` 先问一句 `jvm_direct.dump_is_stale()`：
+
+- **陈旧 → 不走常驻/直起，走 Gradle**（Gradle 一定会先编译，所以它是权威路径）；
+- 新鲜 → 走常驻。
+
+**这条判据能成立，靠的是一条不变式**：`legado-gradle.bat` 的每一次调用（调试那条
+`_run_launcher` 与跑批那条 `_run_gradle`）都把 `LEGADO_TEST_JVM_ENV_OUT` 传下去，
+于是 init 脚本的 `doFirst` 顺手刷新 dump。少了这一步，改一次 Kotlin 就会让常驻**一直被
+挡在外面**（除非有人记得手工 `--refresh`）——实测踩过，所以两侧各配了一条测试。
+
+版本键（`source_sig`）因此也是「Kotlin 指纹 + dump 指纹」：dump 一变说明刚跑过 Gradle，
+进程里的类可能就不是新的了 → 客户端让旧进程退、起新的。
+
+### 判据二：回落目标是 **Gradle**，不是「直起」
+
+直起（D0 那条 `java @argfile`）同样依赖 dump 的新鲜度；而这里要的是「无论如何都能跑对」，
+速度次要。所以产品那条链的回落是 Gradle——它一定会先编译。（CLI/开发默认仍回落直起，
+那条只为快。）
+
+**回落必须说出来**：附注落在第一条分段的 `notes` 上（抽屉本来就在渲染它），静默降级会让
+「常驻一直没生效」永远没人发现，而用户只会觉得「也没快多少」。这条是变异验证逼出来的
+（把 `fallback=_run_launcher` 改成 `fallback=None` 原本一条测试都不红）。
+
+### 验收（产品路径 = `scripts/jvm_debug_run.py`，与后端同一份 `run_jvm_debug`）
+
+| 判据 | 实测 |
+| :--- | :--- |
+| 冷启第一次 → 第二次 | 8.8s → **1.0s** |
+| **硬杀** daemon 之后下一次 | 10.5s 自动拉起、退出码 0（**不是报错**） |
+| 改了 `.kt` 之后 | 走 Gradle 11.4s（先编译，不吃旧类）；Gradle 顺手刷 dump → 常驻按新版本键起来 → 再下一次 0.9s |
+
+四次的事件数与 `cookie_len` 逐次相同（49 / 11）。
+
+**口径提醒**：版本键变了之后，常驻**必然要重启一次**，那一次就是要付入场费——别把
+「换进程后那一次 9s」当成「常驻没生效」。我第一次验收就是判据写成「下一次必须 ≤2s」
+而误报未达标（产品行为是对的，判据错了）。

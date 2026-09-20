@@ -20,11 +20,12 @@ A1–A3 的验收都跑它）与后端 `POST /api/rules/jvm-debug`（界面上�
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import subprocess
 import threading
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from core.app_debug import build_steps, fetch_debug_pages
 from core.fetch import CACHE_AUTO
@@ -50,7 +51,15 @@ CODE_TEXT = {
 #: Gradle 任务。同时跑会互相踩（参数被改写、两个 Gradle 抢同一份构建产物），
 #: 而那种失败看起来像「JVM 坏了」。非阻塞获取——拿不到就直说，**不排队**：
 #: 排队会让界面上的一张卡片转十几分钟，那比一句「另一个任务在跑」糟得多。
+#:
+#: **两侧都必须真拿这把锁**（`run_jvm_debug` 与 `backend/api/jvm.py` 的跑批）：
+#: 只有一侧拿，注释里那句「共用」就成了一个读起来像存在的保护（AGENTS #12）。
 RUN_LOCK = threading.Lock()
+
+#: 拿不到 `RUN_LOCK` 时的**同一句话**。跑批与调试是同一把锁、同一个原因，
+#: 两处各写一份就会在界面上长得不一样，而用户看不出那其实是同一件事。
+BUSY_REASON = ("另一个 JVM 任务在跑（跑批与调试共用同一个 Gradle 任务与参数文件），"
+               "等它跑完再来")
 
 
 def _write_args(src_file: str, key: str, out_file: str, timeout: int, cookie: str = "") -> None:
@@ -76,12 +85,19 @@ def _run_launcher(timeout_min: int = 20) -> Tuple[int, float, str, str]:
     """拉一次 Gradle（阻塞）。返回 `(退出码, 墙钟秒, stdout, stderr)`。
 
     单独一个函数是为了让测试能把它换成假的——**不跑 Gradle 也能测组装逻辑**。
+
+    **顺手刷新 dump**（S5-A 第二期 D2）：把 `LEGADO_TEST_JVM_ENV_OUT` 传给这次 Gradle，
+    `legado-test.init.gradle` 的 `doFirst` 就会把测试 JVM 的环境重新 dump 一份。
+    这条不变式是常驻那条链的前提——**「dump 比 .kt 新」等价于「这份类是新编译的」**：
+    Gradle 一定会先编译，所以它跑过之后 dump 就是可信的；少了这一步，改一次 Kotlin
+    就会让常驻一直被「类可能是旧的」挡在外面，直到有人手工 `--refresh`。
     """
     t0 = time.time()
+    env = {**os.environ, "LEGADO_TEST_JVM_ENV_OUT": str(data_path("app_probe", "test_jvm_env.json"))}
     p = subprocess.run(
         ["cmd", "/c", str(LAUNCHER), ":app:testAppDebugUnitTest",
          "--tests", LAUNCHER_CLASS, "--rerun"],
-        cwd=str(AGSVC), capture_output=True, text=True, errors="replace",
+        cwd=str(AGSVC), env=env, capture_output=True, text=True, errors="replace",
         timeout=timeout_min * 60)
     return p.returncode, time.time() - t0, (p.stdout or ""), (p.stderr or "")
 
@@ -107,16 +123,52 @@ def _env_error() -> str:
     return "本机引擎不可用：%s —— %s" % (first.get("name") or "环境自检未通过", hint)
 
 
+def default_launcher(notes: List[str]) -> Callable[[], Tuple[int, float, str, str]]:
+    """产品默认的拉起方式（S5-A 第二期 D2）：**优先常驻 daemon，不可用回落 Gradle**。
+
+    两条边界，都是实测教训：
+
+    1. **dump 比 .kt 旧（或没有 dump）就不用常驻**：那意味着「这份类可能不是最新编译的」。
+       常驻进程里跑的是**加载时那份类**，改了 `appservice/` 却用它，表现是「规则改了没生效」
+       ——看起来像源/规则的问题，其实是我们在跑旧代码。Gradle 那条一定会先编译，
+       所以这种情况下它才是权威路径（而且它跑完会顺手把 dump 刷新，见 `_run_launcher`）。
+    2. **回落目标是 Gradle，不是「直起」**：直起同样依赖 dump 的新鲜度，而这里要的是
+       「无论如何都能跑对」。`core/jvm_daemon` 内部自己的回落（daemon 半路死了）也走这一条。
+
+    `notes` 是**回落的痕迹**：`run_jvm_debug` 会把它接到第一条 step 的附注上——
+    静默降级会让「常驻一直没生效」永远没人发现（而用户只会觉得「也没快多少」）。
+    """
+    from core import jvm_daemon, jvm_direct
+
+    try:
+        if jvm_direct.dump_is_stale():
+            return _run_launcher
+        dump = jvm_direct.load_dump(warn_stale=False)
+    except Exception as e:                       # dump 读不了（权限/损坏）也别挡住调试
+        notes.append("这次没能用常驻进程（读 dump 失败：%s），已改用 Gradle（启动慢一些）" % e)
+        return _run_launcher
+    return jvm_daemon.launcher_from_args(dump, on_note=notes.append, fallback=_run_launcher,
+                                         fallback_name="Gradle")
+
+
 def run_jvm_debug(source: Dict[str, Any],
                   key: str = "我",
                   timeout: int = 60,
                   cookie: str = "",
                   cache: str = CACHE_AUTO,
                   proxy: str = "",
-                  out_path: str = "") -> Dict[str, Any]:
+                  out_path: str = "",
+                  launcher: Optional[Callable[[], Tuple[int, float, str, str]]] = None,
+                  ) -> Dict[str, Any]:
     """跑一次 JVM 调试，返回与设备通道同形状的结果。
 
     ``out_path`` 只是给测试用的覆盖口（默认落在 `data/app_probe/jvm_debug.ndjson`）。
+
+    ``launcher`` 是**「拉起那一步」的替换口**（签名同 :func:`_run_launcher`）：
+    默认走 Gradle（`legado-gradle.bat` + `--tests <启动器>`），第二期 D0 的
+    「不起 Gradle 直接 `java -cp`」与常驻 daemon 都从这里接进来。
+    **参数拼装 / NDJSON 与侧车解析 / 结果组装只有这一份**——三条拉起方式各写一份，
+    就会出现「命令行跑出来的和界面上跑出来的不一样」（这就是本模块存在的理由）。
     """
     out: Dict[str, Any] = {
         "source": "jvm",
@@ -136,8 +188,7 @@ def run_jvm_debug(source: Dict[str, Any],
         return out
 
     if not RUN_LOCK.acquire(blocking=False):
-        out["error"] = ("另一个 JVM 任务在跑（跑批与调试共用同一个 Gradle 任务与参数文件），"
-                        "等它跑完再来")
+        out["error"] = BUSY_REASON
         return out
     saved = ARGS.read_text(encoding="utf-8") if ARGS.exists() else ""
     ndjson = out_path or data_path("app_probe", "jvm_debug.ndjson")
@@ -146,6 +197,9 @@ def run_jvm_debug(source: Dict[str, Any],
     meta_file = pathlib.Path(str(ndjson) + ".meta.json")
     code = -1
     cost = 0.0
+    #: 拉起方式留下的痕迹（常驻不可用 → 回落了）。**必须露出来**：静默降级会让
+    #: 「常驻一直没生效」永远没人发现，而用户只会觉得「也没快多少」。
+    launch_notes: List[str] = []
     try:
         for p in (pathlib.Path(ndjson), meta_file):
             if p.exists():
@@ -156,7 +210,7 @@ def run_jvm_debug(source: Dict[str, Any],
         pathlib.Path(src_file).write_text(json.dumps([src], ensure_ascii=False),
                                           encoding="utf-8", newline="\n")
         _write_args(src_file, key, ndjson, timeout, cookie)
-        _, cost, _so, _se = _run_launcher()
+        _, cost, _so, _se = (launcher or default_launcher(launch_notes))()
     finally:
         # 还原：跑批与调试共用这一个参数文件，别把调试的参数留在里面
         if saved:
@@ -184,6 +238,11 @@ def run_jvm_debug(source: Dict[str, Any],
         return out
 
     steps = build_steps(events_raw)
+    # 拉起方式的痕迹进附注（回落了要说出来；正常走常驻时这里是空的）。
+    # 放最后一段附注**之前**：先讲「这次是怎么跑起来的」，再讲「跑的过程中缺了什么」
+    if launch_notes and steps:
+        steps[0]["notes"] = list(steps[0]["notes"]) + launch_notes
+        steps[0]["has_notes"] = True
     try:
         out["pages"] = fetch_debug_pages(steps, src, proxy=proxy, cache=cache)
     except Exception as e:

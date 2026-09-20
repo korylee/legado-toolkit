@@ -133,6 +133,37 @@ object DebugService {
             System.err.println("[appservice] --timeout 必须为正数，收到 $timeoutSec")
             return BAD_INPUT
         }
+        return runOnce(Config(file, key, outPath, timeoutSec, cookie))
+    }
+
+    /**
+     * 一次调试的入参。**命令行与常驻 daemon 共用一份**——两份各写一遍的后果是
+     * 「命令行跑出来的和界面上跑出来的不一样」（`core/jvm_debug` 存在的同一个理由）。
+     */
+    data class Config(
+        val file: String,
+        val key: String,
+        val outPath: String,
+        val timeoutSec: Long = DEFAULT_TIMEOUT_SEC,
+        val cookie: String = "",
+    )
+
+    /**
+     * 跑一次调试：读源 → 注入 cookie → 走 App 的调试链 → 落 NDJSON + 侧车 → 退出码。
+     *
+     * **一次性的 `main` 与常驻 daemon（S5-A 第二期）都走这一份**：常驻只是把「进程活多久」
+     * 换了，跑的行为必须逐字段一样——那正是 D1 的验收判据（与「各起一次 JVM」对拍）。
+     */
+    fun runOnce(cfg: Config): Int {
+        val file = cfg.file
+        val key = cfg.key
+        val outPath = cfg.outPath
+        val timeoutSec = cfg.timeoutSec
+        val cookie = cfg.cookie
+
+        // 计数器是**每个请求**的：常驻进程里不清就会累积，而侧车里的
+        // `shadow_webview_calls` 判据是「普通源必须是 0」——累积之后那条诊断会说反话。
+        ShadowBackstageWebView.reset()
 
         // 源 JSON：数组取第一条（与跑批同一个导出形状），也允许单个对象（手工跑方便）
         val sourceJson = try {
@@ -265,8 +296,18 @@ object DebugService {
             runCatching { session.cancel() }
         }
         scope.cancel()
-        // 浏览器进程要收掉：A2 起它可能被 shadow 拉起过。留着的话 Gradle 测试进程
-        // 退出后还挂着一个 Edge，下次跑批会因 profile 被占用而启动失败
+        // **请求之间要把 `Debug` 的静态态清干净**：`debugSource` 只在 `cancel` 与下一次
+        // `replaceSession` 时才变，而 `Debug.log` 的判据正是 `debugSource == sourceUrl`
+        // ——常驻时同一条源再跑，上一轮遗留的协程会把事件打进新一轮的事件流。
+        // 一次性进程不需要（进程都没了），常驻需要（TODO §一点八「请求间清状态」）。
+        // 无条件调用：`cancel` 内部按 session id 判重，重复/已取消都是 no-op。
+        runCatching { session.cancel() }
+        // 浏览器进程要收掉：A2 起它可能被 shadow 拉起过。**常驻也收**（实测取舍见下）：
+        // 留着能省 0.65s/次（实测 0.7s → 0.05s），但它会**一直占着浏览器 profile**
+        // ——另一个 JVM（跑批、一次性调试）撞上占用就「自愈」换临时 profile，
+        // **cookie 静默全丢**（实测：同一条源从 3 段变 1 段，还白等 18s 超时）。
+        // 那种错长得像「源坏了」（AGENTS #4），拿 0.65s 换掉它是划算的。
+        // 真要留着，正确做法是「谁要用谁先让 daemon 交出来」（D2 再议），不是默认占着。
         runCatching { BrowserSession.close() }
 
         // 退出码：**「流关了但没有终止事件」也算失败**。原来只看 count/timedOut，

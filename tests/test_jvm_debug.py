@@ -19,12 +19,13 @@ import shutil
 import tempfile
 import threading
 import unittest
+from unittest import mock
 
 from fastapi import HTTPException
 
 from backend.api.rules import jvm_debug as jvm_debug_endpoint
 from backend.schemas import JvmDebugRequest
-from core import jvm_debug
+from core import jvm_daemon, jvm_debug, jvm_direct
 
 FIXTURE = pathlib.Path(__file__).parent / "fixtures" / "appservice_debug_52shuku.ndjson"
 
@@ -174,11 +175,150 @@ class RunJvmDebugTests(_RunCase):
         self._run()
         self.assertEqual(jvm_debug.ARGS.read_text(encoding="utf-8"), "file=keep\n")
 
+    def test_launcher_hook_replaces_gradle(self) -> None:
+        """`launcher=` 是「拉起那一步」的替换口（D0 的直起、常驻 daemon 都从它接）。
+
+        **是替换、不是并列**：给了它就不该再拉 Gradle——否则一次调试起两个 JVM，
+        写的是同一份 `args.properties`、抢的是同一个 Gradle 任务，正是 RUN_LOCK
+        要挡的那种互相踩。而它产出的两个文件必须照样被解析成同样的 steps/时长
+        （参数拼装与结果解析只有一份，这才是「换个拉起方式」不改变结论的前提）。
+        """
+        gradle = []
+        self._patch("_run_launcher",
+                    lambda timeout_min=20: (gradle.append(1), (0, 9.9, "", ""))[1])
+        direct = []
+        events = self._fixture_events()
+
+        def fake_direct(timeout_min=20):
+            direct.append(True)
+            self.out.write_text(
+                "\n".join(json.dumps(e, ensure_ascii=False) for e in events) + "\n",
+                encoding="utf-8", newline="\n")
+            pathlib.Path(str(self.out) + ".meta.json").write_text(
+                json.dumps({"code": 0, "events": len(events)}), encoding="utf-8", newline="\n")
+            return 0, 2.5, "", ""
+
+        r = self._run(launcher=fake_direct)
+        self.assertEqual(gradle, [], "给了 launcher 就不该再拉 Gradle")
+        self.assertEqual(len(direct), 1)
+        self.assertEqual([s["name"] for s in r["steps"]],
+                         ["search", "bookUrl", "toc", "content"], "四段照样解析得出来")
+        self.assertEqual(r["cost_sec"], 2.5, "时长要用**这条**拉起方式量的那个")
+
+    def test_launch_notes_are_surfaced_on_the_first_step(self) -> None:
+        """**降落必须说出来**（D2）：常驻回落了却静默，用户只会觉得「也没快多少」，
+        而真正的问题（daemon 起不来）永远没人发现。附注落在第一条 step 上——
+        抽屉已经在渲染它（`.debug-notes`）。"""
+        def fake_default(notes):
+            notes.append("这次没能用常驻进程（DaemonError: 起不来），已改用 Gradle（启动慢一些）")
+            return self._fake_launcher(events=self._fixture_events(), meta={"code": 0})
+
+        self._patch("default_launcher", fake_default)
+        r = self._run()
+        notes = r["steps"][0]["notes"]
+        self.assertTrue(any("没能用常驻进程" in n for n in notes), notes)
+        self.assertTrue(r["steps"][0]["has_notes"])
+
     def test_cache_mode_is_forwarded_to_page_fetch(self) -> None:
         self._patch("_run_launcher", self._fake_launcher(
             events=self._fixture_events(), meta={"code": 0}))
         self._run(cache="refresh")
         self.assertEqual(self._patched_pages, ["refresh"])
+
+    def test_no_launch_note_when_the_default_path_is_clean(self) -> None:
+        """正常走常驻时**不许**多出一行附注：那是噪音，而且会让「抽屉里带黄点」
+        失去意义（黄点必须等价于「这一步真有问题」）。"""
+        def fake_default(notes):
+            return self._fake_launcher(events=self._fixture_events(), meta={"code": 0})
+
+        self._patch("default_launcher", fake_default)
+        r = self._run()
+        notes = r["steps"][0]["notes"]
+        self.assertFalse([n for n in notes if "常驻" in n], notes)
+
+
+class DefaultLauncherTests(unittest.TestCase):
+    """默认拉起方式的选择（D2）：**dump 比 .kt 新**才敢用常驻/直起。"""
+
+    def test_stale_dump_falls_back_to_gradle(self) -> None:
+        """dump 比 .kt 旧 = 「这份类可能不是最新编译的」。常驻进程里跑的是**加载时那份
+        类**，用它就会表现成「规则改了没生效」——像源的问题，其实是我们在跑旧代码。
+
+        `load_dump` 一起打桩：**不打桩这条会假绿**——真实 dump 不在测试的工作目录里，
+        `load_dump` 抛异常后也走回 Gradle，于是「把陈旧判定删掉」这个变异根本抓不住
+        （实测：补上打桩才变红）。"""
+        with mock.patch.object(jvm_direct, "dump_is_stale", lambda: True), \
+             mock.patch.object(jvm_direct, "load_dump", lambda warn_stale=True: {"x": 1}):
+            got = jvm_debug.default_launcher([])
+        self.assertIs(got, jvm_debug._run_launcher, "类可能是旧的就必须走 Gradle（它会先编译）")
+
+    def test_fresh_dump_prefers_the_daemon(self) -> None:
+        notes: list = []
+        with mock.patch.object(jvm_direct, "dump_is_stale", lambda: False), \
+             mock.patch.object(jvm_direct, "load_dump", lambda warn_stale=True: {"x": 1}):
+            got = jvm_debug.default_launcher(notes)
+        self.assertIsNot(got, jvm_debug._run_launcher, "dump 新鲜就该走常驻")
+        self.assertEqual(notes, [])
+
+    def test_unreadable_dump_does_not_block_debugging(self) -> None:
+        notes: list = []
+        with mock.patch.object(jvm_direct, "dump_is_stale", lambda: False), \
+             mock.patch.object(jvm_direct, "load_dump",
+                               side_effect=OSError("dump 坏了")):
+            got = jvm_debug.default_launcher(notes)
+        self.assertIs(got, jvm_debug._run_launcher)
+        self.assertTrue(any("dump" in n for n in notes), notes)
+
+    def test_daemon_failure_falls_back_to_gradle_not_direct(self) -> None:
+        """常驻半路死了 → **回落 Gradle**（不是直起）。
+
+        直起同样依赖 dump 的新鲜度，而 Gradle 一定会先编译——这里要的是「无论如何都能
+        跑对」，速度是次要的。**这条是变异验证逼出来的**：把 `fallback=_run_launcher`
+        改成 `fallback=None`（退化成直起）原本一条测试都不红。
+        """
+        gradle_calls: list = []
+
+        def fake_gradle(timeout_min=20):
+            gradle_calls.append(1)
+            return 0, 11.0, "", ""
+
+        notes: list = []
+        with mock.patch.object(jvm_direct, "dump_is_stale", lambda: False), \
+             mock.patch.object(jvm_direct, "load_dump", lambda warn_stale=True: {"x": 1}), \
+             mock.patch.object(jvm_daemon, "ensure",
+                               side_effect=jvm_daemon.DaemonError("起不来")), \
+             mock.patch.object(jvm_daemon, "params_from_args",
+                               lambda *a, **kw: {"file": "a", "key": "b", "out": "c",
+                                                 "timeout": 30, "cookie": ""}), \
+             mock.patch.object(jvm_debug, "_run_launcher", fake_gradle):
+            run = jvm_debug.default_launcher(notes)
+            rc, _cost, _so, _se = run()
+        self.assertEqual(gradle_calls, [1], "回落目标必须是 Gradle")
+        self.assertEqual(rc, 0)
+        self.assertTrue(any("Gradle" in n for n in notes), notes)
+
+
+class GradleDumpRefreshTests(unittest.TestCase):
+    def test_gradle_run_refreshes_the_dump(self) -> None:
+        """**「dump 比 .kt 新」= 「这份类是新编译的」**——这条不变式是常驻链的判据，
+        而它靠的是「每次 Gradle 跑测都顺手 dump 一份」。少了它，改一次 Kotlin 就会让
+        常驻一直被挡在外面（除非有人记得手工 --refresh）。"""
+        seen: dict = {}
+
+        class _P:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        def fake_run(cmd, **kw):
+            seen.update(kw)
+            return _P()
+
+        with mock.patch.object(jvm_debug.subprocess, "run", fake_run):
+            jvm_debug._run_launcher()
+        env = seen.get("env") or {}
+        self.assertIn("LEGADO_TEST_JVM_ENV_OUT", env, "Gradle 那条没刷 dump")
+        self.assertTrue(str(env["LEGADO_TEST_JVM_ENV_OUT"]).endswith("test_jvm_env.json"))
 
 
 class EndpointTests(_RunCase):

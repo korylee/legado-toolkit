@@ -55,6 +55,58 @@ gradle.projectsEvaluated {
         it.inputs.file(new File(appservice, 'args.properties'))
             .withPathSensitivity(PathSensitivity.NONE)
             .optional()
+        // **D0：按需把测试 JVM 的运行环境 dump 成 JSON**（classpath / 系统属性 / JVM 参数）。
+        // 有了它就能不起 Gradle 直接 `java -cp @file ... org.junit.runner.JUnitCore <启动器>`
+        // ——那是第二期常驻 daemon 的前置，也是「② 直起一次要几秒」的唯一量法。
+        //
+        // **默认什么都不写**：只认环境变量，不设就与现在完全一样。
+        //
+        // 为什么 dump 的是**系统属性**而不只是 classpath：Robolectric 要靠 AGP 注入的
+        // `android_merged_manifest` 之类定位资源，少了它直接起不来（而 Gradle 里这些
+        // 是隐式给的，看不见）。
+        //
+        // ⚠️ **本仓库开着 configuration cache**（App 仓库 `gradle.properties`），执行期的
+        // 闭包里**不能碰 `gradle` / `project` 这些脚本对象**（实测报
+        // `Invocation of 'gradle' references a Gradle script object from a Groovy closure
+        // at execution time`，而且只在 info 日志里看得见——被下面的 catch 兜住后，
+        // 表现是「dump 静默没生成」）。所以：环境变量走 `providers.environmentVariable`
+        // 在**配置期**取值（CC 会把它记成输入，改了环境变量就重新配置），执行期只用
+        // 任务自己的属性。
+        def dumpOutPath = app.providers.environmentVariable('LEGADO_TEST_JVM_ENV_OUT').orNull
+        if (dumpOutPath != null && !dumpOutPath.trim().isEmpty()) {
+            def dumpFile = new File(dumpOutPath)
+            if (dumpFile.parentFile != null) dumpFile.parentFile.mkdirs()
+            def gradleVer = gradle.gradleVersion
+            def javaHome = app.providers.environmentVariable('JAVA_HOME').orNull
+            it.doFirst {
+                try {
+                    def launcherPath = null
+                    try {
+                        launcherPath = it.javaLauncher.getOrNull()?.metadata?.installationPath?.asFile?.absolutePath
+                    } catch (Throwable ignore) { }
+                    def data = [
+                        task: it.name,
+                        gradle: gradleVer,
+                        workingDir: it.workingDir.absolutePath,
+                        javaHomeEnv: javaHome,
+                        javaLauncher: launcherPath,
+                        classpath: it.classpath.asPath,
+                        jvmArgs: it.jvmArgs,
+                        maxHeapSize: it.maxHeapSize,
+                        systemProperties: it.systemProperties.collectEntries { k, v ->
+                            [(k as String), (v == null ? null : v.toString())]
+                        },
+                        environment: it.environment,
+                    ]
+                    dumpFile.setText(groovy.json.JsonOutput.toJson(data), 'UTF-8')
+                    it.logger.lifecycle("[appservice] 测试 JVM 环境已 dump: " + dumpFile.absolutePath
+                        + "（classpath " + it.classpath.files.size() + " 项）")
+                } catch (Throwable e) {
+                    // 兜住是为了**不弄坏跑测**；但别静默——上层看不到 dump 会一直找原因
+                    it.logger.warn("[appservice] dump 测试 JVM 环境失败（不影响本次跑测）: " + e)
+                }
+            }
+        }
     }
 
     app.logger.lifecycle("[appservice] 已挂载外部测试源码: " + appservice)
