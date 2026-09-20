@@ -22,13 +22,9 @@ import java.io.File
     shadows = [WindowsPathAssetManagerShadow::class])
 class BrowserBridgeProbeTest {
 
+    /** 参数（`render` / `profile`）由 [AppserviceEnv] 统一定位；没有就空手跑内置壳页。 */
     private fun readArgs(): Map<String, String> {
-        val f = listOf(
-            File("appservice-args.properties"),
-            File(System.getenv("LEGADO_APPSERVICE_DIR") ?: "", "args.properties"),
-        ).firstOrNull { it.exists() } ?: return emptyMap()
-        val props = java.util.Properties()
-        f.reader(Charsets.UTF_8).use { props.load(it) }
+        val props = AppserviceEnv.loadArgs() ?: return emptyMap()
         return props.entries.associate { (k, v) -> k.toString() to v.toString() }
     }
 
@@ -51,11 +47,11 @@ class BrowserBridgeProbeTest {
         try {
             if (target != null && target.isNotBlank()) {
                 val r = BrowserBridge.render(session, target)
-                println("PROBE: $target → ok=${r.ok} reason=${r.reason} len=${r.html.length}")
+                println("PROBE: $target → ok=${r.ok} reason=${r.reason} len=${r.body.length}")
                 if (r.ok) {
-                    File("data/app_probe/rendered.html").writeText(r.html)
-                    println("PROBE: 已写 data/app_probe/rendered.html")
-                    println("PROBE: 前 200 字：" + r.html.take(200).replace('\n', ' '))
+                    File("data/app_probe/rendered.body").writeText(r.body)
+                    println("PROBE: 已写 data/app_probe/rendered.body")
+                    println("PROBE: 前 200 字：" + r.body.take(200).replace('\n', ' '))
                 }
             } else {
                 // 内置壳页：静态 HTML 里没有 "RENDERED-BY-JS"，只有 JS 跑完才有
@@ -64,8 +60,8 @@ class BrowserBridgeProbeTest {
                     "</body></html>"
                 val r = BrowserBridge.render(session, url)
                 println("PROBE: shell 页 → ok=${r.ok} reason=${r.reason}")
-                println("PROBE: 含 RENDERED-BY-JS = ${r.html.contains("RENDERED-BY-JS")}")
-                check(r.ok && r.html.contains("RENDERED-BY-JS")) {
+                println("PROBE: 含 RENDERED-BY-JS = ${r.body.contains("RENDERED-BY-JS")}")
+                check(r.ok && r.body.contains("RENDERED-BY-JS")) {
                     "渲染没生效：JS 注入的内容不在 DOM 里"
                 }
             }

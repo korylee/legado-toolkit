@@ -72,7 +72,8 @@
         <el-descriptions-item label="结论数">{{ lastRun.count ?? r2.count }}</el-descriptions-item>
         <el-descriptions-item label="分布">
           <el-tag v-for="(v, k) in (lastRun.dist || r2.dist)" :key="k" size="small" class="mr4"
-                  :type="k === 'ok' ? 'success' : k === 'empty_js_shell' ? 'warning' : 'info'">
+                  :type="k === 'ok' ? 'success' : (k === 'empty_js_shell' || k === 'login_wall')
+                    ? 'warning' : 'info'">
             {{ k }} {{ v }}
           </el-tag>
         </el-descriptions-item>

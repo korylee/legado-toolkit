@@ -26,8 +26,9 @@ class SourceOut(BaseModel):
     content_ok: Optional[int] = None
     search_hit: Optional[str] = None
     #: 来源阶梯（S2）：最近一批 JVM 校验的结论。state 取 ok/no_result/
-    #: empty_js_shell/timeout/error/invalid，空串 = 没跑过。hit 是搜索命中率
-    #: （0-100 整数，error 时为 None）。同 star_basis：**必须声明在这里**，
+    #: empty_js_shell/login_wall/timeout/error/invalid，空串 = 没跑过。hit 是**命中的条数**
+    #: （不是百分比——百分比那个是本地回放的 search_hit，两个字段别混）。
+    #: 同 star_basis：**必须声明在这里**，
     #: response_model 会按模型裁字段——之前 enrichment 在服务端明明算出来了，
     #: HTTP 响应里却全变空，查起来极像前端 bug。
     jvm_state: str = ""
@@ -39,6 +40,12 @@ class SourceOut(BaseModel):
     jvm_toc_ok: Optional[bool] = None
     jvm_content_len: Optional[int] = None
     jvm_content_ok: Optional[bool] = None
+    #: 正文偏短的附注（**不改结论**）：阈值与措辞都来自 `core.quality` 那一份，
+    #: 这里只是显示。空串 = 没有附注
+    jvm_content_note: str = ""
+    #: A3：这次跑带上了多少字符的 cookie（0 = 没带：该域没登录过，或浏览器不可用）。
+    #: **它是「这次的条件」，不是源的结论**——判断「需登录」时先看它
+    jvm_cookie_len: Optional[int] = None
     jvm_batch: str = ""
     #: 结论是否经浏览器渲染（S3-4）：None=未走浏览器 / True=渲染成功 / False=渲染失败
     jvm_rendered: Optional[bool] = None
@@ -109,6 +116,26 @@ class RuleChainTest(BaseModel):
     keyword: str = "我"
     detail_url: str = ""
     pick: int = 1
+
+
+class JvmDebugRequest(BaseModel):
+    """在本机引擎里跑一次调试（S5-A4）：不填 IP、不推送，直接出分段结果。
+
+    `source` 里的 ``bookSourceUrl`` 有两个用途：源的身份（JVM 侧解析）与 **cookie
+    注入的键**（A3）——登录态是从我们自己的浏览器 profile 按这个 URL 读出来注进去的，
+    所以它不能空、也不该被规范化（与连 App 那条同一个理由：那是源的身份原文）。
+    """
+
+    source: Dict[str, Any]
+    key: str = "我"
+    #: 整次调试的墙钟上限（秒）。比跑批宽：调试一条含正文段的链要渲染页面
+    timeout: int = 60
+    #: 手工注入的一条 cookie（可选）。不给就按源 URL 从浏览器 profile 读——
+    #: 登录墙的源要先在同一个 profile 里登录一次（`scripts/jvm_login.py`）
+    cookie: str = ""
+    #: 页面缓存策略，只管**我们补抓的那几页**（A4 还没从 JVM 取回真实 HTML）；
+    #: 取值校验在路由里做（不合法要 400，不能静默退回默认）
+    cache: str = "auto"
 
 
 class AppDebugRequest(BaseModel):

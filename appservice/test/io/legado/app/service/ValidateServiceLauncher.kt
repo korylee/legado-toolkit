@@ -24,23 +24,17 @@ class ValidateServiceLauncher {
 
     @Test
     fun run() {
-        // 传参走 appservice-args.properties（key=value：file/dir/keyword/out/
+        // 传参走 appservice/args.properties（key=value：file/dir/keyword/out/
         // concurrency/timeout/limit/depth/noStripWebview）。比命令行转义可靠——
         // bash→cmd→gradle 三层引号转义已经坑过三轮。
-        // 文件定位：先 CWD，再按 LEGADO_APPSERVICE_DIR 兜底（启动器会把 CWD
-        // 设为 App 仓库根）。
-        val candidates = listOf(
-            java.io.File("appservice-args.properties"),
-            java.io.File(System.getenv("LEGADO_APPSERVICE_DIR") ?: "", "args.properties"),
-        )
-        val f = candidates.firstOrNull { it.exists() }
-        if (f == null) {
+        // 文件定位（CWD → LEGADO_APPSERVICE_DIR 兜底）由 [AppserviceEnv] 统一负责：
+        // 它与 DebugServiceLauncher、两个探针**共用一份**，别再在这里抄第二遍。
+        val props = AppserviceEnv.loadArgs()
+        if (props == null) {
             println("APPSERVICE-LAUNCHER: 找不到 args.properties（试过 " +
-                candidates.map { it.absolutePath } + "），跳过")
+                AppserviceEnv.argCandidates().map { it.absolutePath } + "），跳过")
             return
         }
-        val props = java.util.Properties()
-        f.reader(Charsets.UTF_8).use { props.load(it) }
         val args = mutableListOf<String>()
         props.getProperty("file")?.let { args += listOf("--file", it) }
         props.getProperty("dir")?.let { args += listOf("--dir", it) }
@@ -50,6 +44,8 @@ class ValidateServiceLauncher {
         props.getProperty("timeout")?.let { args += listOf("--timeout", it) }
         props.getProperty("limit")?.let { args += listOf("--limit", it) }
         props.getProperty("depth")?.let { args += listOf("--depth", it) }
+        // A3：手工 cookie（可选）——不给就由服务按源 URL 从浏览器 profile 读
+        props.getProperty("cookie")?.let { args += listOf("--cookie", it) }
         // 浏览器 profile 目录（S3-4）：给跑批用，探针自己读同一个键
         props.getProperty("profile")?.let {
             System.setProperty("legado.browser.profile", it)

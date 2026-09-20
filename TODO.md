@@ -4,9 +4,8 @@
 > 写进 `skills/legado-source-lessons`，这里只留一行指针；**已完成的事项从这里删掉**
 > ——细节看 `git log`，机制看 lessons（AGENTS #10）。
 >
-> **已收口**（2026-09-19）：S1 JVM 搜索档全量 / S2 接进产品 / S3 三段 + 浏览器桥 /
-> S4 健康六档 + 存量迁移 / 本地回放边界与 `bookUrl` 作用域 / 界面文案批 1。
-> 机制与实测见 lessons §四十八～§五十六，文案那批见 §四十六。
+> **历史批次（S1–S4、文案批 1、S5-A 的 A1–A4）不在这里复述**——机制看 lessons，
+> 细节看 `git log`。本文件只留：还没做的 + 动手前的判据。
 
 ---
 
@@ -14,7 +13,7 @@
 
 | 阶段 | 做什么 | 依赖 | 完成判据 |
 |---|---|---|---|
-| **S5-A JVM 调试通道** | 接替「连 App 调试」，含 cookie 注入——方案见 §一点八。**含第二期常驻 daemon**（先量再定） | S1–S3 ✅ | §一点八 的四批各自判据 |
+| **S5-A JVM 调试通道** | 接替「连 App 调试」，含 cookie 注入——方案见 §一点八。**A1/A2/A3-1/A4 已完成**（2026-09-20，机制见 lessons §五十九/§六十/§六十三/§六十四）：**通道已接进产品，界面默认「本机引擎」**。**下一步：第二期常驻 daemon**（A1 已量：单次 15–41s 里约 10s 是 Gradle 入场费，量法见该节）；A3-2 按需（只覆盖 12 条 auth 源） | S1–S3 ✅ | §一点八 的判据 |
 | **调试体验（§九）** | 先定层再写规则：定层横幅 + 候选按层改写（容器与字段成对、补 id）+ AI 提议加前置条件 | **S5-A 走通**（只为「通道选择」一次做到位） | §九 四批各自判据 |
 | **S5-B 真机复检** | **只做只读那条**（`/searchBook` + 读回 App 自带结论），一行 App 数据都不写 | —— | §二 |
 | **文案收口** | 机检基线**只减不增**（条数以 `tools/copy_baseline.json` 为准，2026-09-20 已收窄到 138）：批 2（前端）、批 3（后端话术 + 断言同步） | —— | §八 |
@@ -36,79 +35,133 @@
   **真机只做复检**（登录墙 / WebView 依赖 / 用户网络出口，见 §二）。
   「调试归 JVM」的**动手方案已定**：见 §一点八（S5-A），做之前「连 App 调试」
   仍是唯一可用入口。
-- **换机器 / 新用户上手**：那几步（App 仓库 + JDK 21 + SDK + 同盘 Gradle 缓存、
-  设置 → JVM 校验页签填 App 源码目录、先自检再跑批）已移进 `README.md` 的
-  「JVM 校验（可选）」一节——它属于「使用者需要知道」，不留在待办里。
+（上手步骤在 `README.md` 的「JVM 校验（可选）」一节。）
 
-**S3 之后悬着的两个设计**（都不阻塞，做真机通道或结论互通时再回来）：
+**S3 之后悬着的设计**（都不阻塞，做真机通道或结论互通时再回来）：
 
 - **「没结果」二义性**：JVM 搜索对单关键词跑，某源没结果可能是「没这本书」——
   缓解靠多词复核（全不命中才判坏），落地点在做 `no_result` 复核批次时。
 - **JVM 结论要不要反向喂给本地口径**（health/stars 的映射与来源标注）：
   那是「结论互通」的事，等三段结论稳定后再议，
   **动本地口径才涉及 CACHE_VERSION**。
+- **UA 是三条通道各一条**：`AppserviceEnv.USER_AGENT`（`Chrome/124.0.0.0`）、App 自己的
+  默认（随 Cronet 版本走，2026-09 是 `Chrome/128.0.0.0`，且用户可改）、Python 的
+  `core/constants.DEFAULT_UA`（`Chrome/124.0`）。要「与设备对齐」得**先给结论行加一根
+  UA 轴**（把当次实际用的那条记进结论；行里已有 `webview_stripped` 这个"当次条件"的
+  先例），否则历史结论与新结论不是同一口径却看不出来（与 AGENTS #5b 同构）。
+  **现在不动**：改值会改变站点返回的页面，与库里 3774 条已有结论不可比。
+
+**三段结论里几处已知的缺口**（都不改判据，做到那一步再回来）：
+
+- **正文附注只做了一半**：JVM 面现在会带「正文较短」的附注（`core.quality.short_content_note`
+  ——报告与列表**同一个函数**）；「疑似错误页」那一半要**全文**匹配 `CONTENT_NOISE_MARKERS`，
+  而结论行的 `content_sample` 只有 60 字，要做得先把它放宽（上限 `SHORT_CONTENT_CHARS`）。
+- **anti-bot 墙在 JVM 侧仍报 no_result/error**（按需）：`login_wall` 只认
+  `LOGIN_MARKERS`（「请登录」这类）；验证码 / Cloudflare 那类（`ANTI_BOT_MARKERS`）没有
+  对应状态，于是「需人工过一下」被读成「没出结果」。要做先数条数（本地那边它们也算
+  auth），判据照 `core/checker.is_login_wall` 那套，**别新造**。
+- **每源总预算是软上界**：慢源实测跑到预算的近两倍（40s → 77.7s），App 自己的 60s
+  `readTimeout` 也参与其中。**估时长别按 `预算 × 条数 ÷ 并发`**；机制、实测与归因方法
+  见 lessons §六十二。要让它真封死，得让 App 的 `readTimeout` 小于预算（另一件事）。
 
 ## 一点八、S5-A：JVM 调试通道（2026-09-19 定方案；接替「连 App 调试」）
 
-**为什么做**：单源调试目前唯一的入口是连 App（`SourceEditDialog.appDebugRun`：
-填 IP → 预检 → 推送 → WS 1123）。而设备 WS 有一个结构性天花板——**`matched_html`
-恒为空串**（`core/app_debug.py` 的 `build_steps`，App 只推文本事件不给 HTML）。
-JVM 通道跑的是同一段 App 代码（`Debug.kt` 管线），手里还握着完整 HTML，建成后
-信息量**超过**设备调试；同时消掉「填 IP / 预检 / 推送」整条前置链。登录/代理源的
-可调试性已查证（lessons §五十六）：代理跟着源走完全支持；登录态三层里只有
-「登录过程本身」要回设备/浏览器做一次，cookie 注入参数把第二层也自动化。
+**为什么做（已兑现）**：单源调试原先唯一的入口是连 App（填 IP → 预检 → 推送 →
+WS 1123），而设备 WS 有一个结构性天花板——**`matched_html` 恒为空串**
+（`core/app_debug.py` 的 `build_steps`，App 只推文本事件不给 HTML）。**JVM 通道跑的
+是同一段 App 代码**（`Debug.kt` 管线）**且手里握着完整 HTML**：今天界面默认就走它，
+「填 IP / 预检 / 推送」整条前置链已经消掉，登录态也能从浏览器 profile 带进来
+（A3）。机制见 lessons §五十六/§五十九/§六十/§六十三/§六十四。
 
-**两个上游接口已核过签名**（App 仓库当前版本）：
-
-- **事件流**：`Debug.startDebug(scope, bookSource, key): Session`（`Debug.kt`），
-  `Session.events` 是公开 Flow（Channel 承载，Error/Completed 自动关流）。
-  key 语法照抄 App：纯关键词=搜索、绝对 URL=详情、`::`=发现、`++`=目录、`--`=正文
-  ——前端本来就懂这套。**不需要 WS、不需要设备**，JVM 里直接 collect。
-- **webView 依赖面**：`BackstageWebView.getStrResponse()` 干**两步**——
-  ① WebView 加载页面（loadUrl / loadDataWithBaseURL），② `EvalJsRunnable` 在渲染
-  结果上执行 `js` 选项（无则默认 `document.documentElement.outerHTML`），
-  **非空才收**，1 秒重试至 30 次超时。调用点三处：`AnalyzeUrl.kt`（取数）、
-  `AnalyzeRule.kt`、`JsExtensions.kt`（规则里的 `java.` 调用）。
-
-**ShadowBackstageWebView 是整个方案的关键设计**——比「渲染后喂解析器」多一步：
-
-- S3-4 校验通道可以「CDP 渲染 → 喂 `BookList.analyzeBookList`」，因为校验只要终态；
-  **调试通道不行**：`Debug` 管线（WebBook.searchBook → infoDebug → …）是不透明的，
-  重实现它等于把 App 调试语义抄一遍。
-- 正确接法：Robolectric shadow 掉 `BackstageWebView`，`getStrResponse()` 委托给
-  `BrowserBridge.renderSerial`（渲染）+ `Runtime.evaluate(js选项)`（求值），
-  组装 `StrResponse` 返回。Debug 管线**一行不改**，webView 源在整条调试链路里透明走 CDP。
-- shadow 语义要对齐 App 的重试纪律：**JS 求值结果为空时重试**，
-  不是「渲染一次拿 outerHTML 交差」——这是与 S3-4 校验桥的本质差异，别复用错了。
-- 与 S3-4 共享一个 Session（renderSerial 已串行）；`js` 选项求值可能改 DOM
-  （isRule 注入），每次求值用独立 Runtime.evaluate，不缓存。
-
-**分四批，每批独立可验、独立提交**：
+**剩下的一件（A1/A2/A3-1/A4 已交付，机制见 lessons §五十六/§五十九/§六十/§六十三/§六十四）**：
 
 | 批 | 做什么 | 验收判据 |
 |---|---|---|
-| **S5-A1 事件流贯通** | `DebugService.kt`（appservice 侧）：args.properties 读 `file/key/out/timeout`，复用 `ensureStarted()` Koin 桩；`Debug.startDebug` + collect events → 每事件一行 NDJSON。先不做 webView/cookie | 普通源 5 条：NDJSON 事件流与设备 WS 推的同构（`┌/└/◇`、段名齐全），`app_debug.py` 的 `_split_segments` **不改一行**能解析；**零事件必须显式报错退出非 0**，不许产出空文件当成功 |
-| **S5-A2 shadow 桥** | **先做半天 spike**（空壳名单 1 条源：shadow 只挂上、验证 Robolectric 下真能 collect 到事件流），走通了再铺开。`ShadowBackstageWebView`（@Implements，只挂测试编译）；getStrResponse 委托 BrowserBridge（渲染 + js 求值 + 空结果重试）；复验 S3-4 的空壳源名单 | 空壳源名单里至少 1 条：调试事件流走通（App 自己管线的日志里出现解析完成），而非「渲染后另喂解析器」 |
-| **S5-A3 cookie 注入** | args 加 `cookie=`；走 `CookieStore.setCookie(url, cookie)` 预填 CacheManager（实现时验证 `enabledCookieJar` 开关与拦截器链路这一环）；管理库存档的 cookie 可直接用 | 带 `loginHeader`/已知 cookie 的源各 1 条：搜索段带登录态跑通 |
-| **S5-A4 接进产品** | `core/jvm_debug.py` + `POST /api/rules/jvm-debug`（subprocess → NDJSON → 复用 `app_debug.py` 分段解析；`matched_html` 本批留空）；前端 `SourceEditDialog` 加通道切换，**默认 JVM**，连 App 降为备选（预检/推送逻辑保留不删） | 界面上选「本机引擎」：不填 IP、不推送，直接看到分段调试结果 |
+| **S5-A3-2 表单登录入口** | `loginUi` 非空那类（弹表单、`loginUrl` 的 JS 在 Rhino 里登录）：能力上可行（那段 JS 我们 JVM 里能原样跑，缺的只是收集字段），但**只覆盖 12 条 auth 源**（全体在用源里 96 条）→ 按需再做，见 lessons §六十三 的覆盖数据 | 一条 `loginUi` 的源能登录并跑通 |
+
+> **排障先看的三样**：侧车 `<out>.meta.json`（退出码含义 / 事件数 / **cookie_len** /
+> shadow 计数 / `browser_cleanup`）、契约测试 `tests/test_jvm_debug*.py`（钉 NDJSON
+> 形状与两侧词表）、CLI `scripts/jvm_debug_run.py`（退出码直接透传，可当验收闸门）。
+>
+> **A4 之后还差一步（小）**：跑批那条路（`backend/api/jvm.py`）**还没接
+> `core/jvm_debug.RUN_LOCK`**——调试在跑时点跑批，两条链仍会同时写 `args.properties`
+> 并抢同一个 Gradle 任务（互相踩，且看起来像「JVM 坏了」）。反过来由调试侧挡住了
+> （非阻塞拿不到锁就明说），所以补跑批这一侧即可。
+>
+> **A1 唯一没做完的验收**：与设备 WS **逐事件对拍**（需要手机开着 Web 服务）；
+> 结构同构已由契约测试保证，对拍等设备在场时补一次即可。
+>
+> **A2 之后可评估（不是待办，先记着）**：跑批那条路（`ValidateService`）今天仍然是
+> 「剥掉 webView 选项 → 渲染 → 另喂 `BookList`」（S3-4 的走法）。shadow 到位后，
+> 跑批也可以**不剥 webView、直接走 App 自己的链路**——那能删掉一整条支路，
+> 但**会改变跑批结论**（真 webView 语义 ≠ 渲染后喂解析器），属于要配
+> `CACHE_VERSION` 的全量重跑，**未评估前不要动手**。
 
 **第三期（S5-A 之后，独立可做）：`matched_html` 回填**——在 shadow / OkHttp 拦截器里
 记 (url, body) 环形缓冲，按每段事件里的 `≡获取成功:<URL>` 回填。做完这条，
 JVM 调试对「看规则命中了什么」就**全面超过**设备 WS。
 
-**第二期：常驻 daemon（把 10–20 秒的入场费消掉）**
+**第二期：常驻 daemon（方案，2026-09-20 定；动手前先量 D0）**
 
-A1–A4 形态是**每次调试起一次 JVM**，那 10–20 秒几乎全是一次性入场费：
-JVM 启动 + Robolectric bootstrap（android-all jar、应用环境、两类静态初始化，
-lessons §四十八点五）+ App 的 Koin 桩。**边际成本其实很小**——S1 全量是
-「3774 条 / 17 分钟」≈ **0.27 秒/源**，那是同一个 JVM 跑完全程摊下来的。所以
-常驻的收益就是把这条曲线搬到交互场景：从「每次 10–20 秒」变成「一次入场 + 每次亚秒级」。
+**要解决的问题**：A1–A4 是**每次调试起一次 JVM**，那 ~10 秒是一次性入场费。实测：
+- 快速源：**11.4s 墙钟里约 10s 是入场费**（echo 源，站点只花 1.4s）；
+- 慢源：A1 那批 15–41s，入场费占 25–60%（站点请求是大头）；
+- 而**同一个 JVM 里摊下来只要 0.27 s/源**（S1 全量 3774 条 / 17 分钟）。
+  → 常驻就是把这条曲线搬到交互场景：**第一次 ~10s，之后每次亚秒级**。
+  编辑循环里同一条源要跑 2–4 次，所以省下来的是「每次 10 秒 × 次数」。
 
-**但先量再定，不要凭估**（lessons §四十七）。量法：同一源跑三次，
-分别记 ① 完整 `legado-gradle.bat` 调用 ② 已编译后直接 `java -cp` 起 JVM
-③ 常驻后单次请求——看 ①−② 是 Gradle 配置阶段的占比、②−③ 才是 Robolectric+App 初始化的占比。
-**若 ③ 之后单次耗时的大头是页面渲染/请求（本会话正文段 18 秒就是这么来的），
-那 daemon 也消不掉它** —— 那种情况下先做 §九（少跑几轮、跑得更准）比建常驻更值。
+**判据（先量，别凭估——lessons §四十七）**：同一源连跑三次，分别记
+① 完整 `legado-gradle.bat` 调用 ② 已编译后直接 `java -cp` 起 JVM（D0 的产物）
+③ 常驻后单次请求。**②−③ 才是 daemon 的真收益**（①−② 是 Gradle 配置阶段的占比）。
+判据：**②−③ ≥ 5s 就做**；否则先做下面表里那两条。按现有数据（快速源 ~10s 入场费）
+预测是 ≥8s → **倾向做**。
+
+**形态**：`DebugServiceDaemon`（同一份 `DebugService` 逻辑 + 常驻循环），后端 `Popen`
+起进程、localhost socket 收发。**关键设计：契约不变**——daemon 只是把「两个文件」换成
+「一条流」，NDJSON 行 schema 与 `core/jvm_debug` 的解析**一行不改**（同 A4 的「同形」
+手法），`tests/test_jvm_debug*.py` 那几条继续守。
+
+| 批 | 做什么 | 验收判据 |
+|---|---|---|
+| **D0 拿到测试 JVM 的 classpath** | 在 `legado-test.init.gradle` 加个小任务：把 `testAppDebugUnitTest` 的 classpath / 系统属性 dump 成文件；然后 `java -cp @file` 直接跑一次 `DebugService` 的 main | **不起 Gradle 也能跑完一次调试**（同一源与 bat 路径逐字段一致），并记下 ② 的耗时——这一批就够定"值不值" |
+| **D1 常驻 + 单请求** | `DebugServiceDaemon`：起一次（Robolectric + App + Koin），监听 localhost，**串行**收请求，回一段 NDJSON | 连续两次调试同一条源：与「各起一次 JVM」的结果**逐字段一致**（对拍）；第二次墙钟 ≤ 2s |
+| **D2 后端接上 + 无感** | `core/jvm_debug` 加「优先 daemon、**不可用回落 subprocess**」；健康探针 + 自动拉起 + **版本键**（App 仓库 + `appservice/` 的 hash）；空闲超时退出 | 界面上点调试 ~11s → ~2s；**杀掉 daemon 后界面自动恢复**（回落或拉起，不是报错）；改了 `appservice/` 后下一个请求自动换进程 |
+| **D3（可选）** | 跑批也走常驻（**另一实例**）；一次并发多源 | 跑批结论与现在逐字段一致 |
+
+**降级路径（必须留）**：daemon 起不来 / 挂了 / 版本对不上 → **回落现有 subprocess 路径**。
+落点现成（`core/jvm_debug.run_jvm_debug` 是唯一入口），但**这条路径在 D1 起就得先存在**
+——别等 D2 才想它。
+
+**要清的状态 vs 要留的状态（别一刀切）**：
+- **要清**：`Debug` 的静态态（上一次的 `debugSource`）、我们 shadow 的计数、
+  Rhino 的 `shareScope`（按源缓存，LRU 16 自限）。
+- **要留**：cookie（A3 的登录态复用**靠的就是它**）、浏览器 profile（同理）。
+  「每请求清干净」会把 A3 的收益一起清掉。
+
+**沿用的约束（A4 已验证过，别重新发明）**：串行队列（`Debug.log` 只在
+`debugSource == sourceUrl` 时 emit）、崩溃自愈、版本失效即重启、**与跑批分开实例**
+（共用一个实例会让跑批把调试堵住，反之亦然）。
+
+**先做谁：daemon vs 另外两条**（不冲突，但顺序有讲究）：
+
+| 方案 | 省多少 | 依赖 | 备注 |
+|---|---|---|---|
+| **daemon（第二期）** | 每次调试省 ~10s，**含第一次** | 无 | 工程增量最大；D0 半天就能给出「值不值」的数 |
+| **第三期 `matched_html` 回填** | 「改完规则再看一遍」省**一整趟站点请求**（5–30s），且用的是 App 真看到的那份 HTML（更准） | 独立可做 | 它同时是 §九-4「对数验收」的地基 |
+| **OkHttp Cache**（shadow 装） | 重复抓同一页的**第二条起秒回** | 独立；要配「忽略缓存重抓」 | 与 daemon 正交：它砍站点时间，daemon 砍入场费 |
+
+**站点请求那一段的其余方向（未评估，先记着）**
+
+| 方向 | 想法 | 风险 / 前提 |
+|---|---|---|
+| **重放优先于重跑**（我认为最值） | 第三期 `matched_html` 回填后，「改完规则再看一遍」可以走**本地重放 App 真看到的那份 HTML**，不再联网。前端已有「重新调试本页」，但它今天用的是**我们补抓**的页（可能与 App 看到的不同）；回填后用的是同一份，**既准又省一整趟请求** | 依赖第三期；且只对「同一页、改规则」有效，改 URL 模板仍要重跑 |
+| **给 OkHttp 装 Cache**（shadow 装，零入侵） | 重复调试同一条源时，前几段（搜索/详情/目录）的页面通常没变，第二次起可秒回 | **必须只在调试点开、且界面上要有「忽略缓存重抓」**——缓存里的页面是旧的，正是「同源不同判」的温床。语义要与现有每次调试可选的那三档缓存策略对齐 |
+| **分段重跑已有，再往前一步** | 「从此步重跑」已经砍掉整链重来；可以再把**上一轮解析出的 book/chapter 传回去**，让正文段不必先重跑目录 | 需要把上一轮结果结构化存下来（前端已有 `steps[].url`，够用） |
+| **并发跑多源** | 一次批量调试多条源时并发——但那是 daemon 的收益，不是单次调试的 | 属于第二期 |
+| **别把「我们自己的补抓」算进 debug 耗时** | `fetch_debug_pages` 是**额外**抓的页（给抽屉看证据），与 App 跑链无关；它慢不该记在调试头上 | 只是记账口径，不是优化 |
+
+> 记这里是因为它是**独立的收益来源**：daemon 解决「入场费」，这几条解决「每次都要重抓同一个页」。
+> 两者不冲突，但**先做哪个要看编辑循环里重复抓同一页的比例**——没量过，别先动手。
 
 形态照旧：`DebugServiceDaemon`（Robolectric 进程驻留 + localhost socket 收请求），
 后端持长连接、前端无感。**动手时的额外约束**（比 A1–A4 多了四条，别漏）：
@@ -124,47 +177,16 @@ lessons §四十八点五）+ App 的 Koin 桩。**边际成本其实很小**—
 > lessons §二十六 记过一句「改成常驻服务是把测试框架当生产容器用」——那句的结论
 > 是**不重写后端**，不是「不能常驻」。常驻的代价就是要正面处理上面这张表。
 
-**关键约束（动手时重读）**：
+**仍然成立的约束**：
 
-- **零入侵边界不放松**：shadow 只在测试编译里挂（`@Config(shadows=[])` 加一行），
-  App 源码一行不动；每批跑完验 App 仓库 `git status` 为空（lessons 里已有此纪律）。
-- **调试结论不落 checks / meta 的批次体系**：它是交互产物（人看着改规则），
-  与校验批次的「每源每 URL 取最深」语义不同；落点只在前端会话（或另立
-  `jvm_debug:<ts>` 键），别混进 `jvm_check`。
-- **`Debug.log` 只在 `debugSource == sourceUrl` 时 emit**（`Debug.kt`）：一次一个
-  会话，A4 的后端要保证串行（同一 JVM 实例同时只调一个调试），或每请求起新 JVM。
+- **零入侵边界不放松**：shadow 只在测试编译里挂，App 源码一行不动；每批跑完验
+  App 仓库 `git status` 为空（AGENTS 的既有纪律）。
+- **调试结论不落 `checks`/`jvm_check` 批次体系**：它是交互产物（人看着改规则），
+  与校验批次的「每源每 URL 取最深」语义不同；落点在前端会话。
 - **key 语法照抄不发明**：`::`/`++`/`--` 前缀是 App 的方言（`Debug.kt`），
-  前端已有的 key 拼装逻辑直接复用，别做一层自己的翻译。
-- **两侧契约只有一份，A4 动手前先钉死**：NDJSON 行 schema / `args.properties`
-  键表 / key 方言，落点 `core/jvm_debug.py` 顶部注释 + 一条契约测试
-  （Kotlin 产出的样例 NDJSON 存成 fixture，Python 解析端断言能吃）。
-  行 schema 建议直接写 `Event` 的三件套 `{"kind","elapsed_ms","text"}`——
-  `text` 用 `Event.message`，**它已含 `[mm:ss.SSS]` 前缀**（`Debug.log` 的
-  `debugTimeFormat` 自己加的，A1 不用算时间、别再包一层）。
-- **A1 的「同构」要靠对拍，不靠眼看**：同一条源分别走设备 WS 与 A1，
-  逐事件比（条数、`┌/└` 成对、`◇` 统计行、段名序列）。取样口径写死：
-  `health=ok` 且不含 `@js:`/webView 的源各取 5 条。
-- **零事件有两种成因，症状相同**：① 传入源的 `bookSourceUrl` 与 App 内部
-  用的不一致（表单态源最容易出）→ `debugSource` 不匹配，一条都不 emit；
-  ② Robolectric 主 looper 默认 PAUSED，scope 选错 dispatcher 事件收不到。
-  A1 对两者都要**显式报错**（分不清成因就都写上），不能静默空文件——
-  这与连 App 的 `_ZERO_EVENT_HINT` 是同一条教训。
-- **批次顺序：A4 放最后**：它要动 `SourceEditDialog.vue`，而前端正被并行改动
-  （2026-09-19 实测 `TidyDrawer.vue`/`styles.css` 同时被改且落了提交）。
-  动手前先 rebase、改动收敛到「通道切换」一处；开发在分支上跑，落地即删
-  （lessons §五十七 的前科 + AGENTS #19）。
-
-**风险与预案**：
-
-| 风险 | 预案 |
-|---|---|
-| `Debug.log` 走 `Log.d`/Handler/Looper 等 Android 运行时 | ~~Robolectric 全都 shadow 了~~ **2026-09-19 审阅订正：事件流根本不走 `Log.d`**——`Debug.log` 把 `Event`（kind/message/timestamp/elapsedMillis）emit 进 `Session.events` 的 Channel Flow，`Log.d` 只是 `BuildConfig.DEBUG` 旁枝，失败也不影响事件流（都查证过符号：`Debug.kt` 的 `log`/`Session.emit`）。真正要防的是上面「零事件两种成因」那两条。要新 shadow 的确实只有 WebView 一层 |
-| A2 做成「渲染后喂解析器」的形态 → 假阴性 | **这是 A2 最贵的错**：`xhr_mode` 类源渲染完的 DOM 里没有图片地址（页面用 XHR 拉成 blob），解析器判「正文取不到」而真机是好的——比延期糟，因为它长得像结论。shadow 必须执行源自己的 `webJs`（渲染 + `Runtime.evaluate` + 空结果重试），语义对齐 App 的重试纪律；spike（见批次表）先把这个形状验出来 |
-| A2 整体受阻不交付 | **有降级路径，不阻塞主线**：`@js:` 规则跑在 Rhino 里、不经过 webView（S1 全量已证），A1+A3+A4 照常发——得到「不填 IP、不推送、能跑 JS 规则」的调试器；只有带 webView 选项的源（空壳名单那批）要等 A2，而那批同时卡 §九 的 L2/L3 → §九 推迟，主线照常 |
-| SnifferWebClient（sourceRegex 嗅探）语义 shadow 不全 | 首版只支持 HtmlWebViewClient 路径（绝大多数源）；`sourceRegex` 非空的源显式报「暂不支持」，不静默给错结果——AGENTS #4 |
-| isRule 注入（`source`/`java` 对象加进 JS 上下文） | `addJavascriptInterface` 在 Robolectric WebView 里本来就 shadow；我们的 shadow 求值时把 `WebJsExtensions` 语义留待按需补，先显式报不支持 |
-| 每次 JVM 冷启动太慢打断调试节奏 | 先量再定（第二期那段有量法）：若大头是**页面渲染/请求**，daemon 消不掉它，先做 §九；若大头是**入场费**（JVM+Robolectric+App 初始化），做常驻——**别一开始就建，那是整个方案里最大的工程增量** |
-| 同 URL 调试时源未保存（表单态 vs 库里态） | 调试用**表单态源**（序列化传给 JVM，与连 App 的 `confirmPush` 语义对齐），不要求先保存——这是比连 App 更顺的一点，也是「不写库」的自然推论 |
+  前端已有的拼装逻辑直接复用，别做一层自己的翻译。
+- **调试用表单态源**：序列化传给 JVM，不要求先保存（与连 App 的 `confirmPush`
+  语义对齐）——也是「不写库」的自然推论。
 
 ## 二、真机复检通道（原「让 App 承担校验」的归宿）
 
@@ -269,8 +291,9 @@ lessons §三十四；「明确不做」的五条也在那一节（不自动合�
 ## 六、体验类（按需）
 
 - **前端暴露 `pick`**：搜索结果多条时选第 N 条重试（后端 `pick` 参数已支持；
-  Legado 固定取第 0 条，见 `Debug.kt`）。§一点八 A4 做通道切换时一并考虑：
-  JVM 侧 key 由我们拼装，pick 语义可以直接进 A4 的参数面。
+  Legado 固定取第 0 条，见 `Debug.kt`）。A4 的通道切换**没带上它**，落点是
+  `core/jvm_debug.run_jvm_debug` 加一个 `pick` 参数（key 由我们拼装，App 那边
+  已有 `Debug.kt` 的 pick 语义）→ 前端给个「换一条」的入口。
 - 点击摘要里的变化数 → 按对应筛选跳转（需与统计条 chip 的筛选状态协同）
 - 校验历史时间线（每次校验的前后对比，而不只是聚合数）——
   **依赖放宽 `checks` 的保留策略**：现在每源只留最近一条，时间线至少要留 N>1 条
@@ -308,12 +331,16 @@ App 用、我们不用，构成「同源不同判」。`replaceRegex` 风险方�
   **改文案必须同步改钉住它的断言**（实测 6 处：`test_quality.py` 的
   「无法离线回放」「正文提取为空」「疑似错误页」「章节数偏少」、
   `test_legado_rules.py` 的「选择器无法解析」）——AGENTS #12。
+- **Kotlin 侧（`appservice/*.kt`）还没进机检**：`TARGETS` 里没有 `appservice`，而
+  `render_reason` 这类串是**直接显示给用户**的（`SourcesView` 的 tooltip）。
+  要加得先写一个跳过注释的 Kotlin 提取器（那个目录里中文注释远多于文案串，
+  直接扫会把注释算成文案），加完还要有人守基线——**别只把目录塞进 `TARGETS`**。
 - **永久例外**：必须逐字保留的串（如换词表的键，见 AGENTS #17）在行尾写
   `# copy-ok: 理由`，**不进基线**（AGENTS #18）——基线里出现永久条目等于把闸门关掉。
 
 ---
 
-## 九、调试体验：先定层，再写规则（**排在 S5-A 走通之后**）
+## 九、调试体验：先定层，再写规则（**S5-A 已走通，可开工**）
 
 **为什么现在不够好用**（四条都是实测，源就是本仓的 `口袋漫画`，机制见 lessons §五十八）：
 

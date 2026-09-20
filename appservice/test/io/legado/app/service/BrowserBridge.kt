@@ -51,9 +51,23 @@ object BrowserBridge {
         .readTimeout(0, TimeUnit.MILLISECONDS)   // WebSocket 不能有读超时
         .build()
 
-    data class Result(val ok: Boolean, val html: String = "", val reason: String = "")
+    /**
+     * 渲染结果。`body` 是**取到的正文**——默认是渲染后的
+     * `document.documentElement.outerHTML`；给了 `js` 参数时则是**那个 JS 的求值结果**
+     * （S5-A2 起）。**原字段名是 `html`，改名是因为它不该被当 HTML 读**：名字说 html、
+     * 里面装的却是 JS 返回值时，调用方会照着 HTML 去解析它（本仓库被这类误导性命名
+     * 坑过多次，见 lessons §十九）。
+     */
+    data class Result(val ok: Boolean, val body: String = "", val reason: String = "",
+                      /** 落地地址（重定向后）。取不到时回退请求地址。 */
+                      val url: String = "")
 
     fun findBrowser(): String? = CANDIDATES.firstOrNull { File(it).isFile }
+
+    /** 上一次清理的结果（给侧车诊断用）。**"没清理" 与 "清理失败" 必须分得开**——
+     *  前者说明代码路径没走到，后者说明命令没杀掉，两件事的下一步完全不同。 */
+    @Volatile
+    var lastCleanupNote: String = "not_called"
 
     private fun freePort(): Int = ServerSocket(0).use { it.localPort }
 
@@ -68,13 +82,53 @@ object BrowserBridge {
         fun tail(): String = exhaust.tail()
 
         fun close() {
-            runCatching { process.destroy() }
-            runCatching {
-                if (!process.waitFor(5, TimeUnit.SECONDS)) process.destroyForcibly()
-            }
+            // **先走协议级关闭**：Chromium 的浏览器端点上有 `Browser.close`，它会
+            // 优雅退出——连 profile 锁一起清干净（A3 复用固定 profile 攒 cookie 的前提）。
+            // 免 shell、免引号、免进程树语义。
+            val graceful = closeBrowser(this)
+            // 兜底：协议没关掉（浏览器卡死 / 端点在但不响应）才动刀子。
+            // `destroy()` 不杀树（实测一次渲染 15 个进程只剩 10 个），所以借
+            // taskkill /T /F——它是**普通 exe**，不经过 shell 引号那一层。
+            if (!graceful) killTree(process)
+            lastCleanupNote = if (graceful) "graceful" else "killtree_fallback"
             runCatching { exhaust.stopped = true }
             // 等进程真退出了才能删：Windows 上文件被占着删不动
             if (tempProfile) runCatching { profileDir.deleteRecursively() }
+        }
+    }
+
+    /**
+     * 用 CDP 的 `Browser.close` 优雅关掉这个浏览器会话。
+     *
+     * 返回是否**确认已退出**，判据是「调试端口不再应答」——`Browser.close` 通常不回
+     * 响应就断开连接，所以**别等应答**，等端口消失才可靠。
+     */
+    private fun closeBrowser(session: Session): Boolean {
+        val info = httpGet("http://127.0.0.1:${session.port}/json/version") ?: return false
+        val wsUrl = runCatching { JSONObject(info).optString("webSocketDebuggerUrl") }
+            .getOrNull()?.takeIf { it.isNotBlank() } ?: return false
+        val inbox = LinkedBlockingQueue<String>()
+        val ws: WebSocket = wsClient.newWebSocket(
+            Request.Builder().url(wsUrl).build(),
+            object : WebSocketListener() {
+                override fun onMessage(webSocket: WebSocket, text: String) { inbox.offer(text) }
+                override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                    inbox.offer("""{"__error":"${t::class.simpleName}"}""")
+                }
+            })
+        return try {
+            ws.send(JSONObject().put("id", 1).put("method", "Browser.close").toString())
+            val deadline = System.currentTimeMillis() + 8000
+            var gone = false
+            while (System.currentTimeMillis() < deadline && !gone) {
+                gone = httpGet("http://127.0.0.1:${session.port}/json/version") == null
+                if (!gone) Thread.sleep(200)
+            }
+            gone
+        } catch (e: Throwable) {
+            false
+        } finally {
+            runCatching { ws.close(1000, "closing") }
         }
     }
 
@@ -132,18 +186,40 @@ object BrowserBridge {
         val proc = ProcessBuilder(cmd).redirectErrorStream(true).start()
         val exhaust = Exhaust(proc.inputStream).start()
         val deadline = System.currentTimeMillis() + timeoutMs
+        var starterExited = false
         while (System.currentTimeMillis() < deadline) {
             if (httpGet("http://127.0.0.1:$port/json/version") != null) {
                 return Session(proc, port, profileDir, exhaust, tempProfile = tempProfile) to ""
             }
-            if (!proc.isAlive) {
-                return null to ("browser_unavailable: 浏览器进程已退出（${exhaust.tail()}）")
-            }
+            // **`!proc.isAlive` 只记下来，不作为判定**（2026-09-20 实测踩坑）：
+            // Chromium 启动后会把活**移交给另一个进程**，我们 ProcessBuilder 起的那个
+            // 随即退出——但浏览器是好的、调试端口也在。原实现看到进程没了就当场判
+            // 「浏览器进程已退出」并 return，于是：① 明明是好的却报不可用（A2 从
+            // 「能渲染」变成「一直 browser_unavailable」就是这个）；② **失败路径直接
+            // return，把一棵浏览器树漏在后台**（实测一次漏 16 个进程、还占着调试端口）。
+            // 真正的判据只有一个：**端口有没有起来**。
+            if (!proc.isAlive) starterExited = true
             Thread.sleep(300)
         }
-        runCatching { proc.destroyForcibly() }
+        // 没起来才是真失败——**必须把自己起过的东西收掉**，不能留泄漏
+        killTree(proc)
         return null to ("browser_unavailable: 调试端口 $port 在 ${timeoutMs}ms 内没起来" +
+            (if (starterExited) "（启动器进程已退出，浏览器没接住）" else "") +
             "（${exhaust.tail()}）")
+    }
+
+    /** 杀一棵进程树（Windows 上 `destroy()` 不杀树，实测留 10 个孤儿）。 */
+    private fun killTree(proc: Process) {
+        val pid = runCatching {
+            org.robolectric.util.ReflectionHelpers.callInstanceMethod<Long>(proc, "pid")
+        }.getOrNull()
+        if (pid != null) {
+            runCatching {
+                ProcessBuilder("taskkill", "/PID", pid.toString(), "/T", "/F")
+                    .redirectErrorStream(true).start().waitFor(5, TimeUnit.SECONDS)
+            }
+        }
+        runCatching { proc.destroyForcibly() }
     }
 
     private fun httpGet(url: String): String? = runCatching {
@@ -160,13 +236,25 @@ object BrowserBridge {
     }.getOrNull()
 
     /**
-     * 渲染一个 URL，返回 `document.documentElement.outerHTML`。
+     * 渲染一个 URL，取回正文。
      *
-     * 浏览器不可用 / 超时都**显式返回原因**（`browser_unavailable` / `render_timeout`），
-     * 调用方据此判 unknown——不静默退回「空壳」结论（那会把工具的欠缺说成源的问题）。
+     * 默认取 `document.documentElement.outerHTML`；**传了 `js` 就取那个 JS 的求值结果**
+     * ——那正是 App 的 `BackstageWebView` 干的事（加载页面 → 在渲染结果上执行 `js` 选项），
+     * S5-A2 的 shadow 要的就是它。
+     *
+     * `jsRetryTimes > 0` 时按 **App 的重试纪律**处理空结果：求值返回空 → 等
+     * `jsRetryIntervalMs` 再来一次，直到非空或用完次数。**不是「渲染一次拿 outerHTML
+     * 交差」**——对 `xhr_mode` 类源（页面用 XHR 拉图、DOM 里没有地址）那会得到空页，
+     * 判成「源取不到」而真机是好的（假阴性）。App 那边是 1 秒 × 最多 30 次。
+     *
+     * 浏览器不可用 / 超时 / 求值为空都**显式返回原因**（`browser_unavailable` /
+     * `render_timeout` / `js_empty`），调用方据此判 unknown——不静默退回「空壳」结论。
      */
     fun render(session: Session, url: String, timeoutMs: Long = 30000,
-               waitAfterLoadMs: Long = 800): Result {
+               waitAfterLoadMs: Long = 800,
+               js: String? = null,
+               jsRetryTimes: Int = 0,
+               jsRetryIntervalMs: Long = 1000): Result {
         // **复用启动时那个 about:blank 页签**（/json/list 的第一个 page），
         // 不每次 `/json/new`：少一个端点就少一类失败（实测 /json/new 偶发拿不到页签），
         // 而且只有一个页签时，渲染天然是串行的——不必再操心多页签互相干扰。
@@ -203,9 +291,27 @@ object BrowserBridge {
                 if (eval(ws, 10, "document.readyState", inbox, 5000) == "complete") break
                 Thread.sleep(200)
             }
-            val html = eval(ws, 11, "document.documentElement.outerHTML", inbox, timeoutMs)
-            return if (html.isNullOrEmpty()) Result(false, reason = "render_empty: 渲染后 DOM 为空")
-            else Result(true, html = html)
+            // 求值表达式：给了 js 就用它，否则仍是整页 outerHTML（原有行为）
+            val expr = js?.takeIf { it.isNotBlank() } ?: "document.documentElement.outerHTML"
+            var body = eval(ws, 11, expr, inbox, timeoutMs)
+            // App 的重试纪律：**空结果要重试**，而不是收工（理由见函数注释）
+            var tries = 0
+            while (body.isNullOrEmpty() && tries < jsRetryTimes) {
+                tries++
+                Thread.sleep(jsRetryIntervalMs)
+                body = eval(ws, 11 + tries, expr, inbox, timeoutMs)
+            }
+            // 落地地址：App 的 buildStrResponse 用的是 WebView 跳转后的地址（`res.url`），
+            // 事件流里的 `≡获取成功:<URL>` 就是它——不取这个的话，重定向的站点会报
+            // 请求前的地址。取不到就退回请求地址（只是少一点信息，不判失败）。
+            val finalUrl = runCatching { eval(ws, 90, "location.href", inbox, 5000) }
+                .getOrNull()?.takeIf { it.isNotBlank() } ?: url
+            return when {
+                !body.isNullOrEmpty() -> Result(true, body = body, url = finalUrl)
+                jsRetryTimes > 0 -> Result(false, reason = "js_empty: 求值 $tries 次仍为空",
+                                           url = finalUrl)
+                else -> Result(false, reason = "render_empty: 渲染后 DOM 为空", url = finalUrl)
+            }
         } finally {
             runCatching { ws.close(1000, "done") }
         }
@@ -216,8 +322,68 @@ object BrowserBridge {
 
     /** 顺便把整段渲染也锁起来（页签是共享资源）。 */
     fun renderSerial(session: Session, url: String, timeoutMs: Long = 30000,
-                     waitAfterLoadMs: Long = 800): Result =
-        synchronized(renderLock) { render(session, url, timeoutMs, waitAfterLoadMs) }
+                     waitAfterLoadMs: Long = 800,
+                     js: String? = null,
+                     jsRetryTimes: Int = 0,
+                     jsRetryIntervalMs: Long = 1000): Result =
+        synchronized(renderLock) {
+            render(session, url, timeoutMs, waitAfterLoadMs, js, jsRetryTimes, jsRetryIntervalMs)
+        }
+
+    /**
+     * 读浏览器 profile 里**这个 URL 适用的 cookie**（CDP `Network.getCookies`）。
+     *
+     * 为什么走 CDP 而不是在页面里读 `document.cookie`：**HttpOnly 的 cookie 只有 CDP 看得到**，
+     * 而登录态大多正是 HttpOnly（实测 8 条里 BAIDUID 这类都在）。
+     *
+     * 实测（2026-09-20，`BrowserCookieProbeTest`）：**不需要先导航、也不需要开 `Network`
+     * 域**，直接问就是 profile 的 cookie 库——于是「预热登录一次、之后按 URL 读」成立，
+     * 批量校验不必为每条源渲染一遍。
+     *
+     * 返回 `(cookie 串, 原因)`：**空串 = 这个域没有 cookie**，与「读失败」分开报
+     * （后者带 `cdp_error:` 前缀）。调用方据此决定注入还是跳过——不静默。
+     *
+     * **不进 [renderLock]**：这是只读查询，CDP 支持多客户端；把它排在渲染后面只会让批量
+     * 的每条源都去等渲染。
+     */
+    fun cookies(session: Session, url: String, timeoutMs: Long = 5000): Pair<String, String> {
+        if (url.isBlank()) return "" to "no_url"
+        val page = pageTarget(session) ?: return "" to "cdp_error: 没有可用的页签"
+        val wsUrl = page.optString("webSocketDebuggerUrl")
+        if (wsUrl.isEmpty()) return "" to "cdp_error: 页签没有调试地址"
+        val inbox = LinkedBlockingQueue<String>()
+        val ws: WebSocket = wsClient.newWebSocket(
+            Request.Builder().url(wsUrl).build(),
+            object : WebSocketListener() {
+                override fun onMessage(webSocket: WebSocket, text: String) { inbox.offer(text) }
+                override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                    inbox.offer("""{"__error":"${t::class.simpleName}: ${t.message}"}""")
+                }
+            })
+        return try {
+            val params = JSONObject().put("urls", org.json.JSONArray().put(url))
+            ws.send(JSONObject().put("id", 1).put("method", "Network.getCookies")
+                .put("params", params).toString())
+            val deadline = System.currentTimeMillis() + timeoutMs
+            while (System.currentTimeMillis() < deadline) {
+                val text = inbox.poll(300, TimeUnit.MILLISECONDS) ?: continue
+                val o = runCatching { JSONObject(text) }.getOrNull() ?: continue
+                if (o.optInt("id", -1) != 1) continue
+                o.optJSONObject("error")?.let { return "" to "cdp_error: ${it.optString("message")}" }
+                val arr = o.optJSONObject("result")?.optJSONArray("cookies")
+                    ?: return "" to "cdp_error: 应答里没有 cookies"
+                val parts = (0 until arr.length()).mapNotNull { i ->
+                    val c = arr.optJSONObject(i) ?: return@mapNotNull null
+                    val name = c.optString("name")
+                    if (name.isEmpty()) null else "$name=${c.optString("value")}"
+                }
+                return parts.joinToString("; ") to ""
+            }
+            "" to "cdp_error: ${timeoutMs}ms 内没有应答"
+        } finally {
+            runCatching { ws.close(1000, "done") }
+        }
+    }
 
     /** 取文档里第一个 `type == "page"` 的页签。 */
     private fun pageTarget(session: Session): JSONObject? {

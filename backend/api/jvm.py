@@ -17,7 +17,6 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 import subprocess
 import sys
@@ -29,6 +28,7 @@ from typing import Any, Dict, List
 from fastapi import APIRouter, HTTPException
 from fastapi.concurrency import run_in_threadpool
 
+from core.paths import data_dir
 from core.store import Store
 from core import settings_store
 from core.jvm_env import selftest
@@ -44,6 +44,9 @@ STATE_LABEL = {
     "ok": "可用（JVM·App 引擎）",
     "no_result": "搜索无结果（JVM）",
     "empty_js_shell": "无法验证·需浏览器（JVM）",
+    #: A3：搜索为空 + 搜索页出现登录提示 → 需登录。**不是源坏了**，是这次没带登录态
+    #: （结论里的 `cookie_len` 会说明带没带；`reason` 里有命中的那个词）
+    "login_wall": "需登录（JVM）",
     "timeout": "超时（JVM）",
     "error": "执行失败（JVM）",
     "invalid": "源 JSON 无效（JVM）",
@@ -78,7 +81,11 @@ def _write_args(keyword: str, timeout: int, concurrency: int, limit: int,
     ]
     if limit:
         lines.append("limit=%d" % limit)
-    (_AGSVC / "args.properties").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    # newline="\n" 是必须的：这是 **git 跟踪的文件**，而 write_text 在 Windows 上
+    # 把 \n 翻成 \r\n——跑一次批工作区就脏一次（内容与 HEAD 逐字节相同，只差行尾，
+    # git diff 连内容都不显示，只在 git add 时冒一句 warning）。同 agent-write-safety §三。
+    (_AGSVC / "args.properties").write_text(
+        "\n".join(lines) + "\n", encoding="utf-8", newline="\n")
 
 
 def _export_sources_file(st) -> Path:
@@ -100,9 +107,15 @@ def _export_sources_file(st) -> Path:
             "bookSourceName", "bookSourceUrl", "searchUrl", "exploreUrl",
             "ruleSearch", "ruleBookInfo", "ruleToc", "ruleContent",
             "header", "bookSourceType", "enabled", "bookSourceGroup") if k in d})
-    path = Path(os.environ.get("LEGADO_DATA_DIR") or "data") / "app_probe" / "jvm_batch.json"
+    # **必须绝对路径**：这两个路径是写给**另一个进程**用的——启动器会 `pushd` 到
+    # App 仓库根再跑 Gradle，测试 JVM 的 CWD 就是那里。相对路径于是解析到
+    # `<App 仓库>/data/...`：轻则后端 `out_path.exists()` 找不到（报「启动器没有
+    # 产出结果文件」），重则**往 App 仓库里写目录**——那是零入侵红线（AGENTS 的
+    # 「App 仓库 git status 必须为空」）。`core.paths.data_dir()` 是仓库自己的解析口。
+    probe_dir = data_dir() / "app_probe"
+    path = probe_dir / "jvm_batch.json"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(out, ensure_ascii=False), encoding="utf-8")
+    path.write_text(json.dumps(out, ensure_ascii=False), encoding="utf-8", newline="\n")
     return path
 
 
@@ -167,8 +180,11 @@ async def jvm_run():
     limit = int(conf.get("limit", 0) or 0)
     if limit > 0:
         data = json.loads(src_file.read_text(encoding="utf-8"))[:limit]
-        src_file.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-    out_path = Path(os.environ.get("LEGADO_DATA_DIR") or "data") / "app_probe" / "jvm_results.jsonl"
+        src_file.write_text(json.dumps(data, ensure_ascii=False),
+                            encoding="utf-8", newline="\n")
+    # 绝对路径的理由同 _export_sources_file：这个路径是给**另一个进程**（CWD = App
+    # 仓库根）用的，相对路径会落到 App 仓库里去
+    out_path = data_dir() / "app_probe" / "jvm_results.jsonl"
     if out_path.exists():
         out_path.unlink()
     _write_args(conf.get("keyword", "我"), int(conf.get("timeout", 25)),

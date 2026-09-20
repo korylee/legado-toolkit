@@ -4,7 +4,7 @@ import { ref, computed, watch, nextTick } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { api, subscribeJob } from "../api/client";
 import { getDetail, listTags, saveSource, sourceExists } from "../api/sources";
-import { appDebug, appPreflight } from "../api/rules";
+import { appDebug, appPreflight, jvmDebug } from "../api/rules";
 import {
   canonicalTag, ensureTagMeta, isQualityTag, isStatusTag,
   mergeGroup, sourceTypes, splitSystemUser, statusTags, tagOfType, typeKeyOf,
@@ -43,6 +43,9 @@ function readAppHost() {
 const loading = ref(false);
 const appHost = ref(readAppHost());  // App 的 IP（连 App 调试用）
 const appDebugging = ref(false);
+//: 调试通道：**默认本机引擎**（App 的源码跑在本机，不填 IP、不推送）。连 App 那条
+//: 留着——登录态、网络出口、WebView 都在手机上，那是它不可替代的地方
+const debugChannel = ref("jvm");
 
 //: 页面缓存策略（每次调试选，不落 localStorage）。
 //
@@ -136,7 +139,7 @@ function buildDebugKey() {
  * 退回搜索之后，调试抽屉照样会把每一步摊开，所以「想看某一步」的信息一点不丢。
  * 真的想**从中间切入**（手里已经有一本书的 URL）时，填上它即可，两条路都在。
  */
-function debugKeyForApp() {
+function debugKey() {
   const q = debugQuery.value.trim();
   if (!q && ["info", "toc", "content"].includes(debugTarget.value)) {
     return "我";        // 搜索入口，App 会自己往下串
@@ -596,21 +599,37 @@ async function quickGenerate() {
 // 跑不了 JS 规则的源更是只有 App 那边验得了（Rhino / cookie / webView 全在 App 里）。
 // 结果**直接塞进 testResult**——App 调试返回的形状与离线回放一致，
 // 所以卡片与调试抽屉零改动。
-async function appDebugRun(keyOverride = "", rerunStep = "") {
-  const host = appHost.value.trim();
-  if (!host) return ElMessage.warning("请先填 App 的 IP（App 通知栏里有）");
-  // keyOverride：「从此步重跑」拼好的分段 key（--/++/绝对URL）。空串走
-  // 表单里选的入口——两个来源最终都落到 App 的同一个调试 WS。
-  const key = keyOverride || debugKeyForApp();
+async function debugRun(keyOverride = "", rerunStep = "") {
+  // keyOverride：「从此步重跑」拼好的分段 key（--/++/绝对URL）。空串走表单里选的入口
+  // ——两个通道认的是**同一套 key 形态**（都跑 App 的分派），所以这里共享
+  const key = keyOverride || debugKey();
   // 除「搜索」外都必须给出 URL（搜索空着会用默认关键词兜底）。放空进去会拼出
   // `发现::` / `++` 这种 App 认不了的目标——它对无效 key 是**静默无响应**，
   // 排查成本极高，宁可在这里挡住。
   if (!key) {
     return ElMessage.warning("这个源没配 exploreUrl，请先填发现页 URL");
   }
-  appDebugging.value = true;
   testResult.value = null;
   testStale.value = false;
+  if (debugChannel.value === "jvm") {
+    // 本机引擎：**不填 IP、不推送、不预检**——它跑的就是 App 的源码。
+    // 返回值与连 App 那条同形状，只是 source 是 "jvm"
+    appDebugging.value = true;
+    try {
+      const r = await jvmDebug(form.value, key, 60, "", appCacheMode.value);
+      testResult.value = r && r.error ? { error: r.error } : r;
+    } catch (e) {
+      testResult.value = { error: String(e.message) };
+    } finally {
+      appDebugging.value = false;
+    }
+    expandTestFailures(testResult.value);
+    if (testResult.value && !testResult.value.error) openDebug(rerunStep);
+    return;
+  }
+  const host = appHost.value.trim();
+  if (!host) return ElMessage.warning("请先填 App 的 IP（App 通知栏里有）");
+  appDebugging.value = true;
   pushed.value = "";
   try {
     // **先预检**。调试 WS 对 App 库里查不到的 tag 什么都不做，只能干等到超时；
@@ -652,7 +671,7 @@ async function appDebugRun(keyOverride = "", rerunStep = "") {
 //: 一一对应：绝对URL → 详情起步（详情→目录→正文）/ `++` → 目录起步 /
 //: `--` → 只跑正文；搜索/发现本来就是链头，重跑即整链。
 const STEP_KEY_BUILDERS = {
-  search: () => debugKeyForApp(),
+  search: () => debugKey(),
   explore: (url) => `发现::${url}`,
   bookUrl: (url) => url,
   toc: (url) => `++${url}`,
@@ -675,7 +694,7 @@ function rerunFromStep(stepName) {
     return ElMessage.warning(
       "上一轮结果里没有这一步的链接。先跑一次完整调试，再重试这一步");
   }
-  return appDebugRun(key, stepName);
+  return debugRun(key, stepName);
 }
 
 //: 预检状态 → 卡片上的短标签与颜色
@@ -729,7 +748,7 @@ async function runPreflight(host) {
 // IP 输入框的失焦 / Enter：只读预检，就地更新卡片上那个 tag。
 //
 // 它以前是「测试连接」按钮，撤掉的理由：这段预检「连 App 调试」本来就会跑
-// （见 appDebugRun），两者结果落在同一个 tag 上——一个动作没必要占两个入口。
+// （见 debugRun），两者结果落在同一个 tag 上——一个动作没必要占两个入口。
 // 挪到输入框上反而更顺：填完 IP 松手就有反馈，还省下一行按钮。
 async function appPreflightRun() {
   const host = appHost.value.trim();
@@ -1182,12 +1201,20 @@ async function doSave(s) {
       </el-col>
 
       <el-col :xs="24" :sm="24" :md="9">
-        <el-card shadow="never" header="连 App 调试" class="sticky-test">
+        <el-card shadow="never" header="调试" class="sticky-test">
+          <!-- 通道：**默认本机引擎**——App 的源码跑在本机（Robolectric），不填 IP、
+               不推送、不预检；连 App 那条留给「登录态/网络出口/WebView 都在手机上」
+               的场合。两者跑的是**同一段 App 代码**，所以分段结果同形状、可直接对比 -->
+          <el-radio-group v-model="debugChannel" size="small" class="debug-targets"
+                          style="margin-bottom: 8px">
+            <el-radio-button value="jvm">本机引擎</el-radio-button>
+            <el-radio-button value="app">连 App</el-radio-button>
+          </el-radio-group>
           <!-- 这一句是**规格**，不是客套：App 拿到入口后会自己沿规则链往下跑
                （Debug.kt:279-297），所以下游 URL 本来就不该由用户提供。
                放在 chip 之前——先知道「可以留空」，再看那排 chip 才不慌 -->
           <p class="muted" style="margin: 0 0 8px">
-            留空就从搜索开始，App 自己跑到底。
+            留空就从搜索开始，引擎自己跑到底。
           </p>
           <!-- 调试目标照 App 调试界面的 chip 行做。这排 chip 只负责改 placeholder
                和拼 key 前缀，**不改变 App 的分派**——它认的是 key 的形态，
@@ -1199,7 +1226,7 @@ async function doSave(s) {
           </el-radio-group>
           <div class="toolbar" style="margin-top: 8px">
             <el-input v-model="debugQuery" size="small" :placeholder="debugHint"
-                      style="flex: 1 1 150px" @keyup.enter="appDebugRun()" />
+                      style="flex: 1 1 150px" @keyup.enter="debugRun()" />
           </div>
           <!-- 连 App 调试：我们离线回放不了 JS 规则（<js> / @js:），
                而 App 内建的调试 WebSocket 能跑完整链路。IP 填 App 通知栏里
@@ -1207,7 +1234,9 @@ async function doSave(s) {
                失焦 / Enter 即预检（只读，不写 App），所以这一行不需要
                「测试连接」占位——见 appPreflightRun -->
           <div class="toolbar" style="margin-top: 8px">
-            <el-input v-model="appHost" size="small" placeholder="App 的 IP，如 192.168.1.5"
+            <!-- 只有连 App 才需要 IP：本机引擎就在这台机器上跑 -->
+            <el-input v-if="debugChannel === 'app'" v-model="appHost" size="small"
+                      placeholder="App 的 IP，如 192.168.1.5"
                       style="flex: 1 1 150px"
                       @blur="appPreflightRun" @keyup.enter="appPreflightRun" />
             <!-- 页面缓存策略：只管**我们补抓的那几页**（链路本身是 App 在跑）。
@@ -1220,15 +1249,22 @@ async function doSave(s) {
             <!-- 唯一的按钮：该不该先推送由预检的三态决定（App 里没有 / 是旧版本 /
                  一致），用户不必知道这一层。推送走 App 的 HTTP 接口，幂等 -->
             <el-button type="primary" size="small" :loading="appDebugging"
-                       @click="appDebugRun()">
-              连 App 调试
+                       @click="debugRun()">
+              {{ debugChannel === "jvm" ? "开始调试" : "连 App 调试" }}
             </el-button>
           </div>
           <p class="muted" style="margin: 6px 0 0">{{ debugCacheTip }}</p>
           <!-- 预检结果就地显示。以前只有一个「连」按钮：连不上或缺源都要干等
                60 秒超时，而且两者表现完全一样，没法对症下药。「检测中」得留一格：
                预检现在是失焦触发的，不给在途状态就成了「点完什么也没发生」 -->
-          <p v-if="appPreflightState || appChecking" style="margin: 8px 0 0">
+          <!-- 本机引擎的登录态提示：登录墙的源要在**我们自己的浏览器 profile** 里
+               登一次（A3），之后按源 URL 自动带上——不说的话用户只会看到「需登录」 -->
+          <p v-if="debugChannel === 'jvm'" class="muted" style="margin: 6px 0 0">
+            登录墙的源：先用 <code>scripts/jvm_login.py</code> 在同一个浏览器里登录一次，
+            之后自动带上登录态。
+          </p>
+          <p v-if="debugChannel === 'app' && (appPreflightState || appChecking)"
+             style="margin: 8px 0 0">
             <template v-if="appChecking">
               <el-tag size="small" type="info">检测中…</el-tag>
             </template>
@@ -1237,7 +1273,7 @@ async function doSave(s) {
               <span class="muted" style="margin-left: 6px">{{ appPreflightState.error }}</span>
             </template>
           </p>
-          <p v-if="pushed" style="margin: 8px 0 0">
+          <p v-if="debugChannel === 'app' && pushed" style="margin: 8px 0 0">
             <el-tag size="small" type="success">已推送到 App</el-tag>
             <span class="muted" style="margin-left: 6px">
               {{ pushed === "missing" ? "（新建）" : "（覆盖了 App 里的旧规则）" }}
@@ -1248,7 +1284,9 @@ async function doSave(s) {
                「需要开 Web 服务、同一局域网」不再单说——连不上时后端那句
                error 已经说了，而且更全（还带端口） -->
           <div v-if="!testResult" class="muted" style="padding: 22px; text-align: center">
-            App 打开「Web 服务」，把通知栏显示的 IP 填到上面那格。
+            {{ debugChannel === "app"
+              ? "App 打开「Web 服务」，把通知栏显示的 IP 填到上面那格。"
+              : "本机引擎就在这台机器上跑：点「开始调试」就行，不用填 IP、不推送。" }}
           </div>
           <template v-else-if="!testResult.error">
             <div v-for="s in testResult.steps" :key="s.name" class="quick-step">
@@ -1299,7 +1337,7 @@ async function doSave(s) {
                转义成实体也救不回来（编译发生在实体解码之后）。v-pre 让这一块
                整段跳过编译、原样输出，才写得出这些字面量。 -->
           <p class="muted" v-pre style="margin: 10px 0 0; line-height: 1.7">
-            <b>以下语法不支持本地调试</b>，只能用「连 App 调试」验：<br>
+            <b>以下语法本地调试跑不了</b>，用「本机引擎」或「连 App 调试」验：<br>
             @js: / &lt;js&gt; / {{ }} / || / @xpath: / &amp;&amp; / %% / $n /
             区间索引 [0:10] / 索引式 [-1] [0] [1,3] [!0] / text. 与 children. 简写 /
             @webjs: / @get:{ }

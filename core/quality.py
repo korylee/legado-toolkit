@@ -319,6 +319,16 @@ def safe_int(value: Any, default: int = 0) -> int:
 
 # ------------------------------------------------------------------ 正文判定
 
+def short_content_note(chars: int) -> str:
+    """「正文短得可疑」的那句话。**只描述，不改判定**（与附注同一纪律）。
+
+    单独一个函数是为了让它**只有一份**：本地调试的报告（`_content_notes`）与
+    JVM 结论的列表附注（`backend/api/sources.py`）都调它——两处各写一句就会漂，
+    而漂的正是用户照着做判断的那句。阈值同理，只用 `SHORT_CONTENT_CHARS`。
+    """
+    return "正文较短（%d 字符），建议看一眼全文确认不是错误页" % chars
+
+
 def _content_notes(source_type: int, shape: str, values: Sequence[str],
                    evidence: Dict[str, Any]) -> List[str]:
     """启发式附注。**只写 notes，绝不改 verdict。**"""
@@ -330,8 +340,7 @@ def _content_notes(source_type: int, shape: str, values: Sequence[str],
                      "建议改用 @text，或加 ##<[^>]+>## 清洗")
 
     if evidence.get("chars", 0) < SHORT_CONTENT_CHARS:
-        notes.append("正文较短（%d 字符），建议看一眼全文确认不是错误页"
-                     % evidence.get("chars", 0))
+        notes.append(short_content_note(evidence.get("chars", 0)))
         hit = evidence.get("noise_hit") or ""
         if hit:
             notes.append("疑似错误页：命中「%s」" % hit)
@@ -563,5 +572,5 @@ __all__ = [
     "EXPECTED_SHAPE", "STRUCT_TAG_RE", "CONTENT_NOISE_MARKERS",
     "MAX_PAGE_HTML_CHARS", "MAX_MATCHED_HTML_CHARS", "MATCHED_NODES_LIMIT",
     "MAX_EVIDENCE_TOTAL_CHARS",
-    "SHORT_CONTENT_CHARS", "safe_int",
+    "SHORT_CONTENT_CHARS", "safe_int", "short_content_note",
 ]

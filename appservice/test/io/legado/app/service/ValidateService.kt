@@ -31,6 +31,8 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withTimeout
 import org.koin.core.context.startKoin
 import org.koin.core.context.stopKoin
@@ -109,70 +111,19 @@ object ValidateService {
 
     private var started = false
 
-    //: 浏览器会话：**一批一个进程**，不是一源一个。
-    //: 一源一个的实测后果是并发直接失效——第二个进程因 profile 目录被占用**立刻退出**，
-    //: 9 条源里 7 条报 `browser_unavailable: 浏览器进程已退出`。
-    //: 启动失败也**记住**，别让后面 3774 条源各试一次。
-    private val browserLock = Any()
-    private var browserSession: BrowserBridge.Session? = null
-    private var browserError: String? = null
-    private var browserDisabled = false
+    //: 浏览器会话的生命周期搬到了 [BrowserSession]——S5-A2 的 shadow 也要用同一套，
+    //: **一份实现两个入口**。原来那三个字段 + 取会话的函数 + profile 推导与自愈
+    //: 全在那里，连注释一起搬的；别在这里重新长一份。
 
-    private fun browserProfileDir(): File =
-        File(System.getProperty("legado.browser.profile")
-            ?: System.getenv("LEGADO_BROWSER_PROFILE")
-            ?: File(System.getProperty("java.io.tmpdir"), "legado-appservice-profile").path)
-
-    /** f 是不是自愈路径创建的专属 profile（`<base>-run<时间戳>`）。
-     *  只认这个模式，用户经系统属性/环境变量指定的 profile **永不匹配**；
-     *  base 自己恰好叫这名字时也排除，防止把用户的目录删了。 */
-    private fun isRunProfile(f: File, base: File): Boolean {
-        if (f.absolutePath == base.absolutePath) return false
-        val prefix = base.name + "-run"
-        if (!f.name.startsWith(prefix)) return false
-        return f.name.drop(prefix.length).toLongOrNull() != null
-    }
-
-    /** 取（必要时启动）共享的浏览器会话。返回 (会话, 失败原因)。 */
-    private fun browser(): Pair<BrowserBridge.Session?, String> {
-        if (browserDisabled) return null to "browser_unavailable: 本次跑批已禁用浏览器桥"
-        synchronized(browserLock) {
-            browserError?.let { return null to it }
-            browserSession?.let { return it to "" }
-            // 兜底清扫：上次进程被外部杀掉时 shutdown 走不到，-run<时间戳>
-            // 专属 profile 会残留（含缓存，几十 MB 级）。趁浏览器没起先扫一遍；
-            // 删不掉（文件还被占）不碍事，下次跑批会再试。
-            runCatching {
-                val base = browserProfileDir()
-                base.parentFile?.listFiles()?.forEach { f ->
-                    if (isRunProfile(f, base)) f.deleteRecursively()
-                }
-            }
-            var (s, why) = BrowserBridge.launch(browserProfileDir())
-            if (s == null) {
-                // **退一步：换本次专属 profile 再试一次**。
-                // 固定 profile 的价值是能留住 cookie（对登录墙后的源有用），但
-                // **上一轮残留的浏览器实例会占着它**——那时新实例会立刻退出
-                // （实测：手工起过一个同 profile 的 Edge，之后所有启动都报
-                // 「浏览器进程已退出」）。专属 profile 打不开就换一个，
-                // 别让整批源卡在"浏览器不可用"上。
-                val base = browserProfileDir()
-                val fresh = File(base.parentFile, base.name + "-run" + System.currentTimeMillis())
-                val (s2, why2) = BrowserBridge.launch(fresh, tempProfile = true)
-                if (s2 == null) {
-                    browserError = "$why2（固定 profile 也失败：$why）"
-                    return null to browserError!!
-                }
-                s = s2
-                why = ""
-            }
-            browserSession = s
-            return s to ""
-        }
-    }
-
-    /** 进程级初始化（幂等）：Koin + appCtx。由 [main] 在跑批前调用一次。 */
-    fun ensureStarted(userAgent: String) {
+    /**
+     * 进程级初始化（幂等）：Koin + appCtx。由 [main] 在跑批前调用一次。
+     *
+     * [userAgent] 默认就是 [AppserviceEnv.USER_AGENT]——它是请求头里那条 UA
+     * （`BaseSource.getHeaderMap` → `AppConst.UA_NAME`），**只能有一份**（那个常量上
+     * 写了「它不等于设备侧那一条」的由来）。留这个参数是给探针一个替换口，
+     * 不是让调用点各写一份。
+     */
+    fun ensureStarted(userAgent: String = AppserviceEnv.USER_AGENT) {
         if (started) return
         RuntimeEnvironment.getApplication().injectAsAppCtx()
         // AppConst.<clinit> 会读 APK 签名（判断官方包）；Robolectric 应用默认没有，
@@ -203,10 +154,7 @@ object ValidateService {
     }
 
     fun shutdown() {
-        synchronized(browserLock) {
-            browserSession?.close()
-            browserSession = null
-        }
+        BrowserSession.close()
         if (started) {
             stopKoin()
             started = false
@@ -304,13 +252,22 @@ object ValidateService {
         }
     }
 
-    /** 对一个书源跑到指定深度，返回结论行。 */
-    fun validateOne(
+    /**
+     * 对一个书源跑到指定深度，返回结论行。
+     *
+     * **suspend**：段与段之间是协程级等待，**不要**因为「反正是阻塞调用」在这里再套
+     * `runBlocking`——套了等于把 `Dispatchers.IO` 的线程钉在该源上直到跑完
+     * （`jvm_concurrency` 上限 32，就是 32 根线程白占），而且内层 Job 与批次的 Job
+     * 无关，**外层取消传不进来**（Ctrl-C / 上层 cancel 时它照跑完）。
+     * `remaining()` 是墙钟预算，`withTimeout` 在 suspend 里本来就能用。
+     */
+    suspend fun validateOne(
         sourceJson: String,
         keyword: String,
         timeoutSec: Long = 30,
         stripWebView: Boolean = true,
         depth: String = DEPTH_SEARCH,
+        manualCookie: String = "",
     ): Map<String, Any?> {
         val source: BookSource = try {
             GSON.fromJsonObject<BookSource>(sourceJson).getOrThrow()
@@ -353,6 +310,12 @@ object ValidateService {
             )
         }
 
+        // A3：**搜索之前**把该源域上的 cookie 注入 App 的 cookie 通道（用户在我们的固定
+        // profile 里预热登录留下的登录态，或 `--cookie` 手工给的那条）。拿不到**不是失败**：
+        // 浏览器不可用 / 该域没 cookie 都照常往下跑，只把长度记进结论（`cookie_len`）——
+        // 结论要能自证「这次带没带登录态」，否则「需登录」与「源坏了」分不开。
+        val cookieInj = injectSourceCookies(source, manualCookie)
+
         val startedAt = System.currentTimeMillis()
         // **每源总预算**，不是每段一份：目录+正文比搜索慢好几倍，按段各给一份的话
         // 一个慢源能把整场拖成 O(源数 × 段数 × timeout)（lessons §五十四）
@@ -360,10 +323,8 @@ object ValidateService {
         fun remaining(): Long = (deadline - System.currentTimeMillis()).coerceAtLeast(1L)
 
         return try {
-            val books = runBlocking {
-                withTimeout(remaining()) {
-                    WebBook.searchBookAwait(effective, keyword)
-                }
+            val books = withTimeout(remaining()) {
+                WebBook.searchBookAwait(effective, keyword)
             }
             val cost = System.currentTimeMillis() - startedAt
             when {
@@ -377,13 +338,15 @@ object ValidateService {
                         "sample" to books.take(3).map { it.name },
                         "cost_ms" to cost,
                         "webview_stripped" to stripped,
+                        "cookie_len" to cookieInj.len,
+                        "cookie_note" to cookieInj.note,
                     )
                     if (depth == DEPTH_TOC || depth == DEPTH_CONTENT) {
                         // 目录段失败**不吞**：state/stage 改写成该段的结论——多段链路里
                         // 「搜索好了但目录坏了」和「搜索就坏了」的下一步动作不同
                         try {
-                            val toc = runBlocking {
-                                withTimeout(remaining()) { runTocStage(effective, books[0]) }
+                            val toc = withTimeout(remaining()) {
+                                runTocStage(effective, books[0])
                             }
                             row.putAll(toc.fields)
                             row["stage"] = DEPTH_TOC
@@ -394,10 +357,8 @@ object ValidateService {
                             } else if (depth == DEPTH_CONTENT) {
                                 // 目录有章节才验正文：没目录就没得验，fail-fast
                                 try {
-                                    val c = runBlocking {
-                                        withTimeout(remaining()) {
-                                            runContentStage(effective, toc.book, toc.chapters)
-                                        }
+                                    val c = withTimeout(remaining()) {
+                                        runContentStage(effective, toc.book, toc.chapters)
                                     }
                                     row.putAll(c)
                                     row["stage"] = DEPTH_CONTENT
@@ -463,27 +424,45 @@ object ValidateService {
                     val searchTxt = source.searchUrl ?: ""
                     val exploreTxt = source.exploreUrl ?: ""
                     val likelyShell = searchTxt.contains("webView", true) || exploreTxt.contains("webView", true)
+                    // 登录墙归因（A3）：**不猜**——抓一次搜索页文本，按与本地回放同一套判据
+                    // （状态 200 + 命中「请登录」这类词 + 源声明 cookieJar，见 core/checker.py
+                    // 的 is_login_wall）判「需登录」。只在「源声明了登录方式」时才去抓，
+                    // 免得给每条空结果源都多发一次请求
+                    val loginHit = if (!likelyShell && declaresLogin(source)) {
+                        detectLoginWall(effective, keyword)
+                    } else ""
                     // **显式写 <String, Any?>**：靠推断的话，值全是 String/Int 时
                     // 会被推成公共父类型 `Comparable<*> & Serializable`，后面合并
                     // 复验结果（Any?）就编译不过——报错信息还指向 forEach 那一行
                     val shellRow = linkedMapOf<String, Any?>(
                         "url" to source.bookSourceUrl,
                         "name" to source.bookSourceName,
-                        "state" to if (likelyShell) "empty_js_shell" else "no_result",
+                        "state" to when {
+                            loginHit.isNotEmpty() -> "login_wall"
+                            likelyShell -> "empty_js_shell"
+                            else -> "no_result"
+                        },
                         "stage" to DEPTH_SEARCH,
-                        "reason" to if (likelyShell)
-                            "剥掉 webView 选项后搜索为空；原源声明需要 webView（页面可能要 JS 渲染）→ 本机无法验证"
-                        else "搜索成功但无结果（关键词：$keyword）",
+                        "reason" to when {
+                            loginHit.isNotEmpty() -> "搜索为空，搜索页出现「$loginHit」→ 需登录" +
+                                (if (cookieInj.len > 0)
+                                    "（已带上该域的 cookie ${cookieInj.len} 字符，可能是登录态已失效）"
+                                else "（本次没带该域的 cookie：先在它的浏览器 profile 里登录一次，"
+                                    + "或用 --cookie 手工给一条）")
+                            likelyShell ->
+                                "剥掉 webView 选项后搜索为空；原源声明需要 webView（页面可能要 JS 渲染）→ 本机无法验证"
+                            else -> "搜索成功但无结果（关键词：$keyword）"
+                        },
                         "cost_ms" to cost,
                         "webview_stripped" to stripped,
+                        "cookie_len" to cookieInj.len,
+                        "cookie_note" to cookieInj.note,
                     )
                     // (b) 浏览器桥复验：只对「疑似 JS 壳」的源做（其余源的"没结果"
                     // 是源自己的结论，渲染一次也变不出书来，白花时间）
                     if (likelyShell) {
-                        val retry = runBlocking {
-                            withTimeout(remaining()) {
-                                validateByRendering(source, keyword, timeoutSec)
-                            }
+                        val retry = withTimeout(remaining()) {
+                            validateByRendering(source, keyword, timeoutSec)
                         }
                         if ((retry["state"] as? String) == "ok") {
                             retry.forEach { (k, v) -> shellRow[k] = v }
@@ -510,6 +489,8 @@ object ValidateService {
                     "搜索超时（每源总预算 ${timeoutSec}s 用尽）"
                 else "搜索超时（是 App 内部的请求超时，非本次预算）",
                 "webview_stripped" to stripped,
+                "cookie_len" to cookieInj.len,
+                "cookie_note" to cookieInj.note,
             )
         } catch (e: Throwable) {
             // ExceptionInInitializerError 的根因在 cause 里；只报 message 会把
@@ -524,7 +505,53 @@ object ValidateService {
                 "root_stack" to root.stackTrace.take(6).joinToString(" | ") { f ->
                     "${f.className.substringAfterLast('.')}.${f.methodName}:${f.lineNumber}" },
                 "webview_stripped" to stripped,
+                "cookie_len" to cookieInj.len,
+                "cookie_note" to cookieInj.note,
             )
+        }
+    }
+
+    /**
+     * 把该源域上的 cookie 注入 App 的 cookie 通道。顺序：**手工给的优先**（`--cookie`
+     * 是用户明确指定的，不该被 profile 里的旧值盖过），否则从浏览器 profile 按源 URL 读。
+     */
+    private fun injectSourceCookies(source: BookSource, manualCookie: String): SourceCookies.Injected {
+        val tag = source.bookSourceUrl.orEmpty()
+        if (manualCookie.isNotBlank()) return SourceCookies.injectManual(tag, manualCookie)
+        val (session, _) = BrowserSession.get()
+        if (session == null) return SourceCookies.Injected(0, "browser_unavailable")
+        return SourceCookies.injectFromProfile(session, tag, tag)
+    }
+
+    /**
+     * 源声明了登录方式吗（`loginUrl` / `loginUi` 任一非空）。
+     *
+     * **这只是「要不要去查登录墙」的开关，不是判据**——判据是抓到的那页文本
+     * （[SourceCookies.loginMarkerOf]）。用元数据当开关，是为了不给每条空结果源都多发一次请求。
+     */
+    private fun declaresLogin(source: BookSource): Boolean =
+        !source.loginUrl.isNullOrBlank() || !source.loginUi.isNullOrBlank()
+
+    /**
+     * 抓一次搜索页，看是不是登录墙（返回命中的特征词；空串 = 不是）。
+     *
+     * 只看**文本**、不渲染：登录墙的特征词在静态 HTML 里就有。状态码也要 200——本地回放
+     * 那边 `is_login_wall` 就是这个门槛（403/503 是反爬/失效，不是登录墙）。
+     * 抓不到页面**不改变结论**（保持原来的 no_result / empty_js_shell），只打一行日志：
+     * 那不能吞成「不是登录墙」这种肯定断言（AGENTS #4）。
+     */
+    private suspend fun detectLoginWall(source: BookSource, keyword: String): String {
+        return try {
+            val ruleData = RuleData()
+            val analyzeUrl = AnalyzeUrl(
+                mUrl = source.searchUrl.orEmpty(), key = keyword, page = 1,
+                baseUrl = source.bookSourceUrl, source = source, ruleData = ruleData)
+            val res = analyzeUrl.getStrResponseAwait()
+            if (res.code() != 200) "" else SourceCookies.loginMarkerOf(res.body)
+        } catch (e: Throwable) {
+            System.err.println("[appservice] 登录墙检测失败（保持原结论）: " +
+                "${e::class.simpleName}: ${e.message?.take(120)}")
+            ""
         }
     }
 
@@ -546,7 +573,7 @@ object ValidateService {
         keyword: String,
         timeoutSec: Long,
     ): Map<String, Any?> {
-        val (session, why) = browser()
+        val (session, why) = BrowserSession.get()
         if (session == null) {
             // 浏览器不可用**显式说**，不静默退回空壳结论
             return linkedMapOf("rendered" to false, "render_reason" to why)
@@ -562,16 +589,23 @@ object ValidateService {
             if (!rendered.ok) {
                 return linkedMapOf("rendered" to false, "render_reason" to rendered.reason)
             }
+            // A3：渲染出来的这一页往往正是「登录页 / 已登录页」——顺手把它的 cookie 收进
+            // CookieStore（上游 `BackstageWebView.setCookie` 同形）。取 cookie 用**落地地址**，
+            // 存的键按上游用源 URL；这样后面的段若走普通 HTTP 请求，登录态也在
+            val inj = SourceCookies.injectFromProfile(
+                session, source.bookSourceUrl.orEmpty(), res.url)
             val books = BookList.analyzeBookList(
                 bookSource = source, ruleData = ruleData, analyzeUrl = analyzeUrl,
-                baseUrl = res.url, body = rendered.html, isSearch = true)
+                baseUrl = res.url, body = rendered.body, isSearch = true)
             return if (books.isNotEmpty()) linkedMapOf(
                 "state" to "ok", "stage" to DEPTH_SEARCH, "rendered" to true,
                 "hit" to books.size, "sample" to books.take(3).map { it.name },
                 "reason" to "浏览器渲染后命中（原源声明 webView）",
+                "render_cookie_len" to inj.len, "render_cookie_note" to inj.note,
             ) else linkedMapOf(
                 "rendered" to true, "render_reason" to
-                    "浏览器渲染后仍然没结果（页面确实没有这本书，或需要交互）")
+                    "浏览器渲染后仍然没结果（页面确实没有这本书，或需要交互）",
+                "render_cookie_len" to inj.len, "render_cookie_note" to inj.note)
         } catch (e: Throwable) {
             val root = generateSequence(e as Throwable?) { it.cause }.lastOrNull() ?: e
             return linkedMapOf(
@@ -700,18 +734,19 @@ object ValidateService {
         timeoutSec: Long = 30,
         stripWebView: Boolean = true,
         depth: String = DEPTH_SEARCH,
+        manualCookie: String = "",
         onResult: (Map<String, Any?>) -> Unit,
     ) {
-        ensureStarted("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+        ensureStarted()
         val results = java.util.Collections.synchronizedList(mutableListOf<Map<String, Any?>>())
         runBlocking {
             coroutineScope {
-                val sem = kotlinx.coroutines.sync.Semaphore(concurrency)
+                val sem = Semaphore(concurrency)
                 sourceJsons.map { json ->
                     async(Dispatchers.IO) {
                         sem.withPermit {
-                            val r = validateOne(json, keyword, timeoutSec, stripWebView, depth)
+                            val r = validateOne(json, keyword, timeoutSec, stripWebView, depth,
+                                manualCookie)
                             results.add(r)
                             onResult(r)
                         }
@@ -719,11 +754,6 @@ object ValidateService {
                 }.awaitAll()
             }
         }
-    }
-
-    private suspend fun kotlinx.coroutines.sync.Semaphore.withPermit(block: suspend () -> Unit) {
-        acquire()
-        try { block() } finally { release() }
     }
 
     // ---------------------------------------------------------------- CLI
@@ -739,6 +769,7 @@ object ValidateService {
         var limit = 0
         var noStrip = false
         var depth = DEPTH_SEARCH
+        var cookie = ""
         var i = 0
         while (i < args.size) {
             when (args[i]) {
@@ -751,6 +782,7 @@ object ValidateService {
                 "--limit" -> { limit = args[++i].toInt() }
                 "--no-strip-webview" -> { noStrip = true }
                 "--depth" -> { depth = args[++i] }
+                "--cookie" -> { cookie = args[++i] }
                 else -> { System.err.println("未知参数: ${args[i]}"); return }
             }
             i++
@@ -763,8 +795,7 @@ object ValidateService {
                     "$DEPTH_CONTENT）")
             return
         }
-        ensureStarted("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+        ensureStarted()
 
         // 收源：--file 单文件（JSON 数组）、--dir 目录下 *.json（Legado 导出常见形态）
         val jsons = mutableListOf<String>()
@@ -782,26 +813,21 @@ object ValidateService {
                 ?.forEach { collect(it) }
         }
         if (limit > 0) jsons.subList(0, minOf(limit, jsons.size)).toList().let { jsons.clear(); jsons.addAll(it) }
-        System.err.println("[appservice] 待验源: ${jsons.size} 条；关键词=$keyword 并发=$concurrency 超时=${timeoutSec}s 深度=$depth 剥webView=${!noStrip}")
+        System.err.println("[appservice] 待验源: ${jsons.size} 条；关键词=$keyword 并发=$concurrency " +
+            "超时=${timeoutSec}s 深度=$depth 剥webView=${!noStrip} " +
+            "cookie=${if (cookie.isEmpty()) "无（按 profile 读）" else "${cookie.length} 字符（手工）"}")
 
         val writer = if (outPath.isNotEmpty())
             File(outPath).bufferedWriter(Charsets.UTF_8) else null
         var done = 0
         try {
-            validateBatch(jsons, keyword, concurrency, timeoutSec, !noStrip, depth) { r ->
+            validateBatch(jsons, keyword, concurrency, timeoutSec, !noStrip, depth, cookie) { r ->
+                // 编码器只此一份（ServiceJson）。原来这里手写的 when **少一个 null
+                // 分支**：null 会被 `Any?.toString()` 变成字符串 "null"，而
+                // `content_ok = null`（下载类源）会让 GET /api/sources 整页 500
                 val line = kotlinx.serialization.json.Json.encodeToString(
                     kotlinx.serialization.json.JsonObject.serializer(),
-                    kotlinx.serialization.json.JsonObject(r.mapValues { v ->
-                        when (val x = v.value) {
-                            is String -> kotlinx.serialization.json.JsonPrimitive(x)
-                            is Number -> kotlinx.serialization.json.JsonPrimitive(x)
-                            is Boolean -> kotlinx.serialization.json.JsonPrimitive(x)
-                            is List<*> -> kotlinx.serialization.json.JsonArray(x.map {
-                                kotlinx.serialization.json.JsonPrimitive(it.toString())
-                            })
-                            else -> kotlinx.serialization.json.JsonPrimitive(x.toString())
-                        }
-                    }),
+                    ServiceJson.toJsonObject(r),
                 )
                 synchronized(writer ?: return@validateBatch) {
                     writer?.write(line); writer?.newLine(); writer?.flush()

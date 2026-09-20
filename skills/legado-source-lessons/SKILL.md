@@ -1,6 +1,6 @@
 ---
 name: legado-source-lessons
-description: 本项目的架构决策与踩过的坑——规则回放器一致性、失效分桶、URL 规范化、SQLite 选型、前端静默失效、变异测试纪律、判定输入的派生污染、读不存在的字段、文档分层与事实来源、流只是加速手段、同一件事可能走两个函数、连接池上限与 Windows select 的 512 fd、任务僵尸行与启动钩子该放哪、DNS 判死必须两个来源同意；数字口径必须带环境、外部导入陌生标签默认清、派生缓存不向后兼容、特征词表不许放裸词、列里显示什么就按什么排、同一屏上两个来源会打架、SQLite 连接跨线程与进程级建 schema、Windows 的 `.js` MIME、静默失败的四种面孔、页面缓存的三条边界、本地回放的三类边界（做不到/没实现/能做）、App 接口先查能力清单再动手、界面文案的信息结构、性能结论必须实测、JVM 里跑 App 引擎的零入侵挂载与环境坑、WebView 不是一个 API 而是一整个浏览器、能力缺口不能用快照来量、App 接口的实测数据形状与对账口径、全量实测的归因口径与断点续跑、多段链路结论要带 stage。改动核心逻辑前必读，避免重犯。
+description: 本项目的架构决策与踩过的坑——规则回放器一致性、失效分桶、URL 规范化、SQLite 选型、前端静默失效、变异测试纪律、判定输入的派生污染、读不存在的字段、文档分层与事实来源、流只是加速手段、同一件事可能走两个函数、连接池上限与 Windows select 的 512 fd、任务僵尸行与启动钩子该放哪、DNS 判死必须两个来源同意；数字口径必须带环境、外部导入陌生标签默认清、派生缓存不向后兼容、特征词表不许放裸词、列里显示什么就按什么排、同一屏上两个来源会打架、SQLite 连接跨线程与进程级建 schema、Windows 的 `.js` MIME、静默失败的四种面孔、页面缓存的三条边界、本地回放的三类边界（做不到/没实现/能做）、App 接口先查能力清单再动手、界面文案的信息结构、性能结论必须实测、JVM 里跑 App 引擎的零入侵挂载与环境坑、WebView 不是一个 API 而是一整个浏览器、浏览器桥 CDP 落地四坑、能力缺口不能用快照来量、App 接口的实测数据形状与对账口径、全量实测的归因口径与断点续跑、多段链路结论要带 stage、类型判定补齐与正文后处理字段、JVM 调试通道的可行性调研、摘进主干的分支要删、把我们的问题说成源的问题的两条静默错、shadow 掉 `BackstageWebView` 的浏览器桥坑（进程移交、协议级收进程、profile 自愈）、跨语言的形状只有一个出口、`withTimeout` 的预算是软上界、登录态从浏览器 profile 取而不代用户登录、调试通道接进产品时返回体同形与逻辑收一处。改动核心逻辑前必读，避免重犯。
 ---
 
 # 本项目的架构决策与踩坑记录
@@ -1664,3 +1664,411 @@ URL 选项」当成了地址的一部分，一条把「属性名」当成了标�
 **不是我们抓不到，是站点确实没有**。
 
 → 已提炼为 AGENTS #20（规则产出的 URL 要剥选项）、#21（取值规则末段是属性名）
+
+## 五十九、S5-A1：把 App 的调试链搬进 JVM —— 五个都是「环境」的坑（2026-09-20）
+
+A1 的活是「在 JVM 里跑一次 `Debug` 管线，把事件流落成 NDJSON」。**App 一行代码没改，
+代码量也不大，时间全花在环境上**——五条坑里没有一条是「逻辑不对」，全是「我们的
+容器和 App 的手机不一样」。这批的价值就在这张表里。
+
+### 一、`Debug` 管线的协程跑在 `Dispatchers.Main` 上，而 Robolectric 主 looper 默认 PAUSED
+
+**症状**：5 条源**全都是**同样的两条事件（`⇒开始搜索关键字` + `︾开始解析搜索页`——
+那是 `startDebug` 同步打的），之后一条都没有，直到超时。看着像「所有站点同时挂了」，
+而同一批源在真机上是好的。**症状一模一样是最危险的信号：说明变量不是源。**
+
+**根因**（认符号）：`WebBook.searchBook(scope, …, executeContext: CoroutineContext =
+Dispatchers.Main)`，而 `Coroutine.executeInternal` 起协程用的是
+`(scope.plus(executeContext)).launch(start = …)`——**整条协程的 dispatcher 就是 Main**，
+不只是回调。Robolectric 默认 `LooperMode.PAUSED`：投进主 looper 的任务不自动执行；
+而我们把 `runBlocking { session.events.collect {} }` 放在测试线程上（Robolectric 里
+**测试线程就是主线程**）→ 协程连启动都启动不了。**两边一起死锁。**
+
+**做法**：收集放**后台线程**，主线程负责**驱动主 looper**：
+
+    val done = AtomicBoolean(false)
+    Thread { runBlocking { withTimeout(t) { session.events.collect { … } } }; done.set(true) }.start()
+    while (!done.get() && now < deadline) {
+        shadowOf(Looper.getMainLooper()).idle()   // 就地跑掉已排队的 Main 任务
+        Thread.sleep(5)                            // App 会一批批投，idle 一次不够
+    }
+
+两个副作用要一起处理：计数器变成**跨线程**（用 `Atomic*`，别用 `var`）；收尾必须
+`session.cancel()` + `scope.cancel()`，否则协程挂在测试 JVM 里拖慢 Gradle 退出。
+
+> **这与「`Debug` 管线不能重实现、只能照抄」是同一件事的两面**：方言照抄，
+> 环境自己补。也解释了为什么 `ValidateService` 的跑批**没**这个问题——它走的是
+> `searchBookAwait` 那套挂起 API（`Dispatchers.IO`），根本不碰 Main。
+
+### 二、Gradle 默认只在测试**失败**时回显被测进程的 stdout/stderr
+
+于是「调试通过了、但一条事件都没有」时，`DebugService` 打在 stderr 上的零事件原因
+**一个字都看不到**。**诊断不能只靠 stderr**：退出码 + **侧车文件**（`<out>.meta.json`）
+才是给调用方的接口。这条对 A4 直接成立——它要按退出码与 meta 分派，而不是去 grep Gradle 日志。
+
+### 三、`legado-gradle.bat` 吞掉 Gradle 的退出码（既有的静默盲区）
+
+那个 bat 结尾是 `endlocal`，没有 `exit /b %ERRORLEVEL%`——**它永远返回 0**。
+`backend/api/jvm.py` 的 `ok = code == 0` 因此**恒为真**（只要结果文件在），
+A1 想要的「零事件 = 退出非 0」也无从谈起。修法是标准写法：
+
+    call gradlew.bat -I "%~dp0legado-test.init.gradle" %*
+    set "RC=%ERRORLEVEL%"
+    popd
+    endlocal & exit /b %RC%
+
+（`set` 之后立刻取，中间别插命令；`%RC%` 在解析那一行时就展开。）
+
+### 四、`ERROR_PREFIXES` 漏了 App 自己的包
+
+`io.legado.app.exception.ContentEmptyException: 内容为空` 是 App 抛错的**首行**，
+而当时只认 `java.` / `javax.`（当初的理由是「不加笼统的 `com.`/`org.`，免得误杀」——
+那把**自家包**也漏在外面了）。后果是**段判成 `unknown` 而不是 `fail`**：一段真出错的
+结果被读成「我们没测出来」，比没有结论更坏。加 `io.legado.app.`（窄到就是自己）。
+
+### 五、给另一个进程用的路径必须绝对
+
+`args.properties` 里的 `file=` / `out=` 是给**另一个进程**用的，而那个进程的 CWD 是
+**App 仓库根**（启动器 `pushd "%LEGADO_REPO%"`）。相对路径于是解析到那里去——轻则
+调用方找不到产物（报「没有产出结果文件」），重则**往 App 仓库里写目录**，那是零入侵红线。
+后端 `_export_sources_file` / `jvm_run` 两处原来都是相对的（**从没被跑通过**：全盘找不到
+`jvm_batch.json` / `jvm_results.jsonl`），已改用 `core.paths.data_dir()`。
+
+### 附带：三条小口径
+
+- **NDJSON 用 LF**：`writer.newLine()` 取平台行尾，Windows 上给 CRLF——同一份事件流在
+  两个平台上字节不同，fixture 对不上、对拍要额外归一。显式 `write("\n")`。
+- **`args.properties` 是 git 跟踪的文件**，而后端用 `write_text` 写它 → Windows 上翻成
+  CRLF，**跑一次批工作区脏一次**（内容与 HEAD 逐字节相同，`git diff` 连内容都不显示）。
+  加 `newline="\n"`。
+- **环境变量能到测试 JVM，且按次生效**：`LEGADO_APPSERVICE_ARGS` 这类**客户端**环境
+  变量实测能穿过 Gradle daemon 到达 forked 测试 JVM——暖 daemon（前一次构建没带它）下
+  「带 → 生效、不带 → 立刻回落默认那份、再带 → 又生效」（三次实测）。所以**参数覆盖口
+  可以放心做成环境变量**，不必为 daemon 复用另找通道；判据是**数三次行为**，
+  不是读 Gradle 文档。
+
+### 实测数据（顺手给第二期 daemon 的量法交底）
+
+编译缓存已热时，**单次调试 15–41 秒**；其中 Gradle 那一段约 **10 秒**（`--rerun` +
+配置阶段），剩下是站点请求本身。所以：**daemon 能省的是那 10 秒上下，省不掉站点耗时**——
+与 TODO §一点八 第二期里「先量再定」的判断一致。
+
+→ 一/三/四已落在代码与测试里（`tests/test_jvm_debug_contract.py`、`tests/test_app_debug.py`）；
+尚无新的 AGENTS 级规矩——这些是 JVM 通道的环境特性，不是跨领域的约定。
+
+## 六十、S5-A2：shadow 掉 `BackstageWebView` —— 五条坑，四条在浏览器那一层（2026-09-20）
+
+A2 的目标是把「取数那一步」换成真浏览器，让 **App 自己的调试管线**跑完整条链
+（而不是像 S3-4 的校验通道那样「渲染后另喂解析器」——那条路对 `xhr_mode` 类源会
+**假阴性**，见 lessons §五十八）。shadow 本身写起来不长，时间全花在浏览器那一层。
+
+### 一、shadow 一个 `suspend` 函数：签名是续体，而且写错了**不报错、只是不被调用**
+
+`BackstageWebView.getStrResponse()` 在 JVM 上是
+`getStrResponse(Continuation)Object`——**续体是最后一个参数、返回类型擦成 `Object`**。
+shadow 必须照这个描述符写：
+
+    @Implementation
+    fun getStrResponse(continuation: Continuation<*>): Any { … }
+
+返回值直接给结果即可：调用方（编译器生成的状态机）看到返回的不是
+`COROUTINE_SUSPENDED`，就当作「已同步完成」当场取用。
+
+**注意失败方式**：名字对上、参数不对时，Robolectric **不会调用它也不会报错**——
+表现是「shadow 好像没挂上」。所以 spike 的第一件事不是写实现，而是**先证明它被调用**
+（计数记进侧车：`shadow_webview_calls`）。
+
+### 二、`!proc.isAlive` 不能当启动失败的判据（Chromium 会移交进程）
+
+**症状**：A2 第一次跑通了（四段全过），随后**一直**报
+`browser_unavailable: 浏览器进程已退出（）`；而手工敲同一条命令行，浏览器起来得
+好好的，调试端口也在应答。
+
+**根因**：`BrowserBridge.launch()` 在轮询循环里判 `if (!proc.isAlive) return null`。
+Chromium 启动后会把活**移交给另一个进程**，我们 `ProcessBuilder` 起的那个随即退出
+——**浏览器是好的，只是我们盯着的那个进程没了**。这是个竞态：赢的时候看不出来，
+输的时候 100% 判死。
+
+**做法**：**唯一判据是调试端口有没有起来**。`isAlive` 只用来给失败信息补一句
+「启动器进程已退出，浏览器没接住」。同时**失败路径必须自己收进程**（原实现直接
+return，实测每失败一次漏一棵浏览器树、16 个进程还占着调试端口）。
+
+### 三、收进程：**用协议关，不要从外面杀**
+
+最干净的做法是 **Chromium 自己的 `Browser.close`**：浏览器端点的 WebSocket
+（`/json/version` 给的 `webSocketDebuggerUrl`）上发一条，它会**优雅退出**——
+连带把 profile 锁一起清干净。判据是「调试端口不再应答」，**别等它的应答**（这条通常
+不回响应就断连）。实测 `browser_cleanup = graceful`、跑完进程残留 **0**。
+
+对比一下「从外面杀」这条路有多难：
+
+- `Process.destroy()` **不杀树**：一次渲染 Edge 起 **15** 个进程，只杀父进程后
+  还剩 **10** 个。它们占着 profile 目录——而**固定 profile 是留给 A3 攒 cookie 的**，
+  被占住下次启动就失败（只能走 `-run<时间戳>` 自愈：能活，但每次冷启动、还不攒 cookie）。
+- 想按「profile 目录匹配命令行」精确杀，就得 shell out（`taskkill` 不支持按命令行过滤），
+  于是撞上下面两条。**那两条不是「PowerShell 的毛病」，是 shell out 本身的结构问题**：
+
+| 坑 | 症状 |
+|---|---|
+| 传给 shell 的脚本里**双引号被 Windows 参数解析吃掉** | `ProcessBuilder("powershell", …, script)` 里 `-Filter "name='msedge.exe'"` 到 PowerShell 手上没有引号 → `Get-CimInstance : 无效查询` → exit=1 → **清理静默失败**（症状还是「还剩 9 个进程」） |
+| `os.name` 判平台**不可靠** | Robolectric 里它报 **Linux**（Android 环境），`if (!isWindows()) return` 把整条清理路径静默跳过 |
+
+    从 Java 里拼一段 shell 脚本丢过去，要穿**三层引号解析**：
+    ProcessBuilder 的 Windows 引号规则 → Windows 命令行规则 → shell 自己的语法。
+    换哪个 shell 都要穿（nu 还多一个安装依赖），**根因是 shell out，不是 shell 选谁**。
+
+    所以本批的产物里**一行 shell 都没有**：优雅关闭走 CDP，兜底才用 `taskkill`
+    （普通 exe，不经过 shell 引号层）。
+
+> **上面最后那条是靠「把清理结果记进侧车」找到的**——在此之前我猜过 profile 锁、
+> 猜过级联效应、猜过 os.name（**都是错的**）。`browser_cleanup = exit=1 out=…无效查询`
+> 一出来，原因就没了悬念。**给失败路径加可观测性，比接着猜便宜得多。**
+
+### 五、`Result.html` 改名 `body`：名字先说了 html，里面可能装 JS 结果
+
+`render` 现在支持 `js` 参数（取那个 JS 的求值结果，而不是整页 outerHTML）——
+于是那个字段可能**不是 HTML**。名字与内容不符时，调用方会照着 HTML 去解析它
+（本仓库被这类误导性命名坑过多次，§十九）。顺手把 `Result.html` 改成 `Result.body`。
+
+### 本批的边界（都要**抛异常**，不是返回空串）
+
+`isRule = true`（`AnalyzeRule.getWebJsResult` 的注入路径，要 `java`/`source` 等绑定）、
+`sourceRegex` 非空（嗅探路径）、只给 `html` 不给 `url`（`loadDataWithBaseURL`）
+——一律显式报「本机调试暂不支持」。**返回空串会被读成「这个源取不到」**，
+而抛异常会顺着 `AnalyzeUrl` → `WebBook` 变成事件流里的错误行，在 NDJSON 里看得见。
+
+### 验收（照 TODO 的判据）
+
+空壳源名单里 `h.4399.com`（`searchUrl` 带 `{"webView":"true"}`）：
+**四段全 pass、`shadow_rendered=1`、渲染 1965ms**，且是 App 自己管线跑出来的
+（`searchDebug → infoDebug → tocDebug → contentDebug`），不是「渲染后另喂解析器」。
+普通源 `shadow_webview_calls = 0`、四段与 A1 基线逐项一致——**shadow 没挂宽**。
+
+→ 无新增 AGENTS 级规矩：这些是浏览器桥这一层的实现坑，不是跨领域约定。
+
+
+## 六十一、一份结论、两个语言：不报错的那一支会一直错下去（2026-09-20）
+
+**症状**：书源列表整页 500。`GET /api/sources` 是列表页**唯一**的数据来源，它按
+`response_model` 校验出参，而一个字段的类型对不上：JVM 结论行里的 `content_ok` 本该是
+`true` / `false` / `null`，实际写成了**字符串 `"null"`**。
+
+**根因**：`Map → JsonObject` 的编码器在**两个地方各写了一遍**（跑批一份、调试的侧车
+一份），分歧正好落在**不报错的那一支**：跑批那份少一个 `null` 分支，落到
+`JsonPrimitive(x.toString())`，而 Kotlin 的 `Any?.toString()` 对 null 返回**字符串**
+`"null"`。偏偏 `runContentStage` 对下载类源（type 3）就是返回 `"content_ok" to null`。
+
+**为什么从 S3-2 埋到那天都没人看见**（这三条比 bug 本身值钱）：
+
+1. **两侧单看都对**：Kotlin 侧觉得写的就是值，Python 侧读到的是一个 JSON 字符串——
+   没有异常、没有日志，谁都不会去看它。
+2. **下游有一句"防御性"代码把它盖住了**：`SourcesView.vue` 渲染时写的是
+   `row.jvm_content_ok === true ? true : row.jvm_content_ok === false ? false : null`，
+   字符串 `"null"` 落进 `null` 分支，界面显示成「未验证」，看着一切正常。
+   **防御写在显示层，等于把上游的错误洗成"看起来正常"**——同一份数据走
+   `response_model` 时直接炸。防御要写在**边界**上，不是写在下游把错藏起来。
+3. **本仓库的测试惯例看不见它**：直调端点函数（不起 `TestClient`）把
+   `response_model` 那一层整条绕过去了；形状测试只断言「回填的键在 `SourceOut` 里
+   声明过」，**不断言值的类型**。
+
+**做法**（三件一起，少一件都不成）：
+
+- **编码只有一个出口**：`appservice/test/io/legado/app/service/ServiceJson.kt`，取两份实现的**并集**
+  （`null → JSON null`、`List → JSON 数组`、数字/布尔 → 原语、其余转字符串）。
+- **对端入口有一道显式的类型闸门**：`backend/api/sources.py` 的 `_jvm_field`——
+  类型不符降级 `None` **并打一行日志**。判据是「一个装饰字段不该带走整页」，
+  同时不许静默（AGENTS #4）。这条是纵深：生产端修了，形状再漂也不会 500。
+- **两侧各留一个不联网的形状钉子**：`ServiceJsonTest`（Kotlin，纯
+  kotlinx.serialization、不挂 Robolectric，几毫秒）与
+  `tests/test_jvm_conclusions.py::ListFillTypeGateTests`（消费端）。变异验证过：
+  把 null 分支改回旧写法，Kotlin 那条立刻红。
+  **形状钉子没有理由省**——它钉的正是"本进程不报错、只在另一个语言那边炸"的那类错。
+
+**同一类的第二个形状：不会命中的"通道"**。`AppserviceEnv` 的参数文件候选表里原先有
+一条 CWD 下的 `appservice-args.properties`——而那个 CWD 是 App 仓库根，我们仓库与
+App 仓库里**都没有**这个文件（**数出来的**，不是读出来的，同 §十九）：它从来不会命中，
+却会在有人真放了的那一刻**静默**盖掉正常那份。删掉，换成一条显式的
+`LEGADO_APPSERVICE_ARGS`（指哪读哪）。**判据：一条候选路径要么有真实的创建者，
+要么删掉。**
+
+→ 已提炼为 AGENTS #22（跨语言的形状：一处编码 + 入口闸门 + 两侧形状钉子）。
+
+
+## 六十二、`withTimeout` 的预算是**软上界**：慢源实测能跑到预算的近两倍（2026-09-20）
+
+**症状**：`validateOne` 从「内层 `runBlocking`」改成 `suspend` 之后跑批，`cost_ms`
+出现 **77.7s**，而每源预算是 **40s**（`--timeout`）；同一条源上一次跑是 **40.0s**。
+看起来像"改动把超时弄坏了"。
+
+**别急着归因**：同一份代码连跑两次，同一条源一次 `40.006s`、一次 `77.717s`——
+**抖动自己就能造出这个现象**。真正的判据是把改动**回退**再跑同一批：旧形态
+（内层 `runBlocking`）同样超预算——`笔趣阁小说网` 目录段 **64.5s**、`连城读书`
+**43.1s**，还多产出一条 `error InterruptedIOException: timeout`。超预算是既有的。
+
+**根因**：`withTimeout` 只保证**到点开始取消**，不保证到点就结束。取消要落在**可取消的
+挂起点**上；落进 App 链里不可取消的一段（同步 IO、Rhino 求值）就只能等它自己回来，
+而 App 自己的 `readTimeout` 是 **60s**（`HttpHelper`，按符号名查证）——于是
+「预算 + 那一段的尾巴 + 60s 上限」才是真实上界。
+
+**纪律**：
+
+- 估总时长**别**按 `预算 × 条数 ÷ 并发`：一个 permit 可能被占掉近两倍预算。
+  「全量 3774 条 17 分钟」那类数字是**实测**出来的，不是算出来的（同 §四十七）。
+- 看到 `cost_ms > timeout` **不是**代码坏了，它表示"取消落在了不可取消的一段"。
+- 真要让预算封死，得让 App 的 `readTimeout` 小于我们的预算——那是另一件事，
+  TODO §一 里记着。
+
+**方法（比结论值钱）**：**"语义不变"的改动要用同一份代码两跑做对照**。改动前后的差异里
+混着站点抖动，单看一次必然误判。回退再跑一次的成本（两分钟）远低于按错误归因去改代码。
+
+→ 无新增 AGENTS 级规矩：这是对量测工具的理解与归因方法，不是跨领域约定。
+
+
+## 六十三、A3：登录态从哪来，以及**不代用户登录**（2026-09-20）
+
+**要解决的问题**：在用源里 `checks.health='auth'` 有 **392 条**，它们在 JVM 通道里会被读成
+「没出结果 / 报错」——也就是**界面上看起来像源坏了**（AGENTS #4 那一类：把工具的欠缺说成
+源的问题）。而本地回放那份判据（`core/checker.py` 的 `is_login_wall`）早就会把它们判成
+「需登录」——缺的不是判据，是**登录态进不来**。
+
+### 上游本来就有一条「渲染 → cookie → HTTP 层」的桥
+
+**源码核对**（认符号）：`BackstageWebView.setCookie()` —— 每次页面加载完成 →
+`CookieManager.getInstance().getCookie(url)`（Android WebView 的 cookie）→
+`CookieStore.setCookie(tag, cookie)`，其中 `tag` 是**源 URL**（`AnalyzeUrl` 构造
+`BackstageWebView` 时传的就是 `source?.getKey()`）。
+
+而请求侧**本来就认 `CookieStore`**：`BookSource.enabledCookieJar` **默认 `true`** →
+`AnalyzeUrl` 给请求打上 `CookieJar` 头 → 网络拦截器 `CookieManager.loadRequest` →
+`CookieStore.getCookie(domain)`（合并 内存/DB/会话 三层）。另一条通道是
+`source.putLoginHeader({...})`（进 `CacheManager["loginHeader_<源URL>"]`，`getHeaderMap`
+自动加到每个请求；规则 JS 里能拿到 `source`/`java`/`cookie`/`cache` 绑定）。
+
+**所以 JVM 侧缺的只有一环**：那个 cookie 的来源。设备上是 Android WebView 的 cookie 库，
+我们这里是桩——换成 **CDP 浏览器**（`BrowserBridge.cookies`）。
+
+### 四条实测（都是探针 `BrowserCookieProbeTest` 跑出来的，不是推断）
+
+1. **`Network.getCookies` 不用先导航**：浏览器一起来就能问出 profile 里该 URL 的 cookie
+   （8 条）——所以**批量不必为每条源渲染一遍**，一条 CDP 查询就够了。
+2. **也不需要先开 `Network` 域**（同一跑里，那一次查询发在 `Network.enable` 之前）。
+3. **HttpOnly 拿得到**（`BAIDUID` 这类都在）：所以必须走 CDP，**不能**在页面里读
+   `document.cookie`——登录态大多正是 HttpOnly。
+4. **喂得进**：`CookieStore.setCookie/replaceCookie` → `getCookie` 读回非空
+   （3035 → 加一条后 3108）——Robolectric 里 Room（`appDb.cookieDao`）与 `CacheManager`
+   都能用，不用另造存储。
+
+### 边界：**不在 CDP 里代替用户登录**
+
+App 的登录入口在 **UI 层**（`ui/login/`），两种模式（源码核对）：
+
+| 模式 | 触发 | App 里的形态 |
+|---|---|---|
+| **网页**（`loginUi` 空） | `SourceLoginMode.Web` | 弹 `SourceLoginWebView` 加载 `loginUrl`，用户在网页里登 → `saveCookie()` 收进 CookieStore |
+| **表单**（`loginUi` 非空） | `SourceLoginMode.Form` | Compose 表单 sheet，`confirm()` 跑 `loginUrl` 的 JS（`if (typeof login=='function') login.apply(this)`，绑定 `java`/`result`） |
+
+我们没有那个界面，也不该有（要用户填凭据）。**能拿的是「已经登录之后」的 cookie**：
+用户在我们的**固定 profile** 里登一次（`scripts/jvm_login.py`：有界面打开、你登、回车 →
+脚本读出 cookie、报告条数），之后每次跑批/调试按 URL 读出来即可。
+
+**覆盖数据**（决定 A3-2 做不做）：在用且 `auth` 的 392 条里——**网页模式 61 / 表单模式 12 /
+两个都没配 319**（后者 App 自己也登不了，只能靠外部 cookie；其中一部分可能只是被
+「请登录」误判的垃圾源）。全体在用源：网页 396 / 表单 96 / 都没配 3273。→ **A3-2（表单入口）
+只覆盖 12 条 auth，不做。** 数据里还有噪声：某条 auth 源的 `loginUrl` 实际是 `｡◕‿◕｡`
+——不能假设它是合法 URL。
+
+**两条接不上的**（下次别再试）：① localStorage / 页面 JS 里的 token：`render(js=...)` 能读
+出来，但 App 的请求层只认 `CookieStore` 与源 header，不会去读它；② 不带 webView 的源没有
+「渲染那一步」——它们的 cookie 只能靠 profile 里已登录过（预热一次即可，因为读 profile
+不需要导航，见上）。
+
+### 验收：用本机 echo 服务把「cookie 有没有到」变成看得见的东西
+
+不去赌某个站点的行为：起一个本机 echo 服务当「源」，**把收到的 `Cookie` 头回吐成一个
+`.book` 元素的名字**（没有 cookie 就**不输出** `.book`）。于是结论行里直接看得见：
+
+| 跑 | 做法 | 结果（实测） |
+|---|---|---|
+| A | 不注入 | `cookie_len=0`、`note=no_cookie_for_domain`；搜索 0 本 |
+| B | `--cookie=echo_test=1` | `cookie_len=11`；事件流里 `└COOKIE:echo_test=1` |
+| C | **只靠 profile**（先 `jvm_login.py` 访问 `/warm` 种一条） | `cookie_len=11`；事件流里 `└COOKIE:echo_warm=1` |
+| D | 批次（`ValidateService`）跑两条源 | echo 源 `ok/hit=1/cookie_len=11`；**登录墙源 `login_wall`** + reason 里带上命中的词 |
+
+**这个形状值得复用**：把「外部状态有没有生效」做成**源自己的回显**，比对着真站点猜可靠。
+夹具在 `data/app_probe/echo_server.py` + `echo_source.json`（可复跑）。
+
+### 两个坑
+
+- **验收夹具必须给 cookie 带有效期**：会话 cookie（没有 `Max-Age`/`Expires`）关浏览器就丢，
+  于是「预热一次 → 之后复用」根本验不出来（C 跑会永远 `cookie_len=0`，而看起来像代码坏了）。
+- **预热脚本的收尾要按「调试端口消失」判**，不是按进程：Chromium 会把活移交给另一个进程，
+  我们 `Popen` 的那个随时已经退出，按它的 pid `taskkill` 等于没杀——实测留了 **2 个进程占着
+  profile**（那会让后面的跑批直接因「profile 被占用」失败）。同 §六十 第二条。
+
+→ 新增的一点规矩（跨语言复制的词表要有逐词比对的契约测试）已补进 AGENTS #22 第⑤点；
+其余是这一层的实现细节。
+
+
+## 六十四、A4：把调试通道接进产品 —— 返回体同形，逻辑收一处（2026-09-20）
+
+**目标**：界面上选「本机引擎」（默认），**不填 IP、不推送**，直接看到分段调试结果。做完
+之后「连 App 调试」降为备选（预检/推送逻辑保留不动——登录态、网络出口、WebView 在手机上
+仍是它不可替代的地方）。
+
+### 形状：与设备通道**同形**，前端零改动
+
+`run_jvm_debug` 返回 `{source, steps, pages, all_ok, events, error}`，与
+`core/app_debug.run_app_debug` 一字不差（只有 `source` 是 `"jvm"`）。这是 A1 定的
+「NDJSON 与设备 WS 逐事件同构」的直接收益：**`build_steps` 一行不改**就吃得下 JVM 的事件流，
+抽屉与卡片也不用改——只多认一个来源标签。
+
+`pages` 走 `fetch_debug_pages`（我们自己的 HTTP 补抓），与设备通道同一口径：本批还没有把
+JVM 里每段的真实 HTML 交回来（那是第三期 `matched_html` 回填），而抽屉「看源码改规则」
+需要 HTML。
+
+### 逻辑收一处：CLI 与端点同一份
+
+`scripts/jvm_debug_run.py` 从 178 行收到 102 行，只剩参数解析与打印——参数拼装、产物解析、
+退出码映射全在 `core/jvm_debug.py`。两个消费方各写一份的后果是「界面上跑出来的和命令行
+跑出来的不一样」，而那看起来像前端 bug（同 §二十三）。
+
+### 坑一：跑批与调试**共用**参数文件与 Gradle 任务
+
+两条链都写 `appservice/args.properties`、都拉 `:app:testAppDebugUnitTest`。同时跑会互相踩
+（参数被改写、两个 Gradle 抢同一份构建产物），而那种失败看起来像「JVM 坏了」。
+
+做法：`core/jvm_debug.RUN_LOCK` 一把锁，**非阻塞获取**——拿不到就直接返回一句
+「另一个 JVM 任务在跑，等它跑完再来」。**不排队**：排队会让界面上的一张卡片转十几分钟
+（跑批 17 分钟），那比一句实话糟得多。跑批那条路之后也应接同一把锁。
+
+### 坑二（顺带修）：界面上「程序先挑」的基准会**自证循环**
+
+`suggest` 那条链的设计是「拿 App 实测到的值当 ground truth，先免费挑一遍候选」，
+后端注释明确写着「**本地回放取到的值不能当基准**——那是当前这条坏规则的产物」。
+而前端 `appValues` 原先**无条件**取当前步骤的 `values` → 本地调试的结果会把坏规则的
+输出喂进去当基准。
+
+修法：按来源判——只有**真引擎**的结果（连 App / 本机引擎）才是基准，本地调试给空
+（后端于是如实地回「没有基准」，改走 AI 那条）。
+
+### 坑三：能力上线了，「只能在 X 验」的旧文案就成了假话
+
+新增一条通道时，**旧的能力说明会静默变成假话**——UI 验收时抓到两处：
+
+- 调试卡片的空态提示写着「App 打开「Web 服务」，把通知栏显示的 IP 填到上面那格」，
+  而本机引擎通道**根本没有 IP 那一格**；
+- 语法速查写着「以下语法不支持本地调试，**只能用「连 App 调试」验**：`@js:` …」，
+  而本机引擎跑的正是 App 的引擎，这些都验得了。
+
+判据：**加一条通道/能力时，grep 一遍「不支持」「只能」「XX 才能」**，看哪些话现在不成立。
+（这是「能力撤了条目还在」的镜像；两者都属于 AGENTS #10 的「一处写、别处只留指针」与
+#18 的文案纪律。）
+
+### 验收（界面级，判据是 A4 的小字）
+
+界面点「本机引擎」→ 4 段（搜索/详情链接/目录/正文）+ 69 条调试事件 + 补抓的 HTML；
+抽屉来源标签写「本机引擎」（不是「App 实测」也不是「本地调试」）；分段重跑「重新调试本步」
+可用；**「程序先挑」用 JVM 的结果当基准跑通了**（坑二修好的证据）。
+截图留在 `data/app_probe/gui-shots/t1_jvm_debug_result.png`。
+
+→ 无新增 AGENTS 级规矩：坑一是这一层的实现细节，坑二/坑三分别落在 #10/#18 的既有要求里。

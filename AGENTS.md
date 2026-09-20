@@ -167,6 +167,25 @@
     `getElements` 把每个 `@` 段都当选择器（`class.list@tag.a` 必须仍是选择器）。
     见 lessons §五十八。
 
+22. **一份结论跨语言（Kotlin ⇄ Python）时：编码只有一处，对端入口要有一道闸。**
+    ①**编码器只能写一遍**（`appservice/test/io/legado/app/service/ServiceJson.kt`）。两处各写一遍时，分歧正好落在
+    **不报错的那一支**：跑批那份少了 `null` 分支，`Any?.toString()` 把
+    `content_ok = null` 写成**字符串 `"null"`**，下游 `jvm_content_ok: Optional[bool]`
+    校验不过 → `GET /api/sources`（列表页**唯一**的数据来源）**整页 500**，而生产侧
+    一句日志都没有。**改编码器 / 取值规则前，先问「另一份在哪」。**
+    ②**对端入口要有显式类型闸门**：`backend/api/sources.py` 的 `_jvm_field` 把类型不符
+    降级成 `None` **并打日志**——一个装饰字段不该带走整页，也不许静默（同 #4）。
+    ③**形状要有不联网的钉子**：两侧各一条（`ServiceJsonTest` /
+    `ListFillTypeGateTests`）。Kotlin 那条不挂 Robolectric、几毫秒，没有理由省。
+    ④**别把防御写在下游显示层**：前端那句 `=== true ? … : null` 把上游的错误洗成了
+    「未验证」，看着一切正常，而同一份数据走 `response_model` 时直接炸——
+    **防御写在边界上（②），不写在显示层把错藏起来**。
+    ⑤**跨语言复制的词表/常量，要有一条逐词比对的契约测试**：判定必须在产结论的那一侧
+    做（如登录墙词表在 Kotlin），而权威那份在 Python——两边没法共享代码，只能靠测试把
+    「各改一边」拦住（`tests/test_jvm_debug_contract.py::TestLoginMarkerParity`）。
+    漂了的后果不是报错，是**同一个页面在两个通道判出不同结论**。
+    见 lessons §六十一、§六十三。
+
 ## 上游 App 源码（查证用）
 
 代码注释里大量 `Xxx.kt:行号` 指向「阅读」App 的源码。本地在

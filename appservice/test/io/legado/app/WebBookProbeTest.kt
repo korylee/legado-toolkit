@@ -5,6 +5,7 @@ import io.legado.app.domain.gateway.DownloadCacheSettingsGateway
 import io.legado.app.domain.model.settings.DownloadCacheSettings
 import io.legado.app.model.webBook.WebBook
 import io.legado.app.probe.WindowsPathAssetManagerShadow
+import io.legado.app.service.AppserviceEnv
 import io.legado.app.utils.GSON
 import io.legado.app.utils.fromJsonObject
 import kotlinx.coroutines.flow.Flow
@@ -44,8 +45,7 @@ class WebBookProbeTest {
     /** 只提供 AnalyzeUrl 需要的设置网关（纯数据：UA / 线程数），不碰 Android。 */
     private object StubSettingsGateway : DownloadCacheSettingsGateway {
         override val currentSettings = DownloadCacheSettings(
-            userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-                "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+            userAgent = AppserviceEnv.USER_AGENT
         )
         override val settings: Flow<DownloadCacheSettings> = flowOf(currentSettings)
         override suspend fun update(transform: (DownloadCacheSettings) -> DownloadCacheSettings) = Unit

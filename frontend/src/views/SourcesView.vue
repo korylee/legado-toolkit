@@ -381,7 +381,7 @@ function depthClass(row) {
 //: 着色口径同 depthClass：绿=跑过且通过，红=跑过且失败；无果/空壳这类
 //: 「跑了但没结论」不着色，避免看起来像失败。
 const JVM_SHORT = {
-  ok: "JVM✓", no_result: "无果", empty_js_shell: "空壳",
+  ok: "JVM✓", no_result: "无果", empty_js_shell: "空壳", login_wall: "需登录",
   timeout: "超时", error: "JVM✗", invalid: "无效",
 };
 //: 结论按**段**展开成若干行，供 tooltip 逐行显示。
@@ -416,6 +416,7 @@ function jvmSteps(row) {
 
 const JVM_STATE_LABELS = {
   ok: "搜索通过", no_result: "跑了但没出结果", empty_js_shell: "JS 规则是空壳",
+  login_wall: "页面要求登录（不是源坏了）",
   timeout: "超时", error: "报错", invalid: "规则无效",
 };
 function jvmText(row) {
@@ -942,11 +943,23 @@ onUnmounted(() => {
                   <span v-if="s.ok === true">✓</span>
                   <span v-else-if="s.ok === false">✗</span>
                 </div>
+                <!-- 正文偏短的附注（判据与措辞都在服务端 core.quality）：
+                     它**不改结论**——✓ 还是 ✓，只是把「这条通过可疑」说出来 -->
+                <div v-if="row.jvm_content_note" class="muted">{{ row.jvm_content_note }}</div>
                 <!-- 浏览器渲染状态（S3-4）：只在走过浏览器时显示——
                      「没渲染过」和「渲染过」是两件事，摆在一起会让人以为源有问题 -->
                 <div v-if="row.jvm_rendered === true" class="muted">浏览器渲染：已渲染</div>
                 <div v-else-if="row.jvm_rendered === false" class="muted">
                   浏览器渲染：失败（{{ row.jvm_render_reason || "原因未记录" }}）
+                </div>
+                <!-- 登录态（A3）：**只在有意义时显示**——带了就说带了（说明「需登录」
+                     不是没试过），这行是「需登录」而没带时才提示下一步。平时不显示：
+                     没登录过的源太多，人人一行会把 tooltip 淹没 -->
+                <div v-if="row.jvm_cookie_len > 0" class="muted">
+                  登录态：本次带了 {{ row.jvm_cookie_len }} 字符的 cookie
+                </div>
+                <div v-else-if="row.jvm_state === 'login_wall'" class="muted">
+                  登录态：本次未带 cookie——先在浏览器里登录一次，之后按源自动复用
                 </div>
                 <div v-if="row.jvm_batch" class="muted">批次：{{ row.jvm_batch }}</div>
               </template>

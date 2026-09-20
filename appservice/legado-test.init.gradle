@@ -50,7 +50,7 @@ gradle.projectsEvaluated {
         // 全量跑批 3774 条时 OOM（约 600 条崩）——Robolectric 默认堆不够 3000+ 协程
         // 同时持有页面/规则对象。3g 实测够用；single fork 保持结论顺序稳定。
         it.maxHeapSize = "3g" 
-        // appservice-args.properties 是「跑批参数」，必须声明为任务输入——
+        // appservice/args.properties 是「跑批参数」，必须声明为任务输入——
         // 否则改了它 Gradle 仍判 UP-TO-DATE，静默跳过（实测踩过）。
         it.inputs.file(new File(appservice, 'args.properties'))
             .withPathSensitivity(PathSensitivity.NONE)

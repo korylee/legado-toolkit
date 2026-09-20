@@ -19,6 +19,17 @@ import { api } from "./client";
 export const appDebug = (source, key, host, port, push = false, cache = "auto") =>
   api.post("/rules/app-debug", { source, key, host, port, push, cache });
 
+// 本机引擎调试（S5-A4）：**App 的真引擎跑在本机**（Robolectric 里跑 App 源码），
+// 不填 IP、不推送、不用预检——本机什么都有。返回体与 /rules/app-debug **同形状**
+// （只有 source 是 "jvm"），所以抽屉与卡片零改动就能吃。
+//
+// cookie 留空就按源 URL 从**我们自己的浏览器 profile** 读登录态（A3）：登录墙的源先跑
+// `scripts/jvm_login.py` 在那个 profile 里登一次，之后自动带上。
+//
+// cache 与连 App 那条同一个含义：只管**我们补抓的那几页**。
+export const jvmDebug = (source, key, timeout = 60, cookie = "", cache = "auto") =>
+  api.post("/rules/jvm-debug", { source, key, timeout, cookie, cache });
+
 // 调试前预检：把「静默无响应」拆成 unreachable / missing / ready 三种状态。
 export const appPreflight = (source, host, port) =>
   api.post("/rules/app-preflight", { source, host, port });

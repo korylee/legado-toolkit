@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException
 from backend.schemas import (
     AppDebugRequest,
     AppHostRequest,
+    JvmDebugRequest,
     ReplayStepRequest,
     RuleChainTest,
     SuggestRuleRequest,
@@ -30,6 +31,36 @@ async def chain_test(body: RuleChainTest):
         )
     except Exception as e:
         raise HTTPException(400, "试跑失败: %s: %s" % (type(e).__name__, e))
+
+
+@router.post("/jvm-debug")
+async def jvm_debug(body: JvmDebugRequest):
+    """在本机引擎里跑一次调试（S5-A4）：**不填 IP、不推送**，直接出分段结果。
+
+    返回体与 ``/app-debug`` **同形状**（source/steps/pages/all_ok/events/error），
+    前端抽屉与卡片零改动——`source` 是 ``"jvm"``，抽屉据此标「本机引擎」而不是
+    「App 实测」。
+
+    不排队：跑批与调试共用 `appservice/args.properties` 与同一个 Gradle 任务，
+    同时跑会互相踩；`core.jvm_debug` 里的锁拿不到就直接返回一句「另一个任务在跑」
+    （错误体，不是 500——用户侧等一下就能自己解决）。
+    """
+    from core.fetch import CACHE_MODES
+    from core.jvm_debug import run_jvm_debug
+
+    # 与 /app-debug 同一条纪律：枚举严格比，**不静默退回默认**——用户选了
+    # 「忽略缓存重抓」却因为拼错而每次都联网，界面上分辨不出来
+    cache = str(body.cache or "")
+    if cache not in CACHE_MODES:
+        raise HTTPException(400, "未知的缓存策略：%s（只能是 %s）"
+                                 % (cache, " / ".join(CACHE_MODES)))
+    if int(body.timeout or 0) <= 0:
+        raise HTTPException(400, "timeout 必须是正数")
+    # 同步阻塞（subprocess 拉 Gradle），必须让出事件循环
+    return await asyncio.to_thread(
+        run_jvm_debug, dict(body.source or {}), body.key or "我",
+        int(body.timeout or 60), body.cookie or "", cache,
+    )
 
 
 @router.post("/app-debug")

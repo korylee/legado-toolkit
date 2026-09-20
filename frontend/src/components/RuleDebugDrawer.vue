@@ -53,17 +53,24 @@ const activeHit = ref(0);
 const steps = computed(() => (props.result && props.result.steps) || []);
 const pages = computed(() => (props.result && props.result.pages) || []);
 
-//: 结果来源。App 实测（走 App 的调试 WS）与本地回放（我们的离线引擎）可信度
-//: 差很多——本地只判「非空/不报错」且跑不了 JS 规则。**必须显式标出来**：
-//: 两者的三态视觉完全一样，不标就分不清哪份该信
-const isAppResult = computed(() => (props.result || {}).source === "app");
+//: 结果来源。三层可信度差很多，**必须显式标出来**：三态视觉完全一样，不标就分不清
+//: 手里这份该信到什么程度——
+//:   - `app`：连 App 实测（手机上跑，登录态/网络出口都是真的）
+//:   - `jvm`：本机引擎（**同一段 App 代码**跑在本机：真规则、真 JS；差在环境——
+//:     登录态要预热、没有手机的网络出口）见 lessons §六十三
+//:   - 其它：本地回放（我们的离线引擎，跑不了 JS 规则）
+const channel = computed(() => String((props.result || {}).source || "local"));
+const isAppResult = computed(() => channel.value === "app");
+//: 跑的是不是「App 的真引擎」——连 App 与本机引擎都算。事件流页签、分段重跑、
+//: 「用实测值当基准」这些只对真引擎成立
+const isEngineResult = computed(() => channel.value === "app" || channel.value === "jvm");
 //: App 推来的原始事件流。steps[].values 是它去掉耗时前缀后的段内文本，
 //: 排查「哪一步慢」「App 到底推了什么」只能看这里
 const events = computed(() => (props.result && props.result.events) || []);
-//: 默认子页签：App 结果看事件流，本地回放看提取结果（那两个 tab 各自只在
-//: 对应的结果下出现，选错会是一片空白）
+//: 默认子页签：真引擎（连 App / 本机）看事件流，本地回放看提取结果（那两个 tab
+//: 各自只在对应的结果下出现，选错会是一片空白）
 const defaultSubTab = computed(
-  () => (isAppResult.value && events.value.length ? "events" : "values"));
+  () => (isEngineResult.value && events.value.length ? "events" : "values"));
 
 const replaying = ref(false);
 const replayResult = ref(null);
@@ -181,7 +188,7 @@ watch(() => props.initialStep, (v) => {
 //: 「从此步重跑」可不可点：搜索步永远可以（等于整链）；其余步要上轮结果里
 //: 有这一步的 URL（拼 App 的 ++/--/裸URL key 用），没有就只能先跑一次完整链路
 const canRerun = computed(() => {
-  if (!isAppResult.value) return false;
+  if (!isEngineResult.value) return false;
   const s = current.value || {};
   if (s.name === "search") return true;
   return !!String(s.url || "").trim();
@@ -420,9 +427,14 @@ const replayNote = computed(() => {
   return "本地调试取到 " + (r.values || []).length + " 条"
     + (r.reason ? "（" + r.reason + "）" : "");
 });
-//: App 实测取到的值 = 「正确的规则应当取到形似的东西」。行首的 ┌└◇ 是事件流的
-//: 结构符号、不是内容，喂模型前先剥掉
-const appValues = computed(() => ((current.value || {}).values || [])
+//: **真引擎**取到的值 = 「正确的规则应当取到形似的东西」。行首的 ┌└◇ 是事件流的
+//: 结构符号、不是内容，喂模型前先剥掉。
+//: ⚠️ **本地回放的结果不能当基准**：那批值正是**当前这条坏规则**的产物，拿它比
+//: 等于自证循环（后端 `core/repair/suggest.preselect` 的注释也这么写着）。
+//: 所以这里按来源判一下——以前无条件用 `current.values`，本地结果会喂进去
+const appValues = computed(() => (isEngineResult.value
+  ? (current.value || {}).values || []
+  : [])
   .map((v) => String(v).replace(/^[┌└◇≡⇒︾︽\s]+/, "").trim())
   .filter(Boolean).slice(0, 8));
 
@@ -613,18 +625,18 @@ async function copyMatched() {
          不标就分不清手里这份结果该信到什么程度 -->
     <template #header>
       <span>调试</span>
-      <el-tag size="small" :type="isAppResult ? 'success' : 'info'"
+      <el-tag size="small" :type="isAppResult ? 'success' : isEngineResult ? 'primary' : 'info'"
               style="margin-left: 8px">
-        {{ isAppResult ? "App 实测" : "本地调试 · 仅供参考" }}
+        {{ isAppResult ? "App 实测" : isEngineResult ? "本机引擎" : "本地调试 · 仅供参考" }}
       </el-tag>
     </template>
 
     <el-empty v-if="!steps.length" description="没有调试结果" :image-size="80" />
 
     <template v-else>
-      <el-alert v-if="!isAppResult" type="warning" :closable="false" show-icon
+      <el-alert v-if="!isEngineResult" type="warning" :closable="false" show-icon
                 style="margin-bottom: 10px"
-                title="本地调试不支持 JS 规则，结果仅供参考。要确认请用「连 App 调试」。" />
+                title="本地调试不支持 JS 规则，结果仅供参考。要确认请用「本机引擎」或「连 App 调试」。" />
       <div class="debug-step-tabs">
         <!-- 高亮要跟着「实际显示的那一步」（current 在 activeStep 失效时会回退到
              steps[0]），否则重跑后会出现「有内容、没有任何页签高亮」 -->
@@ -642,9 +654,11 @@ async function copyMatched() {
              重跑走的是 App 的真引擎，与下面的「用本页重放」（本地、不发请求）
              是两个层次——按钮相邻摆着，哪个快哪个准一目了然 -->
         <el-tooltip placement="top" :disabled="!current.url && current.name !== 'search'"
-                    content="让 App 从这一步重新调试：目录会连正文一起跑，正文只跑正文。规则改过会先问你是否推送。">
+                    :content="isAppResult
+                      ? '让 App 从这一步重新调试：目录会连正文一起跑，正文只跑正文。规则改过会先问你是否推送。'
+                      : '让本机引擎从这一步重新调试：目录会连正文一起跑，正文只跑正文。'">
           <span>
-            <el-button v-if="isAppResult" size="small" plain :loading="rerunning"
+            <el-button v-if="isEngineResult" size="small" plain :loading="rerunning"
                        :disabled="rerunning || !canRerun"
                        @click="emit('rerunFrom', current.name)">重新调试本步</el-button>
           </span>
@@ -661,8 +675,8 @@ async function copyMatched() {
         <el-tag size="small" :type="tagType(replayResult)">{{ verdictText(replayResult) }}</el-tag>
         <span class="muted">取到 {{ (replayResult.values || []).length }} 条</span>
         <span v-if="replayResult.reason" class="muted">· {{ replayResult.reason }}</span>
-        <span v-if="isAppResult" class="muted">
-          · 结果来自我们抓的 HTML，不是 App 看到的页面
+        <span v-if="isEngineResult" class="muted">
+          · 结果来自我们抓的 HTML，不是引擎看到的页面
         </span>
         <el-button link size="small" @click="replayResult = null">关闭</el-button>
       </div>
@@ -815,7 +829,7 @@ async function copyMatched() {
              而且那份 evidence 统计（标签占比之类）是对**事件文本**算的，
              在 App 结果下没有意义。只有本地回放的 values 才是真正取到的值 -->
         <el-tab-pane v-if="events.length" name="events">
-          <template #label>App 事件 ({{ events.length }})</template>
+          <template #label>调试事件 ({{ events.length }})</template>
           <p class="muted" style="margin: 6px 0">
             App 推来的原始事件流，行首的 <span class="mono">[mm:ss.SSS]</span>
             是 App 自己记的相对耗时。
@@ -823,7 +837,7 @@ async function copyMatched() {
           <div v-for="(e, i) in events" :key="i" class="debug-event">{{ e.text }}</div>
         </el-tab-pane>
 
-        <el-tab-pane v-if="!isAppResult" label="提取结果" name="values">
+        <el-tab-pane v-if="!isEngineResult" label="提取结果" name="values">
           <div v-if="current" class="debug-evidence">
             <span>条数 {{ current.evidence.values_total }}</span>
             <span>字符 {{ current.evidence.chars }}</span>

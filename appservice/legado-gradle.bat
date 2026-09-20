@@ -50,5 +50,11 @@ REM the CWD stays elsewhere and test discovery silently breaks
 REM ("No tests found", for the app's own tests too). pushd instead.
 pushd "%LEGADO_REPO%"
 call gradlew.bat -I "%~dp0legado-test.init.gradle" %*
+REM **必须把 Gradle 的退出码带出去**：原来结尾是 endlocal，于是这个 bat 永远
+REM 返回 0——调用方（backend/api/jvm.py 的 `ok = code == 0`、A1/A4 的调试
+REM 「零事件=退出非 0」）都只能拿到一个假的成功。set 之后立刻取，别插别的
+REM 命令（任何命令都可能改 ERRORLEVEL）。`endlocal & exit /b %RC%` 是标准写法：
+REM %RC% 在解析这一行时就展开，所以 endlocal 清掉变量也不影响。
+set "RC=%ERRORLEVEL%"
 popd
-endlocal
+endlocal & exit /b %RC%

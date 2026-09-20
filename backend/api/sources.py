@@ -1,16 +1,57 @@
 # -*- coding: utf-8 -*-
 import collections
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from core.loader import _normalize_url
+from core.quality import SHORT_CONTENT_CHARS, short_content_note
 from backend.deps import get_store
 from backend.schemas import (MergeIn, MergeUndoIn, NameApplyIn, NamePreviewIn, NameUndoIn,
                              SourceDeleteIn, SourcePage, SourceSave, TagDelete, TagMerge,
                              TagPatch, TagRename)
 
 router = APIRouter()
+
+
+def _jvm_field(value: Any, kind: type, field: str, url: str) -> Any:
+    """把 JVM 结论里的原始值收敛到 response_model 声明的类型：对不上就 None + **出声**。
+
+    为什么需要这一道：这些值来自**另一个语言的 NDJSON**（Kotlin 侧一行一个 map），
+    而这里的类型是给 `SourcePage` 校验用的。直接透传的后果不是「这一行显示不对」，
+    是 **`GET /api/sources` 整页 500**——它们只是列表上的装饰字段。
+
+    实证（2026-09-20）：`content_ok` 曾被写成字符串 `"null"`（Kotlin 侧少了 null
+    分支，`Any?.toString()` 的产物），`SourceOut.jvm_content_ok: Optional[bool]`
+    校验不过，整个列表打不开。生产端已修（`ServiceJson`：null → JSON null），
+    但**跨语言的形状不一致要在这里被拦下**：AGENTS #4「显式返回原因」在这里的形态
+    就是「降级成 None + 一行日志」——不静默，也不让整页挂掉。
+    """
+    if value is None or isinstance(value, kind):
+        return value
+    print("[list_sources] JVM 结论字段 %s 类型不符（%s，收到 %r）——按 None 处理"
+          % (field, url, value), flush=True)
+    return None
+
+
+def _jvm_content_note(ok: Any, length: Any) -> str:
+    """正文「通过、但有内容、且短得可疑」时给一句附注。**不改结论**。
+
+    判据不在这里发明：阈值与措辞都来自 `core.quality` 那一份（AGENTS #8 的同一条——
+    一个阈值两处各存一份必然漂）。Kotlin 侧**刻意不做这件事**：那边只报事实
+    （`content_len` 是几），解释放在这一侧，免得两个语言各写一句会漂的话。
+
+    三个条件同时成立才给：通过、有内容、短于阈值。`content_len == 0` 是**没有内容**
+    （`content_ok` 与 `reason` 已经说清），不是「内容短」——在这儿再说一遍是噪声。
+
+    只用 `content_len`，不用 `content_sample`：sample 只有 60 字，拿它去匹配
+    `CONTENT_NOISE_MARKERS` 会漏（那边那条规则本来是拿全文匹配的）。
+    """
+    if ok is not True or not isinstance(length, int) or length <= 0:
+        return ""
+    if length >= SHORT_CONTENT_CHARS:
+        return ""
+    return short_content_note(length)
 
 
 @router.get("", response_model=SourcePage)
@@ -39,19 +80,27 @@ def list_sources(
     try:
         jvm = st.latest_jvm_conclusions()
         for it in items:
-            j = jvm.get(_normalize_url(str(it.get("source_url", "") or "")).rstrip("/"))
-            it["jvm_state"] = j.get("state", "") if j else ""
-            it["jvm_stage"] = j.get("stage", "") if j else ""
-            it["jvm_hit"] = j.get("hit") if j else None
-            it["jvm_toc_count"] = j.get("toc_count") if j else None
-            it["jvm_toc_ok"] = j.get("toc_complete") if j else None
-            it["jvm_content_len"] = j.get("content_len") if j else None
-            it["jvm_content_ok"] = j.get("content_ok") if j else None
-            it["jvm_batch"] = j.get("_batch", "") if j else ""
+            url = _normalize_url(str(it.get("source_url", "") or "")).rstrip("/")
+            j = jvm.get(url) or {}
+            # 每个字段都过 `_jvm_field`：**类型不对就 None**，不让一行坏数据把整页拖走。
+            # 谁的值是什么类型，以 `SourceOut` 的声明为准（那边是 response_model 的口径）
+            it["jvm_state"] = _jvm_field(j.get("state"), str, "jvm_state", url) or ""
+            it["jvm_stage"] = _jvm_field(j.get("stage"), str, "jvm_stage", url) or ""
+            it["jvm_hit"] = _jvm_field(j.get("hit"), int, "jvm_hit", url)
+            it["jvm_toc_count"] = _jvm_field(j.get("toc_count"), int, "jvm_toc_count", url)
+            it["jvm_toc_ok"] = _jvm_field(j.get("toc_complete"), bool, "jvm_toc_ok", url)
+            it["jvm_content_len"] = _jvm_field(j.get("content_len"), int, "jvm_content_len", url)
+            it["jvm_content_ok"] = _jvm_field(j.get("content_ok"), bool, "jvm_content_ok", url)
+            #: 正文偏短的附注（**派生**，不落库）：结论照旧是「通过」，这句只提示可疑
+            it["jvm_content_note"] = _jvm_content_note(
+                it.get("jvm_content_ok"), it.get("jvm_content_len"))
+            it["jvm_batch"] = _jvm_field(j.get("_batch"), str, "jvm_batch", url) or ""
             #: 这条结论是不是**经过浏览器渲染**得到的（S3-4）：
             #: None=没走浏览器，True=渲染成功，False=渲染失败（原因在 jvm_render_reason）
-            it["jvm_rendered"] = j.get("rendered") if j else None
-            it["jvm_render_reason"] = (j.get("render_reason") or "") if j else ""
+            it["jvm_cookie_len"] = _jvm_field(j.get("cookie_len"), int, "jvm_cookie_len", url)
+            it["jvm_rendered"] = _jvm_field(j.get("rendered"), bool, "jvm_rendered", url)
+            it["jvm_render_reason"] = _jvm_field(
+                j.get("render_reason"), str, "jvm_render_reason", url) or ""
     except Exception as exc:
         # 静默吞掉的话，「为什么列表上看不到 JVM 结论」就永远查不出来——
         # 这里至少要留下痕迹（ lessons §二：不接受静默失败）

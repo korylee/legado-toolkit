@@ -328,6 +328,33 @@ class TestEmptyAndError(unittest.TestCase):
         events = ["︾开始解析正文页", "︽正文页解析完成", "错误：内容为空"]
         self.assertEqual(build_steps(events)[0]["verdict"], "fail")
 
+    def test_app_own_exception_counts_as_error(self):
+        """**App 自己的异常也要认**：``io.legado.app.exception.*``。
+
+        实测 2026-09-20（S5-A1）：正文段真抛了 ``ContentEmptyException``，而
+        ``ERROR_PREFIXES`` 当时只认 ``java.``/``javax.``——段于是判成 unknown，
+        把「真出错」读成「我们没测出来」。这条钉住它。
+        """
+        events = [
+            "︾开始解析正文页",
+            "io.legado.app.exception.ContentEmptyException: 内容为空",
+        ]
+        content = build_steps(events)[0]
+        self.assertEqual(content["verdict"], "fail")
+        self.assertIn("ContentEmptyException", content["reason"])
+
+    def test_error_line_with_time_prefix(self):
+        """事件带 ``[mm:ss.SSS]`` 前缀时，错误判定要**剥完前缀再判**。
+
+        连 App 与我们自己的 JVM 通道（S5-A1）都是这个形态：`Debug.log` 把时间前缀
+        加在 message 上。前缀没剥就 startswith，异常行会被读成正常。
+        """
+        events = [
+            "︾开始解析正文页",
+            "[00:15.708] io.legado.app.exception.ContentEmptyException: 内容为空",
+        ]
+        self.assertEqual(build_steps(events)[0]["verdict"], "fail")
+
     def test_reason_is_truncated_to_200_chars(self):
         """失败原因只取前 200 字符（完整错误行仍在 values 里）。"""
         long_error = "错误：" + "x" * 500

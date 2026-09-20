@@ -127,6 +127,12 @@ ERROR_PREFIXES = (
     # 再宽的 ``com.`` / ``org.`` 收益极小（栈里那些 ``at ...`` 行不是首行），
     # 却会凭空多出误判成 fail 的机会——按「不误杀」的立场不划算
     "java.", "javax.",
+    # **App 自己的异常**：``io.legado.app.exception.ContentEmptyException`` 这类
+    # 首行就是它，而上面那条「不加 com./org.」把自家包也漏在外面了。实测
+    # 2026-09-20（S5-A1）：正文段真抛了 ContentEmptyException，段却判成
+    # **unknown**——一段真出错的结果被读成「我们没测出来」，比没有结论更坏。
+    # 这个前缀**窄到就是 App 自己**（不是笼统的 com./org.），误杀面可以忽略。
+    "io.legado.app.",
 )
 
 #: 空事件流的提示。零事件几乎只有两种原因，直接写清楚，省得下一个人重新踩
