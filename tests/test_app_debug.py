@@ -828,6 +828,20 @@ class EnginePagesTests(unittest.TestCase):
         self.assertEqual(engine_pages({"https://a.com": "<html>x</html>"}),
                          {"https://a.com": "<html>x</html>"})
 
+    def test_engine_html_keeps_the_timestamp_prefix_out_of_the_material(self):
+        """payload 是**事件消息**，App 给它加了 `[mm:ss.SSS]` 前缀——存整页 HTML 就得剥掉。
+
+        实测（2026-09-21）：不剥的话，抽屉「整页源码」和生成链拿到的材料都以时间戳开头。
+        只剥**行首**那一个；正文里长得一样的串不能动。
+        """
+        got = engine_pages({"https://a.com": "[00:09.530] <html>x</html>",
+                            "https://b.com": "<html>[00:01.000] 正文里的字</html>"})
+        self.assertEqual(got["https://a.com"], "<html>x</html>")
+        self.assertEqual(got["https://b.com"], "<html>[00:01.000] 正文里的字</html>")
+
+    def test_page_that_is_only_a_timestamp_is_dropped(self):
+        self.assertEqual(engine_pages({"https://a.com": "[00:09.530] "}), {})
+
     def _steps(self):
         return [{"name": "search", "url": "https://a.com/s", "page_id": "search"}]
 

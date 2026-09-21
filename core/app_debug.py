@@ -533,6 +533,13 @@ def engine_pages(raw: Any) -> Dict[str, str]:
     它是「这一页是谁取的」的一条证据，不该把整个结果带走，也不该静默。
     单页超过 ``quality.MAX_PAGE_HTML_CHARS`` 再截一次——Kotlin 侧已经截过一道（更宽），
     两处上限不同是有意的（一个是传输、一个是展示）。
+
+    **顺手剥掉 App 的 ``[mm:ss.SSS]`` 前缀**：payload 那一条是**事件消息**，App 给每条消息
+    都加了耗时前缀，而这里存的是「整页 HTML」——不剥的话，抽屉里的「整页源码」以及生成链
+    拿到的材料都以一个时间戳开头（实测 2026-09-21：
+    ``[00:09.530] <html lang="en-US"…>``）。``matched_html`` 没有这个问题（它过 jsoup）。
+    前缀的正则只有``_PREFIX_RE``这一份，就在本模块里，别在 Kotlin 侧再写一遍
+    （AGENTS #22⑤：跨语言复制常量要配逐词比对）。
     """
     if not isinstance(raw, dict):
         if raw:
@@ -546,7 +553,9 @@ def engine_pages(raw: Any) -> Dict[str, str]:
         key = str(url).strip()
         if not key:
             continue
-        out[key] = html[:Q.MAX_PAGE_HTML_CHARS]
+        clean = _PREFIX_RE.sub("", html, count=1)
+        if clean.strip():
+            out[key] = clean[:Q.MAX_PAGE_HTML_CHARS]
     return out
 
 
