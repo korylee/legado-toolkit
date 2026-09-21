@@ -2,6 +2,7 @@
 """由 services/add_source.py 拆分而来。"""
 
 from core.constants import *
+from core.page_layer import WANT_MEDIA
 from core.urls import abs_url as _abs_url
 from core.fetch import fetch
 
@@ -225,19 +226,58 @@ def analyze_search_page(html: str, keyword: str) -> dict:
             break
 
     return result
-def analyze_detail_page(html: str, book_url: str, page_fetcher=None) -> dict:
+def _text_content_rule(soup) -> tuple:
+    """文本正文：取文本量最大的块（>200 字）。返回 `(规则, 字数)`。"""
+    best_len, best_el = 0, None
+    for el in soup.find_all(["div", "article", "section", "p"]):
+        txt = el.get_text(" ", strip=True)
+        # 只考虑文本较长的块（正文通常 >100 字符）
+        if len(txt) > 200 and len(txt) > best_len:
+            best_len, best_el = len(txt), el
+    if best_el is None:
+        return "", 0
+    return f"{_elem_self_selector(best_el)}@textNodes", best_len
+def _image_content_rule(soup) -> tuple:
+    """图片正文：含真实图片最多的容器（>=3 张）。返回 `(规则, 张数)`。
+
+    排除 logo/图标（src 不含图片后缀的不算），也排除 `src` 为空的占位——
+    而「有 `<img>` 但地址是页面脚本注入的」根本不在这里管：那是**档位**的事
+    （`core/page_layer` 判 L2），由调用方按 `page_facts` 决定给不给规则。
+    """
+    mark = re.compile(r"\.(jpg|jpeg|png|webp|avif|gif)", re.I)
+    best_n, best_el = 0, None
+    for el in soup.find_all(["div", "section", "article", "ul", "p"]):
+        imgs_in = [i for i in el.find_all("img") if (i.get("src") or "") and
+                   mark.search(i.get("src") or "")]
+        if len(imgs_in) > best_n:
+            best_n, best_el = len(imgs_in), el
+    if best_el is None or best_n < 3:
+        return "", 0
+    return f"{_elem_self_selector(best_el)} img@src", best_n
+def analyze_detail_page(html: str, book_url: str, page_fetcher=None,
+                        want: str = "", page_facts: dict = None) -> dict:
     """
     从书籍详情页推断目录规则(ruleToc)和正文规则(ruleContent)。
 
     策略：
       1. 找页面里「含最多章节链接」的容器 → chapterList
       2. chapterName/chapterUrl 取容器内第一章链接的相对路径
-      3. 正文规则：抓第一章 URL，取文本量最大的 div → content
+      3. 正文规则：抓第一章 URL，按 `want` 决定先看文本还是先看媒体
     返回 dict(toc={...}, content=rule, note=str)。
 
     ``page_fetcher``：**取页缝**（默认就是 ``core.fetch.fetch``）。十-5 的编排用它把
     「判到 L2–L4 的那一页」换成**引擎取回来的那份 HTML**（App 手上那份）；拿不到时它**抛**
     （带原因），这里的 ``except`` 会把原因写进 ``note`` —— 「这一段规则先不给」就是这么出来的。
+
+    ``want``：**这一步要拿什么**（`core.page_layer` 的 `WANT_*`，由调用方按书源类型算）。
+    媒体类（漫画 / 听书 / 下载）的正文页要的是**图片列表**，文本类才是文字——同一个页面上
+    两种东西都可能存在（图片站在正文页上也有 >200 字的说明文字），先看哪一边是**类型说了算**，
+    不是页面说了算（2026-09-21：原来只按文本量挑，漫画源实测拿到了 `article@textNodes`）。
+
+    ``page_facts``：取页器如实报告「这一页是在什么材料上判到哪一档」（`_page_for_analysis`
+    填）。**它决定这条 CSS 规则给不给**：判到 L3/L4 时数据要解密 / 走接口，CSS 规则**必然
+    取不到**——那时**不给规则 + 写明原因**（给出去是假成功，AGENTS #4）；判到 L2 时数据要
+    渲染后才有，规则照给，但要**配上让它可用的那个东西**（正文页 URL 带 `webView`）。
     """
     from core.html import make_soup
     toc: dict = {}
@@ -383,41 +423,66 @@ def analyze_detail_page(html: str, book_url: str, page_fetcher=None) -> dict:
         "nextChapterUrl": "",
     }
 
-    # ---- 4) 正文规则：抓第一章 URL，取文本最长容器 ----
+    # ---- 4) 正文规则：抓第一章 URL，按类型先看媒体还是先看文本 ----
     # 用容器内第一个章节链接当样例（漫画站正文多为 JS 加密/懒加载图片，静态抓不到属正常）
     first_chapter_url = _abs_url(book_url, container_a.get("href", ""))
     content_rule = ""
     try:
         ch_html = (page_fetcher or fetch)(first_chapter_url)
         ch_soup = make_soup(ch_html)
-        best_len, best_el = 0, None
-        for el in ch_soup.find_all(["div", "article", "section", "p"]):
-            txt = el.get_text(" ", strip=True)
-            # 只考虑文本较长的块（正文通常 >100 字符）
-            if len(txt) > 200 and len(txt) > best_len:
-                best_len = len(txt)
-                best_el = el
-        if best_el:
-            content_selector = _elem_self_selector(best_el)
-            content_rule = f"{content_selector}@textNodes"
+        img_rule, img_n = _image_content_rule(ch_soup)
+        txt_rule, txt_len = _text_content_rule(ch_soup)
+        if want == WANT_MEDIA:
+            # 声明是媒体类：先看图片。找不到才退回文本，**退回要写进附注**——
+            # 「按漫画生成了一份文本规则」在界面上看不出来就是 §七十七 那一类
+            content_rule = img_rule or txt_rule
+            if img_rule:
+                note += f"；图片正文（检测到 {img_n} 张静态图，content 提取 img@src）"
+            elif txt_rule:
+                note += ("；你选的是漫画 / 听书这类要媒体的源，但这一页上没找到图片列表，"
+                         f"正文规则按文本配的（{txt_len} 字）")
         else:
-            # 文本正文推断失败：检查是否为图片正文（静态 <img> 漫画站）
-            # 排除 logo/图标（src 不含站点图片特征或过小），找含真实图片最多的容器
-            _img_marker = re.compile(r"\.(jpg|jpeg|png|webp|avif|gif)", re.I)
-            best_img_n, best_img_el = 0, None
-            for el in ch_soup.find_all(["div", "section", "article", "ul", "p"]):
-                imgs_in = [i for i in el.find_all("img") if (i.get("src") or "") and
-                           _img_marker.search(i.get("src") or "")]
-                if len(imgs_in) > best_img_n:
-                    best_img_n, best_img_el = len(imgs_in), el
-            if best_img_n >= 3:
-                # 图片正文：content 提取图片 URL（Legado 对 URL 列表自动按图片分页）
-                content_selector = _elem_self_selector(best_img_el)
-                content_rule = f"{content_selector} img@src"
-                note += f"；图片正文（检测到 {best_img_n} 张静态图，content 提取 img@src）"
-            else:
-                note += "；正文为图片/JS动态加载（静态无法推断），ruleContent 留空"
+            content_rule = txt_rule or img_rule
+            if txt_rule:
+                if img_n >= 3:
+                    note += (f"；你选的是文本源，但这一页上还有 {img_n} 张图，"
+                             "正文规则按文本配的")
+            elif img_rule:
+                note += f"；图片正文（检测到 {img_n} 张静态图，content 提取 img@src）"
+        if not content_rule:
+            note += "；正文为图片或 JS 动态加载（静态无法推断），ruleContent 留空"
     except Exception as e:
         note += f"；正文页抓取失败: {e}"
 
+    # ---- 5) 这一页的值不值得给 CSS 正文规则（按取页器报告的那一档）----
+    content_rule, toc, note = _apply_layer_guard(content_rule, toc, note, page_facts)
     return {"toc": toc, "content": content_rule, "note": note}
+
+
+def _apply_layer_guard(content_rule: str, toc: dict, note: str, page_facts: dict) -> tuple:
+    """按**这一页的档位**决定这条 CSS 正文规则给不给（十-5 编排的收口）。
+
+    判据一句话：**给出去的规则必须在 App 的默认链路上真能取到值。**
+
+    - **L3 / L4**：数据要解密 / 走接口，CSS 规则**必然取不到**——不给规则，把原因和下一步
+      动作写进附注（给出去是假成功：选得中、选中的不是数据）
+    - **L2**：数据是渲染后才有，规则照给，但**必须配上让它可用的那个东西**——正文页 URL
+      带上 `webView` 选项，App 才会渲染这一段（只给 CSS 而不管渲染＝静默取空）
+    - **L1 或没判**（`page_facts` 空）：照旧，一个字都不改
+    """
+    facts = page_facts or {}
+    layer = str(facts.get("layer") or "")
+    why = str(facts.get("why") or "")
+    where = "（%s）" % why if why else ""
+    if layer in ("L3", "L4"):
+        action = ("用「网页视图」里的点选读那个全局对象，写成 webJs" if layer == "L3"
+                  else "抓那个接口 + JSONPath")
+        return "", toc, (note + "；正文规则先不给：这一页判到 %s%s，数据要%s才有，"
+                               "CSS 规则取不到东西" % (layer, where, action))
+    if layer == "L2" and content_rule:
+        urls = toc.get("chapterUrl") or ""
+        if urls and "webView" not in urls:
+            toc["chapterUrl"] = urls + ',{"webView":true}'
+        return content_rule, toc, (note + "；正文页 URL 已带 webView——这一页判到 L2%s，"
+                                          "数据要页面脚本跑起来才有" % where)
+    return content_rule, toc, note

@@ -10,6 +10,7 @@
 """
 
 from dataclasses import dataclass
+from typing import Any, Dict, List, Optional
 
 from core.constants import *
 from core.urls import abs_url as _abs_url
@@ -129,21 +130,41 @@ class AddResult:
     error: str = ""
 
 
-def _page_for_analysis(url: str, want: str, notes: List[str], timeout: int = 60) -> str:
+def _page_for_analysis(url: str, want: str, notes: List[str], timeout: int = 60,
+                       facts: Optional[Dict[str, Any]] = None) -> str:
     """这一页该怎么取：**先按老办法抓 → 判层 → L2–L4 时改用引擎那份**（十-5 的编排）。
 
     为什么是「先抓再判」：判层要看页面内容，抓之前判不了。
+
+    判层走 `core.js_hints.classify_with_scripts`——**判到 L2 或判不了时会再看页面引用的
+    那几份脚本**（站点把取数 / 解密逻辑放 bundle 里时，页面 HTML 上一个痕迹都没有）。
+    这条只看脚本的补充是**有条件**的：L1 已经定了、L3/L4 已经由页面痕迹定下来了，就不看
+    （省请求），见那边的 `DEEP_LAYERS`。
+
+    ``facts``（可选）是**取页器如实报告**给它下游的：`layer` 是**我们抓的那份**判出来的档
+    （不是换材料之后的），`why` 是证据行拼起来的。`analyze_detail_page` 拿它决定「这条 CSS
+    正文规则给不给」——L3/L4 数据要解密 / 走接口，CSS 规则必然取不到（详见那边的
+    `_apply_layer_guard`）。
 
     **引擎拿不到就抛**（带原因）——调用方据此「这一段规则先不给」。**不回退**：
     在 L2–L4 的页面上用我们抓的那份写规则，产出的是「看着正常、实际取不到」的假成功
     （lessons §八十：引擎是材料就当硬要求）。
     """
-    from core.page_layer import classify_page
+    from core.js_hints import classify_with_scripts
     html = fetch(url)
-    verdict = classify_page(html, want)
+    deep = classify_with_scripts(html, want, url)
+    verdict = deep["verdict"]
+    if deep["docs"] and deep["light_layer"] != verdict["layer"]:
+        notes.append("%s 只看原文判 %s，看了页面引用的 %d 份脚本后改判 %s"
+                     % (url, deep["light_layer"] or "判不了", len(deep["docs"]),
+                        verdict["layer"] or "判不了"))
+    if facts is not None:
+        # **我们抓到的那份**判出来的档：它回答的是「App 默认那条链路上拿得到吗」
+        # （换材料之后的档回答不了这个问题——那份是引擎渲染出来的）
+        facts.update({"url": url, "layer": deep["light_layer"], "why": _reason_of(verdict)})
     if verdict["layer"] not in ("L2", "L3", "L4"):
         return html
-    why = "；".join(e["why"] for e in verdict["evidence"]) or verdict.get("unsure", "")
+    why = _reason_of(verdict)
     try:
         from core.jvm_debug import page_from_engine
         got = page_from_engine(url, timeout=timeout)
@@ -155,6 +176,14 @@ def _page_for_analysis(url: str, want: str, notes: List[str], timeout: int = 60)
     notes.append("%s 判到 %s（%s），这一段已改用本机引擎取回的那份 HTML（App 手上那份）"
                  % (url, verdict["layer"], why))
     return got
+
+
+def _reason_of(verdict: Dict[str, Any]) -> str:
+    """证据行拼成一句话；脚本里看出来的要标出是哪一份（用户要能复核）。"""
+    parts = []
+    for e in verdict.get("evidence") or []:
+        parts.append("%s，证据在 %s" % (e["why"], e["source"]) if e.get("source") else e["why"])
+    return "；".join(parts) or str(verdict.get("unsure") or "")
 
 
 def run_add(url, name="", source_type="novel", group="📖新增源",
@@ -298,15 +327,25 @@ def run_add(url, name="", source_type="novel", group="📖新增源",
         try:
             # 详情页也按层走（同一份判据、同一个取页器）：L2–L4 时改用引擎取回来的那份，
             # 正文页那一页由 `page_fetcher` 在里面同样处理
-            want_detail = want_of_page("detail", TYPE_MAP.get(source_type, 0))
+            src_type_num = TYPE_MAP.get(source_type, 0)
+            want_detail = want_of_page("detail", src_type_num)
+            want_chapter = want_of_page("chapter", src_type_num)
             d_html = _page_for_analysis(detail_for_toc, want_detail, analysis_notes)
+            # 「这一页判到哪一档」由取页器如实报告（`page_facts`）：它决定正文规则给不给
+            chapter_facts: Dict[str, Any] = {}
             result = analyze_detail_page(
                 d_html, detail_for_toc,
+                want=want_chapter, page_facts=chapter_facts,
                 page_fetcher=lambda u: _page_for_analysis(
-                    u, want_of_page("chapter", TYPE_MAP.get(source_type, 0)), analysis_notes))
+                    u, want_chapter, analysis_notes, facts=chapter_facts))
             toc_rules = result["toc"]
             content_rule = result["content"]
             toc_note = result["note"]
+            # 目录 / 正文那一段的结论（含「按类型挑正文」「这一页判到 L3 所以不给正文规则」
+            # 这类前提）**要进备注**：只 print 的话，界面与导出的源里一个字都看不到，
+            # 而「这份规则是在什么前提下配的」正是用户复核时要看的（AGENTS #4）
+            if toc_note:
+                analysis_notes.append(toc_note.strip("；"))
             if toc_rules:
                 print(f"   目录规则：{toc_rules.get('chapterList')}")
                 print(f"   正文规则：{content_rule or '未推断出'}")
@@ -331,6 +370,10 @@ def run_add(url, name="", source_type="novel", group="📖新增源",
             print(f"   ℹ️ {n}")
 
     # 5) 预览 + 确认
+    # **按哪个类型生成的要说出来**：正文规则是按类型挑的（媒体类先看图片），而这个类型
+    # 只从 `--type` / 表单来。非交互那条路上不说，用户就看不出「这份规则是按小说配的」
+    label = dict(TYPE_LABELS).get(source_type, source_type)
+    print(f"\n🏷️  按「{label}」生成：正文规则按这个类型挑，媒体类先看图片。要换请传 --type")
     print("\n📋 生成的书源预览：")
     print(json.dumps({"bookSourceName": source["bookSourceName"],
                       "bookSourceType": source["bookSourceType"],

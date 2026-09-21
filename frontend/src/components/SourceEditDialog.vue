@@ -924,6 +924,17 @@ async function doSave(s) {
                 <el-input v-model="quickUrl"
                           placeholder="https://site/search?q=关键词（必须带真实关键词）" />
               </el-form-item>
+              <el-form-item label="类型">
+                <!-- **正文规则是按它挑的**：媒体类先看图片、文本类先看文字，同一个正文页上
+                     两种东西都可能存在。所以它必须在生成之前就能看见、能改——放在
+                     「基本信息」页签里等于默认值静默生效（生成出来才发现是小说源）。
+                     与那边是**同一个字段**（`form.bookSourceType`），不另存一份状态。 -->
+                <el-radio-group v-model="form.bookSourceType">
+                  <el-radio-button v-for="t in sourceTypes" :key="t.value" :value="t.value">
+                    {{ t.tag }}
+                  </el-radio-button>
+                </el-radio-group>
+              </el-form-item>
               <el-form-item label="详情页">
                 <el-input v-model="quickDetailUrl"
                           placeholder="可选：详情页样例 URL，不填自动取搜索结果第一条" />
