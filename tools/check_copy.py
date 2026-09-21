@@ -266,7 +266,7 @@ def python_candidates(path: pathlib.Path) -> List[Tuple[int, int, str]]:
 
 #: 要扫的目录与后缀。``tools/`` 自己不扫（本模块的 docstring 里全是反面例子）。
 #:
-#: **`README.md` / `WORKFLOW.md` 也算文案面**（它们是给使用者的）：AGENTS #18 的
+#: **`README.md` 也算文案面**（它是给使用者的）：AGENTS #18 的
 #: 「一个词只指一件事」不加这两份，就只在代码里成立、在文档里是空的——实测
 #: README 里「试跑 / 本地回放」就是这么活到被审计翻出来的。
 #: **`skills/*.md` 不扫**：那是写给改代码的人的（与注释同一档，精确优先）。
@@ -274,8 +274,7 @@ TARGETS = (("frontend/src", (".vue", ".js")),
            ("core", (".py",)),
            ("backend", (".py",)),
            ("cli", (".py",)),
-           ("README.md", (".md",)),
-           ("WORKFLOW.md", (".md",)))
+           ("README.md", (".md",)))
 
 
 def has_copy_ok(path: pathlib.Path, start: int, end: int) -> bool:
@@ -325,7 +324,7 @@ def scan(root: pathlib.Path) -> List[dict]:
     out: List[dict] = []
     for rel, exts in TARGETS:
         base = root / rel
-        # 目标是单个文件时直接用它（README.md/WORKFLOW.md）；目录才 rglob
+        # 目标是单个文件时直接用它（README.md）；目录才 rglob
         paths = [base] if base.is_file() else sorted(base.rglob("*"))
         for path in paths:
             if path.suffix not in exts or not path.is_file():

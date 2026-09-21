@@ -5,15 +5,14 @@ description: 在受限 agent 沙箱里安全写文件、改代码的传输通道
 
 # Agent 写入安全
 
-本文件记录在一个受限沙箱里反复踩坑后总结出的可靠做法。适用于任何
-把「在 shell 里传多行代码」当作写入手段的 agent harness。
+受限沙箱里反复踩坑后总结的可靠做法：适用于任何把「在 shell 里传多行代码」当写入手段的 harness。
+（本文件是这条通道的**唯一一份**；`AGENTS.md` 只留指针。`tools/apply_edits.py` 是它的行式封装。）
 
 ## 一、唯一可靠的传输通道：Python via stdin
 
 工具会把命令包装成 `Invoke-Expression "..."`，其中换行变反引号-n、双引号变反引号-引号、
-美元符变反引号-美元符。**把多行代码塞进命令行，必然被逐层转义破坏。**
-
-正确做法——payload 只经过 PS here-string，然后走 stdin，中间没有引号层：
+美元符变反引号-美元符——**把多行代码塞进命令行，必然被逐层转义破坏**。正确做法是 payload
+只经过 PS here-string，然后走 stdin，中间没有引号层：
 
     $code = @'
     # 这里可以是任意 Python 代码：
@@ -21,72 +20,51 @@ description: 在受限 agent 沙箱里安全写文件、改代码的传输通道
     ' @
     $code | & .venv/Scripts/python.exe -
 
-（上面 end 标记实际写作单引号加 @，此处拆开是为了避免嵌套。）
+**不可靠的方式**：`Invoke-Expression` / `python -c` 里塞多行代码（引号层破坏它）；
+超长 here-string（>5KB 有截断风险，失败时表现为「无任何输出」）。
+**bash / heredoc 视环境而定**——2026-09 在本 harness 上起不来（`CreateFileMapping … Win32 error 5`）：
+换环境先用一条无害命令（`echo ok`）实测，别照抄结论。
 
-**已验证逐字节往返的字符**：单引号、双引号、$HOME $1、反引号、三引号、
-反斜杠 w/d/n、连续两个单引号、@ 加单引号、%s %d、花括号方括号圆括号。
-
-**不可靠的方式**：
-
-- 把多行代码放进 `Invoke-Expression` 或 `python -c`，引号层会破坏它
-- bash / heredoc：**在那个受限沙箱里** bash 起不来（`CreateFileMapping ... Win32 error 5`）
-  ——这是**环境快照不是永久结论**：换 harness / 换机器先实测一次再照着走
-- 超长 here-string（>5KB）：有截断风险，且失败时表现为「无任何输出」
+→ 判据是**通道里没有引号层**；`tools/apply_edits.py`（行式清单）比手写脚本更省事。
 
 ## 二、改代码的纪律（比通道更重要）
 
-1. **不做多行字符串匹配**，只用单行锚点做行级插入 / 删除 / 替换
-2. **写前必读锚点**，不靠记忆。同一行文本常出现多次，
-   例如 `os.makedirs(self.cache_dir, exist_ok=True)`、
-   `if self.cache_dir:` 在同一文件里都各有多处
-3. **唯一性断言**：`assert lines.count(anchor) == 1`
-4. **全部断言通过才写盘**——中途失败时磁盘不动，`git status` 保持干净。
-   这条在实战中救过多次：三次锚点找错都在写盘前被拦住
-5. **改完立刻 import 冒烟**：`python -c "import 模块名"`
-6. **一次一处改动**。一次下 5 处，一处锚点错就全废；拆开做反而更快
-7. **优先用结构定位**（正则匹配 def 边界、AST），而不是精确行号
+1. **不做多行字符串匹配**：只用单行锚点做行级插入 / 删除 / 替换
+2. **写前必读锚点**，不靠记忆——同一行文本常出现多次
+   （`os.makedirs(self.cache_dir, exist_ok=True)` 在一份文件里就有好几处）
+3. **唯一性断言** + **全部断言通过才写盘**：断言放在写盘前，失败时磁盘不动、`git status` 干净。
+   多文件时按文件逐个写，前一个已落盘**不会**回滚
+4. **改完立刻 import 冒烟**（`python -c "import 模块名"`），一次只做一处改动
+5. **优先结构定位**（正则找 def 边界、AST），而不是精确行号
+
+→ 这五条与 AGENTS #6（改前 `git status` 干净、改完跑 import 与全量测试）是一套。
 
 ## 三、高频陷阱速查
 
 | 陷阱 | 症状 | 对策 |
 | :--- | :--- | :--- |
-| from __future__ 位置 | SyntaxError: must occur at the beginning | 往文件头插代码前先确认有没有它 |
-| 反缩进方向搞反 | 类方法掉到模块级，hasattr(Class, m) 为假 | 包装函数内嵌 def 的层级等于类体层级，不要 dedent |
-| 三引号嵌套 | 外层字符串提前闭合，生成无效占位代码 | 拼接的 Python 里用 # 注释代替 docstring |
-| 换行写成字面量 | 文件里出现反斜杠-n 文本 | 用 chr(10) |
-| read_text/write_text 往返改已有文件 | **静默**把整个文件的行尾转成 CRLF（Windows 上 write_text 把 \n 写成 \r\n，read_text 又照常读回来，全程不报错） | 改已有文件用 `read_bytes`/`write_bytes`；非要用文本模式就显式 `newline=""`。改完对比一下兄弟文件的行尾习惯 |
-| **任何"整体重写文件"的方式**（编辑工具、格式化、脚本）翻掉行尾 | 同上前半段，但**更难发现**：`git diff --stat` 只显示你那几行（diff 两边都归一化），唯一提示是 `git add` 时那句 `warning: CRLF will be replaced by LF`，以及提交后 `git status` 会一直显示 ` M`（内容与 HEAD **逐字节相同**，是 stat 缓存没刷新） | 提交前**数一遍**：`open(p,'rb').read().count(b'\r\n')`（本仓库除了个别 Windows 脚本，其余全是 LF）；有就 `write_bytes` 换回 `b'\r\n'→b'\n'`。**改完就查，别等提交**——` M` 那种假modified 会让人以为还有没提交的东西 |
-| 目标目录不存在 | Could not find a part of the path | 先 os.makedirs(d, exist_ok=True) |
-| commit message 含反引号或美元符 | fatal: Invalid path | 提交信息里不写反引号和美元符 |
-| 命令过长 | 随机解析失败，无任何输出 | 拆成多次调用 |
+| `from __future__` 位置 | `SyntaxError: must occur at the beginning` | 往文件头插代码前先确认有没有它 |
+| 反缩进方向搞反 | 类方法掉到模块级，`hasattr(Class, m)` 为假 | 包装函数内嵌 def 的层级等于类体层级，不要 dedent |
+| 三引号嵌套 | 外层字符串提前闭合 | 拼接生成 Python 时用 `#` 注释代替 docstring |
+| 换行写成字面量 | 文件里出现反斜杠-n 文本 | 用 `chr(10)` |
+| **行尾被翻成 CRLF** | **不报错**：`git diff` 两边归一化看不见，只在 `git add` 时 warning，提交后 `git status` 长期显示 ` M`（内容与 HEAD 逐字节相同，是 stat 缓存） | 改已有文件用 `read_bytes` / `write_bytes`；整体重写（编辑工具、格式化、脚本）后**数一遍** `open(p,'rb').read().count(b'\r\n')`，本仓库除个别 Windows 脚本外全是 LF |
+| 目标目录不存在 | `Could not find a part of the path` | 先 `os.makedirs(d, exist_ok=True)` |
+| commit message 含反引号或美元符 | `fatal: Invalid path` | 提交信息里不写反引号和美元符 |
+| 命令过长 | 随机解析失败、无任何输出 | 拆成多次调用 |
 
-## 四、沙箱本身的限制
+→ 这张表按现象索引；**CRLF 那条最容易漏**——它不报错、`git diff` 也看不见，改完就数一遍行尾。
 
-- **部分目录只读**：表现为 Python 也抛 PermissionError。
-  搬迁文件用「读源 + 写到新位置 + git rm --cached」，不要用 move
-- **能改名不能删内容**：整个目录可以 rename，但目录内文件删不掉
-- **%TEMP% 可能不可写**：tempfile.TemporaryDirectory 会失败，
-  测试要显式指定仓库内临时目录
-- **bash 可能存在但不可用**：`C:/Program Files/Git/bin/bash.exe` 在，但 fork 时
-  CreateFileMapping 被拒。**先在当前环境试一条无害命令**（如 `echo ok`）再决定用不用；
-  不可用时走 stdin 脚本通道
+## 四、沙箱本身的限制（2026-09 快照：Windows + 受限 harness——换环境先重测）
+
+- **部分目录只读**：Python 也抛 `PermissionError`。搬迁用「读源 + 写到新位置 + `git rm --cached`」，别用 move
+- **能改名不能删内容**：整个目录可以 rename，目录内文件删不掉
+- **`%TEMP%` 可能不可写**：`tempfile.TemporaryDirectory` 会失败，测试要显式用仓库内临时目录
+
+→ 三条都是 harness 属性、不是本仓知识：换环境先重测（bash 那条同理，见 §一）。
 
 ## 五、可复用的应用器
 
-`tools/apply_edits.py` 把「改代码」降级成「写行式清单」：
+`tools/apply_edits.py` 把「改代码」降级成「写行式清单」（`>>>FILE` + `>>>AFTER` / `>>>BEFORE` /
+`>>>REPLACE` / `>>>DELETE`），锚点不唯一直接报错、不会写半个文件；清单格式与语义在脚本头部。
 
-    >>>FILE core/checker.py
-    >>>AFTER
-    <唯一锚点行>
-    ---
-    <新增行>
-    <<<
-
-支持 `>>>AFTER` / `>>>BEFORE` / `>>>REPLACE` / `>>>DELETE`，
-锚点不唯一直接报错，全部断言通过才写盘。
-
-## 六、给 harness 的最小提示词
-
-> 修改文件时，优先写一个完整 Python 脚本，经 stdin 传给解释器执行。
-> 脚本内先读取文件、用唯一性断言定位锚点、全部断言通过后再写回。
-> 不要在 shell 的多行字符串里拼接代码。
+→ 能用它就别手写脚本；要生成复杂内容（新文件、大段重排）时才回到 §一 的 stdin 通道。
