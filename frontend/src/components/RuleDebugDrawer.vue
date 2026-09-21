@@ -29,6 +29,8 @@ import { FIELD_OF_STEP, findCandidates } from "../utils/ruleCandidates";
 import { formatHtml } from "../utils/htmlView";
 // 定层（九-1）：先定层再写规则——判据与证据行都在纯函数里，这里只负责把「这一步要什么」传进去
 import { classifyLayer } from "../utils/layers";
+// 点选（九-2a）：元素 → 候选选择器 + 实测三个数。**只是提议**，验收仍走真引擎
+import { selectorCandidates } from "../utils/selector";
 
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
@@ -369,6 +371,91 @@ function useCandidate(c) {
   const field = FIELD_OF_STEP[(current.value || {}).name];
   if (!field) return;
   emit("applyRule", { field, rule: c.rule });
+}
+
+// —— 点选：在渲染出来的页面上直接选（九-2a）——
+//
+// 渲染的是**我们补抓的** HTML（`pages[].html`）。页面自带的脚本**不执行**（iframe 只给
+// `allow-same-origin`），点选与高亮由**父页面**注入——同源能拿到它的 document。
+// 两条边界必须记住：① L2–L4 的页面上这里看不到数据（那是通道的问题，不是规则的问题）；
+// ② 点出来的选择器**只是提议**，验收仍走「重新调试本步」的真引擎（AGENTS #3）。
+const frameRef = ref(null);
+//: 选中的元素与它的候选：`{tag, candidates: [{css, legado, why, hits, uniq, ratio}]}`
+const picked = ref(null);
+//: 正在预览（高亮全部命中）的那条候选
+const activeCss = ref("");
+
+//: 塞进 iframe 的 HTML。**剥掉两样会自己跑掉的**：`<meta refresh>` 会把 iframe 导航走，
+//: `<base>` 会让相对地址去站点拉图/样式（与「预览默认不联网」冲突）
+const frameHtml = computed(() => String(pageTextRaw.value || "")
+  .replace(/<meta[^>]+http-equiv=["']?refresh["']?[^>]*>/gi, "")
+  .replace(/<base[^>]*>/gi, ""));
+
+function frameDoc() {
+  const f = frameRef.value;
+  try {
+    return (f && f.contentDocument) || null;
+  } catch (e) {
+    return null;     // 跨源拿不到（正常不该发生：srcdoc + allow-same-origin 是同源）
+  }
+}
+
+function ensureFrameStyle(doc) {
+  if (!doc || doc.getElementById("zc-pick-style")) return;
+  const st = doc.createElement("style");
+  st.id = "zc-pick-style";
+  st.textContent = ".zc-picked{outline:2px solid #e6a23c !important;outline-offset:1px}"
+    + ".zc-hit{outline:2px dashed #409eff !important;outline-offset:1px}";
+  (doc.head || doc.documentElement).appendChild(st);
+}
+
+function clearMark(doc, cls) {
+  if (!doc) return;
+  doc.querySelectorAll("." + cls).forEach((n) => n.classList.remove(cls));
+}
+
+function onFrameLoad() {
+  const doc = frameDoc();
+  if (!doc) return;
+  ensureFrameStyle(doc);
+  // 只挂一次：srcdoc 每次重载都会走 load，重复挂会让一次点击收两遍
+  doc.removeEventListener("click", onFrameClick, true);
+  doc.addEventListener("click", onFrameClick, true);
+  // 切步/换页之后上一次的选择不适用了（页面已经不是那一页）
+  picked.value = null;
+  activeCss.value = "";
+}
+
+function onFrameClick(ev) {
+  const doc = frameDoc();
+  const el = ev.target;
+  // **别让链接把 iframe 带走**：sandbox 挡得住顶层导航，挡不住 iframe 自己跳
+  ev.preventDefault();
+  ev.stopPropagation();
+  if (!doc || !el || !el.tagName) return;
+  const candidates = selectorCandidates(doc, el);
+  picked.value = { tag: el.tagName.toLowerCase(), candidates };
+  clearMark(doc, "zc-picked");
+  el.classList.add("zc-picked");
+  previewCandidate(candidates[0] || null);
+}
+
+//: 高亮一条候选的**全部命中**——「看选中效果」。改一个字符就能看到集合怎么变
+function previewCandidate(c) {
+  const doc = frameDoc();
+  if (!doc) return;
+  clearMark(doc, "zc-hit");
+  activeCss.value = (c && c.css) || "";
+  if (!c) return;
+  try {
+    doc.querySelectorAll(c.css).forEach((n) => n.classList.add("zc-hit"));
+  } catch (e) { /* 选择器不合法：不动 */ }
+}
+
+function usePicked(c) {
+  if (!c) return;
+  // 优先给 Legado 的原生写法（`id.x@tag.y`）；表达不了的那种给纯 CSS，Legado 也认
+  useCandidate({ rule: c.legado || c.css });
 }
 
 // —— 第 2 层：**AI 提议 + 回放验证** ——
@@ -856,6 +943,34 @@ function copyPage() {
           <el-empty v-else :description="matchedHint" :image-size="60" />
         </el-tab-pane>
 
+        <el-tab-pane label="网页视图" name="dom">
+          <p class="muted" style="margin: 6px 0">
+            点页面上要的那块 → 下面是它的候选写法与**实测**（命中 / 去重 / 占比）。
+            预览不加载站点的样式与图片；页面自带的脚本不执行——L2/L3 的页面上这里看不到数据，
+            那是通道的问题，不是规则的问题。
+          </p>
+          <p v-if="layer.layer && layer.layer !== 'L1'" class="muted" style="margin: 6px 0">
+            <el-tag size="small" type="warning">{{ layer.info.name }}</el-tag>
+            <span style="margin-left: 6px">这一页的 HTML 是补抓的：{{ layer.info.action }}。</span>
+          </p>
+          <iframe ref="frameRef" class="pick-frame" :srcdoc="frameHtml"
+                  sandbox="allow-same-origin" @load="onFrameLoad" />
+          <p v-if="picked" class="muted" style="margin: 8px 0 4px">
+            选中的是 <span class="mono">&lt;{{ picked.tag }}&gt;</span>，它的候选：
+          </p>
+          <div v-for="(c, i) in (picked ? picked.candidates : [])" :key="i" class="cand"
+               :class="{ 'pick-active': c.css === activeCss }">
+            <span class="mono rule">{{ c.legado || c.css }}</span>
+            <el-tag v-if="!c.legado" size="small" type="info">纯 CSS</el-tag>
+            <span class="muted">命中 {{ c.hits }} · 去重 {{ c.uniq }} · 占比 {{ formatRatio(c.ratio) }}</span>
+            <span class="muted">{{ c.why }}</span>
+            <span class="grow" />
+            <el-button size="small" plain @click="previewCandidate(c)">预览</el-button>
+            <el-button size="small" type="primary" plain @click="usePicked(c)">用这条</el-button>
+          </div>
+          <el-empty v-if="!picked" description="点上面的页面选一块" :image-size="60" />
+        </el-tab-pane>
+
         <el-tab-pane label="整页源码" name="page">
           <template v-if="currentPage">
             <div class="toolbar" style="margin-bottom: 8px">
@@ -979,4 +1094,42 @@ function copyPage() {
 }
 .debug-pre-wrap { white-space: pre-wrap; word-break: break-all; }
 .debug-hit-active { outline: 2px solid #f56c6c; }
+</style>
+
+<!-- 抽屉里**我们自己的元素**虽然带 data-v-*（scoped 也能中），但这两块都按 AGENTS #15
+     写在**不带 scoped** 的块里、用前缀限定：定层横幅是 `.layer-`，点选页签是 `.pick-`。
+     理由：它们与「抽屉/弹窗内部结构」属于同一类维护面，放一起省得下次又找错地方 -->
+<style>
+.layer-banner {
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-left: 3px solid var(--el-color-warning);
+  border-radius: 4px;
+  background: var(--el-fill-color-lighter);
+  font-size: 13px;
+  line-height: 1.6;
+}
+.layer-banner .layer-action { margin-left: 6px; }
+.layer-banner .layer-ev {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  color: var(--el-text-color-regular);
+}
+.layer-banner .layer-ev li { margin: 2px 0; }
+.layer-banner .layer-why { font-weight: 600; }
+.layer-banner .layer-snippet {
+  display: block;
+  margin-top: 2px;
+  color: var(--el-text-color-secondary);
+  word-break: break-all;
+}
+.pick-frame {
+  width: 100%;
+  height: 58vh;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 4px;
+  background: #fff;      /* 页面大多假设白底 */
+}
+.pick-active { border-left: 3px solid var(--el-color-primary); }
 </style>
