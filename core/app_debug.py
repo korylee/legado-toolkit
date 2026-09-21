@@ -48,6 +48,7 @@ import urllib.parse
 import urllib.request
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from core import page_layer
 from core import quality as Q
 from core.fetch import CACHE_AUTO, CacheMiss, fetch_ex, parse_source_header
 from core.urls import abs_url, split_url_options
@@ -89,6 +90,17 @@ SEGMENT_NAMES = {"搜索": "search", "发现": "explore", "详情": "bookUrl",
 #: 因为发现模式里没有搜索段（理由见 MAX_PAGES 的注释）。
 PAGE_IDS = {"search": "search", "explore": "explore", "bookUrl": "detail",
             "toc": "detail", "content": "chapter"}
+
+#: ``pages[].id`` → 「看这一页的时候要拿到什么」。与前端 `STEP_WANT` 是同一套语义，
+#: 但**层本身只有这一份判据**（`core/page_layer.py`）——前端只渲染 `pages[].page_layer`。
+WANT_OF_PAGE = {"search": "list", "explore": "list", "detail": "link", "chapter": "text"}
+
+
+def want_of_page(page_id: str, source_type: int = 0) -> str:
+    """这一页要看「有没有什么」：正文页在图片 / 音频 / 文件类源上要的是媒体而不是文字。"""
+    if page_id == "chapter" and source_type in (1, 2, 3):
+        return "media"
+    return WANT_OF_PAGE.get(page_id, "")
 
 # ------------------------------------------------------------------ 正则
 
@@ -782,6 +794,13 @@ def fetch_debug_pages(steps: Sequence[Dict[str, Any]], source: Optional[Dict[str
             continue
         Q.new_page(pages, page_id, url, f.html, charset=charset,
                    fetched_at=f.fetched_at, cached=f.cached, origin="fetch")
+    # **判层**（一份判据，两个消费者）：判完挂在 `pages[].page_layer` 上——
+    # 前端只渲染它，生成链（`services/add_source`）判「这一段要不要引擎取」也读它。
+    # 放在这里而不是两个消费者各判一遍：判据在两处必然漂（AGENTS #7/#8）。
+    src_type = Q.safe_int((source or {}).get("bookSourceType", 0))
+    for page in pages.values():
+        page["page_layer"] = page_layer.classify_page(
+            page.get("html") or "", want_of_page(str(page.get("id") or ""), src_type))
     return list(pages.values())
 
 

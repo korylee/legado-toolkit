@@ -323,10 +323,10 @@ const want = computed(() => {
 //: 判据、门槛、证据抓法都在 `utils/layers.js`（纯函数，有 node 断言）——这里只是调用点，
 //: **不要在组件里另写一份**（原来那几个统计就长在这儿，容易与那边漂）
 const layer = computed(() => classifyLayer(
-  (currentPage.value || {}).html || "", props.source || null,
-  // `step` 一并传：源声明的能力按**段**归属（webJs 只说正文那段、webView 只算它挂的
-  // 那条 URL 规则）——不传的话搜索页会被正文的声明连累
-  { want: want.value, step: (current.value || {}).name || "" }));
+  // **页面那半读后端结论**（`pages[].page_layer`，判据在 `core/page_layer.py`）；
+  // 这半（源声明 + 合并）留在前端，因为要对正在编辑的表单即时反应
+  (currentPage.value || {}).page_layer || null, props.source || null,
+  { step: (current.value || {}).name || "" }));
 //: 补抓页面上的节点统计。「你要的东西这页上到底有没有」全靠它——
 //: 没有的话，选择器改多少遍都取不到
 const pageStats = computed(() => (layer.value.page || {}).stats || null);
