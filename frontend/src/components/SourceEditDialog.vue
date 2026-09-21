@@ -1322,15 +1322,6 @@ async function doSave(s) {
             <li>接口源：$.data.list[*].name</li>
             <li>取图：tag.img@src / @data-original</li>
           </ul>
-          <!-- v-pre 不是可选项：Vue 会把 {{ }} 当插值、把 <js> 当标签解析，
-               转义成实体也救不回来（编译发生在实体解码之后）。v-pre 让这一块
-               整段跳过编译、原样输出，才写得出这些字面量。 -->
-          <p class="muted" v-pre style="margin: 10px 0 0; line-height: 1.7">
-            <b>以下语法本地调试跑不了</b>，用「本机引擎」或「连 App 调试」验：<br>
-            @js: / &lt;js&gt; / {{ }} / || / @xpath: / &amp;&amp; / %% / $n /
-            区间索引 [0:10] / 索引式 [-1] [0] [1,3] [!0] / text. 与 children. 简写 /
-            @webjs: / @get:{ }
-          </p>
         </el-card>
       </el-col>
     </el-row>
