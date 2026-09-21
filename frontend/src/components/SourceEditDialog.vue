@@ -51,21 +51,15 @@ const debugChannel = ref("jvm");
 //
 // 不记住是有意的：「只读不补抓」是**针对这一次**的怀疑（比如「我想确认抽屉里
 // 那份 HTML 就是刚才那份」），记住它会让下一次调试莫名其妙没有页面。
-// 三个值对应 core.fetch 的 CACHE_*，后端按同一份枚举校验。
+// 三个值对应 core.fetch 的 CACHE_*，后端按同一份枚举校验。**卡片上不解释
+// 这三档的差别**：抽屉里每一页都标着「页面抓取于 X / 来自缓存」，那才是它该在
+// 的地方——同一件事只写一处（AGENTS #10）。
 const DEBUG_CACHE_MODES = [
-  { value: "auto", label: "用缓存",
-    tip: "同一页面 5 分钟内只抓一次，调试更快" },
-  { value: "only", label: "只读缓存",
-    tip: "一页都不抓，只用已缓存的页面。缺哪页会明确提示。App 那边仍会联网" },
-  { value: "refresh", label: "忽略缓存",
-    tip: "这几页全部重新抓一遍。站点刚更新，或怀疑页面是旧的时用" },
+  { value: "auto", label: "用缓存" },
+  { value: "only", label: "只读缓存" },
+  { value: "refresh", label: "忽略缓存" },
 ];
 const appCacheMode = ref("auto");
-//: 当前口径的说明。下拉选项里的解释在弹层里，选完就看不见了，而这三档的差别
-//: 恰恰是「用户以为在看什么」的问题——必须留在界面上
-const debugCacheTip = computed(
-  () => (DEBUG_CACHE_MODES.find((m) => m.value === appCacheMode.value) || {}).tip || "",
-);
 // 预检结果：null=还没测过 / {state: ready|missing|unreachable, error}
 const appPreflightState = ref(null);
 const appChecking = ref(false);
@@ -77,15 +71,16 @@ const appChecking = ref(false);
 // （isAbsUrl → contains("::") → ++ → -- → 兜底搜索）。所以「搜索」下填一个 URL
 // 会被 App 当详情页跑，「详情」下填关键词会被当搜索跑。这不是我们拼错了——App
 // 自己就是同一个 when，保持一致才是对的。
-//: hint 只回答「这格填什么」。「留空会怎样」不写在这里：三个下游目标是同一个
-//: 答案，写三遍不如在 chip 上方统一说一句。唯一例外是「发现」——留空落回配置里的
-//: `exploreUrl` 而不是搜索，说不到一起，所以由它自己写
+//: hint 只回答「这格填什么」。详情 / 目录 / 正文留空会退回搜索入口（理由见
+//: debugKey），「可留空」写进各自 placeholder 就够；留空之后跑什么不复述——
+//: 三格是同一个答案。例外是「发现」：留空落回配置里的 `exploreUrl` 而不是
+//: 搜索，说不到一起，所以由它自己写
 const DEBUG_TARGETS = [
   { value: "search", label: "搜索", hint: "关键词，如 我的" },
   { value: "explore", label: "发现", hint: "留空则用配置里的 exploreUrl" },
-  { value: "info", label: "详情", hint: "详情页 URL" },
-  { value: "toc", label: "目录", hint: "目录页 URL" },
-  { value: "content", label: "正文", hint: "正文页 URL" },
+  { value: "info", label: "详情", hint: "详情页 URL，可留空" },
+  { value: "toc", label: "目录", hint: "目录页 URL，可留空" },
+  { value: "content", label: "正文", hint: "正文页 URL，可留空" },
 ];
 const debugTarget = ref("search");
 const debugQuery = ref("");
@@ -1210,12 +1205,6 @@ async function doSave(s) {
             <el-radio-button value="jvm">本机引擎</el-radio-button>
             <el-radio-button value="app">连 App</el-radio-button>
           </el-radio-group>
-          <!-- 这一句是**规格**，不是客套：App 拿到入口后会自己沿规则链往下跑
-               （Debug.kt:279-297），所以下游 URL 本来就不该由用户提供。
-               放在 chip 之前——先知道「可以留空」，再看那排 chip 才不慌 -->
-          <p class="muted" style="margin: 0 0 8px">
-            留空就从搜索开始，引擎自己跑到底。
-          </p>
           <!-- 调试目标照 App 调试界面的 chip 行做。这排 chip 只负责改 placeholder
                和拼 key 前缀，**不改变 App 的分派**——它认的是 key 的形态，
                所以在这排选什么并不会「锁死」链路，理由见 buildDebugKey 上方 -->
@@ -1253,15 +1242,14 @@ async function doSave(s) {
               {{ debugChannel === "jvm" ? "开始调试" : "连 App 调试" }}
             </el-button>
           </div>
-          <p class="muted" style="margin: 6px 0 0">{{ debugCacheTip }}</p>
           <!-- 预检结果就地显示。以前只有一个「连」按钮：连不上或缺源都要干等
                60 秒超时，而且两者表现完全一样，没法对症下药。「检测中」得留一格：
                预检现在是失焦触发的，不给在途状态就成了「点完什么也没发生」 -->
           <!-- 本机引擎的登录态提示：登录墙的源要在**我们自己的浏览器 profile** 里
                登一次（A3），之后按源 URL 自动带上——不说的话用户只会看到「需登录」 -->
           <p v-if="debugChannel === 'jvm'" class="muted" style="margin: 6px 0 0">
-            登录墙的源：先用 <code>scripts/jvm_login.py</code> 在同一个浏览器里登录一次，
-            之后自动带上登录态。
+            需登录的源：先用 <code>scripts/jvm_login.py</code> 打开浏览器登录一次，
+            之后调试会自动带上登录态。
           </p>
           <p v-if="debugChannel === 'app' && (appPreflightState || appChecking)"
              style="margin: 8px 0 0">
@@ -1282,13 +1270,13 @@ async function doSave(s) {
           <!-- 空态只在没跑过时出现，正好承接「第一次用才知道」的事：
                IP 从哪来。跑过一次它就自己消失，不常驻占地方。
                「需要开 Web 服务、同一局域网」不再单说——连不上时后端那句
-               error 已经说了，而且更全（还带端口） -->
-          <div v-if="!testResult" class="muted" style="padding: 22px; text-align: center">
-            {{ debugChannel === "app"
-              ? "App 打开「Web 服务」，把通知栏显示的 IP 填到上面那格。"
-              : "本机引擎就在这台机器上跑：点「开始调试」就行，不用填 IP、不推送。" }}
+               error 已经说了，而且更全（还带端口）。
+               本机引擎那侧不写空态：那个通道没有需要解释的东西 -->
+          <div v-if="!testResult && debugChannel === 'app'" class="muted"
+               style="padding: 22px; text-align: center">
+            在 App 里打开「Web 服务」，把通知栏显示的 IP 填到上面的输入框。
           </div>
-          <template v-else-if="!testResult.error">
+          <template v-else-if="testResult && !testResult.error">
             <div v-for="s in testResult.steps" :key="s.name" class="quick-step">
               <el-tag size="small" :type="tagTypeOf(s)">
                 {{ STEP_LABELS[s.name] || s.name }}
@@ -1309,7 +1297,8 @@ async function doSave(s) {
               </el-button>
             </div>
           </template>
-          <pre v-else class="mono" style="margin-top: 10px">{{ testResult.error }}</pre>
+          <pre v-else-if="testResult" class="mono"
+               style="margin-top: 10px">{{ testResult.error }}</pre>
         </el-card>
 
         <!-- grammar-card 这个 class 是给 styles.css 的桌面端布局用的：它要在右列

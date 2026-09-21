@@ -12,10 +12,10 @@
 // 属性名的规则）才退回本地投影：拿我们补抓的页面把规则跑一遍。两者来源不同，
 // 界面上分别标着（引擎给的 = App 选中的；投影 = 可能不一样）。
 //
-// 设计取舍：**不对 HTML 注入换行**。
-// 虽然注入后按行渲染更省事，但用户会把这段源码复制去改规则——
-// 改过字符的源码会与真实响应不一致。改为 pre-wrap 软换行 +
-// 按字符偏移分片渲染，保证「复制出来的就是原文」。
+// 设计取舍：**源码默认按「格式化」显示，但能手切回「原文」，复制永远是原文**。
+// 原来只给原文（pre-wrap 软换行 + 按字符偏移分片渲染），理由是不能让用户把改过字符的
+// 文本当真实响应——那条理由还成立，所以：格式化只是**显示**（`utils/htmlView.js`：只动
+// 空白 + 展开实体），按钮写「复制原文」，切回「原文」就是响应本身。
 import { ref, computed, watch, nextTick } from "vue";
 import { ElMessage } from "element-plus";
 
@@ -25,6 +25,8 @@ import { getLLMStatus } from "../api/llm";
 import { STEP_LABELS } from "../utils/steps";
 // 第 1 层「在页面上找目标」：候选规则从补抓的 HTML 里算出来（纯函数，不发请求）
 import { FIELD_OF_STEP, findCandidates } from "../utils/ruleCandidates";
+// 源码的显示层（折行缩进 + 实体展开，纯函数）：好看的和能抄的是两份东西，见 htmlView
+import { formatHtml } from "../utils/htmlView";
 
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
@@ -56,6 +58,8 @@ const HIT_LIMIT = 200;
 
 const activeStep = ref("");
 const subTab = ref("values");
+//: 两块源码的显示形态：true = 折行缩进 + 实体展开（好读）；false = 原文（好抄）
+const formatSource = ref(true);
 const renderLimit = ref(RENDER_CHUNK);
 const searchKey = ref("");
 const activeHit = ref(0);
@@ -96,6 +100,14 @@ const currentPage = computed(() => {
   if (!current.value || !current.value.page_id) return null;
   return pages.value.find((p) => p.id === current.value.page_id) || null;
 });
+//: 这一步的页面源码，按当前显示形态给（格式化 / 原文）。**搜索与渲染都用它**——
+//: 两边必须是同一份文本，否则高亮位置会整体错位
+const pageText = computed(() => {
+  const html = (currentPage.value && currentPage.value.html) || "";
+  return formatSource.value && html ? formatHtml(html) : html;
+});
+//: 复制按钮一律给**原文**（格式化只是给人看的：它动过空白、展开过实体）
+const pageTextRaw = computed(() => (currentPage.value && currentPage.value.html) || "");
 
 // 三态圆点：fail 红 / unknown 灰 / pass 且有附注 黄 / 纯 pass 绿
 function dotClass(s) {
@@ -118,7 +130,7 @@ function verdictText(s) {
 // 搜索在**完整原文**上做（纯字符串扫描，结果不进 DOM），最多记 HIT_LIMIT 处
 const hitOffsets = computed(() => {
   const key = searchKey.value.trim();
-  const html = (currentPage.value && currentPage.value.html) || "";
+  const html = pageText.value;
   if (!key || !html) return [];
   const out = [];
   let from = 0;
@@ -137,21 +149,15 @@ const hitsTruncated = computed(() => {
   const offsets = hitOffsets.value;
   if (offsets.length < HIT_LIMIT) return false;
   const key = searchKey.value.trim();
-  const html = (currentPage.value && currentPage.value.html) || "";
+  const html = pageText.value;
   if (!key || !html) return false;
   const last = offsets[offsets.length - 1];
   return html.indexOf(key, last + Math.max(1, key.length)) >= 0;
 });
 
 // 只渲染前 renderLimit 个字符，避免百万字符全量进 DOM
-const headText = computed(() => {
-  const html = (currentPage.value && currentPage.value.html) || "";
-  return html.slice(0, renderLimit.value);
-});
-const hasMore = computed(() => {
-  const html = (currentPage.value && currentPage.value.html) || "";
-  return renderLimit.value < html.length;
-});
+const headText = computed(() => pageText.value.slice(0, renderLimit.value));
+const hasMore = computed(() => renderLimit.value < pageText.value.length);
 
 // 把已渲染的片段按命中位置切成 [普通, 高亮, 普通, ...]
 const segments = computed(() => {
@@ -255,6 +261,9 @@ const matchedFromType = computed(() => {
 });
 const matchedHtml = computed(() => (current.value || {}).matched_html
   || (replayResult.value || {}).matched_html || "");
+//: 命中源码的显示形态（同 pageText：显示一份、复制一份）
+const matchedShown = computed(() => (formatSource.value && matchedHtml.value
+  ? formatHtml(matchedHtml.value) : matchedHtml.value));
 const matchedHint = computed(() => {
   if (!currentPage.value) return "这一步没有页面。App 只推文本，页面是我们另抓的";
   if (!canReplay.value) return "这一步的规则不支持本地调试";
@@ -583,18 +592,27 @@ function formatRatio(value) {
   return Number.isFinite(ratio) ? (ratio * 100).toFixed(1) + "%" : String(value);
 }
 
-async function copyMatched() {
-  const text = matchedHtml.value;
+//: 复制一律走这里，且**只复制原文**：格式化视图里换行是加的、实体是展开的，
+//: 拿它去写规则/正则就会以为页面上真是那样（原来那句「复制出来的就是原文」照旧成立）
+async function copyRaw(text, okMsg) {
   try {
     // navigator.clipboard 只在安全上下文（https / localhost）存在。
     // 本前端开了 server.host，用户会从局域网 IP 用 http 打开——
     // 那里它是 undefined，直接调用会同步抛 TypeError，界面毫无反应。
     // 必须包在 try 里，并给出明确反馈。
     await navigator.clipboard.writeText(text);
-    ElMessage.success("已复制命中源码");
+    ElMessage.success(okMsg);
   } catch (e) {
     ElMessage.warning("复制失败，请手动选中文本");
   }
+}
+
+function copyMatched() {
+  return copyRaw(matchedHtml.value, "已复制命中源码（原文）");
+}
+
+function copyPage() {
+  return copyRaw(pageTextRaw.value, "已复制页面源码（原文）");
 }
 </script>
 
@@ -816,11 +834,15 @@ async function copyMatched() {
           </p>
           <!-- 没有命中片段时按钮禁用，避免「点一下复制了空串」 -->
           <div class="toolbar">
+            <el-radio-group v-model="formatSource" size="small">
+              <el-radio-button :value="true">格式化</el-radio-button>
+              <el-radio-button :value="false">原文</el-radio-button>
+            </el-radio-group>
             <el-button size="small" :disabled="!matchedHtml" @click="copyMatched">
-              复制
+              复制原文
             </el-button>
           </div>
-          <pre v-if="matchedHtml" class="debug-pre debug-pre-wrap">{{ matchedHtml }}</pre>
+          <pre v-if="matchedHtml" class="debug-pre debug-pre-wrap">{{ matchedShown }}</pre>
           <el-empty v-else :description="matchedHint" :image-size="60" />
         </el-tab-pane>
 
@@ -842,6 +864,13 @@ async function copyMatched() {
               </template>
               <!-- 用 trim 后的值判断，与 hitOffsets 保持一致：纯空格不算搜过 -->
               <span v-else-if="searchKey.trim()" class="muted">未找到</span>
+              <el-radio-group v-model="formatSource" size="small">
+                <el-radio-button :value="true">格式化</el-radio-button>
+                <el-radio-button :value="false">原文</el-radio-button>
+              </el-radio-group>
+              <el-button size="small" :disabled="!pageTextRaw" @click="copyPage">
+                复制原文
+              </el-button>
             </div>
             <!-- 页面来源：调试默认吃缓存，这一份 HTML 可能是**几分钟前**抓的。
                  不标出来的话，用户会把它当成刚抓的——那正是「看着正常、答的不是
@@ -864,7 +893,7 @@ async function copyMatched() {
               :class="{ 'debug-hit-active': seg.index === activeHit }">{{ seg.text }}</mark></template></pre>
             <div v-if="hasMore" class="toolbar" style="margin-top: 8px">
               <el-button size="small" @click="loadMore">
-                加载更多（已渲染 {{ renderLimit }} / {{ currentPage.html.length }} 字符）
+                加载更多（已渲染 {{ renderLimit }} / {{ pageText.length }} 字符）
               </el-button>
             </div>
           </template>
