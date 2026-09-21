@@ -52,3 +52,9 @@ data/config/
 # core/jvm_debug.py、core/jvm_daemon.py、backend/api/jvm.py、
 # scripts/jvm_debug_run.py、scripts/jvm_debug_direct.py、tools/probe_app_debug.py。
 data/app_probe
+
+# 启动器的参数文件：**跑批/调试每次都重写它**，内容是上一次运行的参数（不是配置）。
+# 也是运行时数据，不进版本库。**仍在写**：core/jvm_debug._write_args（调试）、
+# backend/api/jvm.py 的 _write_args（跑批）。手跑要换一套参数走 LEGADO_APPSERVICE_ARGS
+# （见 appservice/test/io/legado/app/service/AppserviceEnv.kt 的候选顺序）。
+appservice/args.properties
