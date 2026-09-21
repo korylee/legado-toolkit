@@ -56,4 +56,46 @@ class BrowserBridgeChallengeTest {
         assertFalse(BrowserBridge.isChallenge(""))
         assertFalse(BrowserBridge.isChallenge("<html><body>甲</body></html>"))
     }
+
+    @Test
+    fun the_apps_own_probe_wins_when_the_html_looks_clean() {
+        // Cloudflare 挑战期：页面里可能一个特征词都没有，但 App 那句 `!!window._cf_chl_opt`
+        // 是页面里的**真实状态**——它说还在过，就得接着等
+        assertTrue("App 那句为真时必须等（哪怕 HTML 里没有词）",
+            BrowserBridge.isChallenge(normalPage, "true"))
+        assertTrue(BrowserBridge.isChallenge("", "true"))
+    }
+
+    @Test
+    fun a_false_probe_falls_back_to_the_word_list() {
+        assertFalse(BrowserBridge.isChallenge(normalPage, "false"))
+        assertFalse(BrowserBridge.isChallenge(normalPage, ""))
+        // 非 CF 的验证码墙：App 那句为假，但词表命中 → 仍要等
+        assertTrue(BrowserBridge.isChallenge(cdnChallenge, "false"))
+    }
+
+    /** 浏览器自己的错误页（实测 2026-09-22：banxia.cc 返回 Edge 的「无法访问此页面」，317KB）。 */
+    private val browserErrorPage = """
+        <html dir="ltr" lang="zh"><head><title>www.banxia.cc</title></head>
+        <body id="t"><div id="main-frame-error" class="neterror">
+        <span class="error-code">ERR_CONNECTION_CLOSED</span></div></body></html>
+    """.trimIndent()
+
+    @Test
+    fun a_browser_error_page_is_not_a_site() {
+        assertTrue("错误页的 DOM 要认出来（它一个字的站点内容都没有）",
+            BrowserBridge.isBrowserError("https://www.banxia.cc/", browserErrorPage))
+    }
+
+    @Test
+    fun the_landing_url_gives_it_away_even_without_the_marker() {
+        assertTrue("落地地址是 chrome-error:// 就是错误页（不依赖错误页文案的语言）",
+            BrowserBridge.isBrowserError("chrome-error://chromewebdata/", normalPage))
+    }
+
+    @Test
+    fun normal_pages_and_challenge_pages_are_not_browser_errors() {
+        assertFalse(BrowserBridge.isBrowserError("https://a.com/", normalPage))
+        assertFalse(BrowserBridge.isBrowserError("https://a.com/", cdnChallenge))
+    }
 }

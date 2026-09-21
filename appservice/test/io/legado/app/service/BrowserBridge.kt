@@ -309,12 +309,19 @@ object BrowserBridge {
             // 所以：识别到挑战页就等下一次 `Page.loadEventFired`，再取一次；有上界，等不到
             // 就把手里这份**如实交回去**。
             // 判它是什么的权力**不在这一侧**（权威是 `core/quality.interstitial_marker`），
-            // 这里只用那几个词决定「要不要再等一等」——两侧逐词比对钉在
+            // 这里只决定「要不要再等一等」：先问 App 那一句（`CF_CHALLENGE_PROBE`），
+            // 再退回那张通用词表。两侧逐词/逐表达式比对钉在
             // `tests/test_jvm_debug_contract.py::TestChallengeMarkerParity`。
-            // 正常页零代价：只在 [isChallenge] 为真时才进这个循环。
+            // 正常页零代价：多一次求值（几毫秒），不进循环。
             var waitedMs = 0L
             var seq = 20
-            while (js == null && isChallenge(body.orEmpty()) && waitedMs < challengeWaitMs) {
+            // 判据并上：先问 App 那一句（页面里的真实状态），再退回词表（通用）
+            fun stillChallenge(): Boolean {
+                val probe = runCatching { eval(ws, seq++, CF_CHALLENGE_PROBE, inbox, 3000) }
+                    .getOrNull().orEmpty()
+                return isChallenge(body.orEmpty(), probe)
+            }
+            while (js == null && waitedMs < challengeWaitMs && stillChallenge()) {
                 val t0 = System.currentTimeMillis()
                 val again = awaitEvent(inbox, setOf("Page.loadEventFired"),
                                        challengeWaitMs - waitedMs)
@@ -333,8 +340,15 @@ object BrowserBridge {
             // 落地地址：App 的 buildStrResponse 用的是 WebView 跳转后的地址（`res.url`），
             // 事件流里的 `≡获取成功:<URL>` 就是它——不取这个的话，重定向的站点会报
             // 请求前的地址。取不到就退回请求地址（只是少一点信息，不判失败）。
-            val finalUrl = runCatching { eval(ws, 90, "location.href", inbox, 5000) }
+            // **id 取 900**：20 起那些 id 归挑战等待循环用，别撞上（CDP 的应答按 id 过滤）
+            val finalUrl = runCatching { eval(ws, 900, "location.href", inbox, 5000) }
                 .getOrNull()?.takeIf { it.isNotBlank() } ?: url
+            if (isBrowserError(finalUrl, body.orEmpty())) {
+                // **交出去的是失败，不是页面**：错误页当站点用比「没拿到」更糟
+                // （下游会拿它的 DOM 去配规则，而它一个字的站点内容都没有）
+                return Result(false, reason = "browser_error: 浏览器自己报的错页（" +
+                    finalUrl.take(60) + "），不是站点", url = finalUrl)
+            }
             return when {
                 !body.isNullOrEmpty() -> Result(true, body = body, url = finalUrl)
                 jsRetryTimes > 0 -> Result(false, reason = "js_empty: 求值 $tries 次仍为空",
@@ -353,6 +367,18 @@ object BrowserBridge {
     private const val CHALLENGE_WAIT_MS = 8000L
 
     /**
+     * **App 自己那一句**：上游判 Cloudflare 挑战用的就是这个表达式
+     * （`ui/browser/WebViewRouteScreen.kt` 的 `onPageFinished` 里
+     * `evaluateJavascript("!!window._cf_chl_opt")`，为真即「还在挑战页」，挑战解完它自己翻回假）。
+     *
+     * 为什么照抄而不是自己造：它是**页面里的真实状态**，比拿 HTML 匹配字符串精确——
+     * 不会误伤正文里出现的词（实测「请稍候」在正常漫画页里出现 60 次）。两个判据是**并上**，
+     * 不是替换：这句只管 Cloudflare，非 CF 的验证码墙仍靠词表。
+     * 表达式由契约测试钉住（`tests/test_jvm_debug_contract.py::TestChallengeMarkerParity`）。
+     */
+    private const val CF_CHALLENGE_PROBE = "!!window._cf_chl_opt"
+
+    /**
      * 反爬拦截页的特征词——**只用来决定「要不要再等一等」**，不下任何结论。
      *
      * 权威那一份是 `core/models.ANTI_BOT_MARKERS`（Python 侧判「这份材料是不是站点」），
@@ -367,10 +393,29 @@ object BrowserBridge {
         "__cf_chl", "captcha", "verify you are human",
     )
 
-    /** 手里这份 HTML 像不像反爬拦截页（决定要不要再等一次导航）。 */
-    internal fun isChallenge(html: String): Boolean {
+    /**
+     * 挑战还在不在——**两个判据并上**：App 那句 JS 求值（精确、只管 CF）+ 我们的词表（通用）。
+     *
+     * `cfProbe` 是 `CF_CHALLENGE_PROBE` 的求值结果（`"true"` / `"false"` / 空 = 没求到）。
+     */
+    internal fun isChallenge(html: String, cfProbe: String = ""): Boolean {
+        if (cfProbe.trim().equals("true", ignoreCase = true)) return true
         val low = html.lowercase()
         return CHALLENGE_MARKERS.any { low.contains(it.lowercase()) }
+    }
+
+    /**
+     * 交回来的**不是站点、而是浏览器自己那张错误页**吗（连不上 / 被重置 / DNS 失败）。
+     *
+     * 实测（2026-09-22）：`www.banxia.cc` 有一回返回的是 Edge 的「无法访问此页面」
+     * （**317642 字节**，标题就是域名，一个反爬词都没有）——只按词表判会把它当成站点，
+     * 于是下游拿它的 DOM 去配规则（选得中、选中的是错误页）。判据是**结构性的**，两条：
+     * 落地地址变成 `chrome-error://…`（Chromium 错误页的地址），或 DOM 里出现
+     * `main-frame-error`（错误页自己的容器 id）。**都不依赖语言**（错误页文案会本地化）。
+     */
+    internal fun isBrowserError(finalUrl: String, html: String): Boolean {
+        if (finalUrl.trim().startsWith("chrome-error")) return true
+        return html.contains("main-frame-error")
     }
 
     /** 顺便把整段渲染也锁起来（页签是共享资源）。 */

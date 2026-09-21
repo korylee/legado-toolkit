@@ -131,7 +131,8 @@ class AddResult:
 
 
 def _page_for_analysis(url: str, want: str, notes: List[str], timeout: int = 60,
-                       facts: Optional[Dict[str, Any]] = None) -> str:
+                       facts: Optional[Dict[str, Any]] = None,
+                       human_gate: bool = False) -> str:
     """这一页该怎么取：**先按老办法抓 → 判层 → L2–L4 时改用引擎那份**（十-5 的编排）。
 
     为什么是「先抓再判」：判层要看页面内容，抓之前判不了。
@@ -181,10 +182,23 @@ def _page_for_analysis(url: str, want: str, notes: List[str], timeout: int = 60,
             "这一段规则先不给——用我们抓的那份会写出「看着正常、实际取不到」的规则"
             % (headline, e))
     left = interstitial_marker(got)
+    if left and human_gate:
+        # **人就在屏幕前**（CLI / 交互式生成）：开桥那个 profile 的浏览器让他自己过一道，
+        # 过完**机器接着走**——重取一次，不让他回去重新点一遍生成。
+        # 与上游同形（`SourceVerificationHelp.startBrowser` + `refetchAfterSuccess`：
+        # 人工过完 → 重取同一个地址，靠的就是凭据已经留在 profile 里）。
+        from core.browser_gate import open_for_human
+        if open_for_human(url, prompt="在弹出的窗口里把那道验证过一下"):
+            got = page_from_engine(url, timeout=timeout)
+            left = interstitial_marker(got)
+            if not left:
+                notes.append("%s；人工在浏览器里过完验证后重取成功（凭据留在 profile 里）"
+                             % headline)
+                return got
+            notes.append("%s；人工过了一次，但引擎取回来的还是拦截页（%s）" % (headline, left))
     if left:
-        # 引擎那份**还是拦截页**：机器过不去那道验证（实测 banxia.cc 的 Cloudflare 拦截、
-        # 18read.net 的托管挑战等满 8 秒也没放行）。按它写规则是假成功，所以这一段先不给，
-        # 并给**可执行**的下一步——桥用的那个 profile 是固定的，人工过一次就在里面了
+        # 机器过不去那道验证（实测 banxia.cc 的 Cloudflare 拦截、18read.net 的托管挑战
+        # 等满 8 秒也没放行）。按它写规则是假成功，所以这一段先不给，并给**可执行**的下一步
         raise RuntimeError(
             "%s；引擎取回来的还是拦截页（%s），机器过不去那道验证。要人工过一次："
             "跑 scripts/jvm_login.py 在桥那个 profile 里把这一页过一遍（凭据会留在 profile 里，"
@@ -205,7 +219,7 @@ def run_add(url, name="", source_type="novel", group="📖新增源",
             output="auto_added.json", no_ask=False, probe=True,
             detail_url: str = "", verify: bool = True,
             pick: int = 1, interactive: bool = False,
-            to_merge: str = "", discover: bool = False):
+            to_merge: str = "", discover: bool = False, human_gate: bool = False):
     """新增一个书源（可被 main.py 复用）。返回 `AddResult`：rc 0=成功 / 1=失败 / 2=已存在，
     **失败时 error 里带原因**（别只回一个码——§七十七 那次的教训）。
 
@@ -345,14 +359,16 @@ def run_add(url, name="", source_type="novel", group="📖新增源",
             src_type_num = TYPE_MAP.get(source_type, 0)
             want_detail = want_of_page("detail", src_type_num)
             want_chapter = want_of_page("chapter", src_type_num)
-            d_html = _page_for_analysis(detail_for_toc, want_detail, analysis_notes)
+            d_html = _page_for_analysis(detail_for_toc, want_detail, analysis_notes,
+                                        human_gate=human_gate)
             # 「这一页判到哪一档」由取页器如实报告（`page_facts`）：它决定正文规则给不给
             chapter_facts: Dict[str, Any] = {}
             result = analyze_detail_page(
                 d_html, detail_for_toc,
                 want=want_chapter, page_facts=chapter_facts,
                 page_fetcher=lambda u: _page_for_analysis(
-                    u, want_chapter, analysis_notes, facts=chapter_facts))
+                    u, want_chapter, analysis_notes, facts=chapter_facts,
+                    human_gate=human_gate))
             toc_rules = result["toc"]
             content_rule = result["content"]
             toc_note = result["note"]
@@ -624,4 +640,5 @@ def main():
             sys.exit(1)
 
     sys.exit(run_add(url, args.name, args.type, args.group,
-                     args.output, args.no_ask, probe=not args.no_probe).rc)
+                     args.output, args.no_ask, probe=not args.no_probe,
+                     human_gate=not args.no_ask).rc)

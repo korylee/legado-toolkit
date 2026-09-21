@@ -338,8 +338,33 @@ def interstitial_marker(html: str) -> str:
     **别拿「请稍候」这类通用词判**：实测小爱漫画的**正常**章节页正文里
     「正在加载图片，请稍候」出现 60 次——按它判会把正常页说成拦截页（与 `models.py`
     里那条「不要往词表里加裸 cloudflare」是同一类错）。
+
+    另一种「不是站点」见 :func:`browser_error_marker`（浏览器自己的错误页）——两者的
+    下一步动作不同，所以是两个判据、两个词表。
     """
     return anti_bot_marker_of(html)
+
+
+#: Chromium 错误页（「无法访问此页面」）自己的标记：`main-frame-error` 是它那个容器的 id，
+#: `neterror` 是它的样式/脚本命名空间。**不用文案判**——错误页文案随语言变（实测那份是
+#: 「嗯… 无法访问此页面 / ERR_CONNECTION_CLOSED」），而这两个串不随语言变。
+BROWSER_ERROR_MARKERS: List[str] = ["main-frame-error", "neterror"]
+
+
+def browser_error_marker(html: str) -> str:
+    """这份材料是**浏览器自己那张错误页**时返回命中的标记（否则空串）。
+
+    为什么单独一个判据（而不是并进反爬词表）：**下一步动作完全不同**——反爬拦截页可以
+    「给规则 + 带 webView，让 App 渲染时再过一次」，而错误页（连不上 / 被重置）连站点都没
+    碰到，配什么规则都是错的。实测（2026-09-22）：`www.banxia.cc` 有一回引擎交回的是
+    Edge 的错误页，**317642 字节、标题就是域名、一个反爬词都没有**——只按反爬词表判，
+    它会被当成站点。
+    """
+    low = str(html or "").lower()
+    for m in BROWSER_ERROR_MARKERS:
+        if m in low:
+            return m
+    return ""
 
 
 # ------------------------------------------------------------------ 正文判定
@@ -598,4 +623,5 @@ __all__ = [
     "MAX_PAGE_HTML_CHARS", "MAX_MATCHED_HTML_CHARS", "MATCHED_NODES_LIMIT",
     "MAX_EVIDENCE_TOTAL_CHARS",
     "SHORT_CONTENT_CHARS", "safe_int", "short_content_note", "interstitial_marker",
+    "browser_error_marker", "BROWSER_ERROR_MARKERS",
 ]

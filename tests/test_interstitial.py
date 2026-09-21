@@ -129,5 +129,86 @@ class ContentRulePairedWithWebviewTests(unittest.TestCase):
         self.assertIn("webView", toc["chapterUrl"])
 
 
+class HumanGateTests(unittest.TestCase):
+    """`human_gate`：人就在屏幕前时（CLI / 交互式生成）——把窗口开给他，过完**机器接着走**。
+
+    上游同形：`SourceVerificationHelp.startBrowser` + `refetchAfterSuccess`（人工过完 →
+    重取同一个地址）。区别只在**谁开窗口**：那边是 App 内置浏览器，这边是桥那个 profile。
+    """
+
+    REAL = "<html><body><div class='chapter-images'><img src='/1.jpg'><img src='/2.jpg'>" \
+           "<img src='/3.jpg'></div></body></html>"
+
+    def _run(self, human_gate, engine_side_effect, human_ok=True):
+        notes = []
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch("services.add_source.fetch",
+                                           side_effect=lambda u, *a, **k: CHALLENGE))
+            stack.enter_context(mock.patch("core.jvm_debug.page_from_engine",
+                                           side_effect=engine_side_effect))
+            opener = stack.enter_context(mock.patch("core.browser_gate.open_for_human",
+                                                    return_value=human_ok))
+            try:
+                html = _page_for_analysis("https://a.com/1.html", "media", notes,
+                                          human_gate=human_gate)
+            except RuntimeError as e:
+                return None, notes, opener, str(e)
+        return html, notes, opener, ""
+
+    def test_human_passes_and_the_machine_carries_on(self):
+        html, notes, opener, _err = self._run(True, [BLOCKED, self.REAL])
+        self.assertEqual(html, self.REAL, "人过完就该拿到真实内容，不该让他重新点一遍生成")
+        self.assertTrue(opener.called, "该把窗口开给他")
+        self.assertTrue(any("人工" in n for n in notes), notes)
+
+    def test_without_a_human_in_the_loop_the_window_is_never_opened(self):
+        html, notes, opener, err = self._run(False, [BLOCKED])
+        self.assertIsNone(html)
+        self.assertFalse(opener.called, "后台 job 里没有人，别去开浏览器")
+        self.assertIn("人工过一次", err, "没有人工那条路时，要说清下一步")
+
+    def test_human_failed_to_pass_it_still_says_so(self):
+        html, notes, _opener, err = self._run(True, [BLOCKED, BLOCKED], human_ok=False)
+        self.assertIsNone(html)
+        self.assertIn("拦截页", err)
+
+
+class BrowserErrorPageTests(unittest.TestCase):
+    """**另一种「不是站点」**：浏览器自己那张错误页（实测 2026-09-22：banxia.cc 返回
+    Edge 的「无法访问此页面」，317642 字节、标题就是域名、一个反爬词都没有）。
+
+    它跟反爬拦截页的下一步动作不同（那个可以「给规则 + webView」，这个连站点都没碰到），
+    所以是两个判据、两个词表——但**都不许当站点分析**。
+    """
+
+    #: 按实测那份的形状写（`main-frame-error` / `neterror` 是它的结构性标记，不随语言变）
+    ERROR_PAGE = ("<html dir='ltr' lang='zh'><head><title>www.banxia.cc</title></head>"
+                  "<body><div id='main-frame-error' class='neterror'>"
+                  "<span class='error-code'>ERR_CONNECTION_CLOSED</span></div></body></html>")
+
+    def test_the_browser_error_page_is_recognized(self):
+        from core.quality import browser_error_marker
+        self.assertTrue(browser_error_marker(self.ERROR_PAGE))
+
+    def test_lookalikes_are_not_confused_with_each_other(self):
+        from core.quality import browser_error_marker, interstitial_marker
+        # 反爬拦截页不是浏览器错误页，反之亦然：两张词表各管一段
+        self.assertEqual(interstitial_marker(self.ERROR_PAGE), "")
+        self.assertEqual(browser_error_marker(CHALLENGE), "")
+        self.assertEqual(browser_error_marker(NORMAL), "")
+
+    def test_the_drawer_keeps_it_but_says_which_kind_it_is(self):
+        with mock.patch("core.app_debug.fetch_ex",
+                        return_value=mock.Mock(html=self.ERROR_PAGE, cached=False,
+                                               fetched_at="", charset="")):
+            pages = fetch_debug_pages(self._steps(), {})
+        layer = pages[0]["page_layer"]
+        self.assertEqual(layer["layer"], "")
+        self.assertIn("错误页", layer["unsure"], "两种「不是站点」要说得出是哪一种")
+
+    def _steps(self):
+        return [{"name": "search", "url": "https://a.com/s", "page_id": "search"}]
+
+
 if __name__ == "__main__":
     unittest.main()

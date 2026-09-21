@@ -317,6 +317,55 @@ class TestChallengeMarkerParity(unittest.TestCase):
         for bad in ("请稍候", "cloudflare", "loading", "please wait"):
             self.assertNotIn(bad, marks, "通用词不能当挑战页判据：%s" % bad)
 
+    def test_the_cf_probe_is_the_expression_app_itself_uses(self):
+        """判 Cloudflare 挑战那句，**照抄 App 的**，别自己造一个。
+
+        App 侧就在 `ui/browser/WebViewRouteScreen.kt` 的 `onPageFinished` 里
+        `evaluateJavascript("!!window._cf_chl_opt")`。改了这句就得改那边（以及这条测试），
+        否则「我们以为在过挑战」与「App 认为在过挑战」会分家。
+        """
+        text = self.KOTLIN.read_text(encoding="utf-8")
+        self.assertIn('"!!window._cf_chl_opt"', text, "桥里没有 App 那句判据")
+        self.assertIn("CF_CHALLENGE_PROBE", text)
+        # 它必须真的被求值（只留个常量不算）
+        self.assertRegex(text, r"eval\(ws, seq\+\+, CF_CHALLENGE_PROBE")
+
+
+class TestBrowserProfileParity(unittest.TestCase):
+    """浏览器与 profile：**两侧必须同一套**（谁开窗口都得落在同一个 profile 上）。
+
+    为什么：cookie（登录态、CF 的 clearance）存在 profile 里——`scripts/jvm_login.py` 与
+    生成链的 `human_gate` 开的是它，桥渲染与跑批读的也是它。两边任一处换了浏览器或目录，
+    现象是「明明过完验证了 / 明明登了，却说没登」（`core/browser_gate.py` 的注释里写着这条）。
+    对照的是**源码字面量**（不跑 Kotlin），与 `TestLoginMarkerParity` 同一个套路。
+    """
+
+    ROOT = pathlib.Path(__file__).parent.parent
+
+    def test_profile_dir_name_matches(self):
+        from core.browser_gate import PROFILE_DIR_NAME
+        kt = (self.ROOT / "appservice/test/io/legado/app/service/BrowserSession.kt"
+              ).read_text(encoding="utf-8")
+        self.assertIn('"%s"' % PROFILE_DIR_NAME, kt,
+                      "Kotlin 侧的默认 profile 目录名与 core/browser_gate.py 不一致")
+
+    def test_browser_candidates_match_in_order(self):
+        from core.browser_gate import BROWSER_CANDIDATES
+        kt = (self.ROOT / "appservice/test/io/legado/app/service/BrowserBridge.kt"
+              ).read_text(encoding="utf-8")
+        block = kt.split("private val CANDIDATES = listOf(", 1)
+        self.assertEqual(len(block), 2, "BrowserBridge.kt 里找不到 CANDIDATES")
+        # **按行收到 `)` 为止**，别用 split(")")：候选里就有半角括号（`(x86)`），
+        # 那样切会在第一行就断掉，于是「解析出空列表」看起来像「两侧都空」的假绿
+        body_lines = []
+        for ln in block[1].splitlines():
+            if ln.strip().startswith(")"):
+                break
+            body_lines.append(ln)
+        kotlin_paths = re.findall(r'"([^"]*)"', "\n".join(body_lines))
+        self.assertEqual(kotlin_paths, list(BROWSER_CANDIDATES),
+                         "两侧的浏览器候选漂了：换一个就落不到同一个 profile 上")
+
 
 if __name__ == "__main__":
     unittest.main()

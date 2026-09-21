@@ -106,9 +106,10 @@ class WiringTests(unittest.TestCase):
     def _run(self, facts, chapter_html=CHAPTER):
         seen = {"layer": facts.get("layer", ""), "why": facts.get("why", "")}
 
-        def fake_page(url, want, notes, timeout=60, facts=None):
+        def fake_page(url, want, notes, timeout=60, facts=None, human_gate=False):
             # 取页器如实报告「这一页在我们抓的那份上判到哪一档」。
-            # `want` 是区分哪一页的判据：详情页要 list、正文页要 media
+            # `want` 是区分哪一页的判据：详情页要 list、正文页要 media。
+            # `human_gate` 也要接住：run_add 会把它交给取页器（拦截页那道人工口）
             if want != "media":
                 return DETAIL
             if facts is not None:
