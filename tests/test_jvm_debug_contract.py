@@ -279,5 +279,44 @@ class TestEngineHtmlKeyParity(unittest.TestCase):
                       "core/jvm_debug 没在读 engine_html（键名两边要一样）")
 
 
+class TestChallengeMarkerParity(unittest.TestCase):
+    """挑战页特征词：桥里那几个必须**逐词**出现在 Python 的权威词表里。
+
+    为什么：判定这份材料「是不是站点本身」的权威是 `core/models.ANTI_BOT_MARKERS`
+    （`core/quality.interstitial_marker` 用它），而**决定要不要再等一次导航**的那几个词
+    在 Kotlin 侧（桥拿着浏览器，没法回来问 Python）——跨语言没法共享常量，只能靠这条测试
+    拦住「两边各改一边」。
+
+    方向是**单向**的：Kotlin 取子集即可（多出来的词它用不上，Python 照样判得了）；
+    反过来不许——Kotlin 里出现一个 Python 不认的词，就是「桥为它多等 8 秒、而下游仍然把
+    拦截页当站点」那种两头不讨好的错。对照的是**源码字面量**（不跑 Kotlin），
+    与 `TestLoginMarkerParity` 同一个套路。
+    """
+
+    KOTLIN = (pathlib.Path(__file__).parent.parent /
+              "appservice/test/io/legado/app/service/BrowserBridge.kt")
+
+    def _kotlin_markers(self):
+        text = self.KOTLIN.read_text(encoding="utf-8")
+        block = text.split("private val CHALLENGE_MARKERS = listOf(", 1)
+        self.assertEqual(len(block), 2, "BrowserBridge.kt 里找不到 CHALLENGE_MARKERS")
+        body = block[1].split(")", 1)[0]
+        return re.findall(r'"([^"]*)"', body)
+
+    def test_kotlin_markers_are_all_in_the_authoritative_list(self):
+        from core.models import ANTI_BOT_MARKERS
+        marks = self._kotlin_markers()
+        self.assertTrue(marks, "CHALLENGE_MARKERS 不该是空的")
+        unknown = [m for m in marks if m not in ANTI_BOT_MARKERS]
+        self.assertEqual(unknown, [],
+                         "这些词 Python 的反爬词表里没有（权威在 core/models.py）：%s" % unknown)
+
+    def test_generic_words_are_not_used_as_challenge_markers(self):
+        """`请稍候` 这类通用词会让**每个正常页**白等 8 秒（实测正常漫画页里出现 60 次）。"""
+        marks = self._kotlin_markers()
+        for bad in ("请稍候", "cloudflare", "loading", "please wait"):
+            self.assertNotIn(bad, marks, "通用词不能当挑战页判据：%s" % bad)
+
+
 if __name__ == "__main__":
     unittest.main()

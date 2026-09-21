@@ -49,6 +49,7 @@ import urllib.request
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from core import js_hints
+from core import page_layer
 from core import quality as Q
 from core.fetch import CACHE_AUTO, CacheMiss, fetch_ex, parse_source_header
 from core.urls import abs_url, split_url_options
@@ -814,8 +815,21 @@ def fetch_debug_pages(steps: Sequence[Dict[str, Any]], source: Optional[Dict[str
     # `fetch_ex`：**只读缓存模式照旧生效**（缓存里没有就跳过，并在证据里留一行原因）。
     src_type = Q.safe_int((source or {}).get("bookSourceType", 0))
     for page in pages.values():
+        html = page.get("html") or ""
+        mark = Q.interstitial_marker(html)
+        if mark:
+            # **这份材料不是站点本身**（反爬拦截页）。不许当站点判层：按它判「有没有目标」、
+            # 按它写规则都是假结论。判不了 + 说清为什么——抽屉与生成链读的都是这一格，
+            # 而「界面上看不出这份材料是什么」正是 2026-09-21 那次实测暴露的隐患
+            # （引擎连取两次都是「请稍候…」，看起来跟正常页一样）。
+            page["page_layer"] = {
+                "layer": "", "evidence": [], "stats": page_layer.page_stats(html),
+                "has_wanted": None, "login_marker": "",
+                "unsure": "这一页拿到的是拦截页（%s），不是站点本身——看源码与写规则都别用它"
+                          % mark}
+            continue
         deep = js_hints.classify_with_scripts(
-            page.get("html") or "", want_of_page(str(page.get("id") or ""), src_type),
+            html, want_of_page(str(page.get("id") or ""), src_type),
             str(page.get("url") or ""),
             fetcher=lambda u: fetch_ex(u, proxy=proxy, cache=cache).html)
         page["page_layer"] = deep["verdict"]

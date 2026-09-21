@@ -464,6 +464,8 @@ def _apply_layer_guard(content_rule: str, toc: dict, note: str, page_facts: dict
 
     判据一句话：**给出去的规则必须在 App 的默认链路上真能取到值。**
 
+    - **反爬拦截页**（`challenge`，我们抓到的那份根本不是站点）：规则来自引擎过验证后那份
+      材料，所以照给，但**同样要配上 `webView`**——App 渲染时自己会再过一次那道验证
     - **L3 / L4**：数据要解密 / 走接口，CSS 规则**必然取不到**——不给规则，把原因和下一步
       动作写进附注（给出去是假成功：选得中、选中的不是数据）
     - **L2**：数据是渲染后才有，规则照给，但**必须配上让它可用的那个东西**——正文页 URL
@@ -474,15 +476,28 @@ def _apply_layer_guard(content_rule: str, toc: dict, note: str, page_facts: dict
     layer = str(facts.get("layer") or "")
     why = str(facts.get("why") or "")
     where = "（%s）" % why if why else ""
-    if layer in ("L3", "L4"):
+    if layer in ("L3", "L4") and not facts.get("challenge"):
         action = ("用「网页视图」里的点选读那个全局对象，写成 webJs" if layer == "L3"
                   else "抓那个接口 + JSONPath")
         return "", toc, (note + "；正文规则先不给：这一页判到 %s%s，数据要%s才有，"
                                "CSS 规则取不到东西" % (layer, where, action))
+    mark = str(facts.get("challenge") or "")
+    if mark and content_rule:
+        toc, paired = _with_webview(toc)
+        return content_rule, toc, (note + "；这一页有反爬验证（%s），正文页 URL %s"
+                                          "——App 渲染时自己会再过一次那道验证"
+                                          % (mark, "已带 webView" if paired else "已经带过 webView"))
     if layer == "L2" and content_rule:
-        urls = toc.get("chapterUrl") or ""
-        if urls and "webView" not in urls:
-            toc["chapterUrl"] = urls + ',{"webView":true}'
+        toc, paired = _with_webview(toc)
         return content_rule, toc, (note + "；正文页 URL 已带 webView——这一页判到 L2%s，"
                                           "数据要页面脚本跑起来才有" % where)
     return content_rule, toc, note
+
+
+def _with_webview(toc: dict) -> tuple:
+    """给正文页 URL 配上 `webView` 选项（已经带过就不重复加）。返回 `(toc, 这次加了吗)`。"""
+    urls = toc.get("chapterUrl") or ""
+    if urls and "webView" not in urls:
+        toc["chapterUrl"] = urls + ',{"webView":true}'
+        return toc, True
+    return toc, False

@@ -254,7 +254,8 @@ object BrowserBridge {
                waitAfterLoadMs: Long = 800,
                js: String? = null,
                jsRetryTimes: Int = 0,
-               jsRetryIntervalMs: Long = 1000): Result {
+               jsRetryIntervalMs: Long = 1000,
+               challengeWaitMs: Long = CHALLENGE_WAIT_MS): Result {
         // **复用启动时那个 about:blank 页签**（/json/list 的第一个 page），
         // 不每次 `/json/new`：少一个端点就少一类失败（实测 /json/new 偶发拿不到页签），
         // 而且只有一个页签时，渲染天然是串行的——不必再操心多页签互相干扰。
@@ -301,6 +302,34 @@ object BrowserBridge {
                 Thread.sleep(jsRetryIntervalMs)
                 body = eval(ws, 11 + tries, expr, inbox, timeoutMs)
             }
+            // **反爬拦截页要等它自己再来一次导航**（Cloudflare 那类 JS 挑战）：挑战页的
+            // `load` 与 `document.readyState == complete` **都成立**，照上面那条路会稳定取到
+            // 「挑战页那一刻」的 DOM——实测（2026-09-21）18read.net 连取两次都是「请稍候…」、
+            // www.banxia.cc 两次都是 Attention Required。解完挑战的页面会自己 reload，
+            // 所以：识别到挑战页就等下一次 `Page.loadEventFired`，再取一次；有上界，等不到
+            // 就把手里这份**如实交回去**。
+            // 判它是什么的权力**不在这一侧**（权威是 `core/quality.interstitial_marker`），
+            // 这里只用那几个词决定「要不要再等一等」——两侧逐词比对钉在
+            // `tests/test_jvm_debug_contract.py::TestChallengeMarkerParity`。
+            // 正常页零代价：只在 [isChallenge] 为真时才进这个循环。
+            var waitedMs = 0L
+            var seq = 20
+            while (js == null && isChallenge(body.orEmpty()) && waitedMs < challengeWaitMs) {
+                val t0 = System.currentTimeMillis()
+                val again = awaitEvent(inbox, setOf("Page.loadEventFired"),
+                                       challengeWaitMs - waitedMs)
+                waitedMs += System.currentTimeMillis() - t0
+                if (!again) break                    // 它不再加载了：别再耗着
+                // 挑战通过后的那次加载同样可能有二次渲染，等 complete 再取
+                val end2 = System.currentTimeMillis() + 5000
+                while (System.currentTimeMillis() < end2) {
+                    if (eval(ws, seq, "document.readyState", inbox, 5000) == "complete") break
+                    Thread.sleep(200)
+                }
+                seq++
+                body = eval(ws, seq, expr, inbox, timeoutMs)
+                seq++
+            }
             // 落地地址：App 的 buildStrResponse 用的是 WebView 跳转后的地址（`res.url`），
             // 事件流里的 `≡获取成功:<URL>` 就是它——不取这个的话，重定向的站点会报
             // 请求前的地址。取不到就退回请求地址（只是少一点信息，不判失败）。
@@ -319,6 +348,30 @@ object BrowserBridge {
 
     //: 渲染是**串行**的：只有一个页签，两个源同时 Page.navigate 会互相把页面顶掉。
     private val renderLock = Any()
+
+    /** 挑战页最多等多久（毫秒）。实测 Cloudflare 的 JS 挑战在真浏览器里几秒内过掉。 */
+    private const val CHALLENGE_WAIT_MS = 8000L
+
+    /**
+     * 反爬拦截页的特征词——**只用来决定「要不要再等一等」**，不下任何结论。
+     *
+     * 权威那一份是 `core/models.ANTI_BOT_MARKERS`（Python 侧判「这份材料是不是站点」），
+     * 这里取的是其中的子集：**必须逐词出现在那一份里**，契约测试
+     * `tests/test_jvm_debug_contract.py::TestChallengeMarkerParity` 按源码字面量比。
+     *
+     * **别往这里加通用词**（「请稍候」这类）：实测正常漫画页正文里它出现 60 次，
+     * 按它判会让每个正常页都白等 8 秒（`core/models.py` 里「不要放裸 cloudflare」是同一类错）。
+     */
+    private val CHALLENGE_MARKERS = listOf(
+        "验证码", "人机验证", "安全验证", "滑动验证",
+        "__cf_chl", "captcha", "verify you are human",
+    )
+
+    /** 手里这份 HTML 像不像反爬拦截页（决定要不要再等一次导航）。 */
+    internal fun isChallenge(html: String): Boolean {
+        val low = html.lowercase()
+        return CHALLENGE_MARKERS.any { low.contains(it.lowercase()) }
+    }
 
     /** 顺便把整段渲染也锁起来（页签是共享资源）。 */
     fun renderSerial(session: Session, url: String, timeoutMs: Long = 30000,

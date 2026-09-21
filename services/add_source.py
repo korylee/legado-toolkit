@@ -151,30 +151,45 @@ def _page_for_analysis(url: str, want: str, notes: List[str], timeout: int = 60,
     （lessons §八十：引擎是材料就当硬要求）。
     """
     from core.js_hints import classify_with_scripts
+    from core.quality import interstitial_marker
     html = fetch(url)
+    # **我们抓到的这份根本不是站点**（反爬拦截页）：这时别看层，直接去要引擎那份——
+    # 引擎会渲染、会等挑战（桥里那道等待），而且它带着自己的 cookie
+    ours = interstitial_marker(html)
     deep = classify_with_scripts(html, want, url)
     verdict = deep["verdict"]
     if deep["docs"] and deep["light_layer"] != verdict["layer"]:
         notes.append("%s 只看原文判 %s，看了页面引用的 %d 份脚本后改判 %s"
                      % (url, deep["light_layer"] or "判不了", len(deep["docs"]),
                         verdict["layer"] or "判不了"))
+    headline = ("这一页拿到的是拦截页（%s）" % ours if ours else
+                "这一页判到 %s（%s）" % (verdict["layer"], _reason_of(verdict)))
     if facts is not None:
         # **我们抓到的那份**判出来的档：它回答的是「App 默认那条链路上拿得到吗」
-        # （换材料之后的档回答不了这个问题——那份是引擎渲染出来的）
-        facts.update({"url": url, "layer": deep["light_layer"], "why": _reason_of(verdict)})
-    if verdict["layer"] not in ("L2", "L3", "L4"):
+        # （换材料之后的档回答不了这个问题——那份是引擎渲染出来的）。
+        # 拦截页另记一笔：判据不是层，而是「这份材料不是站点」（正文规则的配套不同）
+        facts.update({"url": url, "layer": deep["light_layer"], "why": _reason_of(verdict),
+                      "challenge": ours})
+    if verdict["layer"] not in ("L2", "L3", "L4") and not ours:
         return html
-    why = _reason_of(verdict)
     try:
         from core.jvm_debug import page_from_engine
         got = page_from_engine(url, timeout=timeout)
     except Exception as e:
         raise RuntimeError(
-            "这一页判到 %s（%s），要由本机引擎取；引擎没取到：%s。"
+            "%s，要由本机引擎取；引擎没取到：%s。"
             "这一段规则先不给——用我们抓的那份会写出「看着正常、实际取不到」的规则"
-            % (verdict["layer"], why, e))
-    notes.append("%s 判到 %s（%s），这一段已改用本机引擎取回的那份 HTML（App 手上那份）"
-                 % (url, verdict["layer"], why))
+            % (headline, e))
+    left = interstitial_marker(got)
+    if left:
+        # 引擎那份**还是拦截页**：机器过不去那道验证（实测 banxia.cc 的 Cloudflare 拦截、
+        # 18read.net 的托管挑战等满 8 秒也没放行）。按它写规则是假成功，所以这一段先不给，
+        # 并给**可执行**的下一步——桥用的那个 profile 是固定的，人工过一次就在里面了
+        raise RuntimeError(
+            "%s；引擎取回来的还是拦截页（%s），机器过不去那道验证。要人工过一次："
+            "跑 scripts/jvm_login.py 在桥那个 profile 里把这一页过一遍（凭据会留在 profile 里，"
+            "之后就是通的），或者连 App / 用真机调试。这一段规则先不给" % (headline, left))
+    notes.append("%s，已改用本机引擎取回的那份 HTML（App 手上那份）" % headline)
     return got
 
 

@@ -20,7 +20,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from core.models import BOOK_SOURCE_TYPE_NAMES
+from core.models import BOOK_SOURCE_TYPE_NAMES, anti_bot_marker_of
 
 # ------------------------------------------------------------------ 三态
 
@@ -323,6 +323,25 @@ def safe_int(value: Any, default: int = 0) -> int:
         return default
 
 
+# ------------------------------------------------------------------ 材料判定
+
+def interstitial_marker(html: str) -> str:
+    """手里这份**不是站点本身、而是反爬拦截页**时，返回命中的那个词（否则空串）。
+
+    用例：抽屉「整页源码」与生成链的材料都要先问这一句——按拦截页判层、按它写规则，
+    出来的都是假结论（选得中、选中的不是站点），而界面上原本看不出这份材料是什么。
+
+    **复用 `models.ANTI_BOT_MARKERS`，不另造词表**：一个页面「是不是反爬响应」只有一份判据
+    （AGENTS #10）。实测两张真拦截页（2026-09-21）：`18read.net` 命中「安全验证」、
+    `www.banxia.cc` 命中 `captcha`——现有词表就够，一个新词都不用加。
+
+    **别拿「请稍候」这类通用词判**：实测小爱漫画的**正常**章节页正文里
+    「正在加载图片，请稍候」出现 60 次——按它判会把正常页说成拦截页（与 `models.py`
+    里那条「不要往词表里加裸 cloudflare」是同一类错）。
+    """
+    return anti_bot_marker_of(html)
+
+
 # ------------------------------------------------------------------ 正文判定
 
 def short_content_note(chars: int) -> str:
@@ -578,5 +597,5 @@ __all__ = [
     "EXPECTED_SHAPE", "STRUCT_TAG_RE", "CONTENT_NOISE_MARKERS",
     "MAX_PAGE_HTML_CHARS", "MAX_MATCHED_HTML_CHARS", "MATCHED_NODES_LIMIT",
     "MAX_EVIDENCE_TOTAL_CHARS",
-    "SHORT_CONTENT_CHARS", "safe_int", "short_content_note",
+    "SHORT_CONTENT_CHARS", "safe_int", "short_content_note", "interstitial_marker",
 ]
