@@ -254,7 +254,8 @@ def build_evidence(values: Sequence[str], matched_html: str = "") -> Dict[str, A
 
 def new_page(pages: Dict[str, Dict[str, Any]], page_id: str, url: str, html: str,
              status: int = 200, charset: str = "",
-             fetched_at: str = "", cached: bool = False) -> str:
+             fetched_at: str = "", cached: bool = False,
+             origin: str = "") -> str:
     """把抓到的页面登记进 ``pages``（按 id 去重），返回实际可用的 page_id。
 
     原先这是 ``core/verify.py`` 的私有函数 ``_new_page``。提到这里是因为
@@ -270,6 +271,10 @@ def new_page(pages: Dict[str, Dict[str, Any]], page_id: str, url: str, html: str
       - ``truncated`` 按原始长度判定，``html`` 只存前 ``MAX_PAGE_HTML_CHARS`` 个字符
       - ``fetched_at`` / ``cached`` 由调用方从 ``fetch_ex()`` 的返回值透传，
         缺省是空串 / False（页面来源未知，不谎称它是刚抓的）
+      - ``origin``：这份 HTML **是谁取回来的**——``"engine"``（本机引擎的调试链，
+        App 手上那份：过了它的 JS / cookie / UA）或 ``"fetch"``（我们自己的
+        ``fetch_ex`` 补抓，另一条 HTTP 栈）。界面上要标出来：两份**可能不是同一页**
+        （L2–L4 的站点尤其），而「看源码改规则」正建立在这份材料上
     """
     if not html:
         return ""
@@ -288,6 +293,7 @@ def new_page(pages: Dict[str, Dict[str, Any]], page_id: str, url: str, html: str
         "html": html[:MAX_PAGE_HTML_CHARS],
         "len": len(html),
         "truncated": truncated,
+        "origin": origin,
     }
     return page_id
 

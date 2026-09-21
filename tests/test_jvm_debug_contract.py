@@ -260,5 +260,24 @@ class TestWebViewMarkerParity(unittest.TestCase):
         self.assertIn("IGNORE_CASE", kt)
 
 
+class TestEngineHtmlKeyParity(unittest.TestCase):
+    """侧车里「引擎取回的整页」那个键，两侧必须一致。
+
+    为什么：Kotlin 写（`DebugService.runOnce` 的 `writeMeta`）、Python 读
+    （`core.jvm_debug` 的 `meta.get(...)`）。跨语言没法共享常量，写错一边的后果
+    **不是报错**——Python 读到 None → `engine_pages(None)` 返回 `{}` → `pages[]`
+    静默回落到我们补抓，界面上照样有一页（但那是**另一份材料**），没人看得出来。
+    """
+
+    def test_the_key_is_spelled_the_same_on_both_sides(self):
+        kt = (pathlib.Path(__file__).parent.parent /
+              "appservice/test/io/legado/app/service/DebugService.kt").read_text(encoding="utf-8")
+        py = (pathlib.Path(__file__).parent.parent / "core/jvm_debug.py").read_text(encoding="utf-8")
+        self.assertIn('"engine_html" to', kt,
+                      "DebugService 侧车里没有 engine_html 这个键")
+        self.assertIn('meta.get("engine_html")', py,
+                      "core/jvm_debug 没在读 engine_html（键名两边要一样）")
+
+
 if __name__ == "__main__":
     unittest.main()

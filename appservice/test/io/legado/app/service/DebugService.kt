@@ -102,6 +102,14 @@ object DebugService {
     const val MATCH_FETCH_TIMEOUT_MS = 10_000L
 
     /**
+     * 侧车里那份「引擎取回来的整页 HTML」的单页上限（字符）。比 Python 侧的
+     * `quality.MAX_PAGE_HTML_CHARS`（20 万，展示用）宽一些：**截断只做一次**，
+     * 而且要在能看见的地方做（Python 那边截断会写明「截到什么程度」）。
+     * 一页正文几十万字符很常见，而侧车是要落磁盘的。
+     */
+    const val MAX_ENGINE_HTML_CHARS = 400_000
+
+    /**
      * 每段最多记几个命中节点。**与 `core.quality.MATCHED_NODES_LIMIT` 同一个数**：
      * 抽屉里那块 DOM 原来由本地投影算（也是取前 N 个节点的 outerHTML 拼起来），
      * 数不一样两边就没法对着看。逐词比对钉在
@@ -277,11 +285,16 @@ object DebugService {
         // 命中回填要抓哪些页面：事件里的 `≡获取成功:<URL>`，**按出现顺序、去重**
         // （详情页与目录页常常是同一个 URL，去重后只抓一次）。
         val urls = java.util.Collections.synchronizedSet(linkedSetOf<String>())
+        //: 引擎取回来的整页 HTML（{url: 整页}）。只在收集线程里写，收尾之后才读
+        val engineHtml = EngineHtmlCollector()
         val collector = Thread {
             runBlocking {
                 try {
                     withTimeout(timeoutSec * 1000) {
                         session.events.collect { event ->
+                            // 顺路把 payload 的整页 HTML 收起来（它进侧车、不进 NDJSON，
+                            // 所以不破坏「与设备 WS 同构」——理由见 EngineHtmlCollector）
+                            engineHtml.accept(event.message, event.kind.isSourcePayload)
                             if (event.kind.isSourcePayload) {
                                 dropped.incrementAndGet()
                                 return@collect
@@ -404,6 +417,11 @@ object DebugService {
             // 四个计数是给排障的人看的：`urls` 是事件里出现过的 URL 数，`hits` 是真正
             // 记下来的（URL, 段名）对数——两个数差太远说明规则没命中或页面取不到，
             // 原因在 `matched_fail` 里。
+            // 引擎取回来的**整页 HTML**（`{url: 整页}`）：payload 事件里带的 body，
+            // 以前按「同构」丢掉——留着之后 Python 侧的 `pages[]` 优先用它（App 手上
+            // 那一份，比我们另抓一遍真），我们只补引擎没给的页
+            "engine_html" to engineHtml.result(),
+            "engine_html_urls" to engineHtml.result().size,
             "matched_html" to matched,
             "matched_urls" to urls.size,
             "matched_hits" to matched.values.sumOf { it.size },
@@ -416,6 +434,9 @@ object DebugService {
         System.err.println(
             "[appservice] 调试结束：事件 $n 条（payload ${dropped.get()} 条按 App 的口径丢弃），" +
                 "终止事件=${if (sawTerminal.get()) "有" else "无"}，超时=${timedOut.get()}，退出码=$code")
+        System.err.println(
+            "[appservice] 引擎取回的整页：${engineHtml.result().size} 页（payload " +
+                "${dropped.get()} 条里配上了 ${engineHtml.result().size} 条）")
         System.err.println(
             "[appservice] 命中回填：${urls.size} 个 URL 里记下 ${matched.values.sumOf { it.size }} 段命中" +
                 (if (matchSkipped.get() > 0) "（预算用尽，跳过 ${matchSkipped.get()} 个）" else "") +
@@ -443,7 +464,43 @@ object DebugService {
         }
     }
 
-    // ---------------------------------------------------------------- 命中回填
+    // ---------------------------------------------------------------- 引擎取回的整页
+
+    /**
+     * 把 payload 事件里的**整页 HTML** 按 URL 收起来：`{url: html}`。
+     *
+     * App 每取到一页打**两条**事件——`≡获取成功:<URL>` 紧跟着一条 payload
+     * （`state = 10/20/30/40`，message 就是整页 body）。**这份 HTML 一直都在我们手里**，
+     * 以前按「与设备 WS 同构」整个丢掉（App 自己的 WS 也丢），于是抽屉那份「整页源码」
+     * 只能靠我们另抓一遍（第三期 `matched_html` 是同一个成因的另一半）。
+     *
+     * 两条口径：**每个 URL 只留第一份**（详情页与目录页常常同 URL，后到的那条是同一页）；
+     * 单页超过 [MAX_ENGINE_HTML_CHARS] 截断并写明——超长的多半是整本正文，对
+     * 「看结构 / 写规则」没意义。**不参与「同构」**：它进侧车，不进 NDJSON。
+     */
+    internal class EngineHtmlCollector(
+        private val limit: Int = DebugService.MAX_ENGINE_HTML_CHARS,
+    ) {
+        private val out = LinkedHashMap<String, String>()
+        private var lastUrl = ""
+
+        fun accept(text: String, payload: Boolean) {
+            if (!payload) {
+                DebugService.gotUrlOf(text)?.let { lastUrl = it }
+                return
+            }
+            // payload 不带 URL，靠紧邻的那条 `≡获取成功` 配——**不复刻分段逻辑**
+            //（分段语义只有 Python 那一份；这里只认「最近一页」）
+            if (lastUrl.isEmpty() || out.containsKey(lastUrl)) return
+            out[lastUrl] = if (text.length > limit) {
+                text.take(limit) + "\n…（已截断：整页 " + text.length + " 字符）"
+            } else {
+                text
+            }
+        }
+
+        fun result(): Map<String, String> = out
+    }
 
     /** 事件里的 `≡获取成功:<URL>`：App 每取到一页就打一条（列表 / 详情 / 目录 / 正文
      *  四处各一处）。URL 连 `,{...}` 选项都还在，正好原样交给 `AnalyzeUrl`（它认选项）。 */

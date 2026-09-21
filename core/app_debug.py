@@ -514,6 +514,30 @@ def _split_segments(texts: Sequence[str]) -> List[Dict[str, Any]]:
     return segments
 
 
+def engine_pages(raw: Any) -> Dict[str, str]:
+    """把侧车里的 ``engine_html`` 收敛成 ``{url: 整页 HTML}``。
+
+    **形状不对就整块丢掉并说一声**（与 :func:`matched_map` 同一条纪律，AGENTS #22）：
+    它是「这一页是谁取的」的一条证据，不该把整个结果带走，也不该静默。
+    单页超过 ``quality.MAX_PAGE_HTML_CHARS`` 再截一次——Kotlin 侧已经截过一道（更宽），
+    两处上限不同是有意的（一个是传输、一个是展示）。
+    """
+    if not isinstance(raw, dict):
+        if raw:
+            print("[app_debug] engine_html 形状不对（期望 {url: html}，实测 %s），已忽略"
+                  % type(raw).__name__, file=sys.stderr)
+        return {}
+    out: Dict[str, str] = {}
+    for url, html in raw.items():
+        if not isinstance(html, str) or not html.strip():
+            continue
+        key = str(url).strip()
+        if not key:
+            continue
+        out[key] = html[:Q.MAX_PAGE_HTML_CHARS]
+    return out
+
+
 #: ``matched_html`` 的落库上限：命中的是**整棵子树**，一个 `<div>` 包住整页很常见。
 #: 抽屉里是给人看的（还要能复制去改规则），几万字没有意义、只会把 tooltip 拖垮。
 MAX_MATCHED_CHARS = 20000
@@ -658,12 +682,18 @@ def _fallback_content_url(step: Dict[str, Any], seg_url: Dict[str, str]) -> str:
 
 def fetch_debug_pages(steps: Sequence[Dict[str, Any]], source: Optional[Dict[str, Any]] = None,
                       proxy: str = "", timeout: int = 15,
-                      cache: str = CACHE_AUTO) -> List[Dict[str, Any]]:
+                      cache: str = CACHE_AUTO,
+                      engine_html: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
     """按 steps 抓页面，返回 ``pages[]``（与 verify_chain 同形状）。
 
     只抓「搜索页 / 详情页 / 正文页 / 发现页」各一个——按 ``page_id`` 去重后
     天然 ≤ ``MAX_PAGES`` 个（发现模式是 发现/详情/正文，关键字模式是
     搜索/详情/正文，不会同时出现；上限的余量分析见 ``MAX_PAGES`` 的注释）。
+
+    ``engine_html``：**本机引擎已经交回来的整页**（``{url: 整页}``，来自侧车的
+    ``engine_html``——App 手上那一份，过了它的 JS / cookie / UA）。有它就用它、
+    **一个请求都不发**；没有才由我们补抓。每页记 ``origin``（``engine`` / ``fetch``），
+    界面上要标出来：两份可能不是同一页，而「看源码改规则」正建立在这份材料上。
 
     **必须用书源自己的 header / charset**——与 verify.py 一致：不带书源头抓回来
     的 HTML 是失真的，「看源码改规则」就失去地基。
@@ -716,6 +746,11 @@ def fetch_debug_pages(steps: Sequence[Dict[str, Any]], source: Optional[Dict[str
                     break
             continue
         tried.add(url)
+        # 引擎已经交回来的那份：**一个请求都不发**（那是 App 手上的页面）
+        if (engine_html or {}).get(url):
+            Q.new_page(pages, page_id, url, engine_html[url], charset=charset,
+                       origin="engine")
+            continue
         # URL 可能自带 ``,{...}`` 请求选项（method/headers/body）——与 App 同一
         # 套语法，抓取前拆出来应用，否则带选项的链接会被当成 GET 发出去，
         # 抓回来的往往不是 App 看到的那份
@@ -746,7 +781,7 @@ def fetch_debug_pages(steps: Sequence[Dict[str, Any]], source: Optional[Dict[str
             _note(step, "页面抓取失败（%s），本步判定不受影响" % e)
             continue
         Q.new_page(pages, page_id, url, f.html, charset=charset,
-                   fetched_at=f.fetched_at, cached=f.cached)
+                   fetched_at=f.fetched_at, cached=f.cached, origin="fetch")
     return list(pages.values())
 
 

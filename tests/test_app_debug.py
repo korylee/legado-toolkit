@@ -18,6 +18,7 @@ from unittest.mock import patch
 
 from core import quality as Q
 from core.app_debug import (
+    engine_pages,
     MAX_MATCHED_CHARS, MAX_PAGES, PAGE_IDS, build_steps, collect_debug_events,
     fetch_debug_pages, matched_map, run_app_debug,
 )
@@ -808,6 +809,47 @@ class TestQualityNewPageShared(unittest.TestCase):
 #   M7  ``MAX_PAGES`` 3 → 4
 #       → 2 条变红：test_pages_have_verify_chain_shape、
 #         test_explore_chain_keeps_four_steps_to_three_pages（上限两个方向都有用例守）
+
+class EnginePagesTests(unittest.TestCase):
+    """引擎取回来的整页（`engine_html`）：形状闸门 + `pages[]` 优先用它。
+
+    为什么要钉「**不发请求**」：这条链的价值就在「那是 App 手上那份」（过了它的
+    JS / cookie / UA）。要是实现里回落到我们补抓，界面上照样有一页、看起来一切正常——
+    而那正是「看源码改规则」失地基的那种错（材料换了，没人知道）。
+    """
+
+    def test_shape_gate(self):
+        self.assertEqual(engine_pages(None), {})
+        self.assertEqual(engine_pages("nope"), {}, "形状不对整块丢掉")
+        self.assertEqual(engine_pages([]), {})
+        self.assertEqual(engine_pages({"https://a.com": ""}), {}, "空页丢掉")
+        self.assertEqual(engine_pages({"https://a.com": 123}), {}, "非字符串丢掉")
+        self.assertEqual(engine_pages({"": "<html/>"}), {}, "空 URL 丢掉")
+        self.assertEqual(engine_pages({"https://a.com": "<html>x</html>"}),
+                         {"https://a.com": "<html>x</html>"})
+
+    def _steps(self):
+        return [{"name": "search", "url": "https://a.com/s", "page_id": "search"}]
+
+    def test_engine_copy_is_used_without_any_request(self):
+        def boom(*a, **kw):
+            raise AssertionError("引擎已经给了这一页，不该再发请求")
+
+        with patch("core.app_debug.fetch_ex", side_effect=boom):
+            pages = fetch_debug_pages(self._steps(), {},
+                                      engine_html={"https://a.com/s": "<html>引擎给的</html>"})
+        self.assertEqual(len(pages), 1)
+        self.assertEqual(pages[0]["html"], "<html>引擎给的</html>")
+        self.assertEqual(pages[0]["origin"], "engine")
+
+    def test_fallback_still_marks_the_origin_as_ours(self):
+        with patch("core.app_debug.fetch_ex",
+                   side_effect=lambda *a, **k: Fetched("<html>我们抓的</html>", False, "t")):
+            pages = fetch_debug_pages(self._steps(), {}, engine_html={})
+        self.assertEqual(pages[0]["html"], "<html>我们抓的</html>")
+        self.assertEqual(pages[0]["origin"], "fetch")
+        self.assertEqual(pages[0]["fetched_at"], "t")
+
 
 if __name__ == "__main__":
     unittest.main()

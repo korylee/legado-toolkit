@@ -83,7 +83,9 @@ class _RunCase(unittest.TestCase):
         self._patch("default_launcher", lambda notes: jvm_debug._run_launcher)
         self.launcher_calls = []
 
-    def _fetch_pages(self, steps, source, proxy="", cache="auto"):
+    def _fetch_pages(self, steps, source, proxy="", cache="auto", engine_html=None):
+        # 签名要跟真实现走（多一个 `engine_html`）——**漏了不会报错**：`run_jvm_debug`
+        # 把补抓的异常吞掉（那是有意的：证据失败不带走判定），于是这里会静默变成空页
         self._patched_pages.append(cache)
         return [{"id": "detail", "html": "<html></html>"}]
 

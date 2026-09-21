@@ -1093,9 +1093,20 @@ function copyPage() {
             <!-- 页面来源：调试默认吃缓存，这一份 HTML 可能是**几分钟前**抓的。
                  不标出来的话，用户会把它当成刚抓的——那正是「看着正常、答的不是
                  你问的那件事」那一类问题 -->
-            <p v-if="currentPage.fetched_at" style="margin: 0 0 8px">
-              <span class="muted">页面抓取于 {{ currentPage.fetched_at }}</span>
+            <p v-if="currentPage.fetched_at || currentPage.origin === 'engine'"
+               style="margin: 0 0 8px">
+              <span v-if="currentPage.fetched_at" class="muted">
+                页面抓取于 {{ currentPage.fetched_at }}
+              </span>
+              <!-- **这一页是谁取回来的**：引擎给的是 **App 手上那份**（过了它的 JS /
+                   cookie / UA），我们补抓的是另一条 HTTP 栈、没有登录态——两份可能不是
+                   同一页，而「看源码改规则」正建立在这份材料上 -->
               <el-tag size="small" style="margin-left: 6px"
+                      :type="currentPage.origin === 'engine' ? 'primary' : 'info'">
+                {{ currentPage.origin === "engine" ? "本机引擎取回" : "我们抓到的" }}
+              </el-tag>
+              <el-tag v-if="currentPage.origin !== 'engine'" size="small"
+                      style="margin-left: 4px"
                       :type="currentPage.cached ? 'warning' : 'success'">
                 {{ currentPage.cached ? "来自缓存" : "本次新抓" }}
               </el-tag>

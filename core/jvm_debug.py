@@ -25,7 +25,7 @@ import threading
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from core.app_debug import build_steps, fetch_debug_pages, matched_map
+from core.app_debug import build_steps, engine_pages, fetch_debug_pages, matched_map
 from core.fetch import CACHE_AUTO
 from core.paths import ARGS_PARTS, data_path
 
@@ -256,7 +256,10 @@ def run_jvm_debug(source: Dict[str, Any],
         steps[0]["notes"] = list(steps[0]["notes"]) + launch_notes
         steps[0]["has_notes"] = True
     try:
-        out["pages"] = fetch_debug_pages(steps, src, proxy=proxy, cache=cache)
+        # 引擎取回来的整页（侧车里的 `engine_html`，见 DebugService.EngineHtmlCollector）：
+        # 有它就用它——**那是 App 手上的那份**，比我们另抓一遍真，而且不用再发请求
+        out["pages"] = fetch_debug_pages(steps, src, proxy=proxy, cache=cache,
+                                         engine_html=engine_pages(meta.get("engine_html")))
     except Exception as e:
         # 补证据失败绝不能把已经拿到的判定丢掉（与设备通道同一立场）
         if steps:
