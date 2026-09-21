@@ -309,7 +309,7 @@ def build_report(results: List[Dict[str, Any]]) -> str:
     for r in results:
         if r.get("status") not in ("fixed", "failed", "login_wall"):
             continue
-        L.append("### %s  `%s`" % (r.get("name") or "(无名)", r.get("url") or ""))
+        L.append("### %s  `%s`" % (r.get("name") or "（无名）", r.get("url") or ""))
         L.append("")
         L.append("- 结果：**%s**（%d 轮）" % (labels.get(r.get("status"), r.get("status")), r.get("rounds", 0)))
         for page in (r.get("evidence") or {}).get("login_wall") or []:

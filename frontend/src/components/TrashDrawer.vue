@@ -124,7 +124,7 @@ async function purgeAll() {
               @selection-change="(v) => (selected = v)">
       <el-table-column type="selection" width="42" />
       <el-table-column prop="name" label="名称" min-width="150" show-overflow-tooltip>
-        <template #default="{ row }">{{ row.name || "(无名)" }}</template>
+        <template #default="{ row }">{{ row.name || "（无名）" }}</template>
       </el-table-column>
       <el-table-column label="类型" width="88" align="center">
         <template #default="{ row }">

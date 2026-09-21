@@ -171,7 +171,7 @@ defineExpose({ refresh: load });
                 <div v-for="(c, i) in details[row.id].changedItems" :key="'c' + i" class="chg">
                   <!-- 名字可能重复、也可能为空，**地址才是源的身份**——所以它直接
                        显示出来而不是塞进 tooltip（原来只有悬停才看得到，等于没给） -->
-                  <span class="nm" :title="c.name">{{ c.name || "(无名)" }}</span>
+                  <span class="nm" :title="c.name">{{ c.name || "（无名）" }}</span>
                   <span class="muted url" :title="c.url">{{ c.url }}</span>
                   <span class="muted">{{ healthLabel(c.from) }}</span>
                   <span class="muted">→</span>

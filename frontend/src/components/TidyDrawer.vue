@@ -181,7 +181,7 @@ function toggleGroup(key, on) {
 }
 
 function memberLabel(m) {
-  return [m.name || "(无名)", m.host, HEALTH_LABELS[m.health] || m.health || "未校验",
+  return [m.name || "（无名）", m.host, HEALTH_LABELS[m.health] || m.health || "未校验",
           m.stars ? m.stars + "★" : "", m.checked_at || ""].filter(Boolean).join(" · ");
 }
 
@@ -311,7 +311,7 @@ watch(() => props.modelValue, (v) => {
              :class="{ on: checked.has(r.url) }" @click="toggle(r)">
           <el-checkbox :model-value="checked.has(r.url)" @click.prevent.stop="toggle(r)" />
           <div class="names">
-            <div class="old">{{ r.old_name || "(无名)" }}</div>
+            <div class="old">{{ r.old_name || "（无名）" }}</div>
             <div class="new">{{ r.new_name }}</div>
           </div>
           <el-tag size="small" :type="confType(r.confidence)">
@@ -384,7 +384,7 @@ watch(() => props.modelValue, (v) => {
               <span class="muted">保留</span>
             </el-radio>
             <div class="names">
-              <div class="new">{{ m.name || "(无名)" }}</div>
+              <div class="new">{{ m.name || "（无名）" }}</div>
               <div class="muted mono url">{{ m.url }}</div>
             </div>
             <el-tag v-if="picks[g.key] === i" size="small" type="success">保留这条</el-tag>
