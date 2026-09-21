@@ -48,7 +48,7 @@ import urllib.parse
 import urllib.request
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from core import page_layer
+from core import js_hints
 from core import quality as Q
 from core.fetch import CACHE_AUTO, CacheMiss, fetch_ex, parse_source_header
 from core.urls import abs_url, split_url_options
@@ -797,10 +797,19 @@ def fetch_debug_pages(steps: Sequence[Dict[str, Any]], source: Optional[Dict[str
     # **判层**（一份判据，两个消费者）：判完挂在 `pages[].page_layer` 上——
     # 前端只渲染它，生成链（`services/add_source`）判「这一段要不要引擎取」也读它。
     # 放在这里而不是两个消费者各判一遍：判据在两处必然漂（AGENTS #7/#8）。
+    #
+    # **判到 L2 / 判不了时会再看页面引用的那几份脚本**（`core/js_hints`）：站点把取数 /
+    # 解密逻辑放 bundle 里时页面 HTML 上一个痕迹都没有——实测小爱漫画章节页就这么被判低
+    # 了一档（2026-09-21）。**两条通道走同一个函数**，否则同一页会在抽屉与生成链里被判成
+    # 两层；它只在轻判落在 L2 / 判不了时发生，L1 的页一次额外请求都不发。取脚本用
+    # `fetch_ex`：**只读缓存模式照旧生效**（缓存里没有就跳过，并在证据里留一行原因）。
     src_type = Q.safe_int((source or {}).get("bookSourceType", 0))
     for page in pages.values():
-        page["page_layer"] = page_layer.classify_page(
-            page.get("html") or "", want_of_page(str(page.get("id") or ""), src_type))
+        deep = js_hints.classify_with_scripts(
+            page.get("html") or "", want_of_page(str(page.get("id") or ""), src_type),
+            str(page.get("url") or ""),
+            fetcher=lambda u: fetch_ex(u, proxy=proxy, cache=cache).html)
+        page["page_layer"] = deep["verdict"]
     return list(pages.values())
 
 
