@@ -221,5 +221,44 @@ class TestMatchedStepNameParity(unittest.TestCase):
         self.assertEqual(got, MATCHED_NODES_LIMIT, "两侧的命中节点上限漂了")
 
 
+class TestWebViewMarkerParity(unittest.TestCase):
+    """「这条源带 webView 标记吗」两侧必须**同一个词**。
+
+    为什么要有这条：Kotlin 用它在侧车里记 `webview_unsupported`（那条诊断说「撞上
+    shadow 的三条边界时这几段不可信」），前端用它在定层里判 L2
+    （`frontend/src/utils/layers.js`）。两边各改一边的后果不是报错，是**同一个源在两个
+    地方被分成两层**——用户照着界面换通道，跑到侧车里却是另一种说法（AGENTS #22⑤）。
+
+    对照的是**源码字面量**（不跑 Kotlin、也不跑 JS），与 `TestLoginMarkerParity` 同一套路。
+    """
+
+    KOTLIN = (pathlib.Path(__file__).parent.parent /
+              "appservice/test/io/legado/app/service/DebugService.kt")
+    JS = (pathlib.Path(__file__).parent.parent /
+          "frontend/src/utils/layers.js")
+
+    def test_the_pattern_is_the_same_on_both_sides(self):
+        bs = '\\'
+        kt = self.KOTLIN.read_text(encoding="utf-8")
+        block = kt.split("Regex(", 1)
+        self.assertEqual(len(block), 2, "DebugService.kt 里找不到 webViewPattern")
+        kt_pat = block[1].split(",", 1)[0].strip().strip('"')
+        # 两侧**写法**不同、**判据**要一样，比之前各自归一：
+        #   Kotlin 是字符串字面量 → `BS"` 才是引号、`BSBSs` 才是正则的 `BSs`
+        #   JS 是正则字面量       → 直接写 `"` 与 `BSs`
+        kt_pat = kt_pat.replace(bs + bs, bs).replace(bs + '"', '"')
+
+        js = self.JS.read_text(encoding="utf-8")
+        lines = [ln for ln in js.splitlines() if "WEBVIEW_RE = " in ln]
+        self.assertEqual(len(lines), 1, "layers.js 里找不到 WEBVIEW_RE")
+        body = lines[0].split("WEBVIEW_RE = /", 1)[1]
+        js_pat, _, flags = body.rpartition("/")
+        js_pat = js_pat.replace(bs + bs, bs)
+
+        self.assertEqual(js_pat, kt_pat, "两侧的 webView 判据漂了")
+        self.assertIn("i", flags, "大小写不敏感要写在两边（Kotlin 是 IGNORE_CASE）")
+        self.assertIn("IGNORE_CASE", kt)
+
+
 if __name__ == "__main__":
     unittest.main()

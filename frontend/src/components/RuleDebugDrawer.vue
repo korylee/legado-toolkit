@@ -27,6 +27,8 @@ import { STEP_LABELS } from "../utils/steps";
 import { FIELD_OF_STEP, findCandidates } from "../utils/ruleCandidates";
 // 源码的显示层（折行缩进 + 实体展开，纯函数）：好看的和能抄的是两份东西，见 htmlView
 import { formatHtml } from "../utils/htmlView";
+// 定层（九-1）：先定层再写规则——判据与证据行都在纯函数里，这里只负责把「这一步要什么」传进去
+import { classifyLayer } from "../utils/layers";
 
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
@@ -38,6 +40,9 @@ const props = defineProps({
   //: 源有没有声明 cookie jar。登录墙判定要用它：那一档「200 + 登录词」以它为前提
   //: （「请登录」在正常页面的导航栏里太常见）
   enabledCookieJar: { type: Boolean, default: false },
+  //: 完整源对象（表单里那份）：定层要读源**自己声明的能力**——`ruleContent.webJs` /
+  //: `loginUrl` / URL 规则里的 `webView`（AGENTS #13：能推导的别让用户填）
+  source: { type: Object, default: null },
   //: 「从此步重跑」在途（父组件的 appDebugging）。重跑是 App 实测动作，
   //: 在途时按钮要转圈、并挡住连点——两次分段调试的 WS 会话会互相顶掉
   rerunning: { type: Boolean, default: false },
@@ -312,30 +317,17 @@ const want = computed(() => {
   return w;
 });
 
+//: 定层（九-1）：**这一页 + 这个源** → 层 + 证据行 + 页面统计。
+//: 判据、门槛、证据抓法都在 `utils/layers.js`（纯函数，有 node 断言）——这里只是调用点，
+//: **不要在组件里另写一份**（原来那几个统计就长在这儿，容易与那边漂）
+const layer = computed(() => classifyLayer(
+  (currentPage.value || {}).html || "", props.source || null, { want: want.value }));
 //: 补抓页面上的节点统计。「你要的东西这页上到底有没有」全靠它——
 //: 没有的话，选择器改多少遍都取不到
-const pageStats = computed(() => {
-  const html = (currentPage.value || {}).html || "";
-  if (!html) return null;
-  const low = html.toLowerCase();
-  return {
-    links: (low.match(/<a[\s>][^>]*href=/g) || []).length,
-    images: (low.match(/<img[\s/>]/g) || []).length,
-    // 只有「有值的 src」才算真能取到的图：`<img src="">` 是 JS 注入留下的占位
-    imagesWithSrc: (html.match(/<img[\s>][^>]*src=["'](?!["'])/gi) || []).length,
-    textLen: html.replace(/<[^>]+>/g, "").replace(/\s+/g, "").length,
-  };
-});
-
-//: 这一页上有没有「你要的那个东西」。
-//: 门槛取粗一点没关系——它只用来挡住「怎么改选择器都取不到」这一种死路
+const pageStats = computed(() => (layer.value.page || {}).stats || null);
 const hasWanted = computed(() => {
-  const st = pageStats.value;
-  if (!st || !want.value) return null;
-  if (want.value.kind === "media") return st.imagesWithSrc > 1;   // >1：排除只有 logo 的情况
-  if (want.value.kind === "link") return st.links > 0;
-  if (want.value.kind === "list") return st.links > 0 || st.images > 0;
-  return st.textLen > 200;
+  const got = (layer.value.page || {}).hasWanted;
+  return got === undefined ? null : got;
 });
 
 // —— 第 1 层：在页面上找目标 ——
@@ -631,6 +623,24 @@ function copyPage() {
     <el-empty v-if="!steps.length" description="没有调试结果" :image-size="80" />
 
     <template v-else>
+      <!-- 定层横幅（九-1）：**先定层，再写规则**。摆在这儿是因为它改变的是「下一步做什么」
+           ——L1 写选择器就能过，L2/L3 得换通道，L4 要抓接口。证据行一并列出来，
+           用户要能反驳它（「你说加密，哪一行看出来的」） -->
+      <div v-if="isEngineResult && (layer.layer || layer.unsure)" class="layer-banner">
+        <el-tag v-if="layer.layer" size="small"
+                :type="layer.layer === 'L1' ? 'success' : 'warning'">{{ layer.info.name }}</el-tag>
+        <el-tag v-else size="small" type="info">未定层</el-tag>
+        <span class="layer-action">{{ layer.info ? layer.info.action : layer.unsure }}</span>
+        <ul v-if="layer.evidence.length" class="layer-ev">
+          <li v-for="(e, i) in layer.evidence" :key="i">
+            <span class="layer-why">{{ e.why }}</span>
+            <span v-if="e.line" class="muted">（原文第 {{ e.line }} 行）</span>
+            <span class="muted"> · {{ e.note }}</span>
+            <code class="layer-snippet">{{ e.snippet }}</code>
+          </li>
+        </ul>
+      </div>
+
       <div class="debug-step-tabs">
         <!-- 高亮要跟着「实际显示的那一步」（current 在 activeStep 失效时会回退到
              steps[0]），否则重跑后会出现「有内容、没有任何页签高亮」 -->
