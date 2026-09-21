@@ -59,6 +59,15 @@ class ShadowBackstageWebView {
         val lastCookieNote = AtomicReference("")
         val lastRenderMs = AtomicLong(0)
         val lastReason = AtomicReference("")
+        /** L4 的材料：这一页**实际发过的接口请求**（XHR / Fetch，见 `BrowserBridge.networkRequests`）。
+         *  写进侧车的 `network` 键；Python 侧只认形状（形状不对整块丢掉）。 */
+        @Volatile
+        var lastNetwork: List<Map<String, Any?>>? = null
+        /** 流过来的 `Network.*` 事件条数（0 = 域没启用 / 事件没到，与「页面没发接口」分得开）。 */
+        @Volatile
+        var lastNetworkEvents: Int = 0
+        @Volatile
+        var lastNetworkTypes: String = ""
 
         /** 关掉就退回真实现——做对照实验用（不做对照就证明不了差异来自 shadow）。 */
         @Volatile
@@ -71,6 +80,7 @@ class ShadowBackstageWebView {
         fun reset() {
             calls.set(0); lastUrl.set(""); lastJsLen.set(0); lastIsRule.set(false)
             rendered.set(0); lastRenderMs.set(0L); lastReason.set("")
+            lastNetwork = null; lastNetworkEvents = 0; lastNetworkTypes = ""
             lastCookieLen.set(0); lastCookieNote.set("")
         }
     }
@@ -143,6 +153,9 @@ class ShadowBackstageWebView {
         }
         rendered.incrementAndGet()
         lastReason.set("")
+        lastNetwork = r.network
+        lastNetworkEvents = r.networkEvents
+        lastNetworkTypes = r.networkTypes
         // A3：**渲染完顺手把这一页的 cookie 收进 `CookieStore`**——上游
         // `BackstageWebView.setCookie()` 就是这一步（`onPageFinished` → 取 WebView 的
         // cookie → `CookieStore.setCookie(tag, cookie)`），区别只是我们的来源是 CDP

@@ -26,7 +26,8 @@ import urllib.parse
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from core.app_debug import build_steps, engine_pages, fetch_debug_pages, matched_map
+from core.app_debug import (build_steps, engine_pages, fetch_debug_pages, matched_map,
+                            network_entries)
 from core.fetch import CACHE_AUTO
 from core.paths import ARGS_PARTS, data_path
 
@@ -162,7 +163,8 @@ def default_launcher(notes: List[str]) -> Callable[[], Tuple[int, float, str, st
                                          fallback_name="Gradle")
 
 
-def page_from_engine(url: str, *, timeout: int = 60, render: bool = True) -> str:
+def page_from_engine(url: str, *, timeout: int = 60, render: bool = True,
+                     with_requests: bool = False):
     """**让引擎去取这一页，把 App 手上那份 HTML 交回来**（十-5 的编排用）。
 
     临时源是**一次性的**：`发现::<url>` 让 App 走「发现」分支去取这个地址，源里不需要任何
@@ -192,7 +194,11 @@ def page_from_engine(url: str, *, timeout: int = 60, render: bool = True) -> str
         raise RuntimeError(out.get("error") or
                            ("引擎这次没把这一页交回来（%s）"
                             % (out.get("code_text") or "未见输出")))
-    return str(hit.get("html") or "")
+    html = str(hit.get("html") or "")
+    if with_requests:
+        # L4 的材料：这一页**实际发过的接口请求**（侧车 `network` 键，L4 说明见 `core/net_hunt`）
+        return html, list(out.get("network") or [])
+    return html
 
 
 def run_jvm_debug(source: Dict[str, Any],
@@ -299,6 +305,9 @@ def run_jvm_debug(source: Dict[str, Any],
         if steps:
             steps[0]["notes"] = list(steps[0]["notes"]) + ["页面抓取整体失败：%s" % e]
             steps[0]["has_notes"] = True
+    # 抓包（侧车 `network` 键）：L4 的材料。形状闸门在 `core/app_debug.network_entries`，
+    # 它与 `pages[]` 一样是**证据**——坏了整块丢掉，但绝不带走已经拿到的判定
+    out["network"] = network_entries(meta.get("network"))
     out["steps"] = steps
     out["all_ok"] = all(s["ok"] for s in steps)
     if code == 2:

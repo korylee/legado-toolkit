@@ -60,7 +60,16 @@ object BrowserBridge {
      */
     data class Result(val ok: Boolean, val body: String = "", val reason: String = "",
                       /** 落地地址（重定向后）。取不到时回退请求地址。 */
-                      val url: String = "")
+                      val url: String = "",
+                      /** 这一页**实际发过的接口请求**（XHR / Fetch，有上界）。见 [collectNetwork]。
+                       *  **必须是普通 Map / List**：侧车编码器（`ServiceJson.element`）只递归
+                       *  List / Map，`org.json.JSONArray` 会落到 `toString()` 那支——于是侧车里
+                       *  存的是一个**字符串**，Python 侧的形状闸门只会说「形状不对」。 */
+                      val network: List<Map<String, Any?>>? = null,
+                      /** 流过来的 `Network.*` 事件条数（诊断：0 = 域没启用或事件没到）。 */
+                      val networkEvents: Int = 0,
+                      /** 请求按类型的计数（`XHR=0,Document=1,…`）：让「没抓到接口」自解释。 */
+                      val networkTypes: String = "")
 
     fun findBrowser(): String? = CANDIDATES.firstOrNull { File(it).isFile }
 
@@ -264,23 +273,38 @@ object BrowserBridge {
         val wsUrl = page.optString("webSocketDebuggerUrl")
         if (wsUrl.isEmpty()) return Result(false, reason = "cdp_error: 页签没有调试地址")
 
-        val inbox = LinkedBlockingQueue<String>()
+        // **把流过的每条 CDP 消息顺手抄一份**：三个 helper（send / awaitEvent / eval）各自
+        // 都只认自己那条应答、其余一律丢掉，而网络事件（`Network.*`）正是「其余」那一类。
+        // 抄在这里是**零侵入**：不去改那三个 helper 的匹配语义（它们的行为一个字没动）。
+        val tapped = java.util.Collections.synchronizedList(mutableListOf<String>())
+        val tapQueue = object : LinkedBlockingQueue<String>() {
+            override fun offer(e: String): Boolean {
+                tapped.add(e)
+                return super.offer(e)
+            }
+        }
         val ws: WebSocket = wsClient.newWebSocket(
             Request.Builder().url(wsUrl).build(),
             object : WebSocketListener() {
-                override fun onMessage(webSocket: WebSocket, text: String) { inbox.offer(text) }
+                override fun onMessage(webSocket: WebSocket, text: String) {
+                    tapQueue.offer(text)
+                }
                 override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                    inbox.offer("""{"__error":"${t::class.simpleName}: ${t.message}"}""")
+                    tapQueue.offer("""{"__error":"${t::class.simpleName}: ${t.message}"}""")
                 }
             })
         try {
-            if (!send(ws, 1, "Page.enable", null, inbox, timeoutMs)) {
+            if (!send(ws, 1, "Page.enable", null, tapQueue, timeoutMs)) {
                 return Result(false, reason = "cdp_error: Page.enable 无响应")
             }
+            // 网络域：默认**开着**（上界很小，见 NET_* 常量）。为什么不设开关：这个开关要
+            // 一路穿过 App 的 `AnalyzeUrl` → `BackstageWebView`，那几层不是我们的代码；
+            // 而抓包本身很便宜（只留 XHR / Fetch、条数与字节都有上界）。
+            send(ws, 3, "Network.enable", null, tapQueue, timeoutMs)
             val params = JSONObject().put("url", url)
             ws.send(JSONObject().put("id", 2).put("method", "Page.navigate")
                 .put("params", params).toString())
-            val loaded = awaitEvent(inbox, setOf("Page.loadEventFired", "Page.domContentEventFired"),
+            val loaded = awaitEvent(tapQueue, setOf("Page.loadEventFired", "Page.domContentEventFired"),
                                     timeoutMs)
             if (!loaded) {
                 return Result(false, reason = "render_timeout: ${timeoutMs}ms 内没有 load 事件")
@@ -289,18 +313,18 @@ object BrowserBridge {
             // 等文档真的 complete 再取 HTML（SPA 常有二次渲染）
             val end = System.currentTimeMillis() + 5000
             while (System.currentTimeMillis() < end) {
-                if (eval(ws, 10, "document.readyState", inbox, 5000) == "complete") break
+                if (eval(ws, 10, "document.readyState", tapQueue, 5000) == "complete") break
                 Thread.sleep(200)
             }
             // 求值表达式：给了 js 就用它，否则仍是整页 outerHTML（原有行为）
             val expr = js?.takeIf { it.isNotBlank() } ?: "document.documentElement.outerHTML"
-            var body = eval(ws, 11, expr, inbox, timeoutMs)
+            var body = eval(ws, 11, expr, tapQueue, timeoutMs)
             // App 的重试纪律：**空结果要重试**，而不是收工（理由见函数注释）
             var tries = 0
             while (body.isNullOrEmpty() && tries < jsRetryTimes) {
                 tries++
                 Thread.sleep(jsRetryIntervalMs)
-                body = eval(ws, 11 + tries, expr, inbox, timeoutMs)
+                body = eval(ws, 11 + tries, expr, tapQueue, timeoutMs)
             }
             // **反爬拦截页要等它自己再来一次导航**（Cloudflare 那类 JS 挑战）：挑战页的
             // `load` 与 `document.readyState == complete` **都成立**，照上面那条路会稳定取到
@@ -317,31 +341,31 @@ object BrowserBridge {
             var seq = 20
             // 判据并上：先问 App 那一句（页面里的真实状态），再退回词表（通用）
             fun stillChallenge(): Boolean {
-                val probe = runCatching { eval(ws, seq++, CF_CHALLENGE_PROBE, inbox, 3000) }
+                val probe = runCatching { eval(ws, seq++, CF_CHALLENGE_PROBE, tapQueue, 3000) }
                     .getOrNull().orEmpty()
                 return isChallenge(body.orEmpty(), probe)
             }
             while (js == null && waitedMs < challengeWaitMs && stillChallenge()) {
                 val t0 = System.currentTimeMillis()
-                val again = awaitEvent(inbox, setOf("Page.loadEventFired"),
+                val again = awaitEvent(tapQueue, setOf("Page.loadEventFired"),
                                        challengeWaitMs - waitedMs)
                 waitedMs += System.currentTimeMillis() - t0
                 if (!again) break                    // 它不再加载了：别再耗着
                 // 挑战通过后的那次加载同样可能有二次渲染，等 complete 再取
                 val end2 = System.currentTimeMillis() + 5000
                 while (System.currentTimeMillis() < end2) {
-                    if (eval(ws, seq, "document.readyState", inbox, 5000) == "complete") break
+                    if (eval(ws, seq, "document.readyState", tapQueue, 5000) == "complete") break
                     Thread.sleep(200)
                 }
                 seq++
-                body = eval(ws, seq, expr, inbox, timeoutMs)
+                body = eval(ws, seq, expr, tapQueue, timeoutMs)
                 seq++
             }
             // 落地地址：App 的 buildStrResponse 用的是 WebView 跳转后的地址（`res.url`），
             // 事件流里的 `≡获取成功:<URL>` 就是它——不取这个的话，重定向的站点会报
             // 请求前的地址。取不到就退回请求地址（只是少一点信息，不判失败）。
             // **id 取 900**：20 起那些 id 归挑战等待循环用，别撞上（CDP 的应答按 id 过滤）
-            val finalUrl = runCatching { eval(ws, 900, "location.href", inbox, 5000) }
+            val finalUrl = runCatching { eval(ws, 900, "location.href", tapQueue, 5000) }
                 .getOrNull()?.takeIf { it.isNotBlank() } ?: url
             if (isBrowserError(finalUrl, body.orEmpty())) {
                 // **交出去的是失败，不是页面**：错误页当站点用比「没拿到」更糟
@@ -350,7 +374,10 @@ object BrowserBridge {
                     finalUrl.take(60) + "），不是站点", url = finalUrl)
             }
             return when {
-                !body.isNullOrEmpty() -> Result(true, body = body, url = finalUrl)
+                !body.isNullOrEmpty() -> Result(true, body = body, url = finalUrl,
+                    network = collectNetwork(ws, tapped.toList(), tapQueue, 5000),
+                    networkEvents = networkEventCount(tapped.toList()),
+                    networkTypes = networkTypeCount(tapped.toList()))
                 jsRetryTimes > 0 -> Result(false, reason = "js_empty: 求值 $tries 次仍为空",
                                            url = finalUrl)
                 else -> Result(false, reason = "render_empty: 渲染后 DOM 为空", url = finalUrl)
@@ -402,6 +429,139 @@ object BrowserBridge {
         if (cfProbe.trim().equals("true", ignoreCase = true)) return true
         val low = html.lowercase()
         return CHALLENGE_MARKERS.any { low.contains(it.lowercase()) }
+    }
+
+    // ---------------------------------------------------------------- 网络抓包（L4 的材料）
+
+    /** 最多记几条接口请求（这一页的 XHR / Fetch；超出的丢掉并记数）。 */
+    private const val NET_LIMIT = 20
+    /** 单条响应体的上限（字符）。整页 HTML 接口（有的站搜索页本身就是文档）也够用。 */
+    private const val NET_BODY_LIMIT = 256 * 1024
+    /** 只记「文本类」响应——图片 / 字体那些抓回来也没法当规则材料。 */
+    private val NET_MIME_OK = listOf("json", "text/", "javascript", "xml", "html")
+
+    /**
+     * 从抓到的 CDP 消息里**挑出这一页实际发过的接口请求**：XHR / Fetch，配成
+     * `{url, method, body?, status, mime, requestId}`。
+     *
+     * **为什么是「观察」而不是「读 JS 猜」**：2026-09-21 那一轮实测说明，需要这条路线的站，
+     * 其接口地址往往在外部 bundle 里拼、带签名或 POST body——而且**页面 HTML 我们常常根本拿不到**
+     * （403 / Cloudflare）。而浏览器真发出去的那条请求，地址、方法、body 都是现成的。
+     *
+     * 纯函数（只吃字符串列表），所以它有自己的单测；**取响应体**那一步要 CDP 往返，
+     * 在 [collectNetwork] 里做。
+     */
+    /**
+     * 抓到的请求按类型计数（`Document` / `XHR` / `Image`…）。
+     *
+     * **为什么要报这个**：`network` 空有两种意思——「这一页真没发接口」与「抓包没生效」，
+     * 光看条数分不开（与 `dropped_payload` 同一条纪律：把看不见的事实报出来）。
+     */
+    internal fun networkTypeCount(messages: List<String>): String {
+        val counter = LinkedHashMap<String, Int>()
+        for (msg in messages) {
+            val o = runCatching { JSONObject(msg) }.getOrNull() ?: continue
+            if (o.optString("method") != "Network.requestWillBeSent") continue
+            val type = o.optJSONObject("params")?.optString("type").orEmpty().ifEmpty { "Other" }
+            counter[type] = (counter[type] ?: 0) + 1
+        }
+        return counter.entries.sortedByDescending { it.value }
+            .joinToString(",") { "${it.key}=${it.value}" }
+    }
+
+    internal fun networkEventCount(messages: List<String>): Int {
+        var n = 0
+        for (msg in messages) {
+            val o = runCatching { JSONObject(msg) }.getOrNull() ?: continue
+            if (o.optString("method").startsWith("Network.")) n++
+        }
+        return n
+    }
+
+    internal fun networkRequests(messages: List<String>, limit: Int = NET_LIMIT): List<Map<String, Any?>> {
+        val sent = LinkedHashMap<String, MutableMap<String, Any?>>()
+        for (msg in messages) {
+            val o = runCatching { JSONObject(msg) }.getOrNull() ?: continue
+            val params = o.optJSONObject("params") ?: continue
+            when (o.optString("method")) {
+                "Network.requestWillBeSent" -> {
+                    val req = params.optJSONObject("request") ?: continue
+                    val id = params.optString("requestId")
+                    if (id.isEmpty() || sent.containsKey(id)) continue
+                    // **只留 XHR / Fetch**：文档 / 图片 / 脚本不是「接口」，留着只会把上限挤掉
+                    val type = params.optString("type")
+                    if (type != "XHR" && type != "Fetch") continue
+                    if (sent.size >= limit) continue
+                    val item = mutableMapOf<String, Any?>(
+                        "requestId" to id,
+                        "url" to req.optString("url"),
+                        "method" to req.optString("method", "GET"),
+                        "post_data" to req.optString("postData", ""),
+                        "status" to 0,
+                        "mime" to "",
+                    )
+                    sent[id] = item
+                }
+                "Network.responseReceived" -> {
+                    val id = params.optString("requestId")
+                    val item = sent[id] ?: continue
+                    val resp = params.optJSONObject("response") ?: continue
+                    item["status"] = resp.optInt("status", 0)
+                    item["mime"] = resp.optString("mimeType", "")
+                }
+            }
+        }
+        return sent.values.map { it as Map<String, Any?> }
+    }
+
+    /**
+     * 取回上面挑出来的请求的响应体，附在 `body` 字段上（只取文本类，有上界）。
+     *
+     * `Network.getResponseBody` 必须在响应还在内存里时问（页面导航 / 清缓存之后就没了），
+     * 所以这一步紧跟在渲染之后做。
+     */
+    private fun collectNetwork(ws: WebSocket, messages: List<String>,
+                               inbox: LinkedBlockingQueue<String>,
+                               timeoutMs: Long): List<Map<String, Any?>> {
+        val out = mutableListOf<Map<String, Any?>>()
+        var id = 700
+        for (item in networkRequests(messages)) {
+            val mime = item["mime"] as? String ?: ""
+            val status = (item["status"] as? Int) ?: 0
+            if (status !in 200..399) continue
+            if (NET_MIME_OK.none { mime.lowercase().contains(it) }) continue
+            val rid = item["requestId"] as? String ?: continue
+            val got = runCatching {
+                evalJson(ws, id++, "Network.getResponseBody",
+                         JSONObject().put("requestId", rid), inbox, timeoutMs)
+            }.getOrNull() ?: continue
+            val raw = got.optString("body", "")
+            val encoded = got.optBoolean("base64Encoded", false)
+            val text = if (encoded) runCatching {
+                String(java.util.Base64.getDecoder().decode(raw), Charsets.UTF_8)
+            }.getOrDefault("") else raw
+            if (text.isEmpty()) continue
+            val row = LinkedHashMap<String, Any?>()
+            for ((k, v) in item) if (k != "requestId") row[k] = v
+            row["body"] = text.take(NET_BODY_LIMIT)
+            row["truncated"] = text.length > NET_BODY_LIMIT
+            out.add(row)
+        }
+        return out
+    }
+
+    /** 发一条 CDP 命令并取回它的 `result` 对象（抓包用：`Network.getResponseBody`）。 */
+    private fun evalJson(ws: WebSocket, id: Int, method: String, params: JSONObject,
+                         inbox: LinkedBlockingQueue<String>, timeoutMs: Long): JSONObject? {
+        ws.send(JSONObject().put("id", id).put("method", method).put("params", params).toString())
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            val msg = inbox.poll(200, TimeUnit.MILLISECONDS) ?: continue
+            val o = runCatching { JSONObject(msg) }.getOrNull() ?: continue
+            if (o.optInt("id", -1) != id) continue
+            return o.optJSONObject("result")
+        }
+        return null
     }
 
     /**

@@ -240,6 +240,10 @@ def run_add(url, name="", source_type="novel", group="📖新增源",
     except Exception as e:
         print(f"⚠️  抓取失败：{e}")
 
+    #: 「这一段换了材料」「这一段要引擎但引擎没取到」「L4 找到了接口」这类事实都进这里，
+    #: 最后拼进 note（AGENTS #4：结论是在什么前提下得出的，用户要看得见）
+    analysis_notes: List[str] = []
+
     # 2) 若无结果或抓取失败，且允许探测 → 尝试常见搜索端点
     search_url_template = None
     if probe and not discover and (not html or not _page_has_search_results(html, keyword or "")):
@@ -293,11 +297,36 @@ def run_add(url, name="", source_type="novel", group="📖新增源",
         print(f"     author   = {analysis['author'] or '(无法自动推断)'}")
 
         if not analysis["bookList"]:
-            print("❌ 未能推断出列表规则，可能页面无搜索结果或结构特殊。")
-            if analysis.get("note"):
-                print(f"  原因：{analysis['note']}")
-            return AddResult(1, analysis.get("note")
-                             or "未能从搜索页推断出列表规则（页面结构特殊？）")
+            # **L4**：这一页的列表要么在接口里、要么要渲染后才有——看**浏览器实际发过哪些请求**
+            # （不读 JS 猜地址：需要这条路的站，页面 HTML 我们往往根本拿不到，接口地址也常是
+            # 拼出来 / 带签名的）。材料与判据见 `core/net_hunt`。
+            print("🔌 推断不出列表规则，启用 L4：看引擎渲染时这一页实际发过哪些请求…")
+            l4 = None
+            try:
+                from core import net_hunt
+                l4 = net_hunt.search_api_via_engine(url, keyword, timeout=120)
+            except Exception as e:
+                print(f"   ⚠️  L4 那一步没成：{e}")
+            if l4:
+                print(f"   ✅ 找到接口：{l4['request']['method']} {l4['request']['url']}")
+                print(f"      判据：{l4['why']}；{l4['note']}")
+                analysis_notes.append(
+                    "L4：列表数据来自接口「%s」（判据：%s）——searchUrl 与列表规则都按它配的。%s"
+                    % (l4["request"]["url"], l4["why"], l4["note"]))
+                search_url_template = l4["search_url"]
+                analysis = {"results": 1, "bookList": l4["rules"].get("bookList", ""),
+                            "name": l4["rules"].get("name", ""),
+                            "bookUrl": l4["rules"].get("bookUrl", ""),
+                            "author": l4["rules"].get("author", ""),
+                            "coverUrl": l4["rules"].get("coverUrl", ""),
+                            "intro": "", "note": l4["note"]}
+            else:
+                print("❌ 未能推断出列表规则，可能页面无搜索结果或结构特殊。")
+                if analysis.get("note"):
+                    print(f"  原因：{analysis['note']}")
+                return AddResult(1, analysis.get("note")
+                                 or "未能从搜索页推断出列表规则（页面结构特殊？）"
+                                    "——L4 也看过了：引擎渲染时这一页没发出可用的接口请求")
 
     # 3.5) 交互确认：分析已完成，此时再问名称/类型/分组/主库最有依据
     if interactive:
@@ -350,7 +379,6 @@ def run_add(url, name="", source_type="novel", group="📖新增源",
     content_rule = ""
     toc_note = ""
     #: 「这一段换了材料」「这一段要引擎但引擎没取到」这类事实都进这里，最后拼进 note
-    analysis_notes: List[str] = []
     if detail_for_toc:
         print(f"\n📖 详情页样例：{detail_for_toc}")
         try:

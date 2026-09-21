@@ -408,6 +408,12 @@ object DebugService {
             "shadow_last_is_rule" to ShadowBackstageWebView.lastIsRule.get(),
             "shadow_last_render_ms" to ShadowBackstageWebView.lastRenderMs.get(),
             "shadow_last_reason" to ShadowBackstageWebView.lastReason.get(),
+            // L4 的材料：这一页**实际发过的接口请求**（XHR / Fetch，带响应体）。
+            // 与 `engine_html` 一样是**证据**，不进 NDJSON（那要与设备 WS 同构）；
+            // 形状闸门在 Python 侧（`core/app_debug.network_entries`），坏了整块丢掉。
+            "network" to ShadowBackstageWebView.lastNetwork.orEmpty(),
+            "network_events" to ShadowBackstageWebView.lastNetworkEvents,
+            "network_types" to ShadowBackstageWebView.lastNetworkTypes,
             "browser_cleanup" to BrowserBridge.lastCleanupNote,
             "timeout_sec" to timeoutSec,
             "key" to key,

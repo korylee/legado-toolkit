@@ -565,6 +565,42 @@ def engine_pages(raw: Any) -> Dict[str, str]:
 MAX_MATCHED_CHARS = 20000
 
 
+#: 抓包条目的单条上限（Kotlin 侧也截过一道；这里是 Python 侧的第二道，防的是手改侧车）。
+MAX_NET_BODY_CHARS = 256 * 1024
+
+
+def network_entries(raw: Any) -> List[Dict[str, Any]]:
+    """把侧车里的 ``network`` 收敛成 ``[{url, method, post_data, status, mime, body}]``。
+
+    这是 L4 的材料（**这一页实际发过的接口请求**，`BrowserBridge.networkRequests` 挑的 XHR /
+    Fetch）。**形状不对就整块丢掉并说一声**（与 :func:`engine_pages` / :func:`matched_map`
+    同一条纪律，AGENTS #22）：它是证据，不该把整个结果带走，也不该静默——静默的后果是
+    「L4 永远找不到接口」而没人知道是没人去抓。
+    """
+    if not isinstance(raw, list):
+        if raw:
+            print("[app_debug] network 形状不对（期望数组，实测 %s），已忽略" % type(raw).__name__,
+                  file=sys.stderr)
+        return []
+    out: List[Dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        url = str(item.get("url") or "").strip()
+        if not url:
+            continue
+        body = item.get("body")
+        out.append({
+            "url": url,
+            "method": str(item.get("method") or "GET").upper(),
+            "post_data": str(item.get("post_data") or ""),
+            "status": Q.safe_int(item.get("status"), 0),
+            "mime": str(item.get("mime") or ""),
+            "body": str(body)[:MAX_NET_BODY_CHARS] if isinstance(body, str) else "",
+        })
+    return out
+
+
 def matched_map(raw: Any) -> Dict[str, Dict[str, str]]:
     """把侧车里的 ``matched_html`` 收敛成 ``{url: {step: html}}``。
 
