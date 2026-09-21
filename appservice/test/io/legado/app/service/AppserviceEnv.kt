@@ -39,7 +39,9 @@ object AppserviceEnv {
     /**
      * 参数文件的候选路径，**顺序即优先级**：
      *
-     * 1. `LEGADO_APPSERVICE_ARGS` 指的**那个文件**——手工跑批要换一套参数时的显式覆盖口：
+     * 1. `LEGADO_APPSERVICE_ARGS` 指的**那个文件**——手跑要换参数时的显式覆盖口；
+     *    跑批/调试自己那份也走这条（Python 侧写在 `data/app_probe/args.properties`，
+     *    拉起 Gradle 时把它塞进这个环境变量）。**第 2 条只服务手工场景**：
      *    指哪读哪，不猜位置，也不往别人的仓库里放东西。
      * 2. `LEGADO_APPSERVICE_DIR/args.properties`：启动器（`legado-gradle.bat`）设的环境
      *    变量。今天所有自动链路（后端跑批 / `scripts/jvm_debug_run.py`）都命中它。

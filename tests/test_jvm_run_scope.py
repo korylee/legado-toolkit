@@ -187,13 +187,13 @@ class FilterScopeTests(_Base):
     def test_depth_param_reaches_the_args_file(self) -> None:
         """参数要真的落到给 JVM 的那份 `args.properties` 上——不落就是"填了没用"。"""
         self._call(params={"depth": "content"})
-        args = (self.probe / "appservice" / "args.properties").read_text(encoding="utf-8")
+        args = (self.probe / "data" / "app_probe" / "args.properties").read_text(encoding="utf-8")
         self.assertIn("depth=content", args)
 
     def test_unknown_param_key_is_dropped(self) -> None:
         """未知键丢掉、不报错（`settings_store.coerce` 的契约）；合法键照常生效。"""
         self._call(params={"nope": 1, "depth": "toc"})
-        args = (self.probe / "appservice" / "args.properties").read_text(encoding="utf-8")
+        args = (self.probe / "data" / "app_probe" / "args.properties").read_text(encoding="utf-8")
         self.assertIn("depth=toc", args)
         self.assertNotIn("nope", args)
 

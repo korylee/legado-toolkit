@@ -27,11 +27,15 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from core.app_debug import build_steps, fetch_debug_pages, matched_map
 from core.fetch import CACHE_AUTO
-from core.paths import data_path
+from core.paths import ARGS_PARTS, data_path
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 AGSVC = ROOT / "appservice"
-ARGS = AGSVC / "args.properties"
+#: 启动器的参数文件。**放在 data/ 下**（运行时数据，AGENTS #1）——它长在 `appservice/`
+#: 只是历史约定：`legado-gradle.bat` 会 `pushd` 进 App 仓库，测试 JVM 的 CWD 是别人的
+#: 目录，所以这个文件只能靠「挨着启动器」或环境变量定位。现在由我们写出绝对路径，
+#: 并用 `LEGADO_APPSERVICE_ARGS` 交给那次 Gradle（见 `_run_launcher`）
+ARGS = pathlib.Path(data_path(*ARGS_PARTS))
 LAUNCHER = AGSVC / "legado-gradle.bat"
 LAUNCHER_CLASS = "io.legado.app.service.DebugServiceLauncher"
 
@@ -78,6 +82,7 @@ def _write_args(src_file: str, key: str, out_file: str, timeout: int, cookie: st
     ]
     if cookie:
         lines.append("cookie=%s" % cookie)
+    ARGS.parent.mkdir(parents=True, exist_ok=True)
     ARGS.write_text("\n".join(lines + [""]), encoding="utf-8", newline="\n")
 
 
@@ -93,7 +98,12 @@ def _run_launcher(timeout_min: int = 20) -> Tuple[int, float, str, str]:
     就会让常驻一直被「类可能是旧的」挡在外面，直到有人手工 `--refresh`。
     """
     t0 = time.time()
-    env = {**os.environ, "LEGADO_TEST_JVM_ENV_OUT": str(data_path("app_probe", "test_jvm_env.json"))}
+    env = {**os.environ,
+           "LEGADO_TEST_JVM_ENV_OUT": str(data_path("app_probe", "test_jvm_env.json")),
+           # 参数文件在哪：**必须显式告诉它**（`AppserviceEnv.loadArgs` 的第 1 候选）。
+           # 不给的话它退回「挨着启动器找」——那里现在没有这个文件，而表现是启动器
+           # 打印一句「找不到 args.properties，跳过」之后**什么都不跑**
+           "LEGADO_APPSERVICE_ARGS": str(ARGS)}
     p = subprocess.run(
         ["cmd", "/c", str(LAUNCHER), ":app:testAppDebugUnitTest",
          "--tests", LAUNCHER_CLASS, "--rerun"],

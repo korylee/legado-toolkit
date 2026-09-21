@@ -110,7 +110,9 @@ class _Base(unittest.TestCase):
             return asyncio.run(go())
 
     def _args_file(self) -> pathlib.Path:
-        return self.agsvc / "args.properties"
+        # 参数文件现在写在 **data/app_probe/** 下（`core.paths.ARGS_PARTS`），
+        # 不再是「挨着启动器」——那条只留给手工场景
+        return self.tmp / "data" / "app_probe" / "args.properties"
 
 
 class BusyTests(_Base):

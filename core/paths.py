@@ -20,3 +20,10 @@ def data_dir() -> pathlib.Path:
 
 def data_path(*parts) -> str:
     return str(data_dir().joinpath(*parts))
+
+
+#: 启动器的参数文件（**相对 data/**）：跑批与调试都写它，Gradle 那条链靠环境变量
+#: `LEGADO_APPSERVICE_ARGS` 找到它（见 `core/jvm_debug.ARGS` 与 `backend/api/jvm.py`）。
+#: 零件写在这一处：两侧都要拼同一个路径，而其中一侧必须在**调用时**算
+#: （测试会换 data 目录，import 时算死的常量会把它钉在真目录上）。
+ARGS_PARTS = ("app_probe", "args.properties")

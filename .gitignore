@@ -53,8 +53,7 @@ data/config/
 # scripts/jvm_debug_run.py、scripts/jvm_debug_direct.py、tools/probe_app_debug.py。
 data/app_probe
 
-# 启动器的参数文件：**跑批/调试每次都重写它**，内容是上一次运行的参数（不是配置）。
-# 也是运行时数据，不进版本库。**仍在写**：core/jvm_debug._write_args（调试）、
-# backend/api/jvm.py 的 _write_args（跑批）。手跑要换一套参数走 LEGADO_APPSERVICE_ARGS
-# （见 appservice/test/io/legado/app/service/AppserviceEnv.kt 的候选顺序）。
+# 启动器的参数文件：跑批/调试自己那份现在写在 **data/app_probe/** 下（data/ 已被忽略），
+# 这里留一条是给**手工场景**的——启动器的第 2 候选就是「挨着它自己找」。别把运行时数据
+# 提交进来（曾经跟踪过，于是 HEAD 里躺着一次跑批的参数，读起来像配置）。
 appservice/args.properties

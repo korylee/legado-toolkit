@@ -38,6 +38,7 @@ from core.store import Store
 from core import settings_store
 from core.jvm_env import selftest
 from core.loader import _normalize_url
+from core.paths import ARGS_PARTS
 
 router = APIRouter()
 
@@ -72,9 +73,17 @@ def _launcher() -> Path:
     return p
 
 
+def _args_file() -> Path:
+    """启动器的参数文件（data/ 下，零件见 `core.paths.ARGS_PARTS`）。
+
+    **在调用时算**：测试会换 `data_dir`，import 时算死的常量会把它钉在真目录上。
+    """
+    return Path(data_dir()).joinpath(*ARGS_PARTS)
+
+
 def _write_args(keyword: str, timeout: int, concurrency: int, limit: int,
                 out_path: Path, source_file: Path, depth: str = "search") -> None:
-    """把跑批参数写进 appservice/args.properties（Launcher 的唯一参数入口）。"""
+    """把跑批参数写进启动器的参数文件（Launcher 的唯一参数入口）。"""
     from core.jvm_env import selftest  # 局部导入避免循环
     repo = settings_store.load().get("jvm", {}).get("app_repo", "").strip()
     st_conf = settings_store.load().get("jvm", {})
@@ -96,7 +105,8 @@ def _write_args(keyword: str, timeout: int, concurrency: int, limit: int,
     # newline="\n" 是必须的：这是 **git 跟踪的文件**，而 write_text 在 Windows 上
     # 把 \n 翻成 \r\n——跑一次批工作区就脏一次（内容与 HEAD 逐字节相同，只差行尾，
     # git diff 连内容都不显示，只在 git add 时冒一句 warning）。同 agent-write-safety §三。
-    (_AGSVC / "args.properties").write_text(
+    _args_file().parent.mkdir(parents=True, exist_ok=True)
+    _args_file().write_text(
         "\n".join(lines) + "\n", encoding="utf-8", newline="\n")
 
 
@@ -165,7 +175,10 @@ def _run_gradle(timeout_min: int = 90) -> int:
     """
     exe = _launcher()
     env = {**os.environ,
-           "LEGADO_TEST_JVM_ENV_OUT": str(data_dir() / "app_probe" / "test_jvm_env.json")}
+           "LEGADO_TEST_JVM_ENV_OUT": str(data_dir() / "app_probe" / "test_jvm_env.json"),
+           # **必须显式告诉它参数文件在哪**：不给就退回「挨着启动器找」，那里没有，
+           # 于是启动器打印一句「跳过」之后什么都不跑（一次看不出来的空跑）
+           "LEGADO_APPSERVICE_ARGS": str(_args_file())}
     proc = subprocess.run(
         ["cmd", "/c", str(exe), ":app:testAppDebugUnitTest",
          "--tests", "io.legado.app.service.ValidateServiceLauncher", "--rerun"],

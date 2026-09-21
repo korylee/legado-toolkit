@@ -11,10 +11,11 @@
 
 1. **运行时数据都在 `data/`，不进版本库**（已 gitignore）。
    `candidates.json` 是唯一候选主库，**请单独备份**。
-   **位置上的例外不改口径**：启动器的参数文件 `appservice/args.properties` 必须待在
-   `appservice/` 下（`legado-gradle.bat` 按固定路径找），但它同样是**运行时数据**——
-   跑批/调试每次都重写它，所以已 **untrack + ignore**（曾经跟踪过，于是 HEAD 里躺着
-   一次跑批的参数，读起来像配置）。手跑要换一套参数走 `LEGADO_APPSERVICE_ARGS`。
+   **启动器的参数文件也在 `data/`**（`data/app_probe/args.properties`，见
+   `core.paths.ARGS_PARTS`）：跑批/调试每次都重写它，拉起 Gradle 时用
+   `LEGADO_APPSERVICE_ARGS` 把绝对路径交过去（`legado-gradle.bat` 会 `pushd` 进 App
+   仓库，测试 JVM 的 CWD 是别人的目录，「相对 CWD 找」不成立）。
+   `appservice/args.properties` 那条 ignore 只服务手工场景（启动器的第 2 候选）。
 2. **SQLite 是管理库，JSON 是交付格式**。给 Legado 的 JSON 由
    `Store.export_json()` 生成，不要把 JSON 当作唯一事实来源。
 3. **验证必须由规则回放器完成**，AI 只负责提议。
