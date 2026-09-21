@@ -116,13 +116,6 @@ class ImportBody(BaseModel):
     conflict_strategy: str = "keep"
 
 
-class RuleChainTest(BaseModel):
-    source: Dict[str, Any]
-    keyword: str = "我"
-    detail_url: str = ""
-    pick: int = 1
-
-
 class JvmRunRequest(BaseModel):
     """跑一批 JVM 校验（S5-A 第二期：支持只跑选中的几条）。
 

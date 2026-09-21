@@ -468,7 +468,7 @@ def cmd_add(args: argparse.Namespace) -> int:
         interactive=args.interactive,
         to_merge=args.to,
         discover=getattr(args, "discover", False),
-    )
+    ).rc
 
 
 # ---------------------------------------------------------------- run（一条龙）
@@ -581,7 +581,7 @@ def cmd_menu(args: argparse.Namespace) -> int:
         out = _safe_input("输出文件（回车 auto_added.json）：").strip() or "auto_added.json"
         from services.add_source import run_add
         return run_add(url, name=sname, source_type=stype, group=sgroup,
-                       output=out, no_ask=True, probe=True, interactive=False)
+                       output=out, no_ask=True, probe=True, interactive=False).rc
 
     # 其余命令：确认输入文件（默认自动探测）
     if name == "merge":

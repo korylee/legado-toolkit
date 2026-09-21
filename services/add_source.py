@@ -9,6 +9,8 @@
 > 文件说自己是自己拆出来的，是照抄没改。
 """
 
+from dataclasses import dataclass
+
 from core.constants import *
 from core.urls import abs_url as _abs_url
 from core.fetch import (fetch, extract_keyword, probe_search_endpoint,
@@ -113,12 +115,26 @@ def _interactive_confirm(domain: str, source_type: str, group: str,
         return name, source_type, group, ""
     except EOFError:
         return None
+@dataclass
+class AddResult:
+    """`run_add` 的返回：**退出码与失败原因一起给**。
+
+    为什么不是一个裸 int：原因原来只 print 到 stdout，调用方（job / CLI）手里只剩一个码，
+    于是「工具认不出这个页面」被压成「生成失败」，看起来与「源坏了」一模一样
+    （lessons §七十七、AGENTS #4）。两者绑在同一个返回值里，上层就没有「顺手把原因丢掉」
+    的位置。**约定：`rc != 0` 时 `error` 必须非空**——`tests/test_quick_generate.py` 钉着它。
+    """
+    rc: int
+    error: str = ""
+
+
 def run_add(url, name="", source_type="novel", group="📖新增源",
             output="auto_added.json", no_ask=False, probe=True,
             detail_url: str = "", verify: bool = True,
             pick: int = 1, interactive: bool = False,
             to_merge: str = "", discover: bool = False):
-    """新增一个书源（可被 main.py 复用）。返回 0=成功 / 1=失败 / 2=已存在。
+    """新增一个书源（可被 main.py 复用）。返回 `AddResult`：rc 0=成功 / 1=失败 / 2=已存在，
+    **失败时 error 里带原因**（别只回一个码——§七十七 那次的教训）。
 
     :param discover: 强制「仅发现」模式——不依赖搜索，直接生成无搜索规则的书源，
         分组标记「仅发现」，配合 --detail-url 推断目录/正文规则。
@@ -154,7 +170,8 @@ def run_add(url, name="", source_type="novel", group="📖新增源",
 
     if not html:
         print("❌ 无法获取搜索页 HTML，中止。")
-        return 1
+        return AddResult(1, "抓不到搜索页 HTML（常见搜索端点也探测过了）："
+                            "页面不可达、要登录，或站点结构特殊")
 
     # 2.5) 仅发现模式判定：
     #   强制 discover 参数，或搜索探测失败但页面可打开（无搜索结果/无关键词）→ 自动降级
@@ -175,7 +192,8 @@ def run_add(url, name="", source_type="novel", group="📖新增源",
     else:
         if not keyword:
             print("❌ 无法从 URL 中提取关键词，中止。")
-            return 1
+            return AddResult(1, "URL 里没有可识别的关键词，无法按搜索页生成"
+                                "（若站点确实不可搜，用「仅发现」模式）")
 
         # 3) 分析网页结构，推断规则
         analysis = analyze_search_page(html, keyword)
@@ -191,14 +209,15 @@ def run_add(url, name="", source_type="novel", group="📖新增源",
             print("❌ 未能推断出列表规则，可能页面无搜索结果或结构特殊。")
             if analysis.get("note"):
                 print(f"  原因：{analysis['note']}")
-            return 1
+            return AddResult(1, analysis.get("note")
+                             or "未能从搜索页推断出列表规则（页面结构特殊？）")
 
     # 3.5) 交互确认：分析已完成，此时再问名称/类型/分组/主库最有依据
     if interactive:
         confirmed = _interactive_confirm(domain, source_type, group, output)
         if confirmed is None:
             print("已取消。")
-            return 1
+            return AddResult(1, "已取消（交互确认没通过）")
         name, source_type, group = confirmed[:3]
         if len(confirmed) > 3 and confirmed[3]:
             to_merge = confirmed[3]  # 向导中选择合入的主库
@@ -277,7 +296,7 @@ def run_add(url, name="", source_type="novel", group="📖新增源",
         ans = _safe_input("\n确认保存？[y/N] ").strip().lower()
         if ans not in ("y", "yes"):
             print("已取消。")
-            return 1
+            return AddResult(1, "已取消（没有确认保存）")
 
     # 5.5) 全链路验证（若开启）
     if verify and detail_for_toc:
@@ -306,7 +325,7 @@ def run_add(url, name="", source_type="novel", group="📖新增源",
     exists = any(s.get("bookSourceUrl") == source["bookSourceUrl"] for s in sources)
     if exists:
         print(f"ℹ️  书源 URL {source['bookSourceUrl']} 已存在，跳过追加。")
-        return 2
+        return AddResult(2, f"已存在同 URL 的源（{source['bookSourceUrl']}）")
     # 自动探测主库：若主库已有同 URL 源，跳过追加（避免暂存区产生重复）
     if not to_merge:
         try:
@@ -317,7 +336,7 @@ def run_add(url, name="", source_type="novel", group="📖新增源",
                              for s in load_sources(main_path)}
                 if source["bookSourceUrl"] in main_urls:
                     print(f"ℹ️  主库 {main_path} 已存在同 URL 源，跳过追加。")
-                    return 2
+                    return AddResult(2, f"主库 {main_path} 里已有同 URL 的源")
         except Exception as e:
             print(f"   ⚠️ 主库存在性检查失败（忽略）：{e}")
     sources.append(source)
@@ -347,8 +366,8 @@ def run_add(url, name="", source_type="novel", group="📖新增源",
                         print(f"🧹 已从 {output} 移除已合入的源（暂存区已清空）")
         except Exception as e:
             print(f"⚠️  合并进主库失败：{e}")
-            return 1
-    return 0
+            return AddResult(1, f"合并进主库失败：{e}")
+    return AddResult(0)
 def _parse_sitemap_locs(xml_text: str) -> list:
     """从 sitemap XML（可能含命名空间）提取所有 <loc> URL。"""
     import xml.etree.ElementTree as ET
@@ -500,4 +519,4 @@ def main():
             sys.exit(1)
 
     sys.exit(run_add(url, args.name, args.type, args.group,
-                     args.output, args.no_ask, probe=not args.no_probe))
+                     args.output, args.no_ask, probe=not args.no_probe).rc)

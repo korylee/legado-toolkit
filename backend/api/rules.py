@@ -10,27 +10,10 @@ from backend.schemas import (
     AppHostRequest,
     JvmDebugRequest,
     ReplayStepRequest,
-    RuleChainTest,
     SuggestRuleRequest,
 )
 
 router = APIRouter()
-
-
-@router.post("/chain")
-async def chain_test(body: RuleChainTest):
-    from core.verify import verify_chain
-
-    source = dict(body.source or {})
-    if not source.get("bookSourceUrl"):
-        raise HTTPException(400, "缺少 bookSourceUrl")
-    try:
-        return await asyncio.to_thread(
-            verify_chain, source, body.keyword or "我",
-            body.detail_url or "", int(body.pick or 1),
-        )
-    except Exception as e:
-        raise HTTPException(400, "试跑失败: %s: %s" % (type(e).__name__, e))
 
 
 @router.post("/jvm-debug")
@@ -67,7 +50,8 @@ async def jvm_debug(body: JvmDebugRequest):
 async def app_debug(body: AppDebugRequest):
     """连 App 跑一次调试：借阅读 App 的调试 WebSocket 走完整链路（含 JS 规则）。
 
-    返回体与 ``/rules/chain`` **同形状**（steps / pages），前端抽屉与卡片零改动。
+    返回体与**本机引擎调试**（``/rules/jvm-debug``）**同形状**（steps / pages），
+    前端抽屉与卡片零改动——两条通道的区别只有「在哪台引擎上跑」。
 
     `tag` **必须用 ``bookSourceUrl`` 的导入原文**：App 的
     ``getBookSource(tag)?.let{}`` 查不到源就什么都不做——表现为静默无响应，

@@ -29,6 +29,8 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException
 from fastapi.concurrency import run_in_threadpool
 
+from backend.api.check_summary import (ITEMS_LIMIT, check_items_from_checks,
+                                       summarize_transitions)
 from backend.jobs import runner
 from backend.schemas import JvmRunRequest
 from core.paths import data_dir
@@ -268,7 +270,9 @@ async def jvm_run(body: Optional[JvmRunRequest] = None):
     # 交给任务跑（分钟级）：预检里已经算好的那几项回给前端做进度条，
     # 也让 job 结果的形状与旧版一致（`count` / `dist` / `checks` 都是任务体填的）
     prep = {"started": True, "count": len(rows)}
-    job_id = runner.submit("jvm_run", {"prep": prep})
+    # `total` 进 payload：一次跑批没有逐条进度（一次 Gradle 调用跑一批），但**条数**
+    # 要给前端算「N/N」——不给的话状态条永远停在 0
+    job_id = runner.submit("jvm_run", {"prep": prep, "total": len(rows)})
     return dict(prep, **{"job_id": job_id})
 
 
@@ -302,15 +306,33 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
                                     "reason": "启动器没有产出结果文件（看 Gradle 输出定位）"})
             rows = _read_results(out_path)
             batch = _write_meta(rows)
+            # **上一版结论的快照必须在落库之前读**：跑完再读，每条源都是 old == new，
+            # 「这次变了什么」会永远答「没变」——那正是这个字段要回答的问题（同一处
+            # 理由在 `ops.run_check_job` 里写着，两边必须同规矩）
+            prev_checks = st.checks_map()
             # 结论同时按 checks 的口径落库（六档 / 星级 / 深度）——列表与筛选读的是
             # checks，不落这一步的话健康列会在撤掉本地引擎之后断供（TODO §一点九）。
             # 映射与判据都在 core/jvm_health，**别在这里另写一份**。
             from core import jvm_health
             n_checks = jvm_health.store_checks(rows, batch=batch, store=st)
+            # items 从**落库后的 checks** 取，而不是自己拿 rows 再算一遍六档/星级：
+            # 前端列表读的就是那张表，这样两边天然一致（形状映射见 check_summary）
+            names = {_normalize_url(str(r.get("url") or "")): str(r.get("name") or "")
+                     for r in rows}
+            fresh = st.checks_map()
+            items = check_items_from_checks(
+                {u: fresh[u] for u in names if u in fresh}, names=names)
             dist = Counter(r.get("state") for r in rows)
-            return dict(prep, **{"ok": code == 0, "exit": code, "batch": batch,
-                                "count": len(rows), "dist": dict(dist),
-                                "checks": n_checks})
+            return dict(prep, **{
+                "ok": code == 0, "exit": code, "batch": batch,
+                "count": len(rows), "dist": dict(dist), "checks": n_checks,
+                # 结果体与**本地校验那条同形状**（前端单条校验两条路都读它）：
+                # checked / items / transitions 是回填与摘要要的，cached 这条链
+                # **没有页面缓存**（每次都真抓），报 0 是实话
+                "checked": len(items), "cached": 0, "fetched": len(items),
+                "transitions": summarize_transitions(prev_checks, items),
+                "items": items[:ITEMS_LIMIT],
+            })
         finally:
             RUN_LOCK.release()
 

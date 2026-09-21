@@ -1,8 +1,8 @@
 import { api } from "./client";
 
 // 连 App 调试：借阅读 App 内建的调试 WebSocket 跑一次完整链路。
-// 与 /rules/chain（我们离线回放 CSS 规则）互补——JS 规则、cookie、webView
-// 只有 App 那边跑得了。
+// 与「本机引擎」（`jvmDebug`）互补：调试归本机引擎，真机只在登录态 / WebView /
+// 网络出口上不可替代（§二）。
 //
 // source 必须传**详情接口返回的源对象**：它的 bookSourceUrl 是导入原文，
 // 后端直接拿它当调试 tag。传列表里的 source_url（规范化过，尾部斜杠/lower
@@ -44,10 +44,6 @@ export const replayStep = (html, rule, step, sourceType) =>
   api.post("/rules/replay-step", {
     html, rule, step, source_type: sourceType,
   });
-
-// 离线回放整条链（本地粗验，跑不了 JS 规则）
-export const chainTest = (source, keyword, detailUrl, pick) =>
-  api.post("/rules/chain", { source, keyword, detail_url: detailUrl, pick });
 
 // 让 AI 给**某一步**提候选规则。模型只提议：后端会把每条候选拿本地回放器验一遍，
 // 结果里带 verified / count / samples / rule_error——「本地回放不了」的那类

@@ -34,6 +34,11 @@ class _FakeStore:
     def __init__(self, *a, **kw) -> None:
         pass
 
+    def checks_map(self):
+        # 任务体要读一次「跑之前的结论快照」算变化（十-2）。这条测试只管锁的
+        # 生命周期，给空快照即可——真库那套在 test_jvm_run_scope 里用临时库盖着
+        return {}
+
     def close(self) -> None:
         pass
 

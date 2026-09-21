@@ -12,21 +12,31 @@ import asyncio
 import unittest
 
 from backend.api import ops
-from backend.api.ops import summarize_transitions
+from backend.api.check_summary import summarize_transitions
 from core.loader import _normalize_url
 from core.models import Health, build_record
 
 
 def make_record(url: str, health: str):
+    """给 `FakeChecker` 吃的 Record（`check_items_from_records` 读它的属性）。"""
     rec = build_record({"bookSourceUrl": url, "bookSourceName": "example"}, 0)
     rec.health = health
     return rec
 
 
+def make_item(url: str, health: str) -> dict:
+    """`summarize_transitions` 现在收**形状 dict**（两条校验路的 items 都是它）。
+
+    与 `make_record` 分开：那个是给 `FakeChecker` 吃的（它按 Record 接口被
+    `check_items_from_records` 读属性），两者不是同一个东西，别混。
+    """
+    return {"url": url, "name": "example", "health": health}
+
+
 class TransitionSummaryTests(unittest.TestCase):
     def test_health_change_lands_in_new_health_bucket(self) -> None:
         prev = {_normalize_url("https://a.com"): {"health": Health.OK}}
-        out = summarize_transitions(prev, [make_record("https://a.com", Health.DEAD)])
+        out = summarize_transitions(prev, [make_item("https://a.com", Health.DEAD)])
         self.assertEqual(out["changed"], {Health.DEAD: 1})
         self.assertEqual(out["first_checked"], 0)
 
@@ -37,13 +47,13 @@ class TransitionSummaryTests(unittest.TestCase):
         写松一点就会满屏假变化——而「这次比上次多了 800 条失效」是会被当真的。
         """
         prev = {_normalize_url("https://a.com"): {"health": Health.OK}}
-        out = summarize_transitions(prev, [make_record("https://a.com", Health.OK)])
+        out = summarize_transitions(prev, [make_item("https://a.com", Health.OK)])
         self.assertEqual(out["changed"], {})
         self.assertEqual(out["first_checked"], 0)
 
     def test_source_without_history_counts_as_first_checked(self) -> None:
         """没有历史记录的源只进 first_checked，不进 changed。"""
-        out = summarize_transitions({}, [make_record("https://a.com", Health.OK)])
+        out = summarize_transitions({}, [make_item("https://a.com", Health.OK)])
         self.assertEqual(out["first_checked"], 1)
         self.assertEqual(out["changed"], {})
 
@@ -55,7 +65,7 @@ class TransitionSummaryTests(unittest.TestCase):
         ——而首次那栏本来就是最大的数，错在里面看不出来。
         """
         prev = {_normalize_url("https://a.com"): {"health": Health.OK}}
-        out = summarize_transitions(prev, [make_record("https://A.com/", Health.OK)])
+        out = summarize_transitions(prev, [make_item("https://A.com/", Health.OK)])
         self.assertEqual(out["first_checked"], 0)
         self.assertEqual(out["changed"], {})
 
@@ -66,7 +76,7 @@ class TransitionSummaryTests(unittest.TestCase):
         等于让他自己去 3800 行里翻。明细里的 url 同样要归一（前端拿它跳转/匹配）。
         """
         prev = {_normalize_url("https://a.com"): {"health": Health.OK}}
-        out = summarize_transitions(prev, [make_record("https://A.com/", Health.DEAD)])
+        out = summarize_transitions(prev, [make_item("https://A.com/", Health.DEAD)])
         self.assertEqual(out["changed_items"],
                          [{"url": "https://a.com", "name": "example",
                            "from": Health.OK, "to": Health.DEAD}])
@@ -79,8 +89,8 @@ class TransitionSummaryTests(unittest.TestCase):
         """
         prev = {_normalize_url("https://a.com"): {"health": Health.OK}}
         out = summarize_transitions(prev, [
-            make_record("https://a.com", Health.OK),      # 没变
-            make_record("https://b.com", Health.DEAD),    # 库里没有 → 首次
+            make_item("https://a.com", Health.OK),      # 没变
+            make_item("https://b.com", Health.DEAD),    # 库里没有 → 首次
         ])
         self.assertEqual(out["changed"], {})
         self.assertEqual(out["first_checked"], 1)
@@ -93,10 +103,10 @@ class TransitionSummaryTests(unittest.TestCase):
             _normalize_url("https://b.com"): {"health": Health.DEAD},
         }
         results = [
-            make_record("https://a.com", Health.DEAD),    # 变了 → changed[dead]
-            make_record("https://b.com", Health.DEAD),    # 没变 → 哪都不进
-            make_record("https://c.com", Health.OK),      # 首次 → first_checked
-            make_record("https://d.com", Health.OK),      # 首次 → first_checked
+            make_item("https://a.com", Health.DEAD),    # 变了 → changed[dead]
+            make_item("https://b.com", Health.DEAD),    # 没变 → 哪都不进
+            make_item("https://c.com", Health.OK),      # 首次 → first_checked
+            make_item("https://d.com", Health.OK),      # 首次 → first_checked
         ]
         out = summarize_transitions(prev, results)
         self.assertEqual(out["first_checked"], 2)

@@ -5,15 +5,53 @@ from core.constants import *
 from core.urls import abs_url as _abs_url
 from core.fetch import fetch
 
+#: 书名上的「装饰」：实测 samsbook 的搜索结果标题写成 `[历史]绍宋` / `【言情】绍宋之后`，
+#: 文本**永远不会**恰好等于关键词——这一类站点原来必然失配（lessons §七十七）。
+_TITLE_DECOR_RE = re.compile(r"^\s*[\[【(（][^\]】)）]{1,10}[\]】)）]\s*")
+
+
+def _strip_title_decor(text: str) -> str:
+    """去掉书名开头的 `[分类]` / `【分类】` / `（完）` 这类标注。"""
+    return _TITLE_DECOR_RE.sub("", text or "").strip()
+
+
 def _leaf_text_elems(soup, keyword: str):
-    """找出文本恰好等于关键词的叶子元素（书名锚点）。"""
+    """找出书名锚点（叶子元素）。返回 `(元素列表, 判据)`——**判据要一路带到界面上**
+    （认不出来与源坏了长得一样，所以「按什么认出来的」必须能看见，AGENTS #4 一族）。
+
+    三档匹配，**只取命中的最强那一档**：
+
+    1. 文本恰好等于关键词
+    2. 去掉开头装饰后等于关键词（实测 samsbook：`[历史]绍宋`）
+    3. 文本里含关键词**且是个链接**——第 3 档必须要求链接：页面标题
+       `<title>绍宋-搜索结果(共2条记录)</title>` / `<b>…</b>` 里同样含关键词，
+       不挡就会把它们当书名
+    """
     from core.html import make_soup
-    found = []
+    tiers = {1: [], 2: [], 3: []}
     for el in soup.find_all(True):
+        if el.name in ("title", "script", "style", "meta"):
+            continue
         txt = el.get_text(strip=True)
-        if txt == keyword and not el.find_all(True):  # 叶子节点
-            found.append(el)
-    return found
+        if not txt or el.find_all(True):        # 空文本 / 非叶子
+            continue
+        if txt == keyword:
+            tiers[1].append(el)
+            continue
+        if _strip_title_decor(txt) == keyword:
+            tiers[2].append(el)
+            continue
+        # 第 3 档：含关键词的**链接**（书名锚点几乎总是链接）
+        if keyword in txt and len(txt) <= len(keyword) + 16                 and (el.name == "a" or el.find_parent("a") is not None):
+            tiers[3].append(el)
+    for tier, why in ((1, ""),
+                      (2, "书名带前缀装饰（如「[历史]绍宋」）：按「去掉开头的 [分类] 后"
+                          "等于关键词」认出来的。"),
+                      (3, "书名里含关键词而非恰好相等：按「含关键词的链接」认出来的，"
+                          "页面上可能不止一本。")):
+        if tiers[tier]:
+            return tiers[tier], why
+    return [], ""
 def _nearest_list_item(name_elem):
     """从书名元素向上找列表项（li 优先，无 li 时取含图/链接的分组 div）。"""
     cur = name_elem
@@ -92,7 +130,7 @@ def analyze_search_page(html: str, keyword: str) -> dict:
     """分析搜索页，返回自动推断的 Legado 规则。"""
     from core.html import make_soup
     soup = make_soup(html)
-    anchors = _leaf_text_elems(soup, keyword)
+    anchors, match_why = _leaf_text_elems(soup, keyword)
     result = {
         "results": len(anchors),
         "bookList": "",
@@ -104,8 +142,11 @@ def analyze_search_page(html: str, keyword: str) -> dict:
         "note": "",
     }
     if not anchors:
-        result["note"] = "未找到与关键词完全匹配的书名元素，可能无结果或页面结构特殊。"
+        result["note"] = ("未找到含关键词的书名链接：可能真没有这本书，也可能书名写法特殊，"
+                          "或结果要 JS 渲染（这类页面先看抽屉里的「层」）。")
         return result
+    if match_why:
+        result["note"] = match_why
 
     # 锚点若是 a[title] 且自身就是书名链接，直接用它；否则向上找 a
     anchor = anchors[0]
@@ -164,10 +205,15 @@ def analyze_search_page(html: str, keyword: str) -> dict:
             result["note"] += f" 封面为懒加载属性 {attr}（div背景图），已自动处理。"
 
     # author 规则：列表项内找 p/span/div 中短文本（排除含状态词/数字占比高者）
+    # **跳过书名元素本身与它的祖先**：书名带装饰时它的文本不等于关键词，
+    # 只按 `txt == keyword` 挡不住——`[历史]绍宋` 会被当成作者名（AGENTS #12 那一类）
+    name_text = named_elem.get_text(strip=True)
     for tag in ("p", "span", "div"):
         for el in list_item.find_all(tag):
             txt = el.get_text(strip=True)
-            if not txt or txt == keyword or len(txt) > 12:
+            if not txt or len(txt) > 12:
+                continue
+            if txt == name_text or el is named_elem or el in named_elem.parents:
                 continue
             # 排除"214 鹰扬"这类状态文本（含数字或已知状态词）
             if re.search(r"\d", txt) or any(w in txt for w in ("话", "章", "连载", "完结", "更新", "状态")):

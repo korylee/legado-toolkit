@@ -8,46 +8,11 @@ from core.store import Store
 
 from backend.jobs import runner
 
-#: 「变成 X」的**明细**最多带多少条（计数不受影响，见 summarize_transitions）。
-#: 全量校验时变化可能有几千条，明细全带上会把 result_json 撑到几百 KB——
-#: 而它是要走 SSE 推送的
-CHANGED_ITEMS_LIMIT = 200
-
-
-def summarize_transitions(prev: Dict[str, Dict[str, Any]],
-                          results) -> Dict[str, Any]:
-    """统计本次校验相对**上一次结论**的变化，供任务结果展示。
-
-    ``prev`` 是跑之前读的 ``Store.checks_map()``（``{url: item}``，键已规范化），
-    ``results`` 是本次的 ``BookSourceRecord`` 列表。
-
-    **两侧的 URL 必须用同一套规范化再比**：``prev`` 的键在写库时就归一了，而
-    ``results`` 里的 ``r.url`` 是抓取时的原文（实测 20.7% 的源带尾斜杠）。
-    不归一的话那些源会被当成「首次有结论」，把没变的说成变了。
-
-    「首次有结论」与「变成 X」**分开计**：库里绝大多数源从未校验过，第一次全量
-    之后「新增可用 2000 条」不代表比上次好，那是首次。
-    """
-    first_checked = 0
-    changed: Dict[str, int] = {}
-    changed_items: List[Dict[str, str]] = []
-    for r in results:
-        old = (prev.get(_normalize_url(r.url)) or {}).get("health")
-        if old is None:
-            # 之前没有校验记录，这次有了结论 → 首次，不进 changed
-            first_checked += 1
-        elif old != r.health:
-            # 只统计**变了**的，按新的 health 分桶
-            changed[r.health] = changed.get(r.health, 0) + 1
-            # 明细。**只有计数是不够的**：摘要说「6 条变成失效」，用户下一步
-            # 一定是问「哪 6 条」——只给计数等于让他自己去 3800 行里翻。
-            # 超出上限时只截明细，**计数仍然准确**（前端靠两者对比报「还有 N 条」）
-            if len(changed_items) < CHANGED_ITEMS_LIMIT:
-                changed_items.append({"url": _normalize_url(r.url),
-                                      "name": r.name or r.url,
-                                      "from": old, "to": r.health})
-    return {"first_checked": first_checked, "changed": changed,
-            "changed_items": changed_items}
+# 任务结果的形状（items / transitions）由 `check_summary` **一处**给出：
+# 本机引擎那条跑批（`jvm.run_jvm_job`）用的是同一份——两条路的结果体必须同形，
+# 前端读的是同一段代码（`parseCheckResult` / `applyCheckResults`）。
+from backend.api.check_summary import (ITEMS_LIMIT, check_items_from_records,
+                                       summarize_transitions)
 
 
 @runner.register("check")
@@ -116,23 +81,13 @@ async def run_check_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict
     # (类型, 健康度, 星级) 决定，没被重算的源不可能变——而全库重建实测 0.55 秒，
     # 只校验一条源时那 0.55 秒全是白花的
     st.rebuild_system_tags([r.url for r in results])
-    items = [{
-        # **url 必须归一化后再下发**：前端拿它当 key 回填列表，而列表里的
-        # `source_url` 是 Store 归一化后存的（去空白/尾斜杠/转小写）。
-        # 而 `r.url` 是 build_record 从 bookSourceUrl 直接取的**原文**——
-        # 两侧不归一的话前端一条都匹配不上，表现是「校验完了列表不更新」，
-        # 且看不出任何异常。这正是 lessons §五 那条（本项目实测 20.7% 的源带尾斜杠）
-        "url": _normalize_url(r.url), "name": r.name, "health": r.health,
-        "stars": r.quality_stars, "star_basis": r.star_basis, "error": r.error,
-        "toc_complete": r.toc_complete, "content_ok": r.content_ok,
-        "search_hit": r.search_hit, "checked_at": r.checked_at,
-    } for r in results]
+    items = check_items_from_records(results)
     return {
         "checked": len(items),
         # 相对上一次的变化。与上面「命中多少」同一动机：把看不见的事实报出来。
         # 「首次有结论」与「变成 X」分开——绝大多数源从未校验过，混在一起
         # 「新增可用 2000 条」就会被读成「比上次好」
-        "transitions": summarize_transitions(prev_checks, results),
+        "transitions": summarize_transitions(prev_checks, items),
         # 本次实际用的参数。和下面三项同一动机：把看不见的事实报出来——
         # 否则「为什么这次慢得多」「设置改了到底生效没有」在界面上无从回答
         "params": cfg,
@@ -143,7 +98,7 @@ async def run_check_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict
         # 写库失败多少：>0 说明状态不会变，必须让用户看见（不是我们抛错，是写不进去）
         "save_failures": checker.save_failures,
         "hit_downgrades": len(checker.hit_downgrades),
-        "items": items[:500],
+        "items": items[:ITEMS_LIMIT],
     }
 
 
@@ -195,10 +150,13 @@ async def run_add_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
         )
 
     try:
-        rc = await asyncio.to_thread(_generate)
+        out = await asyncio.to_thread(_generate)
         st.update_job(job_id, progress=2)
+        rc = out.rc
         if rc not in (0, 2):
-            return {"ok": False, "return_code": rc, "error": "生成失败"}
+            # **原因原样带出去**（`AddResult.error`）：压成「生成失败」等于把
+            # 「工具认不出这个页面」说成「源坏了」（lessons §七十七、AGENTS #4）
+            return {"ok": False, "return_code": rc, "error": out.error}
         sources = load_sources(out_path)
         if not sources:
             return {"ok": False, "return_code": rc, "error": "未生成书源（可能已存在）"}

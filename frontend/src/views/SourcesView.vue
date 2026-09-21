@@ -5,6 +5,7 @@ import { Search, Plus, Upload, Download, Delete, Filter, Refresh, Monitor, Magic
 import { listSources, listSourceUrls, listGroups, patchTags, deleteSources, listTags, getStats } from "../api/sources";
 import { api, subscribeJob } from "../api/client";
 import { jvmRun } from "../api/jvm.js";
+import { jobFailReason } from "../utils/jobs";
 import { ensureTagMeta, isQualityTag, isStatusTag, splitTags, tagOfType, sourceTypes } from "../utils/tags";
 import { HEALTH_LABELS, describeChanges, engineLabel, healthLabel,
          starBasisLabel } from "../utils/health";
@@ -622,17 +623,6 @@ async function applyBatchTags(mode) {
  *
  * 口径与任务抽屉里的摘要同源（都读 result_json），不另算一份。
  */
-/**
- * 任务失败的原因（后端写进 `result_json` 的 `error`）。
- *
- * **失败原因不能只显示状态名**：后端为失败任务写的是 `{"error","trace"}`，
- * 其中「进程重启，任务没写终态（崩溃或被强杀）」这类原因（见 Store.fail_orphan_jobs）
- * 是用户唯一能看到的解释——直接显示 "failed" 等于把原因丢了。
- */
-function jobFailReason(resultJson) {
-  try { return JSON.parse(resultJson || "{}").error || ""; } catch (e) { return ""; }
-}
-
 function parseCheckResult(resultJson) {
   let r = null;
   try { r = resultJson ? JSON.parse(resultJson) : null; } catch (e) { return null; }
@@ -653,6 +643,11 @@ function parseCheckResult(resultJson) {
 
 async function checkSources(urls = []) {
   if (checking.value) return ElMessage.warning("已有校验任务在运行");
+  // **单条走本机引擎**（十-2）：结论按 checks 口径落库、结果体与本地那条**同形状**
+  // （`backend/api/check_summary.py` 一处给形状，下面这段订阅/回填/摘要两条路共用）。
+  // 多条与全量暂时仍走本地引擎——本地执行体整体退役是十-4 的事。
+  const viaEngine = urls.length === 1;
+  if (viaEngine && jvmRunning.value) return ElMessage.warning("已有本机引擎跑批在运行");
   checking.value = true;
   // 提交时就要把"测哪些"记下来：等 SSE 回来才更新的话，点完到第一次事件之间
   // 界面上什么都不会变
@@ -667,14 +662,30 @@ async function checkSources(urls = []) {
     // 只有「本次覆盖」的那几项才进 payload
     // 参数全走全局设置：单条校验本来就不弹框、也没有「本次覆盖」这一层
     // （覆盖项原来长在全量弹框里，却会顺手影响行按钮——那一层随弹框里的本地分支一起撤了）
-    const payload = { urls };
-    const r = await api.post("/jobs", { kind: "check", payload });
-    checkJobId.value = r.job_id;
+    let jobId = "";
+    if (viaEngine) {
+      const r = await jvmRun({ urls });
+      if (!r.started) {
+        // 引擎没起来的几种原因分开说（reason = 忙 / 空范围，selftest = 环境没过）——
+        // 都说成「自检未通过」会把原因指反（与跑批那条同一套说法）
+        checking.value = false;
+        checkingUrls.value = new Set();
+        ElMessage.warning(r.reason
+          || "本机引擎不可用：先在「设置 → JVM 校验」里填 App 源码目录并自检");
+        return;
+      }
+      jobId = r.job_id;
+      checkTotal.value = r.count || urls.length;
+    } else {
+      const r = await api.post("/jobs", { kind: "check", payload: { urls } });
+      jobId = r.job_id;
+    }
+    checkJobId.value = jobId;
     // **不弹「已提交」的 toast**：上面那条状态条已经在说「正在校验 N 条」了，
     // 再来一条浮层只是噪音——而且它挡在统计条旁边，反而盖住了真正的进度
     if (stopCheck) stopCheck();
     stopCheck = subscribeJob(
-      r.job_id,
+      jobId,
       // 每帧带整个 job（status/total/progress）。**progress 是每完成一条就更新一次**
       // 的（checker.run 的 on_progress），所以状态条上那个计数是跑动中的，不是跳变的
       (data) => {
@@ -698,7 +709,7 @@ async function checkSources(urls = []) {
               && (filterCount.value > 0 || /verified/.test(query.order));
             // **把 job_id 存进摘要**：resetCheckState() 刚把 checkJobId 清空了，
             // 不存的话结果条上的「查看」点开抽屉不知道要看哪一条
-            summary.jobId = r.job_id;
+            summary.jobId = jobId;
             checkResult.value = summary;
           }
           try { tags.value = await listTags(); } catch (e) { /* 忽略 */ }

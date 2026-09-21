@@ -86,7 +86,9 @@ class _Base(unittest.TestCase):
         async def go():
             r = await jvm_api.jvm_run(body)
             if run_job and r.get("job_id"):
-                await jvm_api.run_jvm_job("testjob", None, {"prep": {}})
+                # **传真的 store**：任务体要读一次「跑之前的 checks 快照」算变化，
+                # 传 None 会当场 AttributeError（生产里 runner 一定会给 store）
+                await jvm_api.run_jvm_job("testjob", Store(self.db), {"prep": {}})
             return r
 
         with mock.patch.object(jvm_api, "Store", lambda *a, **kw: Store(self.db)),              mock.patch("core.jvm_health.store_checks", lambda *a, **kw: 0):
@@ -199,6 +201,62 @@ class FilterScopeTests(_Base):
         """两者都给时**勾选优先**：勾是明确意图，筛选是「这一屏里的」。"""
         self._call(urls=["https://b.com"], filt={"q": "普通"})
         self.assertEqual([s["bookSourceUrl"] for s in self._batch()], ["https://b.com"])
+
+
+class ResultShapeTests(_Base):
+    """跑批结果体与**本地校验那条同形状**（十-2：单条校验切引擎）。
+
+    前端读 items / transitions 的是同一段代码，所以两边少一个键就等于「某一格
+    永远不更新」——不报错，只是那一列看着像没校验过。这里走**真的** `store_checks`
+    （`_call` 里把它打桩了，那条是给范围测试省事的），让 items 真的从 checks 表里来。
+    """
+
+    def _run_single(self):
+        body = JvmRunRequest(urls=["https://a.com"], filter={}, params={})
+
+        async def go():
+            r = await jvm_api.jvm_run(body)
+            return r, await jvm_api.run_jvm_job("testjob", Store(self.db), {"prep": {}})
+
+        # DNS 交叉验证要打桩：`store_checks` 默认会真去探测（测试不许联网）
+        async def _fake_probe(host):
+            return "answer", "1.2.3.4"
+
+        with mock.patch.object(jvm_api, "Store", lambda *a, **kw: Store(self.db)),                 mock.patch("core.dns_check.probe", _fake_probe):
+            return asyncio.run(go())
+
+    def test_result_carries_items_and_transitions(self) -> None:
+        r, out = self._run_single()
+        self.assertTrue(r.get("started"), r)
+        # 与本地那条对得上的四个键（前端 `parseCheckResult` 读 `checked`）
+        self.assertEqual(out["checked"], 1)
+        self.assertEqual(out["cached"], 0)
+        self.assertEqual(out["fetched"], 1)
+        # **首次有结论**：库里本来没有这条源的结论。快照若在 `store_checks` **之后**
+        # 读，这里会变成 0（新旧一样）——那是「这次变了什么」永远答「没变」的同一个错
+        self.assertEqual(out["transitions"]["first_checked"], 1)
+        self.assertEqual(out["transitions"]["changed"], {})
+
+    def test_items_carry_what_the_list_needs_to_backfill(self) -> None:
+        _r, out = self._run_single()
+        it = out["items"][0]
+        self.assertEqual(it["url"], "https://a.com")      # 归一化后的键
+        for key in ("name", "health", "stars", "star_basis",
+                    "toc_complete", "content_ok", "search_hit", "checked_at"):
+            self.assertIn(key, it, "回填缺字段: %s" % key)
+        # 结论是 checks 口径来的（engine=jvm），并进了那张表
+        with Store(self.db) as st:
+            row = st.checks_map().get("https://a.com")
+        self.assertIsNotNone(row, "结论没落进 checks")
+        self.assertEqual(row.get("engine"), "jvm")
+        self.assertEqual(row.get("health"), it["health"])
+
+    def test_second_run_reports_no_change(self) -> None:
+        """第二次跑同一条源：健康度没变 → 不进「变成 X」（快照读的是跑之前那份）。"""
+        self._run_single()
+        _r, out = self._run_single()
+        self.assertEqual(out["transitions"]["changed"], {})
+        self.assertEqual(out["transitions"]["first_checked"], 0)
 
 
 class ExportTests(_Base):
