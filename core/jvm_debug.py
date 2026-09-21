@@ -22,6 +22,7 @@ import os
 import pathlib
 import subprocess
 import threading
+import urllib.parse
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -159,6 +160,39 @@ def default_launcher(notes: List[str]) -> Callable[[], Tuple[int, float, str, st
         return _run_launcher
     return jvm_daemon.launcher_from_args(dump, on_note=notes.append, fallback=_run_launcher,
                                          fallback_name="Gradle")
+
+
+def page_from_engine(url: str, *, timeout: int = 60, render: bool = True) -> str:
+    """**让引擎去取这一页，把 App 手上那份 HTML 交回来**（十-5 的编排用）。
+
+    临时源是**一次性的**：`发现::<url>` 让 App 走「发现」分支去取这个地址，源里不需要任何
+    规则——我们的目的只是那一页的 body（侧车里的 `engine_html`）。**不落库、不推送、
+    不写 App 的任何数据**（与调试那条链同一条纪律）。
+
+    **`render=True` 才是这条口的价值**：光按 URL 抓回来的还是同一份原文（我们的 fetch 就能
+    做到），而 L2/L3/L4 要的是**渲染后**的页面——所以给这个地址挂上 App 自己的
+    `,{"webView":true}` 选项，让它走 `BackstageWebView`（本机就是 A2 那条浏览器桥：
+    真浏览器渲染 + 求值 `js` 选项），交回来的是页面脚本跑过之后的那份 DOM。
+
+    **拿不到就抛，带原因**：调用方据此「这一段规则先不给」，**不退回我们抓的那份**——
+    材料不对产出的规则是假成功（lessons §八十）。
+    """
+    from core.paths import data_path
+    parts = urllib.parse.urlsplit(url)
+    origin = "%s://%s" % (parts.scheme, parts.netloc) if parts.netloc else url
+    probe = {"bookSourceName": "取页探针", "bookSourceUrl": origin,
+             "bookSourceType": 0, "exploreUrl": url}
+    # 选项挂在**key 的 URL** 上：App 拿它当 mUrl 交给 AnalyzeUrl，那里才认 `,{...}`
+    key = "发现::" + url + (',{"webView":true}' if render else "")
+    out = run_jvm_debug(probe, key=key, timeout=timeout,
+                        out_path=data_path("app_probe", "engine_page.ndjson"))
+    pages = [p for p in (out.get("pages") or []) if p.get("origin") == "engine"]
+    hit = next((p for p in pages if str(p.get("url") or "") == url), None) or (pages[0] if pages else None)
+    if not hit:
+        raise RuntimeError(out.get("error") or
+                           ("引擎这次没把这一页交回来（%s）"
+                            % (out.get("code_text") or "未见输出")))
+    return str(hit.get("html") or "")
 
 
 def run_jvm_debug(source: Dict[str, Any],

@@ -137,7 +137,7 @@ def classify_page(html: str, want: str = "") -> Dict[str, Any]:
         if want == WANT_MEDIA and stats["images"] > 0 and stats["images_with_src"] <= 1:
             out["layer"] = "L2"
             out["evidence"] = [{"why": "图片容器在、但图没有地址",
-                                "note": "地址要页面脚本跑起来才有（渲染后）",
+                                "note": "地址由页面脚本给（渲染后进 DOM，或干脆只在接口里）",
                                 "snippet": "<img>", "line": 0}]
             return out
         m = _EMPTY_SHELL_RE.search(text)

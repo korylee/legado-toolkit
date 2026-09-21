@@ -16,6 +16,7 @@ from core.urls import abs_url as _abs_url
 from core.fetch import (fetch, extract_keyword, probe_search_endpoint,
                           _page_has_search_results)
 from core.analyzer import analyze_search_page, analyze_detail_page
+from core.app_debug import want_of_page
 from core.build import build_source, load_sources, save_sources
 from core.verify import verify_chain
 from core.rules.replayer import extract_all as apply_css_rule
@@ -126,6 +127,34 @@ class AddResult:
     """
     rc: int
     error: str = ""
+
+
+def _page_for_analysis(url: str, want: str, notes: List[str], timeout: int = 60) -> str:
+    """这一页该怎么取：**先按老办法抓 → 判层 → L2–L4 时改用引擎那份**（十-5 的编排）。
+
+    为什么是「先抓再判」：判层要看页面内容，抓之前判不了。
+
+    **引擎拿不到就抛**（带原因）——调用方据此「这一段规则先不给」。**不回退**：
+    在 L2–L4 的页面上用我们抓的那份写规则，产出的是「看着正常、实际取不到」的假成功
+    （lessons §八十：引擎是材料就当硬要求）。
+    """
+    from core.page_layer import classify_page
+    html = fetch(url)
+    verdict = classify_page(html, want)
+    if verdict["layer"] not in ("L2", "L3", "L4"):
+        return html
+    why = "；".join(e["why"] for e in verdict["evidence"]) or verdict.get("unsure", "")
+    try:
+        from core.jvm_debug import page_from_engine
+        got = page_from_engine(url, timeout=timeout)
+    except Exception as e:
+        raise RuntimeError(
+            "这一页判到 %s（%s），要由本机引擎取；引擎没取到：%s。"
+            "这一段规则先不给——用我们抓的那份会写出「看着正常、实际取不到」的规则"
+            % (verdict["layer"], why, e))
+    notes.append("%s 判到 %s（%s），这一段已改用本机引擎取回的那份 HTML（App 手上那份）"
+                 % (url, verdict["layer"], why))
+    return got
 
 
 def run_add(url, name="", source_type="novel", group="📖新增源",
@@ -262,11 +291,19 @@ def run_add(url, name="", source_type="novel", group="📖新增源",
     toc_rules = {}
     content_rule = ""
     toc_note = ""
+    #: 「这一段换了材料」「这一段要引擎但引擎没取到」这类事实都进这里，最后拼进 note
+    analysis_notes: List[str] = []
     if detail_for_toc:
         print(f"\n📖 详情页样例：{detail_for_toc}")
         try:
-            d_html = fetch(detail_for_toc)
-            result = analyze_detail_page(d_html, detail_for_toc)
+            # 详情页也按层走（同一份判据、同一个取页器）：L2–L4 时改用引擎取回来的那份，
+            # 正文页那一页由 `page_fetcher` 在里面同样处理
+            want_detail = want_of_page("detail", TYPE_MAP.get(source_type, 0))
+            d_html = _page_for_analysis(detail_for_toc, want_detail, analysis_notes)
+            result = analyze_detail_page(
+                d_html, detail_for_toc,
+                page_fetcher=lambda u: _page_for_analysis(
+                    u, want_of_page("chapter", TYPE_MAP.get(source_type, 0)), analysis_notes))
             toc_rules = result["toc"]
             content_rule = result["content"]
             toc_note = result["note"]
@@ -277,11 +314,21 @@ def run_add(url, name="", source_type="novel", group="📖新增源",
                 print(f"   ⚠️ {toc_note or '目录推断失败'}")
         except Exception as e:
             print(f"   ⚠️ 详情页抓取/推断失败：{e}")
+            analysis_notes.append("详情/正文段没成：%s" % e)
 
     if toc_rules:
         source["ruleToc"] = toc_rules
     if content_rule:
         source["ruleContent"] = {"content": content_rule, "nextContentUrl": ""}
+
+    # 4.9) 编排留下的痕迹（换了材料 / 哪一段要引擎而引擎没取到）写进备注：
+    # 这是「这份规则是在什么材料上写出来的」，用户要能看见（AGENTS #4）
+    if analysis_notes:
+        base = source.get("bookSourceComment", "") or ""
+        source["bookSourceComment"] = (base + ("\n" if base else "") +
+                                       "\n".join("· " + n for n in analysis_notes))
+        for n in analysis_notes:
+            print(f"   ℹ️ {n}")
 
     # 5) 预览 + 确认
     print("\n📋 生成的书源预览：")

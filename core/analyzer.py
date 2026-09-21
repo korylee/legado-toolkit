@@ -225,7 +225,7 @@ def analyze_search_page(html: str, keyword: str) -> dict:
             break
 
     return result
-def analyze_detail_page(html: str, book_url: str) -> dict:
+def analyze_detail_page(html: str, book_url: str, page_fetcher=None) -> dict:
     """
     从书籍详情页推断目录规则(ruleToc)和正文规则(ruleContent)。
 
@@ -234,6 +234,10 @@ def analyze_detail_page(html: str, book_url: str) -> dict:
       2. chapterName/chapterUrl 取容器内第一章链接的相对路径
       3. 正文规则：抓第一章 URL，取文本量最大的 div → content
     返回 dict(toc={...}, content=rule, note=str)。
+
+    ``page_fetcher``：**取页缝**（默认就是 ``core.fetch.fetch``）。十-5 的编排用它把
+    「判到 L2–L4 的那一页」换成**引擎取回来的那份 HTML**（App 手上那份）；拿不到时它**抛**
+    （带原因），这里的 ``except`` 会把原因写进 ``note`` —— 「这一段规则先不给」就是这么出来的。
     """
     from core.html import make_soup
     toc: dict = {}
@@ -384,7 +388,7 @@ def analyze_detail_page(html: str, book_url: str) -> dict:
     first_chapter_url = _abs_url(book_url, container_a.get("href", ""))
     content_rule = ""
     try:
-        ch_html = fetch(first_chapter_url)
+        ch_html = (page_fetcher or fetch)(first_chapter_url)
         ch_soup = make_soup(ch_html)
         best_len, best_el = 0, None
         for el in ch_soup.find_all(["div", "article", "section", "p"]):
