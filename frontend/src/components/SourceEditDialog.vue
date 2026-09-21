@@ -5,6 +5,7 @@ import { ElMessage, ElMessageBox } from "element-plus";
 import { api, subscribeJob } from "../api/client";
 import { getDetail, listTags, saveSource, sourceExists } from "../api/sources";
 import { appDebug, appPreflight, jvmDebug } from "../api/rules";
+import { jobFailReason } from "../utils/jobs";
 import {
   canonicalTag, ensureTagMeta, isQualityTag, isStatusTag,
   mergeGroup, sourceTypes, splitSystemUser, statusTags, tagOfType, typeKeyOf,
@@ -564,7 +565,10 @@ async function quickGenerate() {
         quickStop = null;
         if (d.status !== "done") {
           quickProgress.value = "";
-          ElMessage.error("生成失败：" + (d.status || "未知错误"));
+          // 失败原因在后端的 result_json.error 里（连「进程重启没写终态」那种也有，
+          // 见 Store.fail_orphan_jobs）。只显示 status 字面量等于把原因丢了
+          const why = jobFailReason(d.result_json);
+          ElMessage.error("生成失败：" + (why || d.status || "未知错误"));
           return;
         }
         let result = {};
@@ -1338,6 +1342,7 @@ async function doSave(s) {
                      :initial-step="debugStep" :rules="ruleByStep"
                      :source-type="Number(form.bookSourceType) || 0"
                      :enabled-cookie-jar="!!form.enabledCookieJar"
+                     :source="form"
                      :rerunning="appDebugging"
                      @goto="onDebugGoto" @apply-rule="onApplyRule"
                      @rerun-from="rerunFromStep" />
