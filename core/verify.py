@@ -337,8 +337,8 @@ def strip_evidence(verify_result):
     「同一件事写两处」。
 
     保留 ``verdict`` / ``reason`` / ``notes`` / ``has_notes`` / ``evidence`` / ``ok`` /
-    ``all_ok`` / 其余标量字段；只清空 ``pages[].html``、``steps[].values``、
-    ``steps[].matched_html`` 这三处原文。
+    ``all_ok`` / 其余标量字段；**清空 ``steps[].values``、``steps[].matched_html``，
+    并把 ``pages`` 整份置空**（页面列表本身就是证据，留着没有判定价值）。
 
     **返回新对象，不改动入参**——``loop.py`` 会同时持有剥离前后两份，就地改写会把
     另一份也一起改掉（``tests/test_strip_evidence.py`` 有测试守这条）。

@@ -194,5 +194,68 @@ class RunAddJobReasonTests(unittest.TestCase):
         self.assertNotEqual(r["error"], "生成失败")
 
 
+class VerifyWithEngineTests(unittest.TestCase):
+    """生成完的验证走**本机引擎**（十-5），不再是本地回放器。
+
+    两条要钉的：① 验的是引擎的结论（`source: "jvm"`，steps/all_ok 原样带回来）；
+    ② **引擎不可用不推翻生成结果**——源照样生成，只是把「没验成 + 为什么」带回去
+    （AGENTS #4：原因要走到用户眼前）。
+    """
+
+    def setUp(self) -> None:
+        self.root = pathlib.Path(tempfile.mkdtemp(prefix="quick_verify_"))
+        self.out = self.root / "gen.json"
+        self.html = FIXTURE.read_text(encoding="utf-8")
+        self.calls = []
+
+    def _run_job(self, engine_result):
+        import asyncio
+
+        from backend.api import ops
+        from services.add_source import AddResult
+
+        class FakeStore:
+            def update_job(self, *a, **kw):
+                pass
+
+        def fake_engine(source, **kw):
+            self.calls.append({"source": source, **kw})
+            return engine_result
+
+        with mock.patch("services.add_source.run_add",
+                        return_value=AddResult(0)),                 mock.patch("services.add_source.fetch", side_effect=_fake_fetch(self.html)),                 mock.patch("core.analyzer.fetch", side_effect=_fake_fetch(self.html)),                 mock.patch("services.add_source._find_main_sources", return_value=[]),                 mock.patch("core.jvm_debug.run_jvm_debug", side_effect=fake_engine),                 mock.patch("core.build.load_sources",
+                           return_value=[{"bookSourceName": "测试源",
+                                          "bookSourceUrl": "http://example.com",
+                                          "searchUrl": "http://example.com/search.php?q={{key}}"}]):
+
+            return asyncio.run(ops.run_add_job("job-v", FakeStore(),
+                                               {"url": URL, "verify": True}))
+
+    def test_engine_is_called_and_its_steps_come_back(self):
+        engine = {"source": "jvm",
+                  "steps": [{"name": "search", "verdict": "pass", "values": ["甲"]}],
+                  "pages": [{"id": "search", "html": "<html>整页</html>"}],
+                  "all_ok": True, "events": [{"t": 0, "text": "x"}], "error": ""}
+        r = self._run_job(engine)
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["verify"]["source"], "jvm")
+        self.assertEqual([s["name"] for s in r["verify"]["steps"]], ["search"])
+        self.assertTrue(r["verify"]["all_ok"])
+        # 打的是同一份源、关键词从 URL 里取
+        self.assertEqual(self.calls[0]["key"], "绍宋")
+        # 体积：事件流不进结果、证据原文被剥掉（它会写进 jobs 表 + 走 SSE）
+        self.assertNotIn("events", r["verify"])
+        self.assertEqual(r["verify"]["pages"], [], "页面列表整份是证据，剥掉")
+        self.assertEqual(r["verify"]["steps"][0]["values"], [])
+
+    def test_engine_unavailable_keeps_the_generated_source(self):
+        """没配引擎 / 另一个任务在跑 / 零事件：**源照样给**，但要说清没验成。"""
+        r = self._run_job({"source": "jvm", "steps": [], "pages": [], "all_ok": None,
+                           "events": [], "error": "本机引擎不可用：先在设置里填 App 源码目录"})
+        self.assertTrue(r["ok"], "生成结果不该被验证失败带走")
+        self.assertTrue(r["verify"].get("skipped"))
+        self.assertIn("本机引擎不可用", r["verify"]["error"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -178,6 +178,18 @@ const quickProbe = ref(true);
 const quickLoading = ref(false);
 const quickProgress = ref("");
 const quickVerify = ref(null);
+//: 生成后的那次验证是谁给的（十-5 之后默认是**本机引擎**）：标签必须跟着来源走——
+//: 跑真引擎的结果挂着「本地调试 · 仅供参考」是句假话（AGENTS #4 那一类）
+const quickVerifyFrom = computed(() => {
+  const v = quickVerify.value || {};
+  if (v.local_approx) return { tag: "本地调试", type: "info" };
+  if (v.source === "app") return { tag: "App 实测", type: "success" };
+  if (v.source === "jvm") return { tag: "本机引擎", type: "primary" };
+  return { tag: "", type: "info" };
+});
+//: 验证没跑成时的那句话（引擎不可用 / 零事件 / 另一个任务在跑）。
+//: **不能吞**：源已经生成了，用户要知道「这份验证不是通过，是没跑」
+const quickVerifyError = computed(() => String((quickVerify.value || {}).error || ""));
 let quickStop = null;
 
 // App IP 输入后立刻回写 localStorage（存 trim 后的值）。清空则删掉键——
@@ -925,16 +937,24 @@ async function doSave(s) {
               </el-form-item>
             </el-form>
             <div v-if="quickVerify" class="quick-verify">
-              <!-- 这是**本地离线回放**的结果（verify_chain），不是 App 实测：
-                   只判「取到值 / 不报错」，且跑不了 JS 规则。必须标出来——
-                   它和右侧 App 调试的结果用的是同一套三态视觉，不标就分不清
-                   哪份可信 -->
+              <!-- **谁给的结论要标出来**：十-5 之后这里默认是本机引擎（同一段 App 代码），
+                   与右侧调试的结果用的是同一套三态视觉，不标就分不清哪份是什么。
+                   只有回落到本地回放器那种结果才写「仅供参考」 -->
               <p class="muted" style="margin: 0 0 8px">
-                <el-tag size="small" type="info">本地调试 · 仅供参考</el-tag>
-                <span style="margin-left: 6px">
+                <el-tag v-if="quickVerifyFrom.tag" size="small" :type="quickVerifyFrom.type">
+                  {{ quickVerifyFrom.tag }}
+                </el-tag>
+                <span v-if="quickVerifyFrom.tag === '本地调试'" style="margin-left: 6px">
                   只检查是否取到值，不支持 JS 规则。要确认请用右侧「连 App 调试」。
                 </span>
+                <span v-else style="margin-left: 6px">
+                  生成后的验证跑的是「阅读」App 的真源码（本机引擎）；差在环境——
+                  登录态要预热、网络出口是本机。要连真机确认用右侧。
+                </span>
               </p>
+              <el-alert v-if="quickVerifyError" type="warning" :closable="false" show-icon
+                        style="margin: 0 0 8px"
+                        :title="'这次没验成：' + quickVerifyError" />
               <!-- 与试跑卡片同一套三态渲染：同一个 as_step_dict 产出的数据，
                    这里若还用 ok 两态，「pass + 附注」会显示成绿色，与试跑卡片矛盾 -->
               <div v-for="s in quickVerify.steps" :key="s.name" class="quick-step">

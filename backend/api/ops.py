@@ -15,6 +15,36 @@ from backend.api.check_summary import (ITEMS_LIMIT, check_items_from_records,
                                        summarize_transitions)
 
 
+def _verify_generated(source: Dict[str, Any], keyword: str,
+                      detail_url: str) -> Dict[str, Any]:
+    """生成完的验证：**跑一次本机引擎**（十-5）。
+
+    两条边界：
+
+    - **引擎不可用不推翻生成结果**：没配 App 源码目录 / 另一个 JVM 任务在跑 / 零事件时，
+      源照样生成，只是把「这次没验成 + 为什么」原样带回去（AGENTS #4：原因要走到用户眼前）。
+      生成的验证是**附加证据**，不是生成的必要条件。
+    - **证据原文要剥掉**：结果会写进 jobs 表并走 SSE（`jobs/runner.py` / `api/jobs.py`），
+      整页 HTML + 逐段原文会撑爆它——判定结论（verdict/detail/all_ok）完整保留，
+      前端预览不受影响（同一件事在旧路上也做过）。
+    """
+    from core.jvm_debug import run_jvm_debug
+    from core.paths import data_path
+    from core.verify import strip_evidence
+
+    # 调试目标：有搜索规则就用关键词（搜索 → 详情 → 目录 → 正文整条链）；没有搜索规则的
+    # 源（「仅发现」模式生成的）拿详情页当入口。**App 固定取第一条候选**，没有 pick 这个口
+    key = keyword if str(source.get("searchUrl") or "").strip()         else (detail_url or str(source.get("bookSourceUrl") or ""))
+    out = run_jvm_debug(source, key=key, timeout=60,
+                        out_path=data_path("app_probe", "quick_add_verify.ndjson"))
+    if out.get("error") and not out.get("steps"):
+        return {"steps": [], "pages": [], "all_ok": None, "skipped": True,
+                "engine": "jvm", "error": out["error"]}
+    # 事件流对「生成预览」没用，且它是这里最占体积的一块（判定要看的是 steps）
+    out.pop("events", None)
+    return strip_evidence(out)
+
+
 @runner.register("check")
 async def run_check_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[str, Any]:
     # 校验一批源。payload:
@@ -112,7 +142,6 @@ async def run_add_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
     from core.build import load_sources
     from core.fetch import extract_keyword
     from core.paths import data_path
-    from core.verify import strip_evidence, verify_chain
     from services.add_source import run_add
 
     url = str(payload.get("url") or "").strip()
@@ -167,11 +196,14 @@ async def run_add_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
         source["bookSourceGroup"] = merge_group([], tags)
         keyword = extract_keyword(url) or str(payload.get("keyword") or "我")
         if verify:
-            v = await asyncio.to_thread(verify_chain, source, keyword, detail_url, pick)
-            # 快速生成的结果会写进 jobs 表（jobs/runner.py:51）并走 SSE 推送
-            # （api/jobs.py:47），整页 HTML + 正文全文会撑爆 jobs 表与推送流；
-            # 剥掉证据原文，判定结论（ok/detail/all_ok）完整保留，前端预览不受影响
-            v = strip_evidence(v)
+            # **跑一次本机引擎**（十-5）。原来这里跑的是 `verify_chain`（本地回放器）：
+            # 它跑不了 JS、没有登录态，对 L2–L4 的页面看的是**另一份材料**——给出的
+            # 「通过」与 App 的实际行为无关（正是 lessons §七十七 那一类）。引擎是同一段
+            # App 代码 + 同一套环境，结论与「手动调一次」逐段一致。
+            #
+            # 结果体与设备/引擎调试**同形状**（steps / pages / all_ok），所以前端那套
+            # 三态渲染与「有疑点」引导零改动就能吃。
+            v = await asyncio.to_thread(_verify_generated, source, keyword, detail_url)
         else:
             v = {"steps": [], "all_ok": None, "skipped": True}
         st.update_job(job_id, progress=3)
