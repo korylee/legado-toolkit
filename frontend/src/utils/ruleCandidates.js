@@ -24,6 +24,11 @@ export const FIELD_OF_STEP = {
   content: "ruleContent.content",
 };
 
+/** HTML → 文档（**同一个解析口径**：`DOMParser`）。抽屉算「这条规则选中几个」也用它。 */
+export function parseDoc(html) {
+  return parse(html);
+}
+
 function parse(html) {
   try {
     return new DOMParser().parseFromString(String(html || ""), "text/html");

@@ -24,7 +24,7 @@ import { getLLMStatus } from "../api/llm";
 // 步骤名 → 中文的**唯一**一份（编辑弹窗共用），别再在本组件里写第二份
 import { STEP_LABELS } from "../utils/steps";
 // 第 1 层「在页面上找目标」：候选规则从补抓的 HTML 里算出来（纯函数，不发请求）
-import { FIELD_OF_STEP, findCandidates } from "../utils/ruleCandidates";
+import { FIELD_OF_STEP, findCandidates, parseDoc } from "../utils/ruleCandidates";
 // 源码的显示层（折行缩进 + 实体展开，纯函数）：好看的和能抄的是两份东西，见 htmlView
 import { formatHtml } from "../utils/htmlView";
 // 定层（九-1）：先定层再写规则——判据与证据行都在纯函数里，这里只负责把「这一步要什么」传进去
@@ -454,6 +454,27 @@ function applyRulePreview() {
 // 换了步骤 / 改了规则就跟着重画（在「网页视图」页签上才看得见效果）
 watch(currentRule, () => { if (subTab.value === "dom") applyRulePreview(); });
 
+//: **对数验收**（九-4）：当前字段的规则在这份 HTML 上选中几个节点。
+//: 用 `DOMParser` 独立算一遍（不依赖 iframe 开没开），与「网页视图」里画出来的同源同法。
+//: 对什么数：**引擎那一步报的条数**（`◇目录总数:199` 那种）——两边都算出来才谈得上验收
+//: （原来那条「本地回放 vs 引擎」的比法随本地引擎退场没了，比的是同一条规则在两个页面上
+//: 看到的东西，不一致就说明**材料不同**或 App 另有过滤）。
+const localRuleCount = computed(() => {
+  const html = pageTextRaw.value;
+  if (!html || !currentRule.value) return null;
+  return previewCss(parseDoc(html), currentRule.value);
+});
+
+//: 引擎那一步自己报的条数（事件流里的 `◇书籍总数:7` / `◇目录总数:199`）。
+//: **只认带「总数/条数/数量/个数」的键**：`◇章节名称:第1页` 里的 1 不是条数
+const engineCount = computed(() => {
+  for (const n of ((current.value || {}).notes || [])) {
+    const m = String(n).match(/◇[^:：]*(?:总数|条数|数量|个数)[:：]\s*(\d+)/);
+    if (m) return { label: String(n).replace(/^◇/, "").split(/[:：]/)[0], n: Number(m[1]) };
+  }
+  return null;
+});
+
 function onFrameClick(ev) {
   const doc = frameDoc();
   const el = ev.target;
@@ -603,6 +624,15 @@ async function askAI() {
 //: 这一页是不是登录墙（后端判的，判定表在 core/checker）。是的话**不让点**：
 //: 模型看到的不是 App 看到的那份（App 带登录态），提了也验不了、也修不对
 const loginWall = computed(() => !!(preselRes.value || {}).login_wall);
+
+//: **层不是 L1 时不给 AI 提议**（九-3）。理由不是"省钱"，是**材料不对**：模型看到的是
+//: 我们抓的原文，而 L2–L5 的数据要渲染 / 解密后才有（实测那类章节页原文只有一段 base64
+//: 和一个空容器）——它会**在错材料上生成**，而 `dry_run=false` 还是花钱动作。
+//: 判据直接用九-1 的层（同一个结论只有一处，别在这儿另判一遍）。
+const aiLayerBlock = computed(() => {
+  const l = layer.value;
+  return l && l.layer && l.layer !== "L1" ? l.info.name : "";
+});
 
 // 换步骤 / 换页面就自动跑那趟**免费的**（程序先挑 + 登录墙判断）。它不发模型请求，
 // 所以可以自动跑；付费的那趟只有 askAI 里有，且只由按钮点击触发
@@ -854,10 +884,16 @@ function copyPage() {
           <span class="grow" />
           <!-- 显示的是**这一步**、这一页不是登录墙、**且配了模型**时才给点 -->
           <el-button size="small" type="primary" plain :loading="aiLoading"
-                     :disabled="!canAskAI || loginWall" @click="askAI">
+                     :disabled="!canAskAI || loginWall || !!aiLayerBlock" @click="askAI">
             让 AI 提规则
           </el-button>
         </div>
+        <!-- 判到了 L2–L5：数据要渲染 / 解密后才有，AI 看到的只是原文——先说清楚，
+             别让用户点完才发现「提了也验不了」。**独立于下面那条链**（理由同上） -->
+        <p v-if="aiLayerBlock" class="muted" style="margin: 4px 0 0">
+          这一页判到了 <b>{{ aiLayerBlock }}</b>：{{ layer.info.action }}。数据要渲染 / 解密后
+          才有，AI 看到的只是我们抓的原文——所以这里不给它提规则（提了也验不了）。
+        </p>
         <!-- 没配模型：只说明**按钮**为什么点不了。
              **必须独立于下面那条 v-if / v-else-if 链**——插进链里会把「程序挑的」
              结果一起藏掉，而程序挑候选不依赖模型，那恰恰是没配模型的人唯一能用的 -->
@@ -996,6 +1032,17 @@ function copyPage() {
           <p v-if="rulePreview" class="muted" style="margin: 6px 0 0">
             当前字段的规则 <span class="mono">{{ currentRule }}</span> 在这一页上选中
             <b>{{ rulePreview.hits }}</b> 个节点（去重 {{ rulePreview.uniq }}）——已用蓝框标出。
+          </p>
+          <!-- 对数验收（九-4）：这条规则在**我们抓的页面**上选中 N 个，引擎那一步报 M 个。
+               一致 → 说明这条规则就是它取数用的那条；不一致 → 材料不同 / App 另有过滤，
+               改规则之前先看这里 -->
+          <p v-if="localRuleCount && engineCount" class="muted" style="margin: 6px 0 0">
+            对数：这份页面 <b>{{ localRuleCount.hits }}</b> 个
+            / 引擎那一步 <b>{{ engineCount.n }}</b> 个（{{ engineCount.label }}）
+            <el-tag v-if="localRuleCount.hits === engineCount.n" size="small" type="success">
+              已对数
+            </el-tag>
+            <el-tag v-else size="small" type="danger">数量不一致，先别改规则</el-tag>
           </p>
           <p v-else-if="currentRule" class="muted" style="margin: 6px 0 0">
             当前字段的规则在这一页上**选不中任何节点**：它可能不是选择器（`@js:` 那种），
