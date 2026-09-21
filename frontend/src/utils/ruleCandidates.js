@@ -15,6 +15,8 @@
 // 这一层是**确定性**的：不调模型、不发请求，只解析+查询。
 
 //: 步骤 → 表单里那个字段的路径。填规则时用（与 `RuleDebugDrawer` 的 STEP_RULE_TAB 同源）。
+import { measureValues } from "./selector.js";   // 带扩展名：这样 node 也能直接跑它
+
 export const FIELD_OF_STEP = {
   search: "ruleSearch.bookList",
   bookUrl: "ruleSearch.bookUrl",
@@ -81,7 +83,7 @@ function linkCandidates(doc, limit) {
     const good = hrefs.filter(looksLikeTarget).length;
     const samples = hrefs.filter(looksLikeTarget).slice(0, 3);
     out.push({
-      rule, kind: "link", count: hrefs.length, good,
+      rule, kind: "link", count: hrefs.length, good, values: hrefs,
       samples: samples.length ? samples : hrefs.slice(0, 3),
     });
   }
@@ -109,7 +111,7 @@ function mediaCandidates(doc, limit) {
   }
   return [...groups.entries()]
     .map(([rule, vals]) => ({
-      rule, kind: "media", count: vals.length, good: vals.length,
+      rule, kind: "media", count: vals.length, good: vals.length, values: vals,
       samples: vals.slice(0, 3),
     }))
     .sort((a, b) => b.count - a.count)
@@ -126,7 +128,7 @@ function textCandidates(doc, limit) {
     const text = String(el.textContent || "").replace(/\s+/g, "");
     if (text.length < 200) continue;
     out.push({
-      rule: `.${cls}@text`, kind: "text", count: text.length, good: text.length,
+      rule: `.${cls}@text`, kind: "text", count: text.length, good: text.length, values: text,
       samples: [String(el.textContent || "").replace(/\s+/g, " ").trim().slice(0, 60)],
     });
   }
@@ -153,7 +155,7 @@ function listCandidates(doc, limit) {
     }
   }
   return [...groups.entries()]
-    .map(([rule, count]) => ({ rule, kind: "list", count, good: count, samples: [] }))
+    .map(([rule, count]) => ({ rule, kind: "list", count, good: count, values: [], samples: [] }))
     .sort((a, b) => b.count - a.count)
     .slice(0, limit);
 }
@@ -175,7 +177,9 @@ export function findCandidates(html, kind, limit = 6) {
   }[kind];
   if (!run) return [];
   try {
-    return run(doc, limit);
+    // 实测口径与点选**共用一份**（`utils/selector.js` 的 `measureValues`）：
+    // 「命中 1228」与「命中 1198」在界面上都只是个数字，能分开它们的是**去重**与占比
+    return run(doc, limit).map((c) => ({ ...c, ...measureValues(doc, c.values) }));
   } catch (e) {
     // 脏 HTML 让某一族候选探不出来时，不该把整块面板弄空——诊断那边还有别的线索
     console.error("[candidates] 解析失败:", e);

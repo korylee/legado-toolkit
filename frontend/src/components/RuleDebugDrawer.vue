@@ -30,7 +30,7 @@ import { formatHtml } from "../utils/htmlView";
 // 定层（九-1）：先定层再写规则——判据与证据行都在纯函数里，这里只负责把「这一步要什么」传进去
 import { classifyLayer } from "../utils/layers";
 // 点选（九-2a）：元素 → 候选选择器 + 实测三个数。**只是提议**，验收仍走真引擎
-import { selectorCandidates } from "../utils/selector";
+import { previewCss, selectorCandidates } from "../utils/selector";
 
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
@@ -323,7 +323,10 @@ const want = computed(() => {
 //: 判据、门槛、证据抓法都在 `utils/layers.js`（纯函数，有 node 断言）——这里只是调用点，
 //: **不要在组件里另写一份**（原来那几个统计就长在这儿，容易与那边漂）
 const layer = computed(() => classifyLayer(
-  (currentPage.value || {}).html || "", props.source || null, { want: want.value }));
+  (currentPage.value || {}).html || "", props.source || null,
+  // `step` 一并传：源声明的能力按**段**归属（webJs 只说正文那段、webView 只算它挂的
+  // 那条 URL 规则）——不传的话搜索页会被正文的声明连累
+  { want: want.value, step: (current.value || {}).name || "" }));
 //: 补抓页面上的节点统计。「你要的东西这页上到底有没有」全靠它——
 //: 没有的话，选择器改多少遍都取不到
 const pageStats = computed(() => (layer.value.page || {}).stats || null);
@@ -337,6 +340,11 @@ const hasWanted = computed(() => {
 //: 验一条候选要走真引擎，也就是「用这条」填进表单 + 「重新调试本步」——本地跑一遍
 //: 给的是近似结论，撤掉它正是这一轮的目的。
 const candidates = ref([]);
+
+//: 候选面板只对 **L1**（或判不出层）开着：对 L2–L5，这份 HTML 上的选择器能选中、
+//: 但**选中的不是数据**（假证据）——那正是「找出来的不符合预期」的根因（TODO §九）。
+//: 判不出来（没有页面 / 没有目标定义）时照旧给，那是 L1 的正常情况
+const candidatesUsable = computed(() => !layer.value.layer || layer.value.layer === "L1");
 
 watch([() => props.modelValue, activeStep, currentPage], () => {
   candidates.value = (currentPage.value && want.value)
@@ -414,6 +422,9 @@ function clearMark(doc, cls) {
   doc.querySelectorAll("." + cls).forEach((n) => n.classList.remove(cls));
 }
 
+//: 当前字段里的规则在这一页上选中了什么（「改一个字符看命中集合怎么变」）
+const rulePreview = ref(null);
+
 function onFrameLoad() {
   const doc = frameDoc();
   if (!doc) return;
@@ -424,7 +435,24 @@ function onFrameLoad() {
   // 切步/换页之后上一次的选择不适用了（页面已经不是那一页）
   picked.value = null;
   activeCss.value = "";
+  applyRulePreview();
 }
+
+//: 把**当前字段的规则**在页面上画出来（剥掉末段取值动作，见 `previewCss`）。
+//: 「改一个字符就能看到命中集合怎么变」——不用每次跑一遍引擎
+function applyRulePreview() {
+  const doc = frameDoc();
+  if (!doc) return;
+  clearMark(doc, "zc-hit");
+  rulePreview.value = previewCss(doc, currentRule.value);
+  if (!rulePreview.value) return;
+  try {
+    doc.querySelectorAll(rulePreview.value.css).forEach((n) => n.classList.add("zc-hit"));
+  } catch (e) { /* 选择器不合法：不动 */ }
+}
+
+// 换了步骤 / 改了规则就跟着重画（在「网页视图」页签上才看得见效果）
+watch(currentRule, () => { if (subTab.value === "dom") applyRulePreview(); });
 
 function onFrameClick(ev) {
   const doc = frameDoc();
@@ -788,7 +816,12 @@ function copyPage() {
       <!-- 第 1 层：**在页面上找目标**。候选取自我们补抓的那份 HTML（纯前端算，
            不调模型、不发请求），每条都标出「选到几条 + 前几个值」——不给样本等于
            让用户再猜一次。「用这条」只填表单，验证走「重新调试本步」（App 引擎） -->
-      <div v-if="candidates.length" class="candidates">
+      <div v-if="candidates.length && !candidatesUsable" class="cand-note">
+        这一页判到了 <b>{{ layer.info.name }}</b>——候选是在**我们补抓的原文**上算的，
+        而数据要渲染 / 解密后才有，所以这里不摆候选（能选中，选中的不是数据）。
+        下一步：{{ layer.info.action }}。
+      </div>
+      <div v-if="candidates.length && candidatesUsable" class="candidates">
         <div class="cand-head">
           <b>在页面上找「{{ (want && want.label) || "目标" }}」</b>
           <span class="muted">（「用这条」只把它填进表单；要验就点「重新调试本步」，
@@ -797,6 +830,11 @@ function copyPage() {
         <div v-for="(c, i) in candidates" :key="i" class="cand">
           <span class="mono rule">{{ c.rule }}</span>
           <el-tag size="small" :type="c.count ? 'success' : 'info'">{{ c.count }} 条</el-tag>
+          <!-- 「命中 1228」与「命中 1198」在界面上都只是个数字：**去重**与占比才分得开 -->
+          <el-tag v-if="c.uniq < c.count" size="small" type="warning">
+            去重后 {{ c.uniq }}（{{ c.count - c.uniq }} 条重复）
+          </el-tag>
+          <span class="muted">占比 {{ formatRatio(c.ratio) }}</span>
           <span class="muted samples">{{ (c.samples || []).join("  |  ") || "（无样本）" }}</span>
           <span class="grow" />
           <el-button size="small" type="primary" plain @click="useCandidate(c)">用这条</el-button>
@@ -955,6 +993,14 @@ function copyPage() {
           </p>
           <iframe ref="frameRef" class="pick-frame" :srcdoc="frameHtml"
                   sandbox="allow-same-origin" @load="onFrameLoad" />
+          <p v-if="rulePreview" class="muted" style="margin: 6px 0 0">
+            当前字段的规则 <span class="mono">{{ currentRule }}</span> 在这一页上选中
+            <b>{{ rulePreview.hits }}</b> 个节点（去重 {{ rulePreview.uniq }}）——已用蓝框标出。
+          </p>
+          <p v-else-if="currentRule" class="muted" style="margin: 6px 0 0">
+            当前字段的规则在这一页上**选不中任何节点**：它可能不是选择器（`@js:` 那种），
+            或者数据要渲染后才有。
+          </p>
           <p v-if="picked" class="muted" style="margin: 8px 0 4px">
             选中的是 <span class="mono">&lt;{{ picked.tag }}&gt;</span>，它的候选：
           </p>
@@ -1132,4 +1178,13 @@ function copyPage() {
   background: #fff;      /* 页面大多假设白底 */
 }
 .pick-active { border-left: 3px solid var(--el-color-primary); }
+.cand-note {
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  border-left: 3px solid var(--el-color-warning);
+  border-radius: 4px;
+  background: var(--el-fill-color-lighter);
+  font-size: 13px;
+  line-height: 1.6;
+}
 </style>

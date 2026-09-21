@@ -6,8 +6,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { candidateSpecs, classesOf, cssToLegado, elementSpec, selectorCandidates }
-  from "./selector.js";
+import { candidateSpecs, classesOf, cssToLegado, elementSpec, measureValues,
+  previewCss, selectorCandidates } from "./selector.js";
 
 // ---- 极小的假 DOM：只实现被测到的那几个访问器（node 里没有 document）----
 
@@ -104,4 +104,26 @@ test("elementSpec：把 DOM 读成结构切片（含同标签兄弟序号）", (
   assert.equal(spec.tag, "li");
   assert.equal(spec.ancestors[0].id, "grid");
   assert.equal(spec.ancestors[0].nthOfType, 2, "同标签兄弟里的序号");
+});
+
+test("previewCss：末段是裸词就丢掉；丢完还选不中就返回 null（宁可不画）", () => {
+  const hit3 = { querySelectorAll: (sel) => (sel === ".card a" ? new Array(3).fill(0).map(() => ({})) : (sel === "a[href]" ? new Array(4).fill({}) : [])) };
+  const r = previewCss(hit3, "class.card@tag.a@href");
+  assert.equal(r.css, ".card a");
+  assert.equal(r.hits, 3);
+  assert.equal(r.ratio, 0.75, "3 个命中 / 4 条链接");
+  // 末尾不是裸词（是选择器）时直接用整条链
+  assert.equal(previewCss(hit3, "class.card@tag.a").css, ".card a");
+  // 选不中 → null：**画一个错的集合比不画更糟**
+  assert.equal(previewCss(hit3, "class.nope@tag.a"), null);
+  assert.equal(previewCss(hit3, ""), null);
+});
+
+test("measureValues：按**取到的值**算实测（候选面板那条路）", () => {
+  const doc = { querySelectorAll: () => new Array(8).fill({}) };
+  const m = measureValues(doc, ["/1", "/1", "/2", "  ", ""]);
+  assert.equal(m.hits, 3, "空白值不算命中");
+  assert.equal(m.uniq, 2, "重复的 /1 要去掉");
+  assert.ok(Math.abs(m.ratio - 0.375) < 1e-6, "3 / 8 = 0.375，实测 " + m.ratio);
+  assert.equal(measureValues(doc, []).hits, 0);
 });

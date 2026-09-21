@@ -162,3 +162,46 @@ export function selectorCandidates(doc, el, opts = {}) {
     return { ...c, hits: m ? m.hits : 0, uniq: m ? m.uniq : 0, ratio: m ? m.ratio : 0 };
   });
 }
+
+/**
+ * 一条取值规则的**元素部分**（给「实时高亮」用）：把 `@` 链换成 CSS，末段是裸词就丢掉。
+ *
+ * 为什么要丢末段：取值规则的末段是**取值动作或属性名**（`class.a@tag.b@href`），
+ * 当选择器用取不到东西（AGENTS #21）。这里**不维护那张词表**——只按「裸词」（不含
+ * `.`/`#`/`[`/空格）试，并**要求去掉之后真的能选中**；两档都选不中就返回 null
+ * （宁可不画，也不要画一个错的集合）。
+ */
+export function previewCss(doc, rule) {
+  const toCss = (r) => String(r || "")
+    .replace(/(^|@)class\./g, "$1.")
+    .replace(/(^|@)id\./g, "$1#")
+    .replace(/(^|@)tag\./g, "$1")
+    .replace(/@/g, " ").trim();
+  const text = String(rule || "").trim();
+  if (!text) return null;
+  const tries = [text];
+  const segs = text.split("@");
+  const last = (segs[segs.length - 1] || "").trim();
+  if (segs.length > 1 && /^[A-Za-z][\w-]*$/.test(last)) {
+    tries.push(segs.slice(0, -1).join("@"));
+  }
+  for (const r of tries) {
+    const css = toCss(r);
+    if (!css) continue;
+    const m = measure(doc, css);
+    if (m && m.hits > 0) return { css, ...m };
+  }
+  return null;
+}
+
+/**
+ * 从**取到的值**这一侧算实测（候选面板用）。与 `measure` 同一套口径，只是数的是值：
+ * `uniq` 明显小于 `hits` 就说明**同一项被列了多遍**（实测那类「重复 30 条最新章节」
+ * 就是这么露出来的），`ratio` 是它占页面链接的比例。
+ */
+export function measureValues(doc, values) {
+  const list = (values || []).filter((v) => String(v || "").trim());
+  const uniq = new Set(list.map((v) => String(v))).size;
+  const links = (doc && doc.querySelectorAll("a[href]").length) || 1;
+  return { hits: list.length, uniq, ratio: list.length / links };
+}

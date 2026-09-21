@@ -28,8 +28,9 @@ const KOUDAI = {
   },
 };
 
-test("口袋漫画这类源判 L3，且证据 ≥3 条（判官是源自己声明的能力）", () => {
-  const r = classifyLayer("<html><body><div id='chapter-images'></div></body></html>", KOUDAI);
+test("口袋漫画这类源在**正文页**判 L3，且证据 ≥3 条（判官是源自己声明的能力）", () => {
+  const r = classifyLayer("<html><body><div id='chapter-images'></div></body></html>", KOUDAI,
+                          { want: { kind: "media" }, step: "content" });
   assert.equal(r.layer, "L3");
   assert.ok(r.evidence.length >= 3, "证据不足 3 条：" + JSON.stringify(r.evidence));
   // 证据要能指回源码：每条都有 why 与 snippet
@@ -39,6 +40,25 @@ test("口袋漫画这类源判 L3，且证据 ≥3 条（判官是源自己声�
   // L2 与 L3 的分界就在这一条上：L2 只要求渲染，L3 得读页面 JS 建出来的对象
   assert.ok(r.evidence.some((e) => e.why === "webJs 读的是页面全局对象"),
     "少了「读全局对象」这条证据，L3 与 L2 就分不开了：" + JSON.stringify(r.evidence.map((e) => e.why)));
+});
+
+test("同一份源在**搜索页**不误报：那一段是静态直出（L1）", () => {
+  // 按段归属的理由：`ruleContent.webJs` 说的是正文那一段——把它算到搜索页头上，
+  // 会把「搜索结果明明在原文里」的页面判成 L2/L3（实测口袋漫画就是这样），
+  // 而界面上那是「候选面板被藏掉」，用户只会觉得工具坏了
+  const r = classifyLayer(STATIC_PAGE, KOUDAI, { want: { kind: "list" }, step: "search" });
+  assert.equal(r.layer, "L1", JSON.stringify(r.evidence));
+  assert.equal(r.evidence.length, 0);
+
+});
+
+test("URL 上的 webView 只算它所属的那一段", () => {
+  const src = { ruleToc: { chapterUrl: 'a@href,{"webView":true}' },
+                ruleContent: { content: ".c" } };
+  const page = "<html><body><ul><li>x</li></ul></body></html>";
+  assert.equal(classifyLayer(page, src, { want: { kind: "link" }, step: "toc" }).layer, "L2");
+  // 同一份源、换到搜索段：那条标记不属于它 → 不判 L2
+  assert.notEqual(classifyLayer(page, src, { want: { kind: "list" }, step: "search" }).layer, "L2");
 });
 
 test("静态页判 L1，不误报", () => {

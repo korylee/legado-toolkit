@@ -111,12 +111,39 @@ function sourceStrings(source) {
   return out;
 }
 
-/** 源自己声明的证据（不看页面）。 */
-function sourceEvidence(source) {
+/**
+ * 段 → 这条段自己的 URL 字段（`webView` 标记挂在这些规则上）。
+ * **判层要按段来**：`ruleContent.webJs` 说的是**正文那一段**，把它算到搜索页头上
+ * 会把「搜索页明明是静态直出」的源判成 L2/L3（实测口袋漫画就是这样：搜索页结果
+ * 在原文里，webJs 只服务正文）。
+ */
+const URL_FIELDS_BY_STEP = {
+  search: ["searchUrl"],
+  explore: ["exploreUrl"],
+  bookUrl: ["ruleSearch.bookUrl", "ruleBookInfo.tocUrl"],
+  toc: ["ruleToc.tocUrl", "ruleToc.chapterUrl"],
+  content: ["ruleContent.nextContentUrl"],
+};
+
+function fieldOf(src, path) {
+  let cur = src;
+  for (const k of path.split(".")) {
+    if (!cur || typeof cur !== "object") return "";
+    cur = cur[k];
+  }
+  return typeof cur === "string" ? cur : "";
+}
+
+/**
+ * 源自己声明的证据（不看页面）。**`step` 给了就只算这一段自己的**：不给（判不出段）
+ * 时按「整条源」算——那时宁可多给一条证据，也别把一段的结论按到另一段上。
+ */
+function sourceEvidence(source, step) {
   const src = source || {};
   const out = [];
   const rc = src.ruleContent || {};
-  const webJs = String(rc.webJs || "");
+  const forContent = !step || step === "content";
+  const webJs = forContent ? String(rc.webJs || "") : "";
   if (webJs.trim()) {
     out.push({ why: "源声明了 webJs", note: "取值要在页面里执行 JS（DOM 里没有现成的值）",
                snippet: webJs.trim().slice(0, 120), line: 0 });
@@ -126,11 +153,15 @@ function sourceEvidence(source) {
                  snippet: (webJs.match(GLOBAL_READ_RE) || [""])[0], line: 0 });
     }
   }
-  if (String(rc.content || "").trim().startsWith("@js:")) {
+  if (forContent && String(rc.content || "").trim().startsWith("@js:")) {
     out.push({ why: "正文规则是 @js:", note: "正文不是选择器算出来的，是脚本算出来的",
                snippet: String(rc.content).trim().slice(0, 120), line: 0 });
   }
-  const webViewRule = sourceStrings(src).find((s) => WEBVIEW_RE.test(s));
+  // webView 标记挂在**某一条 URL 规则**上：按段挑字段，别拿 toc 上的标记去说搜索页
+  const urlFields = step ? (URL_FIELDS_BY_STEP[step] || []) : null;
+  const webViewRule = (urlFields
+    ? urlFields.map((f) => fieldOf(src, f)).find((s) => WEBVIEW_RE.test(s))
+    : sourceStrings(src).find((s) => WEBVIEW_RE.test(s)));
   if (webViewRule) {
     const at = webViewRule.search(WEBVIEW_RE);
     out.push({ why: "URL 规则带 webView 标记",
@@ -153,13 +184,16 @@ const hasLogin = (source) => {
  *
  * `want` 是这一步要拿到什么（`{kind: "list"|"link"|"text"|"media"}`）；不给就**不判 L1**
  * （L1 的定义就是「原文里就有目标」，没有目标就无从说起）。
+ * `step` 是这一步的段名：**源声明的能力按段归属**（`ruleContent.webJs` 只说正文那段，
+ * URL 上的 `webView` 只算它所属的那条规则），不给就按整条源算。
  */
 export function classifyLayer(html, source, opts = {}) {
   const text = String(html || "");
   const want = opts.want || null;
+  const step = String(opts.step || "");
   const stats = pageStats(text);
   const wanted = hasWanted(stats, want);
-  const srcEv = sourceEvidence(source);
+  const srcEv = sourceEvidence(source, step);
   const page = { stats, hasWanted: wanted };
 
   // L5：登录墙。**要源自己声明了登录方式**才算——否则「请登录」在正常页面上太常见
