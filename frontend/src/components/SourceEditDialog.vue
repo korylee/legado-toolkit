@@ -1385,7 +1385,101 @@ async function doSave(s) {
 .quick-step { display: flex; align-items: center; gap: 8px; padding: 3px 0; }
 .raw-json :deep(textarea) { font-family: Consolas, Monaco, monospace; font-size: 12px; }
 /* 这里原本有一条 `@media (min-width: 993px) { .sticky-test { position: sticky } }`，
-   已随右列布局改动删除：右列不再是滚动容器（见 styles.css 桌面端段——两张卡片
-   各滚各的），sticky 失去可吸附的上下文，留着只会让人以为它还在起作用。
+   已随右列布局改动删除：右列不再是滚动容器（见本文件末尾那个不带 scoped 的块——
+   两张卡片各滚各的），sticky 失去可吸附的上下文，留着只会让人以为它还在起作用。
    .sticky-test 这个 class 仍在用，在那儿做右列的布局钩子。 */
+</style>
+<!-- 弹窗自身的布局：**不带 scoped**，因为这里动的是 el-dialog 的内部结构
+     （`.el-dialog__body` / `.el-tabs__content` / `.el-card__body` / `.el-col`）。
+     弹窗是 teleport 到 body 的，那些元素不是本组件渲染的、身上没有 scope id——
+     scoped 写了不生效且不报错，`:deep()` 也救不回来（AGENTS #15）。
+     这类"打向第三方内部结构"的规则是唯一需要不带 scoped 的情形；作用于我们自己
+     元素的规则照常写在上面的 scoped 块里。
+     与 styles.css 的分工：跨组件复用的原语才留在那儿。 -->
+<style>
+/* 编辑书源弹窗：只允许 body 内部滚动，避免 el-overlay-dialog 出现外层滚动条 */
+.edit-dialog-overlay .el-overlay-dialog { overflow: hidden; }
+.edit-dialog {
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+  margin-bottom: 0;
+  overflow: hidden;
+}
+.edit-dialog .el-dialog__header,
+.edit-dialog .el-dialog__footer {
+  flex: 0 0 auto;
+}
+.edit-dialog .el-dialog__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+/* 桌面端：body 不再整体滚动，改为左右两列各自独立滚动。
+   原来是「body 一个滚动条 + 右侧卡片 sticky 挂在它顶部」——两列被同一个滚动条
+   牵着走：左列滚到哪，右侧卡片就跟着钉在视口顶，看着像固定在上角；而左列很长时
+   整个弹窗都在滚，tab 导航也跟着滚出视野。
+   改成各滚各的之后：左列的 tab 导航钉住不动、只有内容区滚；右侧调试卡片自己滚，
+   左列滚多远都不影响它。
+   移动端（<993px，与 :md 分栏同一个断点）保持 body 整体滚动——那里是单列堆叠，
+   再切两个滚动区只会更难用。 */
+@media (min-width: 993px) {
+  /* 桌面端要给弹窗一个**确定高度**，这是下面所有 height:100% 的根参照。
+     只写 max-height 是不够的：那时弹窗高度是「内容撑开、最多 90vh」，body 高度
+     是 auto，height: 100% 等于没写、两列的独立滚动根本建不起来；而 body 此时已
+     改成 overflow: hidden，高度不确定就意味着超出 90vh 的部分被**直接裁掉、连
+     滚动条都没有**——被裁的正是排在最底部的语法速查卡片（这是实修过的 bug，
+     不是理论推演）。
+     限在桌面端：移动端是单列堆叠、不需要两列独立滚动，固定高度只会徒留空白。 */
+  .edit-dialog { height: 90vh; }
+  .edit-dialog .el-dialog__body { overflow: hidden; }
+  .edit-dialog .main-rule-form { height: 100%; min-height: 0; }
+  /* 两列都撑满 body 高度，否则 height:100% 的链条断在 el-row 上 */
+  .edit-dialog .main-rule-form > .el-col { height: 100%; min-height: 0; }
+  /* 左列：tab 导航钉住，只有内容区滚。min-height 归零是必需的——
+     .source-tabs 自己有一条 min-height: 520px（本文件 scoped 块里），
+     不覆盖的话窗口一矮就会撑破已固定高度的容器、把滚动条顶到外层去 */
+  .edit-dialog .main-rule-form .source-tabs { height: 100%; min-height: 0; }
+  .edit-dialog .source-tabs .el-tabs__content {
+    flex: 1 1 auto; min-height: 0;
+    overflow-y: auto; overflow-x: hidden;
+  }
+  /* 右列不再整列滚，交给两张卡片各滚各的：调试结果的长度不可控，让它和
+     语法速查共用一个滚动条，就会变成「谁长谁说了算」 */
+  .edit-dialog .main-rule-form > .el-col:last-child {
+    display: flex; flex-direction: column;
+    overflow: hidden;
+  }
+  /* 两张卡片都改造成「卡片头固定 + 内容区自己滚」的容器，与左列 tab 导航钉住
+     是同一个思路：滚到哪儿都还知道自己在看哪张卡 */
+  .edit-dialog .sticky-test,
+  .edit-dialog .grammar-card {
+    display: flex; flex-direction: column;
+    min-height: 0;
+    overflow: hidden;
+  }
+  .edit-dialog .sticky-test .el-card__header,
+  .edit-dialog .grammar-card .el-card__header { flex: 0 0 auto; }
+  .edit-dialog .sticky-test .el-card__body,
+  .edit-dialog .grammar-card .el-card__body {
+    flex: 1 1 auto; min-height: 0;
+    overflow-y: auto; overflow-x: hidden;
+  }
+  /* 高度分配：调试卡片按内容自然高但**封顶 62%**（提取值/命中片段/整页源码
+     可能很长，不封顶就把速查挤到看不见）；语法速查吃掉剩余，至少还有 38%。
+     （封顶这条同时让组件里那条 `position: sticky` 失效——右列已不是滚动容器，
+     没有可吸附的上下文了。class 名保留，只当布局钩子用。） */
+  .edit-dialog .sticky-test { flex: 0 1 auto; max-height: 62%; }
+  .edit-dialog .grammar-card { flex: 1 1 auto; }
+  /* 紧凑化：el-card 默认的 header/body 内边距是按「一屏一张卡」定的，这里要在
+     一列里塞下两张，收窄一档。条目刚补全（6 → 9 条 + 一组「回放不了」清单），
+     靠这个抵消掉高度增长。行距在组件里的 inline style 上收紧（inline 优先级
+     高于这里的类选择器，从这边覆盖不动它）。 */
+  .edit-dialog .sticky-test .el-card__header,
+  .edit-dialog .grammar-card .el-card__header { padding: 9px 12px; }
+  .edit-dialog .grammar-card .el-card__body { padding: 10px 12px; }
+}
 </style>

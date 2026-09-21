@@ -1,17 +1,23 @@
 <script setup>
 import { ref, reactive, computed, nextTick, watch, onMounted, onUnmounted } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { Search, Plus, Upload, Download, Delete, Filter, Refresh, Monitor, MagicStick } from "@element-plus/icons-vue";
+import { Search, Plus, Upload, Download, Delete, Filter, Refresh, Monitor, MagicStick,
+         Operation, Close } from "@element-plus/icons-vue";
 import { listSources, listSourceUrls, listGroups, patchTags, deleteSources, listTags, getStats } from "../api/sources";
 import { api, subscribeJob } from "../api/client";
 import { jvmRun } from "../api/jvm.js";
 import { jobFailReason } from "../utils/jobs";
-import { ensureTagMeta, isQualityTag, isStatusTag, splitTags, tagOfType, sourceTypes } from "../utils/tags";
-import { HEALTH_LABELS, describeChanges, engineLabel, healthLabel,
+import { ensureTagMeta } from "../utils/tags";
+import { HEALTH_OPTIONS, describeChanges, engineLabel, healthLabel,
          starBasisLabel } from "../utils/health";
-import { DEPTH_SHORT } from "../utils/checkFields";
+// 一行的显示事实（健康/深度/标签/逐段结论）都在 utils/sourceRow.js——移动卡片与
+// 桌面表格共用同一份判断，这里只负责渲染
+import { depthClass, depthText, hasAnyTag, healthCell, jvmStateLabel, jvmSteps,
+         lockedStatus, tagCellsOf, triToInt, typeLabel, urlKey } from "../utils/sourceRow";
 import { useMobile } from "../composables/useMobile";
 import SourceEditDialog from "../components/SourceEditDialog.vue";
+import SourceFilterForm from "../components/SourceFilterForm.vue";
+import SourceCard from "../components/SourceCard.vue";
 import TrashDrawer from "../components/TrashDrawer.vue";
 import TidyDrawer from "../components/TidyDrawer.vue";
 import ExportDrawer from "../components/ExportDrawer.vue";
@@ -35,6 +41,9 @@ const tidyVisible = ref(false);
 const exportVisible = ref(false);
 const importVisible = ref(false);
 const filterVisible = ref(false);
+//: 移动端工具行是否展开。**不持久化**：它是一次性动作（点开→用一个→收起），
+//: 不是偏好；记住了反而会在某次刷新后莫名挡住列表
+const toolsOpen = ref(false);
 const batchTags = ref([]);
 const tags = ref([]);
 const tagManagerVisible = ref(false);
@@ -58,6 +67,10 @@ function isRowChecking(url) {
   if (checkingAll.value) return true;
   return checkingUrls.value.has(url);
 }
+
+/** 单条校验：**卡片与表格行共用这一处**（手机卡片是 emit 上来的、桌面是行内按钮）。
+ *  不弹框，直接用全局设置——单条本来就没什么可调的。 */
+function checkOne(row) { checkSources([row.source_url]); }
 
 //: 总数优先用后端报的（提交列表与"全量"的实际条数可能不同，比如回收站/禁用的源）
 const checkStatusText = computed(() => {
@@ -267,30 +280,8 @@ const query = reactive({
   order: "-verified", limit: 50, offset: 0,
 });
 
-//: 健康态 → el-tag 配色。五档按「动作的紧急度」分色：
-//: 可用/已失效是结论的两极（success/danger），需登录/需翻墙/待验证
-//: 都是「还没到删的地步」（warning/info）。
-const healthType = {
-  ok: "success", dead: "danger", auth: "warning", gfw: "info",
-  pending: "info",
-};
-const typeLabel = (v) => tagOfType(v) || ("类型" + v);
-
-// 健康度的取值：统计条上的 chip（点一下直接改筛选条件）和两个下拉共用这一份。
-//
-// **6 个健康态一个都不能少**：原来这里有两份，各只列了 4 个（ok/dead/auth/gfw），
-// 于是 timeout / no_search / error / skipped 的源在统计条上一个都数不到——各 chip
-// 之和小于总数，看着像凭空少了一批源，而且没法按它们下钻、下钻不到就没法批量处理。
-// 文案从 HEALTH_LABELS 取（那是 core/models.py HEALTH_NAMES 的显示层副本），
-// 别在这儿再抄一份名字。
-//
-// 「未校验」（health IS NULL）不在这里：它不是状态而是数据缺失，统计条上另有
-// 一个灰 chip 展示、后端筛选取值 "none"。
-const HEALTH_OPTIONS = [
-  "ok", "auth", "gfw", "pending", "dead",
-].map((value) => ({ value, label: HEALTH_LABELS[value] }));
-
 // stats.health 的键是 str(health)：没有校验记录时 health 为 NULL，键就是字符串 "None"
+// （后端**筛选**用的取值才是 "none"，别拿它当键——读错这一格永远是 0）
 const healthCount = (key) => {
   const h = stats.value && stats.value.health;
   return (h && h[key]) || 0;
@@ -340,16 +331,6 @@ async function load() {
 //: 值为 null 表示没有可展示的结果（没校验过 / 任务状态获取失败）。
 //: `stale` 是就地回填的副产品：行没动，所以排序和筛选项都可能已经不再成立。
 const checkResult = ref(null);
-
-//: 列表 API 的 toc_complete/content_ok 是 0/1/null（SourceOut 里是 Optional[int]，
-//: 由 SQLite 的三态整数来的），而校验结果里是 true/false/null（Python bool）。
-//: **不转就静默坏掉**：模板里判的是 `=== 1`，赋个 true 进去两个分支都不成立，
-//: 表现是那一格永远显示「未验证」——看着像没校验，其实是类型不对
-const triToInt = (v) => (v === true ? 1 : v === false ? 0 : null);
-
-//: URL 两侧必须同口径：列表里的 source_url 是库里归一化过的（去空白/尾斜杠/小写），
-//: 后端下发 items 时也已归一。这里再兜一次——归一化是最容易漏在半路的那种约定
-const urlKey = (u) => String(u || "").trim().replace(/\/+$/, "").toLowerCase();
 
 /**
  * 用校验结果**就地回填**列表，不是整表重拉。
@@ -458,93 +439,6 @@ async function selectAllFiltered() {
   } catch (e) {
     ElMessage.error("获取全部筛选结果失败: " + e.message);
   }
-}
-
-//: 用户**手动锁定**的健康状态（`system_tags_locked`）。
-//:
-//: 锁定只改了 `group_name` 里的状态标签，而「健康」这一列读的是 `checks` 的实测
-//: 结论——于是同一屏上标签说「可用」、列说「失效」，两个来源打架。锁定的意思就是
-//: 「这条以我为准」，所以列里要显示锁定的值，**实测值进 tooltip 不丢**。
-//: 深度列上的**结果**标记。深度只说「验到哪」，而 4★/5★ 依赖的是 toc/content 的
-//: 实测结果——depth≥3 里约一半是「验了但没过」（实测：depth 3 有 118 条目录不完整，
-//: depth 4 有 8 条正文不可用）。取**最深的那个有结论的**：正文优先、其次目录；
-//: 两者都没结论就不标——不能把「没验到」说成「没过」。
-function depthVerdict(row) {
-  if (row.content_ok != null) return { label: "正文", ok: row.content_ok === 1 };
-  if (row.toc_complete != null) return { label: "目录", ok: row.toc_complete === 1 };
-  return null;
-}
-
-//: 深度列显示的那行字：**结果优先，深度兜底**。
-//:
-//: 有结论就显示「正文 ✗」「目录 ✓」——那才是「验得怎么样」；没有结论才显示验到
-//: 哪一步（主页/搜索/…）。**不要拼成「正文 目录 ✗」**：depth 恰好等于结果所在那步时
-//: 会写成「目录 目录 ✗」（实测 125 条），读起来像重复；而那种情况下深度信息
-//: 由 tooltip 兜住，代价可以忽略（实测只有 38 条落在"深度比结论更深"的形态）。
-function depthText(row) {
-  const v = depthVerdict(row);
-  if (v) return v.label + (v.ok ? " ✓" : " ✗");
-  return DEPTH_SHORT[row.probe_depth] || "";
-}
-
-//: 结果好坏的着色（**没有结论就不着色**）：一眼扫过去，绿=验过且通过、红=验了没过
-function depthClass(row) {
-  const v = depthVerdict(row);
-  return v ? (v.ok ? "v-ok" : "v-bad") : "";
-}
-
-//: 结论按**段**展开成若干行，供 tooltip 逐行显示（原来这些只喂 JVM 列那一格，
-//: 现在「验证」列一列一结论，明细全在它的 tooltip 里）。
-//:
-//: **只显示跑到的段**：跑到搜索档的行不该出现「正文：未验证」——那是**没跑**，
-//: 不是**跑了没过**，摆在一起会让人以为源有问题（S3-3 的核心取舍）。
-//: 段的顺序固定为 搜索 → 目录 → 正文，与探测深度同向。
-function jvmSteps(row) {
-  const stage = row.jvm_stage || "";
-  if (!stage) return [];
-  const out = [{
-    label: "搜索",
-    text: row.jvm_hit != null ? "命中 " + row.jvm_hit + " 本"
-      : (jvmStateLabel(row.jvm_state) || "—"),
-    ok: row.jvm_state === "ok" ? true : null,
-  }];
-  if (stage === "toc" || stage === "content") {
-    out.push({
-      label: "目录",
-      text: row.jvm_toc_count != null ? row.jvm_toc_count + " 章" : "未取到",
-      ok: row.jvm_toc_ok === true ? true : row.jvm_toc_ok === false ? false : null,
-    });
-  }
-  if (stage === "content") {
-    out.push({
-      label: "正文",
-      text: row.jvm_content_len != null ? row.jvm_content_len + " 字" : "未取到",
-      ok: row.jvm_content_ok === true ? true : row.jvm_content_ok === false ? false : null,
-    });
-  }
-  return out;
-}
-
-const JVM_STATE_LABELS = {
-  ok: "搜索通过", no_result: "跑了但没出结果", empty_js_shell: "JS 规则是空壳",
-  login_wall: "页面要求登录（不是源坏了）",
-  timeout: "超时", error: "报错", invalid: "规则无效",
-};
-function jvmStateLabel(state) { return JVM_STATE_LABELS[state] || state; }
-
-function lockedStatus(row) {
-  if (!row.system_tags_locked) return "";
-  return splitTags(row.group_name || "").find((t) => isStatusTag(t)) || "";
-}
-
-function userTagsOf(row) {
-  return splitTags(row.user_tags || "");
-}
-
-// group_name 是系统标签的逗号拼接串。类型和健康状态表格里已各自单独成列展示，
-// 这里只取不重复的质量标签（规则完整），避免同一信息渲染两遍。
-function qualityTagsOf(row) {
-  return splitTags(row.group_name || "").filter((t) => isQualityTag(t));
 }
 
 //: 移入回收站的确认框，返回**原因**（取消时抛出）。
@@ -771,8 +665,8 @@ async function onSaved() {
 }
 
 onMounted(async () => {
-  // 列表要按系统标签拆分组内容（qualityTagsOf），必须等枚举到位再拉数据，
-  // 否则首屏会把系统标签当成用户标签渲染
+  // 拆分系统/用户标签（utils/sourceRow 的质量标签、用户标签）用的是后端下发的枚举，
+  // 必须等它到位再拉数据，否则首屏会把系统标签当成用户标签渲染
   try { await ensureTagMeta(); } catch (e) {
     ElMessage.warning("系统标签枚举加载失败，标签归类可能不准: " + e.message);
   }
@@ -821,43 +715,20 @@ onUnmounted(() => {
     <!-- 桌面：筛选一行、操作一行。显式分行，不靠 flex-wrap 决定断点 -->
     <div class="bar bar-rows page-toolbar desktop-only" v-if="!isMobile">
       <div class="bar-row">
-        <el-input class="w-search" v-model="query.q" placeholder="搜名称 / 域名" clearable
-                  size="small" :prefix-icon="Search" @keyup.enter="search" />
-        <el-select class="w-type" v-model="query.type" placeholder="类型" clearable size="small">
-          <el-option v-for="t in sourceTypes" :key="t.value" :value="t.value" :label="t.tag" />
-        </el-select>
-        <el-select class="w-health" v-model="query.health" placeholder="健康度" clearable size="small">
-          <el-option v-for="h in HEALTH_OPTIONS" :key="h.value" :value="h.value" :label="h.label" />
-        </el-select>
-        <el-select class="w-group" v-model="query.group" placeholder="分组" clearable filterable
-                   size="small">
-          <el-option v-for="g in groups" :key="g.group" :value="g.group"
-                     :label="g.group + ' (' + g.count + ')'" />
-        </el-select>
-        <el-select class="w-group" v-model="query.tag" placeholder="用户标签" clearable filterable
-                   size="small">
-          <el-option v-for="t in tags.filter((x) => x.kind === 'user')" :key="t.tag" :value="t.tag"
-                     :label="t.tag + ' (' + t.count + ')'" />
-        </el-select>
-        <el-select class="w-order" v-model="query.order" size="small">
-          <!-- 「验证深度」是列表那一列；星级降为可选排序（列不再显示它） -->
-          <!-- 排序键必须与列里显示的东西一致：列里显示的是**结果**（正文 ✓ / 目录 ✗），
-               所以排序也是按结果（验过且通过 → 验了没过 → 还没验到），而不是按深度 -->
-          <el-option value="-verified" label="验证结果 ↓" />
-          <el-option value="verified" label="验证结果 ↑" />
-          <el-option value="-checked_at" label="校验时间 ↓" />
-          <el-option value="name" label="名称 ↑" />
-        </el-select>
-        <el-button type="primary" size="small" @click="search">查询</el-button>
-        <el-button size="small" @click="reset">重置</el-button>
+        <!-- 六个筛选字段 + 查询/重置：与移动端底部抽屉**同一个组件**（那一处是 sheet） -->
+        <SourceFilterForm variant="bar" :query="query" :groups="groups" :tags="tags"
+                          @search="search" @reset="reset" />
       </div>
 
       <div class="bar-row">
         <el-button size="small" :icon="Plus" @click="openNew">新建源</el-button>
-        <!-- 本次的选项（参数覆盖 + 忽略缓存）在点开后的弹框里，不再单独占一个按钮 -->
+        <!-- 动作行这一个是**全量口径**（全部 / 当前筛选），文案固定不变脸；
+             「校验这批勾选的」住在下面的批量条里——那里才有勾选这个前提。
+             原来它按 selected 变脸并偷读 selected，一个按钮担两种范围，
+             勾选状态一旦不在视野里（比如手机把它收进菜单）就说不清在测哪批 -->
         <el-button size="small" :icon="Refresh" :disabled="checking || jvmRunning"
-                   @click="openCheckDialog([...selected])">
-          {{ selected.length ? "校验选中" : "全量校验" }}
+                   @click="openCheckDialog([])">
+          全量校验
         </el-button>
         <span class="grow" />
         <el-button size="small" :icon="Upload" @click="exportVisible = true">导出/订阅</el-button>
@@ -868,25 +739,73 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <!-- 移动端：搜索 + 筛选 + 新建 -->
-    <div class="bar page-toolbar mobile-only" v-if="isMobile">
-      <el-input style="flex: 1 1 140px; min-width: 0" v-model="query.q" placeholder="搜索书源"
-                clearable :prefix-icon="Search" @keyup.enter="search" />
-      <el-badge :value="filterCount" :hidden="!filterCount" type="primary">
-        <el-button :icon="Filter" @click="filterVisible = true">筛选</el-button>
-      </el-badge>
-      <el-button type="primary" :icon="Plus" @click="openNew" />
+    <!-- 移动端：搜索 + 筛选 + 工具，**一行**。工具行默认收起，点开才铺开 -->
+    <div class="bar bar-rows page-toolbar" v-if="isMobile">
+      <div class="bar-row">
+        <el-input class="q-input" v-model="query.q" placeholder="搜索书源"
+                  clearable :prefix-icon="Search" @keyup.enter="search" />
+        <el-badge :value="filterCount" :hidden="!filterCount" type="primary">
+          <el-button :icon="Filter" @click="filterVisible = true">筛选</el-button>
+        </el-badge>
+        <!-- 工具**不是筛选**：它们跟「这批源」无关（新建/校验/导入/导出/回收站/标签/
+             整理）。以前全塞在筛选抽屉里，是因为那时手机端没有别的地方可挂——抽屉因此
+             成了「什么都往里放」的筐。现在给它们一行自己的位置，抽屉回到单一职责。
+             校验也在这儿（不在抽屉里）：它的语义**跟着勾选变**（校验选中 / 全量校验），
+             那是动作，不是筛选条件。用一次就收起——它是菜单，不是常驻面板 -->
+        <el-button :icon="Operation" :type="toolsOpen ? 'primary' : 'default'"
+                   aria-label="工具" @click="toolsOpen = !toolsOpen">工具</el-button>
+      </div>
+      <!-- 用 v-show 而不是 el-collapse-transition：实测**刷新后第一次展开不渲染**——
+           按钮高亮成 primary 了、整行却还是 display:none（宽度量出来全是 0），
+           再点一次才正常。疑与 EP 那个过渡组件首次 enter 取到的 scrollHeight 为 0 有关
+           （行还是 none 时量高就是 0）。这一行是折叠菜单，展开/收起瞬时切换即可，
+           不值得为了滑动动画赌一个「点了没反应」 -->
+      <div v-show="toolsOpen" class="bar-row tools-row">
+        <!-- 与桌面那条动作行**同一组、同一顺序**（新建源 / 校验 / 导出订阅 / 导入 /
+             回收站 / 标签管理 / 整理源）；也同尺寸（size="small"）——手机上 7 个按钮
+             本来就放不下，用 small 的一档内边距能把行数收少一档
+             （高度仍是 36px：全局那条「触摸目标不用 small」的规则管着，别在这儿掀） -->
+        <el-button size="small" :icon="Plus" @click="toolsOpen = false; openNew()">
+          新建源
+        </el-button>
+        <el-button size="small" :icon="Refresh" :loading="checking"
+                   @click="toolsOpen = false; openCheckDialog([])">
+          全量校验
+        </el-button>
+        <el-button size="small" :icon="Upload" @click="toolsOpen = false; exportVisible = true">
+          导出/订阅
+        </el-button>
+        <el-button size="small" :icon="Download" @click="toolsOpen = false; importVisible = true">
+          导入
+        </el-button>
+        <el-button size="small" :icon="Delete" @click="toolsOpen = false; trashVisible = true">
+          回收站
+        </el-button>
+        <el-button size="small" @click="toolsOpen = false; tagManagerVisible = true">
+          标签管理
+        </el-button>
+        <el-button size="small" :icon="MagicStick" @click="toolsOpen = false; tidyVisible = true">
+          整理源
+        </el-button>
+      </div>
     </div>
 
-    <!-- 批量操作条 -->
+    <!-- 批量操作条：**勾选之后要干什么**都在这儿（校验选中 / 移入回收站 / 取消选择），
+         桌面上还多一排「加/去标签」。这条 bar 的前提是「有勾选」，它只在有勾选时出现、
+         同屏还写着「已选 N 条」——所以它的动作**不必变脸**，按钮只说这一种范围。
+         手机上动作只留图标（文字在窄屏藏掉）：一行放得下五个元素，而且图标与桌面同款、
+         aria-label 保命名不变，两种形态不会各写一套 -->
     <div class="batch-bar" v-if="selected.length">
       <span class="batch-text">已选 <b>{{ selected.length }}</b> 条</span>
       <!-- 入口是「先在表头（或移动端卡片）上勾一条」——批量条本身只在有勾选时出现。
-           跨页勾选做不了（表格只渲染当前页），所以这一步走显式 URL 列表 -->
+           跨页勾选做不了（表格只渲染当前页），所以这一步走显式 URL 列表。
+           文案短：手机上一行要放五个元素，长文案（「选中全部 N 条筛选结果」）
+           单独就占 147px，只这一条就把整行挤成两行 -->
       <el-button v-if="total > selected.length" size="small" link type="primary"
                  @click="selectAllFiltered">
-        选中全部 {{ total }} 条筛选结果
+        全选 {{ total }} 条
       </el-button>
+      <div class="flex-1"></div>
       <template v-if="!isMobile">
         <el-divider direction="vertical" />
         <el-select class="w-batch" v-model="batchTags" multiple filterable allow-create
@@ -901,17 +820,23 @@ onUnmounted(() => {
         <el-button size="small" :disabled="!batchTags.length" @click="applyBatchTags('remove')">
           去标签
         </el-button>
+        <el-divider direction="vertical" />
       </template>
-      <el-divider direction="vertical" />
-      <el-button size="small" :icon="Refresh" :loading="checking" :disabled="!selected.length"
+      <!-- 手机上**不给 default 插槽**，el-button 就只剩图标；桌面才给文字。
+          （不再叠 `.desktop-only`：那是同一条 900px 断点的另一条链路，两套一起用
+          只会在有人改断点时留下一个静默的第二种行为。）命名由 aria-label 保住——
+          两种形态同名，读屏与将来的测试都认它 -->
+      <el-button size="small" :icon="Refresh" :loading="checking" aria-label="校验选中"
                  @click="openCheckDialog([...selected])">
-        校验选中
+        <template v-if="!isMobile" #default>校验选中</template>
       </el-button>
-      <el-button size="small" type="danger" plain @click="removeSelected">移入回收站</el-button>
-      <el-button size="small" link @click="clearSelection">取消选择</el-button>
-      <span v-if="isMobile" class="grow" />
-      <el-button v-if="isMobile" size="small" type="primary" :icon="Upload"
-                 @click="exportVisible = true">导出/订阅</el-button>
+      <el-button size="small" type="danger" plain :icon="Delete" aria-label="移入回收站"
+                 @click="removeSelected">
+        <template v-if="!isMobile" #default>移入回收站</template>
+      </el-button>
+      <el-button size="small" link :icon="Close" aria-label="取消选择" @click="clearSelection">
+        <template v-if="!isMobile" #default>取消选择</template>
+      </el-button>
     </div>
 
     <!-- 上次校验的结果条。**持久**，不是 toast——「新校验几条 / 复用几条 / 几条变了」
@@ -939,54 +864,12 @@ onUnmounted(() => {
     <!-- 列表区：移动端卡片 / 桌面表格 -->
     <div class="page-fill">
       <div v-if="isMobile" class="card-list" v-loading="loading">
-        <div v-for="row in rows" :key="row.source_url" class="src-card"
-             :class="{ sel: isSelected(row) }" @click="toggleCard(row)">
-          <div class="chk" @click.stop>
-            <el-checkbox :model-value="isSelected(row)" @change="toggleCard(row)" />
-          </div>
-          <div class="main">
-            <div class="row1">
-              <span class="nm">{{ row.name || "(无名)" }}</span>
-              <!-- 与表格同口径：显示验到哪一步（星级里大部分是推的） -->
-              <span class="stars" v-if="row.probe_depth" :class="depthClass(row)">
-                验到{{ depthText(row) }}
-              </span>
-              <!-- 结论**来自谁**（与表格 tooltip 同一件事）：卡片窄，只放出处不放第二份结论 -->
-              <span class="muted nowrap" v-if="row.engine">{{ engineLabel(row.engine) }}</span>
-            </div>
-            <div class="host mono">{{ row.source_url }}</div>
-            <div class="meta">
-              <el-tag size="small">{{ typeLabel(row.source_type) }}</el-tag>
-              <el-tag v-if="lockedStatus(row)" size="small" type="warning">
-                {{ lockedStatus(row) }} · 手动
-              </el-tag>
-              <el-tag v-else-if="row.health" size="small" :type="healthType[row.health] || 'info'">
-                {{ healthLabel(row.health) }}
-              </el-tag>
-              <span class="muted nowrap" v-if="row.toc_complete !== null || row.content_ok !== null">
-                {{ row.toc_complete === 1 ? "目录✓" : row.toc_complete === 0 ? "目录✗" : "" }}
-                {{ row.content_ok === 1 ? " 正文✓" : row.content_ok === 0 ? " 正文✗" : "" }}
-              </span>
-            </div>
-            <div class="grp">
-              <el-tag v-for="t in qualityTagsOf(row)" :key="t" size="small" type="info">
-                {{ t }}
-              </el-tag>
-              <el-tag v-if="row.system_tags_locked" size="small" type="warning">手动</el-tag>
-              <el-tag v-for="t in userTagsOf(row)" :key="t" size="small" type="success">
-                {{ t }}
-              </el-tag>
-              <span v-if="!qualityTagsOf(row).length && !userTagsOf(row).length"
-                    class="muted">(无标签)</span>
-            </div>
-          </div>
-          <el-button link :icon="Refresh" :loading="isRowChecking(row.source_url)"
-                     @click.stop="checkSources([row.source_url])" />
-          <el-button link :icon="Filter" @click.stop="openEdit(row)" />
-          <!-- 与表格操作栏同一组动作：卡片是移动端的等价物，少一个就会
-               「手机上没有删除入口、只能先勾选再走批量条」 -->
-          <el-button link type="danger" :icon="Delete" @click.stop="removeOne(row)" />
-        </div>
+        <!-- 卡片是纯展示组件（`components/SourceCard.vue`）：勾选与「正在校验」从这儿进，
+             四个动作从它出来——手机上的布局调整都落在那个文件里，改它不必读这个 1200 行的 -->
+        <SourceCard v-for="row in rows" :key="row.source_url" :row="row"
+                    :selected="isSelected(row)" :checking="isRowChecking(row.source_url)"
+                    @toggle="toggleCard" @check="checkOne"
+                    @edit="openEdit" @remove="removeOne" />
         <el-empty v-if="!loading && !rows.length" description="没有匹配的书源" :image-size="80" />
       </div>
 
@@ -995,7 +878,7 @@ onUnmounted(() => {
         <el-table-column type="selection" width="42" />
         <el-table-column prop="name" label="名称" min-width="170" show-overflow-tooltip>
           <template #default="{ row }">
-            <a href="#" @click.prevent="openEdit(row)">{{ row.name || "(无名)" }}</a>
+            <a href="#" @click.prevent="openEdit(row)">{{ row.name || "（无名）" }}</a>
           </template>
         </el-table-column>
         <el-table-column label="类型" width="88" align="center">
@@ -1008,10 +891,10 @@ onUnmounted(() => {
                 <div>手动锁定为「{{ lockedStatus(row) }}」</div>
                 <div>实测：{{ row.health ? healthLabel(row.health) : "未校验" }}{{ row.checked_at ? " · " + row.checked_at : "" }}</div>
               </template>
-              <el-tag size="small" type="warning">{{ lockedStatus(row) }} · 手动</el-tag>
+              <el-tag size="small" :type="healthCell(row).type">{{ healthCell(row).label }}</el-tag>
             </el-tooltip>
-            <el-tag v-else-if="row.health" size="small" :type="healthType[row.health] || 'info'">
-              {{ healthLabel(row.health) }}
+            <el-tag v-else-if="healthCell(row)" size="small" :type="healthCell(row).type">
+              {{ healthCell(row).label }}
             </el-tag>
             <span v-else class="muted">未校验</span>
           </template>
@@ -1072,15 +955,10 @@ onUnmounted(() => {
         </el-table-column>
         <el-table-column label="标签" min-width="210">
           <template #default="{ row }">
-            <el-tag v-for="t in qualityTagsOf(row)" :key="t" size="small" type="info">
-              {{ t }}
+            <el-tag v-for="t in tagCellsOf(row)" :key="t.key" size="small" :type="t.type">
+              {{ t.label }}
             </el-tag>
-            <el-tag v-if="row.system_tags_locked" size="small" type="warning">手动</el-tag>
-            <el-tag v-for="t in userTagsOf(row)" :key="t" size="small" type="success">
-              {{ t }}
-            </el-tag>
-            <span v-if="!qualityTagsOf(row).length && !userTagsOf(row).length"
-                  class="muted">(无标签)</span>
+            <span v-if="!hasAnyTag(row)" class="muted">（无标签）</span>
           </template>
         </el-table-column>
         <el-table-column prop="source_url" label="域名" min-width="190" show-overflow-tooltip>
@@ -1095,7 +973,7 @@ onUnmounted(() => {
         <el-table-column label="操作" width="140" fixed="right" align="center">
           <template #default="{ row }">
             <el-button link size="small" :loading="isRowChecking(row.source_url)"
-                       @click="checkSources([row.source_url])">校验</el-button>
+                       @click="checkOne(row)">校验</el-button>
             <el-button link type="danger" size="small"
                        @click="removeOne(row)">删除</el-button>
           </template>
@@ -1110,70 +988,15 @@ onUnmounted(() => {
                    @current-change="onPage"
                    @size-change="(s) => { query.limit = s; search(); }" />
 
-    <!-- 移动端筛选底部抽屉 -->
+    <!-- 移动端筛选底部抽屉。**只管筛选**：条件 + 查询/重置（校验与其他工具都在
+         工具行——校验的语义跟着勾选变，是动作不是筛选条件） -->
     <el-drawer v-model="filterVisible" title="筛选" direction="btt" size="auto" :with-header="true">
       <div class="sheet">
-        <div class="fld">
-          <label>关键词</label>
-          <el-input v-model="query.q" placeholder="名称 / 域名" clearable />
-        </div>
-        <div class="fld">
-          <label>类型</label>
-          <el-select v-model="query.type" placeholder="全部" clearable style="width: 100%">
-            <el-option v-for="t in sourceTypes" :key="t.value" :value="t.value" :label="t.tag" />
-          </el-select>
-        </div>
-        <div class="fld">
-          <label>健康度</label>
-          <el-select v-model="query.health" placeholder="全部" clearable style="width: 100%">
-            <el-option v-for="h in HEALTH_OPTIONS" :key="h.value" :value="h.value" :label="h.label" />
-          </el-select>
-        </div>
-        <div class="fld">
-          <label>分组</label>
-          <el-select v-model="query.group" placeholder="全部" clearable filterable
-                     style="width: 100%">
-            <el-option v-for="g in groups" :key="g.group" :value="g.group"
-                       :label="g.group + ' (' + g.count + ')'" />
-          </el-select>
-        </div>
-        <div class="fld">
-          <label>用户标签</label>
-          <el-select v-model="query.tag" placeholder="全部" clearable filterable
-                     style="width: 100%">
-            <el-option v-for="t in tags.filter((x) => x.kind === 'user')" :key="t.tag" :value="t.tag"
-                       :label="t.tag + ' (' + t.count + ')'" />
-          </el-select>
-        </div>
-        <div class="fld">
-          <label>排序</label>
-          <el-select v-model="query.order" style="width: 100%">
-            <el-option value="-verified" label="验证结果 ↓" />
-            <el-option value="verified" label="验证结果 ↑" />
-            <el-option value="-checked_at" label="校验时间 ↓" />
-            <el-option value="name" label="名称 ↑" />
-          </el-select>
-        </div>
-        <div class="btns">
-          <el-button @click="reset(); filterVisible = false">重置</el-button>
-          <el-button type="primary" @click="search(); filterVisible = false">查询</el-button>
-        </div>
-        <div class="btns">
-          <el-button :icon="Download" @click="importVisible = true; filterVisible = false">
-            导入书源
-          </el-button>
-          <el-button :icon="Refresh" :loading="checking"
-                     @click="openCheckDialog([...selected]); filterVisible = false">
-            {{ selected.length ? "校验选中" : "全量校验" }}
-          </el-button>
-          <el-button :icon="Delete" @click="trashVisible = true; filterVisible = false">
-            回收站
-          </el-button>
-          <el-button @click="tagManagerVisible = true; filterVisible = false">标签管理</el-button>
-          <el-button :icon="MagicStick" @click="tidyVisible = true; filterVisible = false">
-            整理源
-          </el-button>
-        </div>
+        <!-- 同一份筛选表单（桌面工具条那处是 bar）。两处入口各写一遍时，加一个筛选项
+             只改一处**不会报错**——表现是两个入口能筛出来的东西不一样 -->
+        <SourceFilterForm variant="sheet" :query="query" :groups="groups" :tags="tags"
+                          @search="search(); filterVisible = false"
+                          @reset="reset(); filterVisible = false" />
       </div>
     </el-drawer>
 
@@ -1216,19 +1039,73 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
-/* 星级旁边那个「实测 / 仅规则」。
-   光看星级分不出「验出来的」和「看规则推的」——库里 489 条 5★ 全是后者。
-   颜色用 element-plus 的 success / warning 色值（本文件其余部分用的也是字面色） */
-.basis {
-  font-size: 11px;
-  line-height: 16px;
-  padding: 0 4px;
-  margin-left: 4px;
-  border-radius: 3px;
-  white-space: nowrap;
+/* ── 本页自己的样式 ────────────────────────────────────────────────
+   这一族规则作用到的元素**全是本组件写的**（工具条两行、抽屉的插槽内容、卡片列表），
+   所以放 scoped 就够：不必靠 class 前缀自律，也不会外泄到别的组件。
+   （够不到的是 el-drawer 自己的 `.el-drawer__body` 那一层——真需要动它时才单开一个
+   不带 scoped 的块，本组件末尾那个 `.check-dialog` 块就是这种。）
+
+   留在 styles.css 的只有两类：跨组件复用的原语（骨架的 `.app-` / `.page-` 系列、
+   `.bar`、`.toolbar`、`.muted`、`.dot` 系列），以及打向第三方组件内部结构的规则
+   （`.el-table .cell`、`.el-dialog__body` 那类——它们身上没有 scope id，
+   只能不带 scoped）。 */
+.bar-rows { flex-direction: column; align-items: stretch; }
+/* 工具条显式分两行（筛选 / 操作）与移动端的两行（搜索行 / 工具行）共用这一条。
+   **不靠 flex-wrap 偶然决定断点**：1440px 下桌面那行本来就会换行，而 .grow 撑开的
+   空档会自己占掉一行，把操作按钮挤到第三行——「校验参数」和「全量校验」因此分处
+   第一行和第三行，等于白挨着。分行是结构，不该是布局的副产物。 */
+.bar-row {
+  display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+  width: 100%;
 }
-.basis.measured { color: #67c23a; background: #f0f9eb; }
-.basis.static { color: #e6a23c; background: #fdf6ec; }
+/* 手机那一行（搜索 + 筛选 + 工具）**不写死宽度**：输入框 `flex: 1 1 0` 吃掉余量，
+   按钮各按内容宽，整行自然落成一行。
+   这里原来写的是 `flex: 1 1 140px`——那是在"猜一个基准宽"，加了「工具」之后差 2px
+   就把「新建」挤到第二行，只能再去调数字。基准改成 0 之后与机型无关：basis 为 0 的项
+   不参与"这行要不要换行"的决定，只有按钮的宽度会，而按钮在任何手机宽度下都放得下 */
+.q-input { flex: 1 1 0; min-width: 0; }
+/* 手机工具行：7 个按钮在 390px 下放不下，靠上面那条 `.bar-row` 的 flex-wrap 换行；
+   这里只需让按钮按内容排布，并去掉 Element Plus 相邻按钮的 margin——间距交给 gap，
+   否则换行后的第一个按钮会多缩进 12px、两排左边缘对不齐 */
+.tools-row .el-button { flex: 1 1 auto; margin-left: 0; }
+
+/* 移动端筛选抽屉：撤走工具之后只剩筛选条件 + 查询/重置 + 校验 */
+.sheet { display: flex; flex-direction: column; gap: 14px; padding: 4px 2px 8px; }
+.sheet .btns { display: flex; gap: 8px; padding-top: 4px; }
+.sheet .btns .el-button { flex: 1 1 0; }
+
+/* 批量操作条：仅勾选时出现 */
+.batch-bar {
+  /* flex: 0 0 auto 与 .result-tip 同理：它是 `.page-flex` 的直接子项，不排除在收缩
+     之外的话，列表一高就被压扁、内容被自己的 overflow 裁掉 */
+  flex: 0 0 auto;
+  /* **不换行**。这条里的元素宽度都是内容定的（不像工具条那行有个输入框能吸收余量），
+     空间不够时 flex 只能把它们折到下一行——而它是一条动作条，折行既难看又把列表
+     顶下去。所以定成 nowrap，并拿 overflow-x: auto 当安全阀：放不下时**横滑**而不是
+     折行（统计条 chips 在手机端就是这个做法） */
+  display: flex; flex-wrap: nowrap; gap: 8px; align-items: center;
+  overflow-x: auto;
+  padding: 8px 12px;
+  background: #ecf5ff;
+  border: 1px solid #d9ecff;
+  border-radius: 6px;
+}
+.batch-bar .batch-text { font-size: 13px; color: #409eff; }
+.batch-bar .batch-text b { font-size: 15px; margin: 0 2px; }
+.w-batch { width: 240px; }
+.flex-1 {
+  flex: 1;
+}
+
+/* ================= 卡片列表（移动端主视图） =================
+   只有**容器**留在这儿；卡片自己的样式跟着卡片走了（components/SourceCard.vue） */
+.card-list {
+  flex: 1 1 auto; min-height: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  display: flex; flex-direction: column; gap: 8px;
+  padding-bottom: 4px;
+}
 
 /* 校验结果条。
    **flex: 0 0 auto 是必须的**：`.page-flex` 是 `height:100% + overflow:hidden` 的纵向
@@ -1277,15 +1154,11 @@ onUnmounted(() => {
 .stats-bar .chip.active {
   background: #ecf5ff; border-color: #409eff; color: #409eff; font-weight: 600;
 }
-/* 不可点的 chip（未校验）：去掉手型与 hover 反馈，避免看着像能筛 */
-.stats-bar .chip.readonly { cursor: default; color: #909399; }
-.stats-bar .chip.readonly:hover { border-color: #e4e7ed; color: #909399; }
 
 @media (max-width: 900px) {
   /* 移动端：chips 单行横滑，「任务」按钮钉在右侧不被挤出去 */
   .stats-bar { gap: 6px; padding: 6px 10px; }
   .stats-bar .chips { flex-wrap: nowrap; overflow-x: auto; -webkit-overflow-scrolling: touch; }
-  .stats-bar .chip { min-height: 32px; }
 }
 </style>
 <!-- 全量校验弹框：只允许 body 内部滚动，弹窗自己不滚。弹窗内部是 teleport 到 body 的，

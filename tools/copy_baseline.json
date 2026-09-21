@@ -4,9 +4,7 @@
     "backend/__main__.py|标点·半角冒号|9240027d61ff",
     "backend/__main__.py|标点·半角冒号|94bc4a4968fc",
     "backend/api/imports.py|标点·半角冒号|fd7ffd3e177a",
-    "backend/api/rules.py|术语·试跑|14e5cee58af9",
     "backend/api/rules.py|术语·重放|ef3a2b7d163d",
-    "backend/api/rules.py|标点·半角冒号|14e5cee58af9",
     "backend/api/rules.py|标点·半角冒号|6fe3fb8f8df1",
     "backend/api/rules.py|标点·半角冒号|84603bfd1f26",
     "backend/api/rules.py|标点·半角冒号|ef3a2b7d163d",
@@ -134,8 +132,6 @@
     "frontend/src/views/SourcesView.vue|标点·半角冒号|3a593811d2cc",
     "frontend/src/views/SourcesView.vue|标点·半角冒号|5191c6f7be40",
     "frontend/src/views/SourcesView.vue|标点·半角冒号|62c14c51d57e",
-    "frontend/src/views/SourcesView.vue|标点·半角冒号|67d8ce293e97",
-    "frontend/src/views/SourcesView.vue|标点·半角括号|5d61855e1e67",
-    "frontend/src/views/SourcesView.vue|标点·半角括号|dca24a94ac34"
+    "frontend/src/views/SourcesView.vue|标点·半角冒号|67d8ce293e97"
   ]
 }

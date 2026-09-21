@@ -23,6 +23,17 @@ export const HEALTH_LABELS = {
   pending: "❓待验证",
 };
 
+/**
+ * 健康度的取值清单（统计条 chip、两处「健康度」下拉、批量校验的范围提示共用）。
+ *
+ * **从 HEALTH_LABELS 派生，别另抄一份名字**；顺序就是界面上的顺序。
+ * 少一档的后果不是少个选项，而是**那种源在统计条上一个都数不到**——各 chip 之和
+ * 小于总数，看着像凭空少了一批源，而下钻不到就没法批量处理（历史上这里确实有过
+ * 两份各只列 4 档的副本）。
+ */
+export const HEALTH_OPTIONS = ["ok", "auth", "gfw", "pending", "dead"]
+  .map((value) => ({ value, label: HEALTH_LABELS[value] }));
+
 //: 结论是**谁判的**（`checks.engine`）。取值定义在 core/models.Engine，这里是
 //: 显示层副本（同 HEALTH_LABELS 的关系）；新增取值时两处一起改。
 export const ENGINE_LABELS = {
