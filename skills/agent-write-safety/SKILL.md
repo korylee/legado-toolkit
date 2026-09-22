@@ -58,9 +58,48 @@ description: 在受限 agent 沙箱里安全写文件、改代码的传输通道
 
 - **部分目录只读**：Python 也抛 `PermissionError`。搬迁用「读源 + 写到新位置 + `git rm --cached`」，别用 move
 - **能改名不能删内容**：整个目录可以 rename，目录内文件删不掉
-- **`%TEMP%` 可能不可写**：`tempfile.TemporaryDirectory` 会失败，测试要显式用仓库内临时目录
+- **`0o700` 建出的目录不可读写**（根因已查实，2026-09-22）：本沙箱用 `WRITE_RESTRICTED` token，
+  限制 SID 里**没有用户自己的 SID**；而 CPython on Windows 会拿 `os.mkdir` 的 `mode` 造
+  目录 DACL（docstring 声称忽略 mode，实测不忽略）。`mode=0o700` → owner-only DACL →
+  受限进程**写不进、列不出、也删不掉**自己刚建的目录（`[Errno 13]` / `WinError 5`），
+  而 `stat` 看起来 mode 是 `0o777`，**不报异常**。
+  判据：`os.mkdir(d, 0o700)` 失败、`os.mkdir(d, 0o777)` 正常，就是它——**与在哪个目录无关**
+  （换到仓库内一样失败），所以「用仓库内临时目录」这个绕法**不成立**。`tempfile.mkdtemp()`
+  硬编码 `0o700`（`TemporaryDirectory` 同理），于是**直接跑全量**会倒出一片 `PermissionError`
+  （本仓实测 82 个），**看着像代码坏了，其实是 harness**——绕行配方见本节末尾。
+  `dsh-python-tempfile-shim` 正是修这个的：给**经过插件 shell executor 的受限命令**注入
+  `sitecustomize`，让 `os.mkdir` 忽略 mode。**判断它有没有生效只看一处**：`python -c "import os; print(os.mkdir)"` ——
+  打出 `<built-in function mkdir>` 就是没生效（此时 `PYTHONPATH` 也是空的）。
 
-→ 三条都是 harness 属性、不是本仓知识：换环境先重测（bash 那条同理，见 §一）。
+**跑全量测试的绕行配方**（已验证：82 errors → 0）。先 patch `tempfile` 的建目录，再 discover：
+
+    import os, tempfile, unittest
+    def _patched_mkdtemp(suffix=None, prefix=None, dir=None):
+        prefix, suffix, dir, output_type = tempfile._sanitize_params(prefix, suffix, dir)
+        names = tempfile._get_candidate_names()
+        for _ in range(tempfile.TMP_MAX):
+            name = next(names)
+            file = os.path.join(dir, prefix + name + suffix)
+            try:
+                os.mkdir(file, 0o777)
+            except FileExistsError:
+                continue
+            except PermissionError:
+                if os.name == "nt" and os.path.isdir(dir) and os.access(dir, os.W_OK):
+                    continue
+                raise
+            return os.path.abspath(file)
+        raise FileExistsError("no usable temp dir name")
+    tempfile.mkdtemp = _patched_mkdtemp
+    tempfile.TemporaryDirectory._mkdtemp = staticmethod(_patched_mkdtemp)
+    unittest.TextTestRunner().run(unittest.TestLoader().discover("tests", top_level_dir="."))
+
+**唯一允许的残留失败**是 `tests.test_frontend_utils`：`node --test` 要为每个测试文件 spawn
+子进程，本沙箱拦 spawn（`EPERM`），与代码无关。单独验证：
+
+    node --test --experimental-test-isolation=none frontend/src/utils/*.test.js
+
+→ 这几条都是 harness 属性、不是本仓知识：换环境先重测（bash 那条同理，见 §一）。
 
 ## 五、可复用的应用器
 
