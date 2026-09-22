@@ -163,6 +163,45 @@ def default_launcher(notes: List[str]) -> Callable[[], Tuple[int, float, str, st
                                          fallback_name="Gradle")
 
 
+def verify_generated(source: Dict[str, Any], keyword: str, detail_url: str = "",
+                     timeout: int = 60, out_path: str = "") -> Dict[str, Any]:
+    """**生成之后的验证**：跑一次本机引擎（十-5）。生成链与 Web 那条路**共用这一份**。
+
+    为什么收在这里而不是各写一份：两条路（CLI 的 `services.add_source.run_add`、Web 的
+    `backend/api/ops.py`）验的是同一件事——「这份刚生成的源在 App 的真引擎上跑得通吗」。
+    各写一份就会漂，而漂的表现是**两边的结论不一样**，看的人不知道该信哪个（lessons §二十三
+    那类）。本地回放器那条老链（`core.verify.verify_chain`）跑不了 JS、没有登录态，对 L2–L4
+    的页面看的是**另一份材料**——它的「通过」与 App 的实际行为无关（lessons §七十七）。
+
+    两条边界：
+
+    - **引擎不可用不推翻生成结果**：没配 App 源码目录 / 另一个 JVM 任务在跑 / 零事件时，
+      源照样生成，只把「这次没验成 + 为什么」带回去（AGENTS #4：原因要走到用户眼前）。
+      生成的验证是**附加证据**，不是生成的必要条件。
+    - **证据原文要剥掉**（`strip_evidence`）：Web 那条路的结果会写进 jobs 表并走 SSE，
+      整页 HTML + 逐段原文会撑爆它；判定结论（verdict / detail / all_ok）完整保留。
+      CLI 只打印，剥掉也无损——**一份行为，两处都安全**。
+
+    调试目标：有搜索规则用关键词（搜索 → 详情 → 目录 → 正文整条链）；没有搜索规则的源
+    （「仅发现」模式生成的）拿详情页当入口。**App 固定取第一条候选**，没有 pick 这个口。
+    """
+    from core.paths import data_path
+    from core.verify import strip_evidence
+
+    src = dict(source or {})
+    key = (keyword if str(src.get("searchUrl") or "").strip()
+           else (detail_url or str(src.get("bookSourceUrl") or "")))
+    out = run_jvm_debug(src, key=key, timeout=timeout,
+                        out_path=out_path or data_path("app_probe",
+                                                       "quick_add_verify.ndjson"))
+    if out.get("error") and not out.get("steps"):
+        return {"steps": [], "pages": [], "all_ok": None, "skipped": True,
+                "engine": "jvm", "source": "jvm", "error": out["error"]}
+    # 事件流对「生成预览」没用，且它是这里最占体积的一块（判定要看的是 steps）
+    out.pop("events", None)
+    return strip_evidence(out)
+
+
 def page_from_engine(url: str, *, timeout: int = 60, render: bool = True,
                      with_requests: bool = False):
     """**让引擎去取这一页，把 App 手上那份 HTML 交回来**（十-5 的编排用）。

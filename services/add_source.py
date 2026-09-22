@@ -19,7 +19,7 @@ from core.fetch import (fetch, extract_keyword, probe_search_endpoint,
 from core.analyzer import analyze_search_page, analyze_detail_page
 from core.app_debug import want_of_page
 from core.build import build_source, load_sources, save_sources
-from core.verify import verify_chain
+from core.jvm_debug import verify_generated
 from core.rules.replayer import extract_all as apply_css_rule
 
 def _safe_input(prompt: str = "") -> str:
@@ -447,25 +447,27 @@ def run_add(url, name="", source_type="novel", group="📖新增源",
             print("已取消。")
             return AddResult(1, "已取消（没有确认保存）")
 
-    # 5.5) 全链路验证（若开启）
+    # 5.5) 全链路验证（若开启）：**跑一次本机引擎**（十-5）
+    # 与 Web 那条路共用 `core.jvm_debug.verify_generated`——同一件事只有一份实现，
+    # 否则两边的结论会漂（那份的注释里写着为什么本地回放器不能当验收）。
     if verify and detail_for_toc:
         v_title = "发现→目录→正文" if discover_mode else "搜索→详情→目录→正文"
-        print(f"\n🔍 全链路验证（{v_title}）...")
+        print(f"\n🔍 全链路验证（{v_title}，本机引擎）...")
         try:
-            v = verify_chain(source, keyword, detail_url=detail_for_toc, pick=pick)
-            # 只说清「这个结果是什么」，**不动任何既有输出行**——可能有脚本在解析它们。
-            # 之所以要提示：本结果是离线回放出来的（回放不了 <js>/@js: 规则），
-            # 与 App 的真实行为可能有偏差，别拿它当真机结论。
-            if v.get("local_approx"):
-                print("   ℹ️ 本地粗略验证（离线回放）：回放不了 <js>/@js: 的源，"
-                      "结论与 App 的真实行为可能有偏差，真机行为请以 App 里的调试为准。")
-            for s in v["steps"]:
-                mark = "✅" if s["ok"] else "❌"
-                print(f"   {mark} {s['name']:<9} {s['detail']}")
-            if v["all_ok"]:
-                print("   🎉 全链路通过！")
+            v = verify_generated(source, keyword, detail_url=detail_for_toc)
+            if v.get("skipped"):
+                # **没验成不等于没生成**：源在这儿，把原因与下一步说清（AGENTS #4）
+                print(f"   ⚠️ 这次没验成：{v.get('error') or '引擎没交回结果'}")
+                print("      源已经生成了；要验先把本机引擎配好（设置 → JVM 校验），"
+                      "或连 App / 用真机调试")
             else:
-                print("   ⚠️ 部分步骤失败，可在 Legado 中手动修正规则。")
+                for s in v["steps"]:
+                    mark = "✅" if s["ok"] else "❌"
+                    print(f"   {mark} {s['name']:<9} {s['detail']}")
+                if v["all_ok"]:
+                    print("   🎉 全链路通过（本机引擎，同一段 App 代码；差在环境）")
+                else:
+                    print("   ⚠️ 部分步骤失败，可在 Legado 中手动修正规则。")
         except Exception as e:
             print(f"   ⚠️ 验证过程异常：{e}")
 
@@ -643,6 +645,7 @@ def main():
     p_add.add_argument("--output", default="auto_added.json", help="输出书源文件（默认 auto_added.json）")
     p_add.add_argument("--no-ask", action="store_true", help="不确认直接保存")
     p_add.add_argument("--no-probe", action="store_true", help="不自动探测常见搜索端点")
+    p_add.add_argument("--no-verify", action="store_true", help="生成后不跑本机引擎验证")
 
     p_index = sub.add_parser("index", help="从 sitemap 建「书名→ID」映射索引（适用于纯 id 站点）")
     p_index.add_argument("domain", help="站点域名，如 liumanhua.com")
@@ -669,4 +672,4 @@ def main():
 
     sys.exit(run_add(url, args.name, args.type, args.group,
                      args.output, args.no_ask, probe=not args.no_probe,
-                     human_gate=not args.no_ask).rc)
+                     verify=not args.no_verify, human_gate=not args.no_ask).rc)
