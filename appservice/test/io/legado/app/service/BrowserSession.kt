@@ -66,12 +66,15 @@ object BrowserSession {
                     if (isRunProfile(f, base)) f.deleteRecursively()
                 }
             }
-            var (s, why) = BrowserBridge.launch(profileDir())
+            // 代理：**现读** args.properties（每次运行都重写它；常驻 daemon 也读得到）。
+            // 空 = 不传 --proxy-server，行为与以前一字不差
+            val proxy = AppserviceEnv.loadArgs()?.getProperty("proxy").orEmpty()
+            var (s, why) = BrowserBridge.launch(profileDir(), proxy = proxy)
             if (s == null) {
                 // 退一步：换本次专属 profile 再试一次（理由见类注释第 3 条）
                 val base = profileDir()
                 val fresh = File(base.parentFile, base.name + "-run" + System.currentTimeMillis())
-                val (s2, why2) = BrowserBridge.launch(fresh, tempProfile = true)
+                val (s2, why2) = BrowserBridge.launch(fresh, tempProfile = true, proxy = proxy)
                 if (s2 == null) {
                     error = "$why2（固定 profile 也失败：$why）"
                     return null to error!!

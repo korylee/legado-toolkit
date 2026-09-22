@@ -39,10 +39,14 @@ async def jvm_debug(body: JvmDebugRequest):
                                  % (cache, " / ".join(CACHE_MODES)))
     if int(body.timeout or 0) <= 0:
         raise HTTPException(400, "timeout 必须是正数")
+    # 代理：走**全局设置**（`network.proxy`）——它同时用于这次调试与我们的补抓。
+    # 界面上配了代理却只走一半（我们走、App 不走）是查不出来的不一致：两边都「正常」，
+    # 只有用户能看出网络出口不一样（十-3）
+    from core.settings_store import resolve_proxy
     # 同步阻塞（默认常驻 daemon，回落时才拉 Gradle），必须让出事件循环
     return await asyncio.to_thread(
         run_jvm_debug, dict(body.source or {}), body.key or "我",
-        int(body.timeout or 60), body.cookie or "", cache,
+        int(body.timeout or 60), body.cookie or "", cache, resolve_proxy(),
     )
 
 

@@ -473,23 +473,17 @@ def cmd_diagnose(args) -> int:
         # 从没筛掉过任何东西：`--only-dead` 照样对全部 3861 条发请求，而用户以为只测
         # 失效的。名不副实、且不报错。
         #
-        # 读的是**与 check 命令同一个后端**（默认管理库；NDJSON 目录要
-        # `--cache-dir` + `LEGADO_LEGACY_CACHE=1`）。后端由 AsyncChecker 自己判，
-        # 这里**不能** import cli/main 的 `_resolve_check_cache`——core 层反向依赖
-        # CLI 是 lessons §十 记过的坑
-        from core.checker import AsyncChecker
+        # **直接读管理库的 checks**（最近一次结论就在那张表；本地校验链退场后
+        # 那是唯一的后端——NDJSON 缓存随它一起退役）。core 层反向依赖 CLI 是
+        # lessons §十 记过的坑，所以这里不 import cli/main 的任何东西
         from core.models import Health
         from core.loader import _normalize_url
-        probe = AsyncChecker(cache_dir=getattr(args, "cache_dir", "") or None)
-        try:
-            checks = probe.load_cache()
-        finally:
-            probe.close()
+        from core.store import Store
+        with Store() as st:
+            checks = st.checks_map()
         if not checks:
-            # 不静默：空缓存时这个开关等于没开，用户至少要知道
-            print("警告: 读不到校验结果，--only-dead 本次不筛"
-                  "（默认读管理库；结果在 NDJSON 目录就加 --cache-dir 并设 "
-                  "LEGADO_LEGACY_CACHE=1）")
+            # 不静默：空库时这个开关等于没开，用户至少要知道
+            print("警告：管理库还没有任何校验结论，--only-dead 本次不筛")
         before = len(data)
         data = [s for s in data
                 if str((checks.get(_normalize_url(str(s.get("bookSourceUrl", "") or "")))

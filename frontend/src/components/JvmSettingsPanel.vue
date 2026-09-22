@@ -9,9 +9,20 @@
           其余环境（JDK / Android SDK / Gradle 目录）由「自检」自动推导，不需要填
         </div>
       </el-form-item>
+      <!-- 代理：**这台机器怎么出去**（环境类配置，不是"这次怎么跑"）。两条引擎路
+           （调试 / 跑批）与生成后的验证都读它——放弹框里会出现"跑批走了代理、调试没走"
+           这种查不出来的不一致（十-3） -->
+      <el-form-item label="代理">
+        <el-input v-model="conf.proxy" placeholder="http://127.0.0.1:7890（留空 = 直连）"
+                  clearable :disabled="saving" />
+        <div class="muted" style="font-size: 12px; margin-top: 2px">
+          只认 http://（填 host:port 会自动补成 http://）；socks 与 https 不支持——
+          上游与本地抓取两处都要能用，只认它们公共的那一种
+        </div>
+      </el-form-item>
       <!-- **跑批参数不在这里**（2026-09-20 搬走）：测试关键词 / 超时 / 并发 / 挡位 /
            条数上限都是"这次怎么跑"，跟着动作走——它们在书源列表的「全量校验」弹框里，
-           改一次只影响那一次。这一页只留**配置**：环境 + 自检 + 最近一次的结果 -->
+           改一次只影响那一次。这一页只留**配置**：环境 + 代理 + 自检 + 最近一次的结果 -->
     </el-form>
 
     <div style="display: flex; gap: 8px; margin: 4px 0 12px; align-items: center">
@@ -86,7 +97,7 @@ import { getSettings, patchSettings } from "../api/settings";
 import { jvmSelftest, jvmResults } from "../api/jvm.js";
 
 //: 这一页只剩**配置**一项（App 源码目录）；跑批参数在列表页的弹框里，不在这
-const conf = reactive({ app_repo: "" });
+const conf = reactive({ app_repo: "", proxy: "" });   // proxy 属 network 段（这台机器怎么出去）
 const selftest = ref(null);
 const checking = ref(false);
 const saving = ref(false);
@@ -97,6 +108,7 @@ onMounted(async () => {
   try {
     const s = await getSettings();
     conf.app_repo = (s.values.jvm || {}).app_repo || "";
+    conf.proxy = (s.values.network || {}).proxy || "";
   } catch (e) { /* 设置接口挂了就保持默认，自检按钮仍可用 */ }
   try {
     r2.value = await jvmResults();
@@ -108,7 +120,8 @@ async function doSelftest() {
   checking.value = true;
   try {
     // 先保存路径，自检读的是后端设置
-    await patchSettings({ jvm: { app_repo: conf.app_repo } });
+    await patchSettings({ jvm: { app_repo: conf.app_repo },
+                          network: { proxy: conf.proxy } });
     selftest.value = await jvmSelftest();
   } catch (e) {
     ElMessage.error("自检失败: " + e);
@@ -123,8 +136,10 @@ async function save() {
     // 以后端收敛后的值为准（填了越界的值会被收掉，界面要跟着变）
     // 只发**这一页编辑的**那一个键：PATCH 的 exclude_unset 语义保证其余键不动
     // （跑批参数那几项仍然存在设置里，只是不再有界面）
-    const s = await patchSettings({ jvm: { app_repo: conf.app_repo } });
+    const s = await patchSettings({ jvm: { app_repo: conf.app_repo },
+                                    network: { proxy: conf.proxy } });
     conf.app_repo = (s.values.jvm || {}).app_repo || "";
+    conf.proxy = (s.values.network || {}).proxy || "";
     ElMessage.success("已保存，下次跑批生效");
   } catch (e) {
     ElMessage.error("保存失败：" + e);

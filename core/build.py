@@ -36,7 +36,9 @@ def build_source(url: str, keyword: str, analysis: dict,
         "loginUrl": "",
         "concurrentRate": 1,
         "weight": 0,
-        "header": f"User-Agent: {DEFAULT_UA}",
+        # **JSON**：App 用 GSON 解这个字段（`BaseSource.getHeaderMap`），行式串会被整块跳过
+        # ——原来写的是 `User-Agent: …`，那行 UA 从来没生效过（十-3 顺手改掉）
+        "header": json.dumps({"User-Agent": DEFAULT_UA}, ensure_ascii=False),
         "jsLib": "",
         "customButton": False,
         "lastUpdateTime": 0,

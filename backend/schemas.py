@@ -271,25 +271,6 @@ class LLMProfilePatch(BaseModel):
     sort_order: Optional[int] = None
 
 
-class CheckSettingsPatch(BaseModel):
-    """校验参数（core.settings_store.DEFAULTS["check"]）的局部更新。
-
-    全部 Optional 且默认 None：只提交显式给出的键，其余保持原值。
-    字段名必须与 settings_store 的键一致——**这里不做任何校验或收敛**，
-    区间 clamp／类型／非法回落一律由 ``settings_store.coerce`` 负责。
-    在本模型上再写一份 rules 就是同一口径的第二个出处，必然漂移。
-    """
-
-    concurrency: Optional[int] = None
-    timeout: Optional[float] = None
-    # 一档对一级星级（1 主页 / 2 搜索 / 3 目录 / 4 正文）。合并前这里还有一个
-    # probe_search 开关，与深度是两根轴——已去掉
-    probe_depth: Optional[int] = None
-    verify_ssl: Optional[bool] = None
-    proxy: Optional[str] = None
-    cache_ttl_ok: Optional[int] = None
-    cache_ttl_other: Optional[int] = None
-    cache_ttl_auth: Optional[int] = None
 
 
 class JvmSettingsPatch(BaseModel):
@@ -306,10 +287,21 @@ class JvmSettingsPatch(BaseModel):
     depth: Optional[str] = None
 
 
+class NetworkSettingsPatch(BaseModel):
+    """这台机器怎么出去（`settings_store.DEFAULTS["network"]`）。
+
+    同「校验参数」那条老约定：全部 Optional、只提交显式给出的键，**这里不做校验或收敛**
+    （区间 clamp / 类型 / 非法回落一律由 ``settings_store.coerce`` 负责）——
+    在本模型上再写一份 rules 就是同一口径的第二个出处，必然漂移。
+    """
+
+    proxy: Optional[str] = None
+
+
 class SettingsPatch(BaseModel):
     """按 section 分组，与 settings_store 的文件结构一一对应（不做映射层）。"""
 
-    check: Optional[CheckSettingsPatch] = None
+    network: Optional[NetworkSettingsPatch] = None
     jvm: Optional[JvmSettingsPatch] = None
 
 

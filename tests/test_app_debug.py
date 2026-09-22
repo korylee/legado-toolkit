@@ -769,10 +769,14 @@ class TestRunAppDebug(unittest.TestCase):
 
 
 class TestQualityNewPageShared(unittest.TestCase):
-    def test_verify_and_app_debug_share_one_implementation(self):
-        """页面登记只有一份实现：verify._new_page 就是 quality.new_page。"""
+    def test_verify_has_no_second_page_implementation(self):
+        """页面登记只有一份实现（`quality.new_page`）。
+
+        本地试跑那条链退场（十-4）后 verify 只剩 replay_step / strip_evidence，
+        连页面登记都不需要了——钉「别让它再长一份出来」。"""
         from core import verify
-        self.assertIs(verify._new_page, Q.new_page)
+        self.assertFalse(hasattr(verify, "_new_page"),
+                         "verify 又长出了自己的页面登记——那是第二份实现")
 
     def test_new_page_keeps_first_and_flags_truncated(self):
         pages = {}

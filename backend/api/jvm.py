@@ -124,6 +124,10 @@ def _export_sources_file(st, urls: Optional[List[str]] = None,
     3. 都没有 —— 全部在用源。
     """
     import io
+    from core.jvm_debug import apply_proxy_header
+    from core.settings_store import resolve_proxy
+
+    proxy = resolve_proxy()
     want = {_normalize_url(u) for u in (urls or []) if str(u or "").strip()}
     if want:
         views = st.export_sources()
@@ -151,10 +155,12 @@ def _export_sources_file(st, urls: Optional[List[str]] = None,
         d = view
         if want and _normalize_url(str(d.get("bookSourceUrl") or "")) not in want:
             continue
-        out.append({k: d.get(k) for k in (
+        row = {k: d.get(k) for k in (
             "bookSourceName", "bookSourceUrl", "searchUrl", "exploreUrl",
             "ruleSearch", "ruleBookInfo", "ruleToc", "ruleContent",
-            "header", "bookSourceType", "enabled", "bookSourceGroup") if k in d})
+            "header", "bookSourceType", "enabled", "bookSourceGroup") if k in d}
+        # 代理走源的 header（App 唯一认的注入点，十-3）——跑批与调试因此走同一个出口
+        out.append(apply_proxy_header(row, proxy))
     # **必须绝对路径**：这两个路径是写给**另一个进程**用的——启动器会 `pushd` 到
     # App 仓库根再跑 Gradle，测试 JVM 的 CWD 就是那里。相对路径于是解析到
     # `<App 仓库>/data/...`：轻则后端 `out_path.exists()` 找不到（报「启动器没有

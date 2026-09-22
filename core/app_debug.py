@@ -25,7 +25,7 @@ webView、正文分页全都在。我们只当客户端——**App 一行源码�
 本模块做两件事：
 
 1. **调试 WS**：收事件 → 聚合成 steps[] → 抓页面补 pages[]，产出与
-   ``core/verify.py:verify_chain`` 同形状的结果，供前端抽屉直接消费。
+   ``core/jvm_debug`` 那条链的结果，供前端抽屉直接消费。
 2. **App 的 HTTP 接口**（见下方「HTTP 接口」一节）：问 App 有没有某个源、
    把源推过去。用来把「调试 WS 对未知 tag 静默无响应」这个坑变成可判定的状态。
 
@@ -642,7 +642,7 @@ def build_steps(events: Sequence[Any], matched: Optional[Dict[str, Dict[str, str
     ``events`` 可以是 ``collect_debug_events`` 的返回值（``{"t","text"}``），
     也可以是裸文本列表——聚合只用到文本，这样测试不必构造事件字典。
 
-    每段产出与 ``verify_chain`` 完全同形的 step（经
+    每段产出与调试那条链完全同形的 step（经
     ``quality.Judgement.as_step_dict`` 摊平，**不在这里抄一份字典字面量**）：
       - ``name``：search / explore / bookUrl / toc / content
         （``explore`` 只在 key 为 ``发现::<URL>`` 时出现，见 ``SEGMENT_NAMES``）
@@ -742,7 +742,7 @@ def fetch_debug_pages(steps: Sequence[Dict[str, Any]], source: Optional[Dict[str
                       proxy: str = "", timeout: int = 15,
                       cache: str = CACHE_AUTO,
                       engine_html: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
-    """按 steps 抓页面，返回 ``pages[]``（与 verify_chain 同形状）。
+    """按 steps 抓页面，返回 ``pages[]``（与调试链同形状）。
 
     只抓「搜索页 / 详情页 / 正文页 / 发现页」各一个——按 ``page_id`` 去重后
     天然 ≤ ``MAX_PAGES`` 个（发现模式是 发现/详情/正文，关键字模式是
@@ -882,7 +882,7 @@ def run_app_debug(host: str, source_url_raw: str, key: str,
                   source: Optional[Dict[str, Any]] = None,
                   proxy: str = "",
                   cache: str = CACHE_AUTO) -> Dict[str, Any]:
-    """连 App 跑一次调试，返回与 ``verify_chain`` 同形状的结果，供前端抽屉直接消费。
+    """连 App 跑一次调试，返回与设备通道同形状的结果，供前端抽屉直接消费。
 
     返回 ``{"source": "app", "steps": [...], "pages": [...], "all_ok": bool,
     "events": [{"t": 秒, "text": 原文}], "error": ""}``。
@@ -934,6 +934,6 @@ def run_app_debug(host: str, source_url_raw: str, key: str,
             steps[0]["has_notes"] = True
     out["steps"] = steps
     out["pages"] = pages
-    # 与 verify_chain 同一口径：只有 fail 会让 all_ok 变 False（unknown 不算坏）
+    # 同一口径：只有 fail 会让 all_ok 变 False（unknown 不算坏）
     out["all_ok"] = all(s["ok"] for s in steps)
     return out

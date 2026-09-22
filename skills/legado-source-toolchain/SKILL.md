@@ -52,10 +52,9 @@ description: 本仓库 Legado 书源工具链的用法——SQLite 管理库（�
 
 ## 四、一次批量的完整动作
 
-    python cli/main.py check    -i data/candidates.json -o data/out/checked.json -c 50
-    python cli/main.py organize -i data/out/checked.json -o data/out/organized.json -r
-    python cli/main.py report   -i data/out/organized.json -r -o data/out/report.md
     # 动手前先单独备份（candidates.json 不在版本库里）
     Copy-Item data/candidates.json "data/backups/candidates_$(Get-Date -Format yyyyMMdd_HHmm).json"
+    # 校验在 Web 管理台：书源列表的「全量校验 / 校验选中」（本机引擎）
+    #   cli 的 check / organize / report / run 已于 2026-09-22 退场（本地校验链收成一台引擎）
 
 → 先备份、跑完看分布；**「频繁跑全量会被封 IP」是硬约束**，能跑增量就别跑全量。

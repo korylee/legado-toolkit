@@ -68,7 +68,8 @@ BUSY_REASON = ("另一个 JVM 任务在跑（跑批与调试共用同一个参�
                "等它跑完再来")
 
 
-def _write_args(src_file: str, key: str, out_file: str, timeout: int, cookie: str = "") -> None:
+def _write_args(src_file: str, key: str, out_file: str, timeout: int, cookie: str = "",
+                proxy: str = "") -> None:
     """写 args.properties。
 
     **必须 `newline="\n"`**：这是 git 跟踪的文件，而 `write_text` 在 Windows 上把 `\n`
@@ -84,6 +85,11 @@ def _write_args(src_file: str, key: str, out_file: str, timeout: int, cookie: st
     ]
     if cookie:
         lines.append("cookie=%s" % cookie)
+    # 浏览器那一侧的代理（Chrome 只认启动参数；与源 header 里那个 OkHttp 代理配套）。
+    # **写进这个文件而不是环境变量**：常驻 daemon 早就起来了、环境变量它读不到；
+    # 而这个文件每次运行都重写，`AppserviceEnv.loadArgs()` 现读现用
+    if proxy:
+        lines.append("proxy=%s" % proxy)
     ARGS.parent.mkdir(parents=True, exist_ok=True)
     ARGS.write_text("\n".join(lines + [""]), encoding="utf-8", newline="\n")
 
@@ -188,10 +194,13 @@ def verify_generated(source: Dict[str, Any], keyword: str, detail_url: str = "",
     from core.paths import data_path
     from core.verify import strip_evidence
 
+    from core import settings_store
+
     src = dict(source or {})
+    proxy = settings_store.resolve_proxy()          # 全局唯一的代理出入口
     key = (keyword if str(src.get("searchUrl") or "").strip()
            else (detail_url or str(src.get("bookSourceUrl") or "")))
-    out = run_jvm_debug(src, key=key, timeout=timeout,
+    out = run_jvm_debug(src, key=key, timeout=timeout, proxy=proxy,
                         out_path=out_path or data_path("app_probe",
                                                        "quick_add_verify.ndjson"))
     if out.get("error") and not out.get("steps"):
@@ -200,6 +209,60 @@ def verify_generated(source: Dict[str, Any], keyword: str, detail_url: str = "",
     # 事件流对「生成预览」没用，且它是这里最占体积的一块（判定要看的是 steps）
     out.pop("events", None)
     return strip_evidence(out)
+
+
+def _header_map(source: Dict[str, Any]):
+    """把源的 ``header`` 变成 dict——**App 认的就是这个形态**。
+
+    `BaseSource.getHeaderMap()` 是 ``GSONStrict.fromJsonObject<Map<String,String>>(header)``：
+    **JSON**。所以行式串（``User-Agent: x``）在 App 里解不出来、整块被跳过——实测库里 32 条
+    行式历史的 UA 就没生效过，而我们自己生成的源也是行式（一起改，见 `core/build.py`）。
+
+    三种返回：dict（能合并）、``None``（`@js:` / `<js>`——**脚本形态，别动它**：合并会改变它
+    的语义，只能放弃注入并让调用方知道）、``{}``（空）。
+    """
+    raw = str((source or {}).get("header") or "").strip()
+    if not raw:
+        return {}
+    if raw.lower().startswith(("@js:", "<js>")):
+        return None
+    if raw.startswith("{"):
+        try:
+            got = json.loads(raw)
+            return {str(k): str(v) for k, v in got.items()} if isinstance(got, dict) else {}
+        except Exception:
+            return {}
+    # 行式：`k: v` 一行一条（历史形态）。转成 dict 等于让它按作者的原意生效
+    out = {}
+    for ln in raw.splitlines():
+        if ":" in ln:
+            k, v = ln.split(":", 1)
+            if k.strip():
+                out[k.strip()] = v.strip()
+    return out
+
+
+def apply_proxy_header(source: Dict[str, Any], proxy: str) -> Dict[str, Any]:
+    """把代理写进**源的 header**（JSON），返回副本（不改调用方那份）。
+
+    **为什么是 header**：上游 `AnalyzeUrl` 的 init 从 `source.getHeaderMap()` 取 ``proxy`` 键，
+    取到就当这次请求的 OkHttp 代理（并从 header 里去掉，见 `AnalyzeUrl.kt` 的 init）——
+    这是 App 唯一认的注入点，所以不用改 Kotlin。
+
+    空代理 = 直连：**一个字都不动**（不写一个空值的 proxy 键——看起来像生效中的设置）。
+    header 是 `@js:` / `<js>` 脚本时同样不动：那是脚本，我们合并不了（这一次就没有代理可用，
+    调用方要知道——见返回体本身的形状）。
+    """
+    src = dict(source or {})
+    proxy = str(proxy or "").strip()
+    if not proxy:
+        return src
+    head = _header_map(src)
+    if head is None:                       # @js / <js>：脚本形态，不碰
+        return src
+    head["proxy"] = proxy
+    src["header"] = json.dumps(head, ensure_ascii=False)
+    return src
 
 
 def page_from_engine(url: str, *, timeout: int = 60, render: bool = True,
@@ -225,7 +288,9 @@ def page_from_engine(url: str, *, timeout: int = 60, render: bool = True,
              "bookSourceType": 0, "exploreUrl": url}
     # 选项挂在**key 的 URL** 上：App 拿它当 mUrl 交给 AnalyzeUrl，那里才认 `,{...}`
     key = "发现::" + url + (',{"webView":true}' if render else "")
-    out = run_jvm_debug(probe, key=key, timeout=timeout,
+    from core import settings_store
+
+    out = run_jvm_debug(probe, key=key, timeout=timeout, proxy=settings_store.resolve_proxy(),
                         out_path=data_path("app_probe", "engine_page.ndjson"))
     pages = [p for p in (out.get("pages") or []) if p.get("origin") == "engine"]
     hit = next((p for p in pages if str(p.get("url") or "") == url), None) or (pages[0] if pages else None)
@@ -267,7 +332,9 @@ def run_jvm_debug(source: Dict[str, Any],
         "events": [],
         "error": "",
     }
-    src = dict(source or {})
+    # 代理走**源的 header**（App 唯一认的注入点）：只影响交给 App 的那份，
+    # 调用方手里那份不动；`proxy` 同时用于我们自己的补抓（fetch_debug_pages）
+    src = apply_proxy_header(source or {}, proxy)
     if not str(src.get("bookSourceUrl", "") or "").strip():
         out["error"] = "缺少 bookSourceUrl（它同时是 cookie 注入的键，不能空）"
         return out
@@ -298,7 +365,7 @@ def run_jvm_debug(source: Dict[str, Any],
         pathlib.Path(src_file).parent.mkdir(parents=True, exist_ok=True)
         pathlib.Path(src_file).write_text(json.dumps([src], ensure_ascii=False),
                                           encoding="utf-8", newline="\n")
-        _write_args(src_file, key, ndjson, timeout, cookie)
+        _write_args(src_file, key, ndjson, timeout, cookie, proxy)
         _, cost, _so, _se = (launcher or default_launcher(launch_notes))()
     finally:
         # 还原：跑批与调试共用这一个参数文件，别把调试的参数留在里面

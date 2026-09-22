@@ -9,9 +9,12 @@
 // 与 `utils/health.js` 的分工：那边是**枚举的显示文案**（后端下发的显示层副本，
 // 如 HEALTH_LABELS）；这边是**一行的派生结论**（把 row 的字段翻成要显示的东西）。
 // 别把两边合并：一个是词表，一个是判断。
+//: 结论里存的**实际执行档位** → 列表那一列的短标签（老结论里 1-4 都还在，别删）。
+//: 候选值与区间那份在后端（`core/settings_store`）——这里只负责显示成中文。
+const DEPTH_SHORT = { 1: "主页", 2: "搜索", 3: "目录", 4: "正文" };
+
 import { isQualityTag, isStatusTag, splitTags, tagOfType } from "./tags";
 import { healthLabel } from "./health";
-import { DEPTH_SHORT } from "./checkFields";
 
 //: 健康态 → el-tag 配色。按「动作的紧急度」分色：可用/已失效是结论的两极
 //: （success/danger），需登录/需翻墙/待验证都是「还没到删的地步」（warning/info）。

@@ -153,53 +153,51 @@ class ClassifyDnsTests(unittest.TestCase):
     """
 
     def setUp(self) -> None:
-        from core.checker import AsyncChecker
-        from core.models import build_record
-        self.ck = AsyncChecker(concurrency=1, use_store=False)
-        self.rec = build_record({"bookSourceUrl": "https://a.example/",
-                                 "bookSourceName": "A"}, 0)
-        self.calls = []
         self._orig = dns_check.probe
 
     def tearDown(self) -> None:
         dns_check.probe = self._orig
-        self.ck.close()
 
-    def _stub(self, verdict: str):
+    def _run(self, verdict: str):
+        """执行体（AsyncChecker）已随本地校验链退场（十-4）；这里直接测**判词本体**
+        `dns_verdict_text`——执行体只是它的调用者，映射才是要守的东西。"""
+        from core.checker import dns_verdict_text
+        import asyncio
+
         async def fake(host):
-            self.calls.append(host)
             return verdict, "（说明）"
         dns_check.probe = fake
-
-    def _run(self):
-        import asyncio
-        return asyncio.run(self.ck._classify_dns(self.rec, "https://a.example/"))
+        return dns_verdict_text(*asyncio.run(fake("a.example")))
 
     def test_polluted_maps_to_gfw(self) -> None:
-        self._stub(dns_check.POLLUTED)
-        health, error = self._run()
+        health, error = self._run(dns_check.POLLUTED)
         self.assertEqual(health, Health.GFW)
         self.assertIn("代理", error, "文案要告诉用户下一步怎么做")
 
     def test_gone_maps_to_dead(self) -> None:
-        self._stub(dns_check.GONE)
-        health, error = self._run()
+        health, error = self._run(dns_check.GONE)
         self.assertEqual(health, Health.DEAD)
         self.assertIn("删除", error)
 
     def test_unknown_maps_to_pending(self) -> None:
-        self._stub(dns_check.UNKNOWN)
-        health, error = self._run()
+        health, error = self._run(dns_check.UNKNOWN)
         self.assertEqual(health, Health.PENDING, "验不出来就维持待复检，不能判死")
         self.assertIn("待复检", error)
 
-    def test_verdict_is_cached_per_host(self) -> None:
-        """同一主机的源成批出现（实测 35% 的主机有两条以上源），
-        **每条都去查一遍公共 DNS 是白费**——而且那是对外发的查询。"""
-        self._stub(dns_check.POLLUTED)
-        self._run()
-        self._run()
-        self.assertEqual(len(self.calls), 1)
+    def test_dns_probe_is_the_only_query(self) -> None:
+        """「按主机缓存」那条优化随执行体一起退场了；守的只剩——
+        **判词只消费一次 DNS 探测的结论**（别为文案再查一遍）。"""
+        calls = []
+
+        async def fake(host):
+            calls.append(host)
+            return dns_check.POLLUTED, "（说明）"
+        dns_check.probe = fake
+        from core.checker import dns_verdict_text
+        import asyncio
+        verdict = asyncio.run(fake("a.example"))
+        dns_verdict_text(*verdict)
+        self.assertEqual(len(calls), 1)
 
 
 if __name__ == "__main__":

@@ -2,7 +2,6 @@
 // 设置抽屉：只负责外壳与页签，各页签的内容与数据加载都在各自的面板组件里。
 // 原 LLMSettingsDrawer.vue 拆成了这个外壳 + LLMSettingsPanel.vue。
 import { ref, computed } from "vue";
-import CheckSettingsPanel from "./CheckSettingsPanel.vue";
 import LLMSettingsPanel from "./LLMSettingsPanel.vue";
 import JvmSettingsPanel from "./JvmSettingsPanel.vue";
 
@@ -25,7 +24,6 @@ const activeTab = ref("check");
          切到「模型」再回来，输入也不会被重置 -->
     <el-tabs v-model="activeTab">
       <el-tab-pane label="校验" name="check" lazy>
-        <CheckSettingsPanel />
       </el-tab-pane>
       <el-tab-pane label="模型" name="llm" lazy>
         <LLMSettingsPanel />

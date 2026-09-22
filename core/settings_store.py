@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 from typing import Any, Dict, Optional
 
 from core.paths import data_path
@@ -75,30 +76,15 @@ JVM_DEPTHS = ("search", "toc", "content")
 #: 按 section 分区（当前只有 check）：后续加「App 连接」等平行设置时不用再动
 #: schema，也不会和已有键挤在同一层。
 DEFAULTS: Dict[str, Dict[str, Any]] = {
-    "check": {
-        "concurrency": 50,
-        "timeout": 8.0,
-        #: 默认停在「搜索」档：与合并前（深度 1 + 搜索探测开）的有效行为一致。
-        #: 落成「主页」的话，重置设置会**静默**把搜索探测关掉——search_hit 全空、
-        #: 星级整体下降，而用户什么都没改
-        "probe_depth": DEPTH_SEARCH,
-        "verify_ssl": True,
+    #: 这台机器**怎么出去**（环境类配置，不是「这次怎么跑」）。放全局是因为它同时被
+    #: 两条引擎路（调试 / 跑批）与生成后的验证读——按「这一次怎么跑」放弹框里，就会
+    #: 出现「跑批走了代理、调试没走」这种查不出来的不一致（AGENTS #8 的同一条意思）。
+    "network": {
+        #: 形如 ``http://host:port``（``host:port`` 会被补成 http://）。**只认 http**：
+        #: 上游还支持 socks4/5，但我们自己那条抓取链（`core/fetch.py`）只支持 http——
+        #: 一个值两处用，就按两处都能用的那个来（socks 值在这儿等于给 App 用、给我们炸）。
         "proxy": "",
-        #: 缓存有效期（天）。可用源留久一点；其余状态一律短 TTL——「待验证」
-        #: 「需翻墙」长期停在旧结论上，比多校验几次更糟。
-        #: 这两个数是**唯一权威**，core/checker.py 从这里引用默认值。
-        "cache_ttl_ok": 14,
-        "cache_ttl_other": 7,
-        #: 「200 + 登录词」判出来的「需登录」单独给一天。它与 403/401 那种
-        #: 站点明确拒绝不是一回事：触发它的常常是**当时的页面**（WAF 挑战页、
-        #: 临时登录页、页头一个登录链接），而它会随页面一起消失。锁 7 天的话，
-        #: 用户点「重新校验」只会看到「复用缓存」，而调试里明明是好的。
-        "cache_ttl_auth": 1,
     },
-    #: JVM 校验服务（S2）。**只有一个路径类输入**（App 源码目录），其余环境
-    #: （JDK / Android SDK / Gradle 用户目录）全部由后端自检接口推导——
-    #: 「必须与另一个字段同盘」的 gradle-home 尤其不该让用户手填（AGENTS #13）。
-    #: 路径为空 = 功能未配置（界面上显示「未配置」，而不是拿默认值瞎跑）。
     "jvm": {
         "app_repo": "",
         "keyword": "我",
@@ -112,16 +98,9 @@ DEFAULTS: Dict[str, Dict[str, Any]] = {
     },
 }
 
-#: 各键的合法区间。**「clamp 到多少」的唯一定义处**——前端表单的
-#: ``el-input-number`` 上下界由 ``GET /api/settings`` 的 ``limits`` 下发，
-#: 不在 JS 里再写一份。
+#: 各键的合法区间。**「clamp 到多少」的唯一定义处**——前端表单的上下界由
+#: ``GET /api/settings`` 下发（AGENTS #8：默认值与区间不许在调用点再写一遍）。
 LIMITS: Dict[str, tuple] = {
-    "concurrency": (1, 200),
-    "timeout": (1.0, 120.0),
-    "probe_depth": PROBE_DEPTH_CHOICES,
-    "cache_ttl_ok": (1, 365),
-    "cache_ttl_other": (1, 365),
-    "cache_ttl_auth": (0, 365),
     "jvm_timeout": (5, 120),
     "jvm_concurrency": (1, 32),
     "jvm_limit": (0, 100000),
@@ -129,10 +108,6 @@ LIMITS: Dict[str, tuple] = {
     "jvm_depth": JVM_DEPTHS,
 }
 
-#: 代理只认 http/https。**故意不含 socks5**：aiohttp 原生不支持（要 ``aiohttp_socks``，
-#: 本项目未装），``core/fetch.py`` 的 ``proxy`` 说明已就此立过规矩——「不要再写 socks5
-#: 以免加深误导」。CLI 帮助与 README 里的 socks5 示例已按此改掉。
-#: API 层会在写入前拦下 socks5 并给出明确报错，这里只是手改文件时的最后一道兜底。
 _PROXY_SCHEMES = ("http://", "https://")
 
 _TRUE_WORDS = ("1", "true", "yes", "on")
@@ -148,8 +123,11 @@ def _to_int(value: Any, default: int, lo: int, hi: int) -> int:
     if isinstance(value, bool):
         return default
     try:
+        # **OverflowError 也要接住**：`int(float("inf"))` 抛的是它（不是 ValueError）——
+        # 漏掉的话，一个手写成 `1e400` 的设置会让**每一个**读设置的接口 500
+        # （json.loads("1e400") 给的是 inf）。这是被测试抓出来的真 bug，别删那一项
         return int(_clamp(int(float(value)), lo, hi))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return default
 
 
@@ -188,10 +166,47 @@ def _to_bool(value: Any, default: bool) -> bool:
 
 
 def _to_proxy(value: Any) -> str:
+    """代理串。**顺手把 ``host:port`` 补成 ``http://host:port``**——那是用户最常粘的形态，
+    而两种消费方都要求带 scheme（urllib 只认带 scheme 的代理；上游 `AnalyzeUrl` 更是拿正则
+    `(http|socks4|socks5)://…` 去匹配，匹配不到会直接抛异常）。补全比静默丢掉好：丢掉的表现
+    是「代理好像没生效」而没有任何提示。
+
+    仍然只认 http / https（`_PROXY_SCHEMES`）：socks 上游支持、我们的抓取链不支持，
+    一个值要两处都能用。
+    """
     s = str(value or "").strip()
     if not s:
         return ""
-    return s if s.lower().startswith(_PROXY_SCHEMES) else ""
+    low = s.lower()
+    if low.startswith(_PROXY_SCHEMES):
+        return s
+    # 没有 scheme 的形态：`host:port` / `host:port@user@pass@`（与上游正则的字段顺序一致）
+    if re.match(r"^[\w.-]+:\d{2,5}(@.*@.*@)?$", s):
+        return "http://" + s
+    return ""
+
+
+def _to_app_proxy(value: Any) -> str:
+    """交给**本机引擎**的那个代理串：只认 ``http://host:port``（``host:port`` 自动补 http://）。
+
+    **为什么不能像 `_to_proxy` 那样收 https**：上游是拿正则
+    ``(http|socks4|socks5)://(.*):(\\d{2,5})(@.*@.*)?`` 去匹配的（`HttpHelper.getProxyClient`），
+    匹配不到时它直接 ``ms.first()`` —— **抛异常**。也就是说 `https://…` 在我们这边「合法」，
+    到 App 里会把这次请求炸掉，而现象只是「这一条源取不到东西」。
+
+    socks 同理不收：上游支持、但我们自己那条抓取链不支持（`core/fetch.py` 只支持 http），
+    一个值要两处都能用。**被拒的值存成空串**——界面上那句提示是用户唯一能看到的理由，
+    所以提示里要写清只认 http。
+    """
+    s = str(value or "").strip()
+    if not s:
+        return ""
+    if s.lower().startswith("http://"):
+        return s
+    # 没有 scheme：`host:port` / `host:port@user@pass@`（字段顺序与上游正则一致）
+    if re.match(r"^[\w.-]+:\d{2,5}(@.*@.*@)?$", s):
+        return "http://" + s
+    return ""
 
 
 def _to_path(value: Any) -> str:
@@ -217,57 +232,26 @@ def _to_probe_depth(value: Any) -> int:
 
 
 def _migrate_legacy(data: Dict[str, Any]) -> None:
-    """把 v1 的两根轴（``probe_depth`` 1/2/3 + ``probe_search``）折成 v2 的一根。
+    """旧形状的搬运（就地改 ``data``，在逐键回落之前跑）。
 
-    判据是 ``schema_version``，**不是「旧键还在不在」**：app 自己写的文件当然一整套
-    键都在，但手改过的可能只写一半——`{"probe_depth": 2}` 少一个 `probe_search` 时，
-    旧代码的实际行为是「深度 2 + 搜索探开」，只认键在不在会把它当成新的「搜索档」，
-    **已经验过的目录白丢**。
-
-    映射（旧的有效行为 → 新档位），只往「验得更多」的那侧偏：
-
-        旧深度 2 / 3          → 3 / 4     （那两档本来就必须验搜索：门要求 search_hit）
-        旧深度 1 + 搜索探打开  → 2
-        旧深度 1 + 搜索探关闭  → 1
-
-    ``probe_search`` 缺失时**按 True 算**（它当年的默认值）。幂等：新版 `_empty()`
-    写下的 `schema_version` 已是 2，不会再进来。
+    **代理从「校验参数」搬成「这台机器怎么出去」**（十-3）：`check.proxy` 原来只服务本地
+    校验链，而它在两条引擎路上同样必要。新键没写、老键有值时就搬一次——**不动老键**，
+    老键随 `check.*` 一起退役（十-4）。
     """
-    try:
-        ver = int(data.get("schema_version") or 1)
-    except (TypeError, ValueError):
-        ver = 1
-    if ver >= VERSION:
-        return
-    section = data.get("check")
-    if not isinstance(section, dict):
-        return
-    old = _to_probe_depth(section.get("probe_depth"))
-    wants_search = _to_bool(section.get("probe_search"), True)
-    if old >= DEPTH_SEARCH:
-        section["probe_depth"] = min(old + 1, DEPTH_CONTENT)
-    else:
-        section["probe_depth"] = DEPTH_SEARCH if wants_search else DEPTH_HOME
-    section.pop("probe_search", None)
+    net = data.get("network")
+    if not isinstance(net, dict):
+        net = {}
+        data["network"] = net
+    check = data.get("check")
+    old_proxy = check.get("proxy") if isinstance(check, dict) else ""
+    if not str(net.get("proxy") or "").strip() and str(old_proxy or "").strip():
+        net["proxy"] = old_proxy
 
 
 #: ``(section, key)`` → 收敛函数。**没登记就是未知键**，由 coerce 返回 None 丢弃。
 #: 默认值一律从 DEFAULTS 取，不在这里写第二遍字面量。
 _SPECS: Dict[tuple, Any] = {
-    ("check", "concurrency"): lambda v: _to_int(
-        v, DEFAULTS["check"]["concurrency"], *LIMITS["concurrency"]),
-    ("check", "timeout"): lambda v: _to_float(
-        v, DEFAULTS["check"]["timeout"], *LIMITS["timeout"]),
-    ("check", "probe_depth"): _to_probe_depth,
-    ("check", "verify_ssl"): lambda v: _to_bool(
-        v, DEFAULTS["check"]["verify_ssl"]),
-    ("check", "proxy"): _to_proxy,
-    ("check", "cache_ttl_ok"): lambda v: _to_int(
-        v, DEFAULTS["check"]["cache_ttl_ok"], *LIMITS["cache_ttl_ok"]),
-    ("check", "cache_ttl_other"): lambda v: _to_int(
-        v, DEFAULTS["check"]["cache_ttl_other"], *LIMITS["cache_ttl_other"]),
-    ("check", "cache_ttl_auth"): lambda v: _to_int(
-        v, DEFAULTS["check"]["cache_ttl_auth"], *LIMITS["cache_ttl_auth"]),
+    ("network", "proxy"): _to_app_proxy,
     ("jvm", "app_repo"): _to_path,
     ("jvm", "keyword"): lambda v: (str(v).strip() or DEFAULTS["jvm"]["keyword"]),
     ("jvm", "timeout"): lambda v: _to_int(
@@ -371,6 +355,15 @@ def reset() -> Dict[str, Any]:
     return data
 
 
+def resolve_proxy() -> str:
+    """这次出去走哪个代理（``network.proxy``）。
+
+    **唯一入口**：两条引擎路（调试 / 跑批）与生成后的验证都读它。分散读的后果是
+    「跑批走了代理、调试没走」——两边都「正常」，只有用户能看出网络出口不一样。
+    """
+    return str(load()["network"]["proxy"] or "")
+
+
 def resolve_check(override: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """算出「这次校验实际用哪套参数」：全局设置打底，``override`` 里非 None 的键覆盖。
 
@@ -404,5 +397,5 @@ def resolve_check(override: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
 
 __all__ = ["DEFAULTS", "DEPTH_CONTENT", "DEPTH_HOME", "DEPTH_SEARCH", "DEPTH_TOC",
            "LIMITS", "PROBE_DEPTHS", "PROBE_DEPTH_CHOICES", "SETTINGS_NAME", "VERSION",
-           "coerce", "load", "reset", "resolve_check", "settings_path",
+           "coerce", "load", "reset", "resolve_check", "resolve_proxy", "settings_path",
            "update"]

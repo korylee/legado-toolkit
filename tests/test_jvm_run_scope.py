@@ -49,7 +49,7 @@ class _Base(unittest.TestCase):
             mock.patch.object(jvm_api, "_write_meta", lambda rows: "testbatch"),
             mock.patch.object(jvm_api, "_run_gradle", self._fake_gradle),
             mock.patch.object(jvm_api.settings_store, "load",
-                              lambda: {"jvm": {"app_repo": "X:/repo", "keyword": "我",
+                              lambda: {"network": {"proxy": ""}, "jvm": {"app_repo": "X:/repo", "keyword": "我",
                                                "timeout": 25, "concurrency": 8,
                                                "limit": 2, "depth": "search"}}),
         ):

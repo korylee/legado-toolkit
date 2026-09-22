@@ -178,7 +178,7 @@ object BrowserBridge {
      * @param tempProfile 自愈路径的专属 profile 才置 true——close 时删目录。
      */
     fun launch(profileDir: File, timeoutMs: Long = 20000,
-               tempProfile: Boolean = false): Pair<Session?, String> {
+               tempProfile: Boolean = false, proxy: String = ""): Pair<Session?, String> {
         val exe = findBrowser() ?: return null to "browser_unavailable: 没找到 Edge/Chrome"
         profileDir.mkdirs()
         val port = freePort()
@@ -190,6 +190,7 @@ object BrowserBridge {
             "--no-first-run", "--no-default-browser-check",
             "--disable-gpu", "--disable-extensions",
             "--window-size=1280,900",
+        ) + proxyArg(proxy) + listOf(
             "about:blank",
         )
         val proc = ProcessBuilder(cmd).redirectErrorStream(true).start()
@@ -404,6 +405,16 @@ object BrowserBridge {
      * 表达式由契约测试钉住（`tests/test_jvm_debug_contract.py::TestChallengeMarkerParity`）。
      */
     private const val CF_CHALLENGE_PROBE = "!!window._cf_chl_opt"
+
+    /**
+     * 浏览器走不走代理：`--proxy-server=<值>`（空 = 不加这个参数，行为与以前一字不差）。
+     *
+     * **为什么浏览器这一侧必须单独做**：App 的 OkHttp 与 App 的 WebView 是两条取数栈——
+     * 前者靠源 header 里的 `proxy` 键（`AnalyzeUrl`），后者是**真浏览器**，只认启动参数。
+     * 只做前者的话，L2–L4 的「换材料」在代理环境里仍然出不去，而且看不出原因（十-3）。
+     */
+    internal fun proxyArg(proxy: String): List<String> =
+        proxy.trim().takeIf { it.isNotEmpty() }?.let { listOf("--proxy-server=$it") } ?: emptyList()
 
     /**
      * 反爬拦截页的特征词——**只用来决定「要不要再等一等」**，不下任何结论。

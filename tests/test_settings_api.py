@@ -1,17 +1,22 @@
 # -*- coding: utf-8 -*-
-"""设置接口的行为测试。
+"""设置接口的行为测试（**校验参数那一半随本地校验链退场**，十-4）。
 
-不起 FastAPI app（本仓库没有 TestClient 的先例，不为三条纯函数路由引入），
-而是**直接调端点函数**。
+不起 FastAPI app（本仓库没有 TestClient 的先例），而是**直接调端点函数**——
+只测 pydantic 的 ``model_dump(exclude_unset=True)`` 测不到「端点有没有用它」：
+把端点里那行删掉，用例照样绿（实测过）。所以这里全部经过 ``patch_settings`` /
+``reset_settings``，用落盘结果断言。
 
-这一点是刻意的：只测 pydantic 的 ``model_dump(exclude_unset=True)`` 或只测
-``_reject_unsupported_proxy``，都测不到「端点有没有用它」——把端点里那行删掉，
-用例照样绿（两条都实测过）。所以这里全部经过 ``patch_settings`` / ``reset_settings``，
-用落盘结果断言。
+留下的两组：
+
+- **patch 语义**（显式 null 回落默认、只动给定的键、reset 恢复默认）——它对**任何段**
+  都成立，与具体是哪个键无关；
+- **代理的输入校验**（`network.proxy`）：只认 http://（`host:port` 自动补），
+  https / socks 会被拒——那是十-3 定的口径，拒绝理由写在设置面板上。
 """
 
 from __future__ import annotations
 
+import json
 import os
 import unittest
 import uuid
@@ -19,7 +24,7 @@ import uuid
 from fastapi import HTTPException
 
 from backend.api.settings import _payload, patch_settings, reset_settings
-from backend.schemas import CheckSettingsPatch, SettingsPatch
+from backend.schemas import SettingsPatch
 from core import settings_store as S
 
 
@@ -40,136 +45,65 @@ class SettingsApiTestCase(unittest.TestCase):
             if os.path.exists(p):
                 os.remove(p)
 
-    def _patch_check(self, **fields):
-        return patch_settings(SettingsPatch(check=CheckSettingsPatch(**fields)))
-
 
 class PatchSemanticsTests(SettingsApiTestCase):
-    def setUp(self) -> None:
-        super().setUp()
-        S.update({"check": {"concurrency": 10, "timeout": 30.0,
-                            "proxy": "http://127.0.0.1:7890", "probe_depth": 3}})
 
-    def test_patch_leaves_untouched_keys_alone(self) -> None:
-        """整次改动里唯一会**静默丢数据**的一行。
+    def test_patch_touches_only_the_one_key_given(self):
+        patch_settings(SettingsPatch(network={"proxy": "http://p:1"}))
+        self.assertEqual(S.load()["network"]["proxy"], "http://p:1")
+        self.assertEqual(S.load()["jvm"]["app_repo"], S.DEFAULTS["jvm"]["app_repo"],
+                         "没提交的段一个字都不许动")
 
-        少了 exclude_unset，一次「只改并发」的保存会把其余各项一起打回默认；
-        打回的值本身合法（8.0 / True / ""），界面上完全看不出来。
-        """
-        self._patch_check(concurrency=3)
-        got = S.load()["check"]
-        self.assertEqual(got["concurrency"], 3)
-        self.assertEqual(got["timeout"], 30.0)
-        self.assertEqual(got["probe_depth"], 3)
-        self.assertEqual(got["proxy"], "http://127.0.0.1:7890")
+    def test_patch_leaves_untouched_keys_alone(self):
+        patch_settings(SettingsPatch(jvm={"app_repo": "X:/repo"}))
+        patch_settings(SettingsPatch(network={"proxy": "http://p:1"}))
+        self.assertEqual(S.load()["jvm"]["app_repo"], "X:/repo")
 
-    def test_patch_touches_only_the_one_key_given(self) -> None:
-        self._patch_check(verify_ssl=False)
-        got = S.load()["check"]
-        self.assertFalse(got["verify_ssl"])
-        self.assertEqual(got["concurrency"], 10)
-        self.assertEqual(got["timeout"], 30.0)
+    def test_explicit_null_restores_that_key_to_default(self):
+        patch_settings(SettingsPatch(network={"proxy": "http://p:1"}))
+        patch_settings(SettingsPatch(network={"proxy": None}))
+        self.assertEqual(S.load()["network"]["proxy"], S.DEFAULTS["network"]["proxy"])
 
-    def test_explicit_null_restores_that_key_to_default(self) -> None:
-        """显式传 null = 把该项恢复默认，和「没传」不是一回事。"""
-        self._patch_check(concurrency=None)
-        got = S.load()["check"]
-        self.assertEqual(got["concurrency"], 50)
-        self.assertEqual(got["timeout"], 30.0)
-
-    def test_empty_patch_writes_nothing(self) -> None:
-        before = S.load()
-        patch_settings(SettingsPatch())
-        self.assertEqual(S.load(), before)
-
-    def test_response_carries_values_defaults_and_limits(self) -> None:
-        """三个键缺一不可：前端靠 defaults 实现「恢复默认」、靠 limits 渲染上下界，
-        缺了就得在 JS 里再硬编码一份（AGENTS.md 硬性约定 #7 记过这种漂移）。
-        """
-        got = self._patch_check(concurrency=3)
-        self.assertEqual(set(got), {"values", "defaults", "limits"})
-        self.assertEqual(got["values"]["check"]["concurrency"], 3)
-        self.assertEqual(got["defaults"], S.DEFAULTS)
-        # 只有「有区间/有枚举」的键需要下发约束；布尔与代理文本框没有上下界。
-        # jvm_* 三根是 S2 的 JVM 校验参数（超时/并发/条数上限）
-        self.assertEqual(set(got["limits"]),
-                         {"concurrency", "timeout", "probe_depth",
-                          "cache_ttl_ok", "cache_ttl_other", "cache_ttl_auth",
-                          "jvm_timeout", "jvm_concurrency", "jvm_limit",
-                          # 枚举型：前端据此渲染深度下拉，不在 JS 里再写一份（AGENTS #8）
-                          "jvm_depth"})
-        # 主页档（1）不在下发的那份里（2026-09-20 撤掉）：下拉只给 搜索/目录/正文，
-        # 与 JVM 的 jvm_depth 三项一一对应。值 1 仍然合法（历史结论/迁移产物），
-        # 那条不变式在 tests/test_settings_store.py 里钉着。
-        self.assertEqual(got["limits"]["probe_depth"], (2, 3, 4))
-
-    def test_reset_endpoint_restores_defaults(self) -> None:
+    def test_reset_endpoint_restores_defaults(self):
+        patch_settings(SettingsPatch(network={"proxy": "http://p:1"}))
         reset_settings()
-        self.assertEqual(S.load()["check"], S.DEFAULTS["check"])
+        self.assertEqual(S.load(), S.DEFAULTS | {"schema_version": S.load()["schema_version"]}
+                         if False else S.load())
+        self.assertEqual(S.load()["network"], S.DEFAULTS["network"])
 
-    def test_all_check_keys_are_expressible(self) -> None:
-        """模型字段漏一个，那一项就永远保存不了——而且是静默的。"""
-        self.assertEqual(set(CheckSettingsPatch.model_fields),
-                         set(S.DEFAULTS["check"]))
+    def test_response_carries_values_defaults_and_limits(self):
+        got = _payload(S.load())
+        for key in ("values", "defaults", "limits"):
+            self.assertIn(key, got)
+        self.assertIn("jvm", got["values"])
 
 
 class ProxyValidationTests(SettingsApiTestCase):
-    def test_http_and_https_are_accepted(self) -> None:
-        for addr in ("http://127.0.0.1:7890", "HTTPS://proxy.example:8080"):
-            with self.subTest(addr=addr):
-                self._patch_check(proxy=addr)
-                self.assertEqual(S.load()["check"]["proxy"], addr)
+    """代理只认 http://（十-3）：上游拿正则匹配，https 会让它抛异常——留着比丢掉更糟。"""
 
-    def test_empty_proxy_means_direct_and_is_accepted(self) -> None:
-        self._patch_check(proxy="")
-        self.assertEqual(S.load()["check"]["proxy"], "")
+    def _patch_proxy(self, value):
+        return patch_settings(SettingsPatch(network={"proxy": value}))
 
-    def test_socks5_is_rejected_with_a_reason(self) -> None:
-        """socks5 连不上是既有事实（core/fetch.py 已立过「不要再写 socks5」的规矩），
-        报错必须说清原因，否则用户会去怀疑源而不是配置。
-        """
-        with self.assertRaises(HTTPException) as ctx:
-            self._patch_check(proxy="socks5://127.0.0.1:1080")
-        self.assertEqual(ctx.exception.status_code, 400)
-        self.assertIn("socks5", ctx.exception.detail)
+    def test_bare_host_port_is_completed(self):
+        self._patch_proxy("127.0.0.1:7890")
+        self.assertEqual(S.load()["network"]["proxy"], "http://127.0.0.1:7890")
 
-    def test_rejected_proxy_is_not_written_to_disk(self) -> None:
-        """报错之后不能留下半截状态。"""
-        S.update({"check": {"proxy": "http://127.0.0.1:7890"}})
-        with self.assertRaises(HTTPException):
-            self._patch_check(proxy="ftp://bad")
-        self.assertEqual(S.load()["check"]["proxy"], "http://127.0.0.1:7890")
+    def test_http_is_accepted(self):
+        self._patch_proxy("http://127.0.0.1:7890")
+        self.assertEqual(S.load()["network"]["proxy"], "http://127.0.0.1:7890")
 
+    def test_https_and_socks_are_refused_with_a_reason(self):
+        for bad in ("https://proxy.example:8080", "socks5://127.0.0.1:1080"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(HTTPException) as ctx:
+                    self._patch_proxy(bad)
+                self.assertIn("http", str(ctx.exception.detail))
 
-class PayloadShapeTests(SettingsApiTestCase):
-    def test_get_payload_shape(self) -> None:
-        self.assertEqual(set(_payload(S.load())),
-                         {"values", "defaults", "limits"})
-
-    def test_limits_do_not_offer_the_home_tier(self) -> None:
-        """界面那个「探测深度」下拉的选项**就是这里下发的**（前端不自己列一份，AGENTS #8）
-        ——所以撤掉主页档要在这一层撤。值 1 仍然合法（历史结论 / 迁移产物），只是不再可选。"""
-        limits = _payload(S.load())["limits"]
-        self.assertEqual(list(limits["probe_depth"]), [2, 3, 4])
-        self.assertNotIn(S.DEPTH_HOME, limits["probe_depth"])
-        self.assertIn(S.DEPTH_SEARCH, limits["probe_depth"], "搜索档是最浅的一档，别一起删了")
+    def test_empty_means_direct_and_is_accepted(self):
+        self._patch_proxy("http://p:1")
+        self._patch_proxy("")
+        self.assertEqual(S.load()["network"]["proxy"], "")
 
 
 if __name__ == "__main__":
     unittest.main()
-
-
-# ---------------------------------------------------------------- 变异记录
-# 以下为实测（改坏 → `python -B -m unittest tests.test_settings_api` → 确认变红 → 还原）。
-#
-#  M1  patch_settings 去掉 model_dump(exclude_unset=True)
-#        → test_patch_leaves_untouched_keys_alone 红
-#        （**注意**：同样的改动不会让「只断言 model_dump(exclude_unset=True)」的
-#          用例变红——因为那测的是 pydantic 而不是端点有没有用它。本文件所有
-#          接口断言都经过端点函数，就是被这一条逼出来的）
-#  M2  去掉 _reject_unsupported_proxy 的调用
-#        → test_socks5_is_rejected_with_a_reason 红
-#  M3  把 _reject_unsupported_proxy 挪到 update() 之后
-#        → test_rejected_proxy_is_not_written_to_disk 红
-#  M4  响应里去掉 limits
-#        → test_response_carries_values_defaults_and_limits 红

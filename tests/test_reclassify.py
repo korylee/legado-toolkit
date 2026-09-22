@@ -443,16 +443,20 @@ class OnlyDeadFilterTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def _seed_cache(self) -> None:
-        """写两条结论：一条可用、一条失效。第三条（没校验过的）故意不写。"""
-        from core.checker import AsyncChecker
-        from core.models import build_record
-        ck = AsyncChecker(use_store=True)
-        for src, health in ((self.GOOD, Health.OK), (self.BAD, Health.DEAD)):
-            rec = build_record(src, 0)
-            rec.health = health
-            rec.checked_at = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time() - 300))
-            ck.save_cache_append(rec)
-        ck.close()
+        """写两条结论：一条可用、一条失效。第三条（没校验过的）故意不写。
+
+        本地校验链退场（十-4）后，最近一次结论只住在管理库的 checks 表里——
+        种子也直接写它（那正是被测代码读的地方）。"""
+        from core.store import Store
+        from core.loader import _normalize_url
+        now = time.strftime("%Y-%m-%d %H:%M:%S")
+        # `save_checks` 吃的是 **check_cache 的条目形状（dict）**，不是 record 对象
+        # ——喂 record 会静默写 0 行（它 `.get` 不出来），而表现只是「筛选没生效」
+        rows = [{"url": _normalize_url(src["bookSourceUrl"]), "health": health,
+                 "checked_at": now, "engine": "jvm"}
+                for src, health in ((self.GOOD, Health.OK), (self.BAD, Health.DEAD))]
+        with Store() as st:
+            self.assertEqual(st.save_checks(rows), 2, "两条结论都要真的写进 checks")
 
     def _run(self, only_dead: bool):
         from core import reclassify as R

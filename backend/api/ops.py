@@ -2,104 +2,10 @@
 # 耗时操作的任务入口：把 CLI 的能力暴露成 job。
 from typing import Any, Dict, List
 
-from core import settings_store
 from core.loader import _normalize_url
 from core.store import Store
 
 from backend.jobs import runner
-
-# 任务结果的形状（items / transitions）由 `check_summary` **一处**给出：
-# 本机引擎那条跑批（`jvm.run_jvm_job`）用的是同一份——两条路的结果体必须同形，
-# 前端读的是同一段代码（`parseCheckResult` / `applyCheckResults`）。
-from backend.api.check_summary import (ITEMS_LIMIT, check_items_from_records,
-                                       summarize_transitions)
-
-
-@runner.register("check")
-async def run_check_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[str, Any]:
-    # 校验一批源。payload:
-    #   urls: [书源URL]  为空则全量
-    #   limit: 限制条数
-    #   refresh_cache: 忽略有效期内的缓存。它是**每次动作**而非默认值，所以不进
-    #                  设置，由前端直接传
-    #   check: {concurrency/timeout/probe_depth/verify_ssl/proxy}
-    #          本次临时覆盖，只作用于这一个 job，**不写回全局设置**
-    #          （单独一层是为了不和 urls/limit/refresh_cache/total 挤在一个命名空间）
-    from core.checker import AsyncChecker
-    from core.models import build_record
-
-    urls = payload.get("urls") or []
-    limit = int(payload.get("limit", 0) or 0)
-    if urls:
-        srcs = [s for s in (st.get_source(u) for u in urls) if s]
-    else:
-        srcs = st.export_sources()
-    if limit:
-        srcs = srcs[:limit]
-    st.update_job(job_id, total=len(srcs))
-
-    records = [build_record(s, i) for i, s in enumerate(srcs)]
-    # 上一版结论的快照，**必须在 run() 之前读**：跑完之后新结论就落库了，
-    # 那时再读，每条源都是 old == new，摘要会永远报「无状态变化」——看起来一切
-    # 正常，却把这次改动要回答的问题答错了。checks_map 的键是规范化的，
-    # 比对时两侧都要归一（见 summarize_transitions）
-    prev_checks = st.checks_map()
-    # 取值顺序：本次覆盖 > 全局设置 > 内置默认。三级都在 resolve_check 里完成，
-    # 这里**不要**再出现 payload.get("concurrency", 20) 这类写法——默认值散落在
-    # 调用点是漂移的源头（ops.py 曾写 20、CLI 写 50、AsyncChecker 写 50）
-    cfg = settings_store.resolve_check(payload.get("check"))
-    checker = AsyncChecker(
-        concurrency=cfg["concurrency"],
-        timeout=cfg["timeout"],
-        # 以前根本没读 payload 的 verify_ssl，前端给了也不生效
-        verify_ssl=cfg["verify_ssl"],
-        probe_depth=cfg["probe_depth"],
-        # keyword 不在全局设置里（那是「测哪个书名」，不是随环境变的参数），保持原样
-        keyword=str(payload.get("keyword") or "我"),
-        # 设置里空串 = 直连；AsyncChecker 认的是 None，"" 会被原样递给 aiohttp。
-        # 转换只在这一处，别在存储层也存成 None（那样「空串=直连」就没法显式表达了）
-        proxy=cfg["proxy"] or None,
-        cache_ttl_ok=cfg["cache_ttl_ok"],
-        cache_ttl_other=cfg["cache_ttl_other"],
-        cache_ttl_auth=cfg["cache_ttl_auth"],
-        use_store=True,
-    )
-    checker.refresh_cache = bool(payload.get("refresh_cache"))
-    try:
-        results = await checker.run(
-            records,
-            # **长任务必须报进度**：不报的话 `jobs.progress` 全程是 0，而全量 3800 条
-            # 要跑十几分钟——用户看到的就是「点了没反应」，只能靠猜还在不在跑。
-            # run() 每完成一条报一次（含缓存命中那部分的起步值，见那边的注释）
-            on_progress=lambda done, _total: st.update_job(job_id, progress=done),
-        )
-    finally:
-        checker.close()
-
-    st.update_job(job_id, progress=len(results))
-    # 只重建**这次校验过**的那些源的分组标签。分组只由该源自身的
-    # (类型, 健康度, 星级) 决定，没被重算的源不可能变——而全库重建实测 0.55 秒，
-    # 只校验一条源时那 0.55 秒全是白花的
-    st.rebuild_system_tags([r.url for r in results])
-    items = check_items_from_records(results)
-    return {
-        "checked": len(items),
-        # 相对上一次的变化。与上面「命中多少」同一动机：把看不见的事实报出来。
-        # 「首次有结论」与「变成 X」分开——绝大多数源从未校验过，混在一起
-        # 「新增可用 2000 条」就会被读成「比上次好」
-        "transitions": summarize_transitions(prev_checks, items),
-        # 本次实际用的参数。和下面三项同一动机：把看不见的事实报出来——
-        # 否则「为什么这次慢得多」「设置改了到底生效没有」在界面上无从回答
-        "params": cfg,
-        # 缓存命中多少、真发了多少：不分出来的话，「点校验 → 一条请求都没发」
-        # 和「真跑了一遍」在界面上长得一模一样
-        "cached": checker.cached_count,
-        "fetched": len(items) - checker.cached_count,
-        # 写库失败多少：>0 说明状态不会变，必须让用户看见（不是我们抛错，是写不进去）
-        "save_failures": checker.save_failures,
-        "hit_downgrades": len(checker.hit_downgrades),
-        "items": items[:ITEMS_LIMIT],
-    }
 
 
 @runner.register("add")

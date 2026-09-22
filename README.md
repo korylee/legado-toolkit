@@ -198,10 +198,7 @@ python cli/main.py
 | 新增一个站 | `echo '搜索URL' \| python cli/main.py add - --interactive` |
 | 导入外部源 | **Web 管理台「导入」对话框**（CLI 无此命令） |
 | 清洗类型脏值（导入前必跑） | `python cli/main.py sanitize -i 外部.json`（缺省就地覆盖） |
-| 校验 + 整理 + 报告（一条龙） | `python cli/main.py run -i candidates.json -o out/checked.json` |
-| 深度验证审计（目录 + 正文实测） | `python cli/main.py check -i candidates.json --probe-depth 4` |
-| 仅可用源精简版 | `python cli/main.py run -i candidates.json --keep-only-ok -o out/checked_ok.json` |
-| 只要报告（不重新校验） | `python cli/main.py report -i out/organized.json -r -o out/report.md` |
+| 校验（含目录 / 正文） | **Web 管理台**的「全量校验 / 校验选中」（本机引擎） |
 | 去重检查 | `python cli/main.py dedupe -i 某文件.json -o 去重后.json` |
 
 新增源时 URL 走 stdin，避免 shell 破坏百分号编码：
@@ -210,10 +207,8 @@ python cli/main.py
 @('https://example.com/search?q=%E7%BB%8D%E5%AE%8B') | python cli/main.py add - --name "示例站" --type novel --no-ask
 ```
 
-**校验缓存在管理库**（`data/sources.sqlite3` 的 `checks` 表）：`--cache-dir` / `-r` 读的就是
-它。要读旧的 NDJSON 缓存目录得加 `LEGADO_LEGACY_CACHE=1`（`check` / `run` 另有
-`--legacy-cache` 开关，`organize` / `report` 没有）——所以示例里的 `-r` 指的是「从缓存恢复
-星级」，**不是**读那个目录。
+**校验结论在管理库**（`data/sources.sqlite3` 的 `checks` 表）：列表页与导出都读它。
+本地校验链（NDJSON 缓存 + `cli check/run/organize/report`）已于 2026-09-22 退场——校验只有本机引擎一条路（见上表）。
 
 ---
 
@@ -309,7 +304,7 @@ cache/check_cache/imports/out/config/app_probe 等）——**新增子目录要�
 | `data/out/` | Web / 后端产出的临时快照与导出记录 |
 | `data/archive/` | 历史产物归档（可回溯，不删） |
 | `data/app_probe/` | App / JVM 实测产物：调试 NDJSON 与侧车、跑批导出、常驻日志 |
-| `data/check_cache/` | **遗留** NDJSON 校验缓存：现役缓存在管理库 `checks` 表，只在 `--legacy-cache` 与迁移对拍时读。**别再建 `check_cache_full` / `_deep3` 这类变体** |
+| `data/check_cache/` | **已删除**（十-4，2026-09-22）：本地校验链退场后没有读者了；结论都在管理库 `checks` 表 |
 
 **两条操作纪律**：① 新增源走 `add`（CLI）或 Web「新增」，外部源走 Web「导入」——
 **别用 `merge --mode replace` 直接覆盖管理库**；② 规则冲突要人工判断：先用 `check` 看外部

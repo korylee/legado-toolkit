@@ -2,19 +2,15 @@
 """
 Legado 书源整理工具 CLI。
 
-子命令：
-  check    高并发联网校验书源可用性/稳定性
-  organize 按内容类型 + 健康状态重建清晰分组
-  report   生成 Markdown 诊断报告
+子命令（**校验 / 整理 / 报告 / 一条龙已随本地校验链退场**，十-4：引擎只剩一台，
+那些动作用界面上的「本机引擎」跑；这里留的是纯本地的那几个）：
+
   merge    合并/更新多份书源文件（URL 去重）
   dedupe   按 URL/名称去重（写出新文件）
   dups     找重复源：规则相同、只有地址/署名不同的（只读清单，不改数据）
-  add      快捷新增书源：给搜索 URL 自动推断规则生成书源
+  add      快捷新增书源：给搜索 URL 自动推断规则生成书源（生成后跑本机引擎验证）
 
 示例：
-  python cli/main.py report -i bookSource.json -o report.md
-  python cli/main.py check -i bookSource.json -c 50 -o check_cache/
-  python cli/main.py organize -i bookSource.json -r check_cache/ -o organized.json
   python cli/main.py merge -i a.json -i b.json -o merged.json --mode replace
   echo 'https://host/search?q=%E7%BB%8D%E5%AE%8B' | python cli/main.py add - --type manga --no-ask
 """
@@ -57,39 +53,15 @@ def _load_records(path: str, limit: int = 0):
 
 
 # 默认输出文件名（各子命令未指定 -o 时使用）
+#: 还在用的那几个输出名（check / organize / report 随本地校验链退场，十-4）
 DEFAULT_OUTPUTS = {
-    "check": "checked.json",
-    "organize": "organized.json",
-    "report": "report.md",
     "merge": "merged.json",
     "dedupe": "deduped.json",
 }
-DEFAULT_CACHE_DIR = "check_cache"
 
 
-def _resolve_check_cache(args: argparse.Namespace) -> tuple[str, bool]:
-    """解析校验缓存策略。
-
-    --no-cache 关闭缓存读写，优先级高于 --refresh-cache；
-    --refresh-cache 跳过旧缓存读取，但保留成功结果写入缓存。
-    """
-    if getattr(args, "no_cache", False):
-        return "", False
-    cache_dir = getattr(args, "cache_dir", "") or DEFAULT_CACHE_DIR
-    return cache_dir, bool(getattr(args, "refresh_cache", False))
 
 
-def _cache_backend(args: argparse.Namespace, cache_dir: str) -> str:
-    """按**真实**的缓存后端写那行「结果写到哪」。
-
-    不能直接报 `cache_dir`：`AsyncChecker` 默认走 SQLite 管理库
-    （`use_store` 默认 True，见 core/checker.py），此时 cache_dir **一次都不会被
-    读写**——只有 `--legacy-cache` 把 `LEGADO_LEGACY_CACHE` 置起来才轮到它。
-    报一个用不上的目录名，正是本项目一直在消灭的那种「静默说反话」。
-    """
-    if getattr(args, "legacy_cache", False):
-        return "NDJSON %s" % cache_dir
-    return "管理库（要退回 NDJSON 目录加 --legacy-cache）"
 
 
 def _auto_detect_input() -> str:
@@ -150,137 +122,10 @@ def _ask_confirm(prompt: str = "确认？[y/N] ") -> bool:
     return ans in ("y", "yes", "是")
 
 
-# ---------------------------------------------------------------- check
-def cmd_check(args: argparse.Namespace) -> int:
-    from core.checker import run_check
-    input_path = _resolve_input(args)
-    records, sources = _load_records(input_path, args.limit)
-    cache_dir, refresh_cache = _resolve_check_cache(args)
-    if getattr(args, "no_cache", False):
-        print("缓存策略：不读取、不写入缓存")
-    elif refresh_cache:
-        print(f"缓存策略：跳过旧缓存，成功结果写入 {_cache_backend(args, cache_dir)}")
-    print(f"加载书源 {len(records)} 个，开始校验（并发 {args.concurrency}，超时 {args.timeout}s）...")
-    testset = None
-    if getattr(args, "testset", ""):
-        # 自定义测试集 JSON：{"novel": ["书名..."], "manga": ["漫画名..."]}
-        try:
-            with open(args.testset, "r", encoding="utf-8") as f:
-                testset = json.load(f)
-            print(f"已加载自定义测试集: {testset}")
-        except Exception as e:
-            print(f"警告: 测试集加载失败（使用内置）：{e}")
-    results = run_check(
-        records,
-        concurrency=args.concurrency,
-        timeout=args.timeout,
-        keyword=args.keyword,
-        verify_ssl=not args.insecure,
-        cache_dir=cache_dir,
-        testset=testset,
-        max_keywords=getattr(args, "max_keywords", 2),
-        proxy=getattr(args, "proxy", None),
-        probe_depth=getattr(args, "probe_depth", DEPTH_SEARCH),
-        refresh_cache=refresh_cache,
-        # --no-cache 要**真的**不读不写：只把 cache_dir 置空挡不住 store 后端
-        # （use_store 默认 True）。不给这一项的话，help 里那句「不读取旧缓存，
-        # 也不写入本次结果」在默认配置下是假的——读的还是管理库、写的也是。
-        use_store=False if getattr(args, "no_cache", False) else None,
-    )
-    # 统计
-    from collections import Counter
-    health_counter = Counter(r.health for r in results)
-    from core.models import HEALTH_NAMES
-    print("\n===== 校验结果 =====")
-    for h in sorted(health_counter, key=lambda x: -health_counter[x]):
-        print(f"  {HEALTH_NAMES.get(h, h):<8} {health_counter[h]}")
-    ok_count = health_counter.get(Health.OK, 0)
-    print(f"\n可用 {ok_count}/{len(results)}")
-
-    # 结果保存
-    output = getattr(args, "output", "") or DEFAULT_OUTPUTS["check"]
-    if output:
-        from core.organizer import organize_sources
-        data = organize_sources(results, skip_disabled=not args.keep_disabled)
-        dump_json_file(output, data)
-        print(f"已保存整理结果: {output}")
-    # **落库了 health 就要重建那几条的组名**，否则界面上一屏两个来源打架：
-    # 健康列读 checks.health、标签列读 sources.group_name，而 CLI 的 organize
-    # 只写 JSON、不写库——那个组名会一直停在旧结论上。口径与 Web 那条链路
-    # （backend/api/ops.py）完全相同：只重建**这次校验过的**源。
-    # 两个后端都没被关掉时才重建（`--no-cache` 不落库、`--legacy-cache` 落 NDJSON）
-    store_backend = not (getattr(args, "no_cache", False)
-                         or getattr(args, "legacy_cache", False))
-    if results and store_backend:
-        from core.store import Store
-        with Store() as st:
-            st.rebuild_system_tags([r.url for r in results])
-    return 0
 
 
-# ---------------------------------------------------------------- organize
-def cmd_organize(args: argparse.Namespace) -> int:
-    input_path = _resolve_input(args)
-    records, sources = _load_records(input_path, args.limit)
-    # 若提供 -r 校验缓存，则合并缓存结果
-    if getattr(args, "check_dir", ""):
-        from core.checker import AsyncChecker, is_cache_item_valid, restore_from_cache
-        cache = AsyncChecker(cache_dir=args.check_dir).load_cache()
-        restored = 0
-        for rec in records:
-            if rec.url in cache and is_cache_item_valid(rec, cache[rec.url]):
-                # 统一走公共恢复逻辑：星级由原始量重算 + 标签清洗（剔除命中《》、保留原创、补齐规则完整）
-                restore_from_cache(rec, cache[rec.url])
-                restored += 1
-        print(f"合并缓存结果: {restored}/{len(records)}")
-    else:
-        # 无缓存时从旧分组迁移明确状态；无法确认的源必须保守标为待验证。
-        # 这条路径上 health 只可能是默认值 PENDING（「没结论」），
-        # 用默认值当「没填过」的判据仍然成立
-        from core.organizer import infer_health_from_group
-        for rec in records:
-            if rec.health == Health.PENDING:
-                rec.health = infer_health_from_group(rec.group)
-
-    from core.organizer import organize_sources
-    output = getattr(args, "output", "") or DEFAULT_OUTPUTS["organize"]
-    drop_dead = bool(getattr(args, "drop_dead", False))
-    keep_only_ok = bool(getattr(args, "keep_only_ok", False))
-    before = sum(1 for r in records if r.enabled)
-    data = organize_sources(records, skip_disabled=not args.keep_disabled,
-                            drop_dead=drop_dead, keep_only_ok=keep_only_ok)
-    if drop_dead:
-        dropped = before - len(data)
-        print(f"已剔除失效源: {dropped} 个")
-    if keep_only_ok:
-        print(f"已精简为仅可用源: {len(data)} 个")
-    dump_json_file(output, data)
-    print(f"已整理 {len(data)} 个源 → {output}")
-    return 0
 
 
-# ---------------------------------------------------------------- report
-def cmd_report(args: argparse.Namespace) -> int:
-    from core.reporter import build_report
-    input_path = _resolve_input(args)
-    records, sources = _load_records(input_path, args.limit)
-    # 合并缓存
-    if getattr(args, "check_dir", ""):
-        from core.checker import AsyncChecker, is_cache_item_valid, restore_from_cache
-        cache = AsyncChecker(cache_dir=args.check_dir).load_cache()
-        restored = 0
-        for rec in records:
-            if rec.url in cache and is_cache_item_valid(rec, cache[rec.url]):
-                # 统一走公共恢复逻辑：星级由原始量重算 + 标签清洗（剔除命中《》、保留原创、补齐规则完整）
-                restore_from_cache(rec, cache[rec.url])
-                restored += 1
-        print(f"合并缓存结果: {restored}/{len(records)}")
-    report = build_report(records, source_path=input_path)
-    output = getattr(args, "output", "") or DEFAULT_OUTPUTS["report"]
-    with open(output, "w", encoding="utf-8") as f:
-        f.write(report)
-    print(f"报告已保存: {output}")
-    return 0
 
 
 # ---------------------------------------------------------------- merge
@@ -471,65 +316,6 @@ def cmd_add(args: argparse.Namespace) -> int:
     ).rc
 
 
-# ---------------------------------------------------------------- run（一条龙）
-def cmd_run(args: argparse.Namespace) -> int:
-    """一条龙：check → organize → report，产出 checked.json / organized.json / report.md。"""
-    from core.checker import run_check
-
-    input_path = _resolve_input(args)
-    records, sources = _load_records(input_path, args.limit)
-    cache_dir, refresh_cache = _resolve_check_cache(args)
-    if getattr(args, "no_cache", False):
-        print("缓存策略：不读取、不写入缓存")
-    elif refresh_cache:
-        print(f"缓存策略：跳过旧缓存，成功结果写入 {_cache_backend(args, cache_dir)}")
-
-    # 1) check
-    print(f"\n===== [1/3] 联网校验（{len(records)} 个源）=====")
-    results = run_check(
-        records,
-        concurrency=args.concurrency,
-        timeout=args.timeout,
-        keyword=args.keyword,
-        verify_ssl=not args.insecure,
-        cache_dir=cache_dir,
-        max_keywords=getattr(args, "max_keywords", 2),
-        proxy=getattr(args, "proxy", None),
-        probe_depth=getattr(args, "probe_depth", DEPTH_SEARCH),
-        refresh_cache=refresh_cache,
-    )
-    from collections import Counter
-    from core.models import HEALTH_NAMES
-    health_counter = Counter(r.health for r in results)
-    for h in sorted(health_counter, key=lambda x: -health_counter[x]):
-        print(f"  {HEALTH_NAMES.get(h, h):<8} {health_counter[h]}")
-    print(f"  可用 {health_counter.get(Health.OK, 0)}/{len(results)}")
-
-    # 2) organize（直接保存带分组的整理结果）
-    print("\n===== [2/3] 整理分组 =====")
-    from core.organizer import organize_sources
-    drop_dead = bool(getattr(args, "drop_dead", False))
-    keep_only_ok = bool(getattr(args, "keep_only_ok", False))
-    if drop_dead:
-        print("（剔除失效源模式已开启）")
-    if keep_only_ok:
-        print("（仅保留可用源模式已开启）")
-    data = organize_sources(results, skip_disabled=not args.keep_disabled,
-                            drop_dead=drop_dead, keep_only_ok=keep_only_ok)
-    checked_path = getattr(args, "output", "") or "checked.json"
-    dump_json_file(checked_path, data)
-    print(f"  已保存: {checked_path}（{len(data)} 个源）")
-
-    # 3) report
-    print("\n===== [3/3] 生成报告 =====")
-    from core.reporter import build_report
-    report = build_report(results, source_path=input_path)
-    report_path = "report.md"
-    with open(report_path, "w", encoding="utf-8") as f:
-        f.write(report)
-    print(f"  已保存: {report_path}")
-    print("\n✅ 完成。可将 checked.json 导入 Legado，或查看 report.md 诊断。")
-    return 0
 
 
 # ---------------------------------------------------------------- menu（交互菜单）
@@ -598,41 +384,6 @@ def cmd_menu(args: argparse.Namespace) -> int:
         ns.timeout = 8.0
         ns.keyword = "我"
         ns.testset = ""
-        ns.max_keywords = 2
-        ns.probe_depth = DEPTH_SEARCH
-        ns.proxy = ""
-        ns.insecure = False
-        ns.keep_disabled = False
-        ns.cache_dir = DEFAULT_CACHE_DIR
-        ns.no_cache = False
-        ns.refresh_cache = False
-        ns.output = ""
-    elif name == "organize":
-        ns.check_dir = ""
-        ns.keep_disabled = False
-        ns.output = ""
-        # 引导：询问是否剔除失效源
-        drop_in = _safe_input("是否剔除失效源（❌ 分组）？[y/N] ").strip().lower()
-        ns.drop_dead = drop_in in ("y", "yes", "是")
-    elif name == "report":
-        ns.check_dir = ""
-        ns.output = ""
-    elif name == "run":
-        ns.concurrency = 50
-        ns.timeout = 8.0
-        ns.keyword = "我"
-        ns.max_keywords = 2
-        ns.probe_depth = DEPTH_SEARCH
-        ns.proxy = ""
-        ns.insecure = False
-        ns.keep_disabled = False
-        ns.cache_dir = DEFAULT_CACHE_DIR
-        ns.no_cache = False
-        ns.refresh_cache = False
-        ns.output = ""
-        # 引导：询问是否剔除失效源
-        drop_in = _safe_input("是否剔除失效源（❌ 分组）？[y/N] ").strip().lower()
-        ns.drop_dead = drop_in in ("y", "yes", "是")
     elif name == "dedupe":
         ns.keep = "last"
         ns.output = ""
@@ -640,10 +391,13 @@ def cmd_menu(args: argparse.Namespace) -> int:
         print(f"暂不支持菜单调用: {name}")
         return 0
 
-    funcs = {
-        "check": cmd_check, "organize": cmd_organize, "report": cmd_report,
-        "run": cmd_run, "dedupe": cmd_dedupe,
-    }
+    # 校验 / 整理 / 报告 / 一条龙**已随本地校验链退场**（十-4）：它们服务的正是那台引擎，
+    # 而校验与生成今天都走本机引擎（界面与 CLI 的 `add`）。菜单只留纯本地的那几个。
+    funcs = {"dedupe": cmd_dedupe}
+    if name not in funcs:
+        print("「%s」已随本地校验链退场：校验走界面上的「本机引擎」，或用 add 生成源"
+              % name)
+        return 0
     return funcs[name](ns)
 
 
@@ -669,51 +423,6 @@ def build_parser() -> argparse.ArgumentParser:
         description="Legado 书源整理工具：校验可用性、重建分组、诊断报告、合并去重",
     )
     sub = parser.add_subparsers(dest="command")
-
-    # check
-    p_check = sub.add_parser("check", help="高并发联网校验书源可用性/稳定性")
-    p_check.add_argument("-i", "--input", default="", help="书源 JSON 文件（缺省自动探测）")
-    p_check.add_argument("-o", "--output", default="", help=f"校验后整理输出 JSON（缺省 {DEFAULT_OUTPUTS['check']}）")
-    p_check.add_argument("-c", "--concurrency", type=int, default=50, help="并发数（默认 50）")
-    p_check.add_argument("-t", "--timeout", type=float, default=8.0, help="单请求超时秒数（默认 8）")
-    p_check.add_argument("-k", "--keyword", default="我", help="搜索探测关键词（默认「我」）")
-    p_check.add_argument("--testset", default="", help="自定义测试集 JSON 文件：{\"novel\": [书名], \"manga\": [漫画名]}（默认内置）")
-    p_check.add_argument("--max-keywords", type=int, default=2, help="每个源最多尝试测试集关键词数（默认 2）")
-    p_check.add_argument("--probe-depth", type=int, choices=list(PROBE_DEPTHS),
-                         default=DEPTH_SEARCH, help=DEPTH_HELP)
-    p_check.add_argument("--proxy", default="", help="代理地址，形如 http://127.0.0.1:7890（**只支持 http/https**，socks5 不成立——aiohttp 与 urllib 都不认）")
-    p_check.add_argument("--limit", type=int, default=0, help="只处理前 N 个源（测试用）")
-    p_check.add_argument("--insecure", action="store_true", help="不校验证书（规避 SSL 报错）")
-    p_check.add_argument("--keep-disabled", action="store_true", help="输出时保留 enabled=false 的源")
-    p_check.add_argument("--cache-dir", default="", help=f"校验缓存目录（缺省 {DEFAULT_CACHE_DIR}）")
-    p_check.add_argument("--legacy-cache", action="store_true",
-                         help="退回旧 NDJSON 缓存（默认走 SQLite 管理库）")
-    p_check.add_argument("--no-cache", action="store_true",
-                         help="完全禁用缓存：不读取旧缓存，也不写入本次结果（优先级高于 --refresh-cache）")
-    p_check.add_argument("--refresh-cache", action="store_true",
-                         help="跳过旧缓存，重新联网校验；成功结果仍写入缓存")
-    p_check.set_defaults(func=cmd_check)
-
-    # organize
-    p_org = sub.add_parser("organize", help="按内容类型 + 健康状态重建清晰分组")
-    p_org.add_argument("-i", "--input", default="", help="书源 JSON 文件（缺省自动探测）")
-    p_org.add_argument("-o", "--output", default="", help=f"输出 JSON 文件（缺省 {DEFAULT_OUTPUTS['organize']}）")
-    p_org.add_argument("-r", "--check-dir", default="", help="校验缓存目录（可选，用于健康分组）")
-    p_org.add_argument("--limit", type=int, default=0, help="只处理前 N 个源（测试用）")
-    p_org.add_argument("--keep-disabled", action="store_true", help="输出时保留 enabled=false 的源")
-    p_org.add_argument("--drop-dead", action="store_true",
-                       help="剔除失效源（Health.DEAD；需登录/需翻墙源保留）")
-    p_org.add_argument("--keep-only-ok", action="store_true",
-                       help="只保留 ✅可用 源（精简导入版）")
-    p_org.set_defaults(func=cmd_organize)
-
-    # report
-    p_rep = sub.add_parser("report", help="生成 Markdown 诊断报告")
-    p_rep.add_argument("-i", "--input", default="", help="书源 JSON 文件（缺省自动探测）")
-    p_rep.add_argument("-o", "--output", default="", help=f"输出 Markdown 文件（缺省 {DEFAULT_OUTPUTS['report']}）")
-    p_rep.add_argument("-r", "--check-dir", default="", help="校验缓存目录（可选）")
-    p_rep.add_argument("--limit", type=int, default=0, help="只处理前 N 个源（测试用）")
-    p_rep.set_defaults(func=cmd_report)
 
     # merge
     p_mrg = sub.add_parser("merge", help="合并/更新多份书源文件")
@@ -750,52 +459,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_san.add_argument("-o", "--output", default="", help="输出 JSON 文件（缺省就地覆盖）")
     p_san.set_defaults(func=cmd_sanitize)
 
-    # run —— 一条龙
-    p_run = sub.add_parser("run", help="一条龙：校验 → 整理 → 报告")
-    p_run.add_argument("-i", "--input", default="", help="书源 JSON 文件（缺省自动探测）")
-    p_run.add_argument("-o", "--output", default="", help="校验整理输出 JSON（缺省 checked.json）")
-    p_run.add_argument("-c", "--concurrency", type=int, default=50, help="并发数（默认 50）")
-    p_run.add_argument("-t", "--timeout", type=float, default=8.0, help="单请求超时秒数（默认 8）")
-    p_run.add_argument("-k", "--keyword", default="我", help="搜索探测关键词（默认「我」）")
-    p_run.add_argument("--max-keywords", type=int, default=2, help="每个源最多尝试测试集关键词数（默认 2）")
-    p_run.add_argument("--probe-depth", type=int, choices=list(PROBE_DEPTHS),
-                       default=DEPTH_SEARCH, help=DEPTH_HELP)
-    p_run.add_argument("--proxy", default="", help="代理地址")
-    p_run.add_argument("--limit", type=int, default=0, help="只处理前 N 个源（测试用）")
-    p_run.add_argument("--insecure", action="store_true", help="不校验证书")
-    p_run.add_argument("--keep-disabled", action="store_true", help="输出时保留 enabled=false 的源")
-    p_run.add_argument("--drop-dead", action="store_true",
-                       help="剔除失效源（Health.DEAD；需登录/需翻墙源保留）")
-    p_run.add_argument("--keep-only-ok", action="store_true",
-                       help="只保留 ✅可用 源（精简导入版）")
-    p_run.add_argument("--cache-dir", default="", help=f"校验缓存目录（缺省 {DEFAULT_CACHE_DIR}）")
-    p_run.add_argument("--legacy-cache", action="store_true",
-                       help="退回旧 NDJSON 缓存（默认走 SQLite 管理库）")
-    p_run.add_argument("--no-cache", action="store_true",
-                       help="完全禁用缓存：不读取旧缓存，也不写入本次结果（优先级高于 --refresh-cache）")
-    p_run.add_argument("--refresh-cache", action="store_true",
-                       help="跳过旧缓存，重新联网校验；成功结果仍写入缓存")
-    p_run.set_defaults(func=cmd_run)
-
-    # add —— 快捷新增书源（自动推断规则）
-    p_add = sub.add_parser("add", help="快捷新增书源：URL→自动推断搜索规则→生成书源")
-    p_add.add_argument("url", nargs="?", help="带真实关键词的搜索 URL，如 https://host/search?q=绍宋；传 - 从 stdin 读取")
-    p_add.add_argument("--name", default="", help="书源名称（默认取域名）")
-    p_add.add_argument("--type", choices=["novel", "manga", "audio", "file"], default="novel",
-                       help="内容类型（默认 novel 小说）")
-    p_add.add_argument("--group", default="📖新增源", help="分组名（默认 📖新增源）")
-    p_add.add_argument("--output", default="auto_added.json", help="输出书源文件（默认 auto_added.json）")
-    p_add.add_argument("--no-ask", action="store_true", help="不确认直接保存")
-    p_add.add_argument("--no-probe", action="store_true", help="不自动探测常见搜索端点（keyboard/key/wd...）")
-    p_add.add_argument("--detail-url", default="", help="详情页样例 URL（自动推断目录/正文规则；缺省用搜索结果第一条当样例）")
-    p_add.add_argument("--pick", type=int, default=1, help="用搜索结果第 N 条当详情页样例（默认 1）")
-    p_add.add_argument("--no-verify", action="store_true", help="跳过全链路验证（搜索→详情→目录→正文）")
-    p_add.add_argument("--interactive", action="store_true", help="半自动向导模式：逐步确认")
-    p_add.add_argument("--to", default="", help="生成后自动 merge 进该书源 JSON（一键打通主流程）")
-    p_add.add_argument("--discover", action="store_true",
-                       help="仅发现模式：跳过搜索探测，直接生成无搜索规则的书源（分组标记「仅发现」，适合搜索被限流的站）")
-    p_add.set_defaults(func=cmd_add)
-
     # reclassify —— 按实测信号重判书源类型（漫画被标成小说）
     p_rc = sub.add_parser("reclassify", help="按实测信号重判书源类型（修正漫画/小说错标）")
     p_rc.add_argument("-i", "--input", required=True, help="书源 JSON 数组")
@@ -811,9 +474,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_dg.add_argument("-o", "--output", help="Markdown 报告输出路径")
     p_dg.add_argument("--only-dead", action="store_true",
                       help="按最近一次校验结果，只探测非「可用」的源")
-    p_dg.add_argument("--cache-dir", default="",
-                      help=f"校验结果目录（默认读管理库；NDJSON 用 {DEFAULT_CACHE_DIR}"
-                           " 并设 LEGADO_LEGACY_CACHE=1）")
     p_dg.add_argument("-c", "--concurrency", type=int, default=20)
     p_dg.add_argument("-t", "--timeout", type=float, default=8.0)
     p_dg.add_argument("--keywords", nargs="*", default=None, help="搜索探测关键词")
@@ -845,8 +505,6 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
-    if getattr(args, "legacy_cache", False):
-        os.environ["LEGADO_LEGACY_CACHE"] = "1"
     # Windows 控制台 UTF-8
     if sys.platform == "win32":
         try:
