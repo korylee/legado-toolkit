@@ -51,11 +51,44 @@
 背景：`replayResult` / `canReplay` / `doReplay` / `/replay-step` 那条链现在是
   「引擎没覆盖的段」的退路。摘之前先定详情段与末段两处怎么办，否则那两段的
   「命中源码」会空掉。
-约束：先满足依赖两处，否则摘了会静默丢功能。
+约束：先满足下面三处前置，否则摘了会静默丢功能。**A、B 两处待用户就「改契约
+  vs 维持投影」拍板后另开任务**；本条只等那两件。
 验收：摘掉后抽屉里每个段的「命中源码」仍能取到值，或明确显示「本段取不到」。
 指针：lessons §七十三 / §七十五，frontend/src/utils/layers.js
+  前置三处（都落地才能摘；依据与来源行号在
+  `frontend/src/components/RuleDebugDrawer.vue` 的 `matchedFrom` / `matchedHint` 旁）：
+  - **C · 每种空值有可执行的一句话**：已落地。
+    App 通道空 / 本机引擎空 / 没有页面 / 规则不支持（后两者是既有原因，
+    优先级不变）各有一句。摘投影不依赖它，但它是
+    TODO 原定验收那半「明确显示本段取不到」的落地。
+  - **A · 契约带取值页上下文**：待拍板。详情段的命中证据属**搜索页**的
+    `bookList` 节点作用域（`tests/test_legado_rules.py:479-510`），而现有键是
+    `(段自己的 url, 段名)`（`core/app_debug.py:634-652`）——表达不了。
+    选一条：把记录扩成 `{page_url, step, container_selector}`，或让 search 页同时输出
+    bookUrl 命中（App 侧 `DebugService.kt` 需新增按列表节点求 bookUrl 的分支，并定义同页
+    多条书取哪一个节点）。跨 Kotlin / Python / 测试 / 前端协议，需逐词/形状测试。
+  - **B · 属性末段有明确模型**：待拍板。五动作词表恰好五词
+    （`text` / `textNodes` / `ownText` / `html` / `all`，大小写归一），`title` / `style` / `label`
+    归属性名判定（AGENTS #21）。现状已是此语义
+    （`core/rules/replayer.py:55-66`），缺的是逐词契约测试与 App 侧末段回填分支
+    （`DebugService.kt:519-526,536-541`）。
 
 ## 2 · 按需
+
+### 条目：fe-drawer-tests · 抽屉的提示规则没有自动化覆盖
+状态：todo
+依赖：无
+优先级：P2
+背景：`frontend/src/utils/*.test.js` 只覆盖 `htmlView` / `layers` /
+  `selector`，`RuleDebugDrawer.vue` 一行断言都没有。而它那两处提示（命中源码的来源与空值口径）
+  正是读者判断“这结果该不该信”的依据。实测代价：一处误删 `v-if`
+  （把局部投影的说明渲染给 App 实测）已经靠读 diff 才捕到，自验全绿。
+约束：提示逻辑在 `.vue` 里，而现有 node 套件跑的是 `utils/*.js`
+  纯函数——要么把判定抽成 `utils/` 里的纯函数再钉（同 `layers.js` 那条路），
+  要么引入组件测试。别为了过测把提示文案搬到别处又不钉。
+验收：命中源码的来源选择与空值口径各有一条可跑的断言；且修改该逻辑而回退断言时
+  套件会变红。
+指针：frontend/src/components/RuleDebugDrawer.vue，frontend/src/utils/layers.js
 
 ### 条目：site-req-opt · 站点请求那一段的优化（都未评估）
 状态：todo
