@@ -57,3 +57,6 @@ data/app_probe
 # 这里留一条是给**手工场景**的——启动器的第 2 候选就是「挨着它自己找」。别把运行时数据
 # 提交进来（曾经跟踪过，于是 HEAD 里躺着一次跑批的参数，读起来像配置）。
 appservice/args.properties
+
+AGENTS.local.md
+.agent-teams/

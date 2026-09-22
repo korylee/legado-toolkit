@@ -17,11 +17,12 @@ description: 本仓库 Legado 书源工具链的用法——SQLite 管理库（�
 迁移与对拍（都不联网）：
 
     python -m core.store_migrate migrate --reset   # 导入并自动做一致性校验
-    python -m core.store_migrate verify            # 比对四项分布，全一致才算成功
-    python -m core.cache_parity --sample 400       # SQLite vs NDJSON 命中矩阵，退出码 0 = 等价
+    python -m core.store_migrate verify            # 比对源数与类型分布，全一致才算成功
 
-缓存后端默认走 SQLite；退回旧 NDJSON 用 `--legacy-cache` 或 `LEGADO_LEGACY_CACHE=1`
-（`organize` / `report` 没有这个开关，见 README「CLI 使用」）。
+缓存后端是 SQLite（`checks` 表）；旧 NDJSON 后端与对拍脚本随本地校验链一起退场
+（2026-09-22），`--legacy-cache` 那类开关已不存在。
+
+
 
 → 给 Legado 的 JSON 永远由 `Store.export_json` 生成，别拿它当事实来源（AGENTS #2）。
 
