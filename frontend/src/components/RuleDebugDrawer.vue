@@ -266,13 +266,24 @@ const matchedFromType = computed(() => {
   if (matchedFrom.value === "本地调试") return "warning";
   return isAppResult.value ? "success" : "primary";
 });
+//: 引擎给了位置、却没给命中片段：App 通道只推文本（不可修），本机引擎则是真的没
+//: 返回。分开判是为了把原因说到用户能照着做（AGENTS #4）；两者都只在
+//: `matchedHtml` 为空时才成立，所以不会把投影给的那份误标成空。
+const matchedEmptyFromEngine = computed(
+  () => isEngineResult.value && !(current.value || {}).matched_html,
+);
 const matchedHtml = computed(() => (current.value || {}).matched_html
   || (replayResult.value || {}).matched_html || "");
 //: 命中源码的显示形态（同 pageText：显示一份、复制一份）
 const matchedShown = computed(() => (formatSource.value && matchedHtml.value
   ? formatHtml(matchedHtml.value) : matchedHtml.value));
+//: 命中片段为空时那一句话。每种空值都要能照着做（AGENTS #4：不许静默空白）。
+//: 顺序就是优先级：页面 → 投影的已知原因（不支持 / 在读 / 选中 0 条）→ 引擎空。
+//: 后两者都只在投影没给东西时到达，所以新文案**不会吞掉**
+//: 下面那两条旧原因（不支持本地调试 / 没选中）。
 const matchedHint = computed(() => {
   if (!currentPage.value) return "这一步没有页面。App 只推文本，页面是我们另抓的";
+  // 页面在、录音不能播：这条原因必须原样到用户眼前（AGENTS #4）
   if (!canReplay.value) return "这一步的规则不支持本地调试";
   if (replaying.value) return "正在读取…";
   if (replayResult.value) {
@@ -280,7 +291,26 @@ const matchedHint = computed(() => {
     return (replayResult.value.rule_error || replayResult.value.detail
             || "这条规则在这份页面上没有选中任何 DOM");
   }
-  return "正在读取…";
+  // 这里开始：投影也没给东西。引擎自己带回的那份命中片段为空，
+  // 必须说清楚差在哪个通道、下一步能做什么
+  if (matchedEmptyFromEngine.value) {
+    if (isAppResult.value) {
+      return "本段取不到命中源码：App 调试通道只推文本；要查看本段命中源码，"
+        + "请改用本机引擎调试。";
+    }
+    return "本段取不到命中源码：本机引擎未返回命中片段。";
+  }
+  // **这一支今天不可达**，写在这里是为了「多一条通道时也不撒谎」（AGENTS #4）。
+  // 为什么不可达：本 computed 唯一的消费点是模板里
+  // `<pre v-if="matchedHtml">` 的 `v-else`（hint 显示 ⟹ `matchedHtml` 为空 ⟹ 本段
+  // `matched_html` 为空）；而结果来源 `source` 只有两个产者——`core/app_debug.py:898`
+  // 产出 `"app"`、`core/jvm_debug.py:328` 产出 `"jvm"`——所以 `isEngineResult` 恒真，
+  // 上面 `matchedEmptyFromEngine` 那一支必定先命中，走不到这里。
+  // 留成显式文案而不是 `return "正在读取…"`：后者在 `replaying` 为假时是谎报
+  // （页面在、也没在读，用户只会看到一个永不结束的加载态）。将来多一条通道
+  // 时这句就立刻是对的，不必等有人先想起它。
+  return "本段取不到命中源码：既没有引擎返回的命中片段，"
+    + "本地调试也没选中 DOM。";
 });
 
 //: 打开抽屉 / 换步骤就自动回放一次：**诊断与「命中源码」都要它的结果**。
@@ -1000,6 +1030,7 @@ function copyPage() {
           <p v-if="matchedFrom" class="muted" style="margin: 6px 0">
             <el-tag size="small" :type="matchedFromType">{{ matchedFrom }}</el-tag>
             <span v-if="matchedFrom === '本地调试'" style="margin-left: 6px">
+              这是本地调试投影，不是 App 实测；
               跑不了 JS 规则，可能与 App 的实际命中不同
             </span>
           </p>
