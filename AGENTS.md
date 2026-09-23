@@ -51,7 +51,7 @@
 8. **校验参数的默认值与取值范围只在 `core/settings_store.py` 定义**
    （`DEFAULTS` / `LIMITS` / `PROBE_DEPTHS`）。前端经 `GET /api/settings` 拿值、
    拿 `limits` 渲染上下界，不得再硬编码一份。历史上并发数曾在 `ops.py`(20)、
-   CLI(50)、`AsyncChecker`(50) 三处各写一遍（第一处已随它退场），结果是界面上改不动、也没人知道该信哪个——
+   CLI(50)、`AsyncChecker`(50) 三处各写一遍（后两处已随本地校验链退场），结果是界面上改不动、也没人知道该信哪个——
    这种漂移靠「对齐数字」修不掉，只能靠**把数字从调用点删掉**。
    `cli/main.py` 的 argparse 默认值是**独立的另一条链路**，不要试图统一。
 9. **`sources.source_url` 的唯一性是「仅在用」，不是全表**
