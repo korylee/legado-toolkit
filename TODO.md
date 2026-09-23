@@ -18,23 +18,16 @@
 
 ## 0 · 现在做
 
-### 条目：jvm-dump-gate · dump 缺字段时禁止静默继承调用方环境
+---
+
+### 条目：jvm-env-readiness · JVM 配置、自检与实际启动环境统一
 状态：todo
 依赖：无
-优先级：P1
-背景：`load_dump()` 现在只检查文件存在与新鲜度。`run_direct()` 和 daemon 启动又把缺失的
-  `workingDir` / `environment` 退化成调用方 CWD / 环境，`classpath`、`jvmArgs`、
-  `systemProperties` 的缺失也会悄悄改变直起参数。
-约束：在 dump 入口和直起/常驻边界都做显式 schema 闸门；必需键要校验存在、类型与非空语义，
-  不许用 `or None` / `or {}` 兜底。`javaLauncher` / `javaHomeEnv` 与 `maxHeapSize` 的
-  fallback 也要明确是否属于闸门范围。错误必须逐字段说明，并指向「运行一次 `--refresh`」；
-  产品回到 Gradle 时也必须把该原因带到用户眼前。
-验收：手工删掉 dump 的 `workingDir`、`classpath`、`environment` 各跑一次直起与常驻入口；
-  均在启动子进程前明确报错或留下可见原因，不得继承当前 CWD / 环境继续运行。
-指针：core/jvm_direct.py，core/jvm_daemon.py，core/jvm_debug.py
-
-
----
+优先级：P0
+背景：JVM 校验、调试与 Gradle refresh 依赖 App 源码目录、JDK、Android SDK 和 Gradle 环境；目前用户难以在操作前判断这些配置是否可用，也缺少证据保证自检与实际启动使用同一组路径。启动器中的个人路径回退会让错误配置被静默掩盖，失败原因也可能止于后端日志。
+约束：自检和实际启动必须共用同一份解析后的环境配置，并展示实际采用的 App 源码目录、JDK、Android SDK 与 Gradle 用户目录。移除个人绝对路径回退；自动发现失败或路径无效时允许用户输入/修改 App 源码目录，并提供能回填本机真实路径的目录选择按钮（不能用只返回浏览器文件名/句柄的控件冒充路径选择）。文件类配置才提供文件选择；当前 App 源码配置是目录。单条校验、调试和 refresh 启动前自动预检；未配置或未通过时阻止启动并说明缺项，不要求用户额外手动运行自检。启动器/Gradle 的底层错误必须沿 API 到达界面。本 P0 一并完成 `jvm-runtime-snapshot` 的环境对拍；审查 appservice 内逻辑，逐项说明其是否承担不可替代的测试桥接职责，只有确认重复时才删除，不做路线迁移。
+验收：覆盖自动发现成功、未发现、错误路径、JDK/SDK 缺失和 Gradle 启动失败；目录选择、手工输入、取消选择后保留原值均符合预期。界面能在校验/调试前准确显示可用状态、实际路径及修复动作。refresh、直起、常驻及实际校验/调试各留独立可追溯快照；至少完成一次真实对拍，逐项归因 workingDir / user.dir、classpath、jvmArgs、systemProperties 与 environment 的差异，快照不得进入判定链或互相覆盖。错误配置不会落入个人路径或调用方环境继续运行。完成 appservice 逻辑清单并为保留/删除结论提供调用链依据。
+指针：core/jvm_direct.py，core/jvm_daemon.py，core/jvm_debug.py，backend/api/jvm.py，frontend/src/views/SourcesView.vue，appservice/legado-test.init.gradle，TODO.md（jvm-runtime-snapshot）
 
 ## 1 · 排队
 
@@ -76,7 +69,7 @@
 
 ### 条目：jvm-runtime-snapshot · 让 JVM 实际运行环境与 dump 对拍
 状态：todo
-依赖：jvm-dump-gate
+依赖：无
 优先级：P1
 背景：dump 记录的是 Gradle 任务声明的环境，当前没有证据证明 JVM 实际拿到的环境与它一致。
   本条吸收原「jvm-dump-parity」：refresh 与产品都使用同一个 test task，但仍需把声明与实际
@@ -89,7 +82,7 @@
   冒充完整 `System.getProperties()`。不同入口的 snapshot 不得互相覆盖。
 验收：refresh、直起、常驻各留一份可追溯 snapshot；完成一次真实对拍，workingDir / classpath /
   jvmArgs / systemProperties / environment 每个差异逐条归因。差异若会导致今天的静默继承或
-  参数漂移，转入 `jvm-dump-gate` 的约束或修复范围。
+  参数漂移，直接修正并补对应的边界测试。
 指针：core/jvm_direct.py，appservice/legado-test.init.gradle，appservice/test/io/legado/app/service/ServiceJson.kt，
   appservice/test/io/legado/app/service/ServiceJsonTest.kt，appservice/test/io/legado/app/service/DebugService.kt，
   appservice/test/io/legado/app/service/ValidateService.kt，lessons §六十五
