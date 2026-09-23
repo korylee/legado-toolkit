@@ -111,6 +111,37 @@ class EnvironmentDiscoveryTests(unittest.TestCase):
         self.assertFalse(toolchain.ok)
         self.assertIn("当前 Java 17", daemon.detail)
 
+    def test_gradle_java_candidates_include_explicit_paths_and_from_env(self) -> None:
+        repo = self._repo()
+        configured = self.root / "configured-jdk"
+        from_env = self.root / "env-jdk"
+        (repo / "gradle.properties").write_text(
+            "org.gradle.java.installations.paths=" + str(configured).replace("\\", "\\\\") + "\n"
+            "org.gradle.java.installations.fromEnv=JDK_FOR_GRADLE\n",
+            encoding="utf-8")
+        with patch.dict(os.environ, {"JAVA_HOME": str(self.root / "launcher-jdk"),
+                                    "JDK_FOR_GRADLE": str(from_env),
+                                    "GRADLE_USER_HOME": str(self.root / "gradle-home")}, clear=False):
+            homes = jvm_env._gradle_java_homes(str(repo))
+        found = {str(home): source for home, source in homes}
+        self.assertIn(str(self.root / "launcher-jdk"), found)
+        self.assertIn(str(configured), found)
+        self.assertIn(str(from_env), found)
+        self.assertEqual("Gradle installations.paths", found[str(configured)])
+        self.assertEqual("Gradle fromEnv:JDK_FOR_GRADLE", found[str(from_env)])
+
+    def test_toolchain_requirement_selects_matching_jdk_candidate(self) -> None:
+        candidates = [
+            jvm_env.Check("JDK 候选", True, found="X:/jdk17/bin/java.exe", detail="JAVA_HOME", version=17),
+            jvm_env.Check("JDK 候选", True, found="Y:/jdk21/bin/java.exe", detail="Gradle paths", version=21),
+        ]
+        result = jvm_env._java_candidate_requirement_check(
+            "项目编译 toolchain", candidates, 21, "project toolchain", exact=True)
+        self.assertTrue(result.ok)
+        self.assertEqual("Y:/jdk21/bin/java.exe", result.found)
+        self.assertIn("未复刻 Gradle 的全部自动发现来源", result.detail)
+        self.assertIn("版本必须等于 Java 21", result.detail)
+
     def test_sdk_requires_project_compile_sdk(self) -> None:
         repo, sdk = self._repo(), self._sdk("sdk")
         with patch.dict(os.environ, {"ANDROID_HOME": str(sdk)}, clear=False):

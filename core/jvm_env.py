@@ -70,6 +70,97 @@ def _find_java() -> Check:
                  hint="安装有效的 JDK，并设置 JAVA_HOME 或 PATH", items=tried)
 
 
+def _gradle_java_homes(app_repo: str) -> List[tuple[Path, str]]:
+    """Collect explicitly configured JDK homes without guessing installation directories."""
+    gradle_home = Path(os.environ.get("GRADLE_USER_HOME", str(Path.home() / ".gradle"))).expanduser()
+    property_files = [gradle_home / "gradle.properties", Path(app_repo) / "gradle.properties"]
+    properties: Dict[str, str] = {}
+    for path in property_files:
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            match = re.match(r"\s*(org\.gradle\.java\.(?:home|installations\.(?:paths|fromEnv)))\s*[=:]\s*(.*?)\s*$", line)
+            if match and not line.lstrip().startswith(("#", "!")):
+                properties.setdefault(match.group(1), _java_property_value(match.group(2)))
+
+    homes: List[tuple[Path, str]] = []
+    java_home = properties.get("org.gradle.java.home")
+    if java_home:
+        homes.append((Path(java_home).expanduser(), "Gradle org.gradle.java.home"))
+    for value in properties.get("org.gradle.java.installations.paths", "").split(","):
+        if value.strip():
+            homes.append((Path(value.strip()).expanduser(), "Gradle installations.paths"))
+    for name in properties.get("org.gradle.java.installations.fromEnv", "").split(","):
+        env_home = os.environ.get(name.strip(), "")
+        if env_home:
+            homes.append((Path(env_home).expanduser(), "Gradle fromEnv:" + name.strip()))
+
+    path_java = shutil.which("java.exe" if os.name == "nt" else "java")
+    if os.environ.get("JAVA_HOME"):
+        homes.insert(0, (Path(os.environ["JAVA_HOME"]).expanduser(), "JAVA_HOME"))
+    elif path_java:
+        homes.insert(0, (Path(path_java).resolve().parent.parent, "PATH"))
+    unique: List[tuple[Path, str]] = []
+    seen = set()
+    for home, source in homes:
+        key = os.path.normcase(str(home.resolve(strict=False)))
+        if key not in seen:
+            seen.add(key)
+            unique.append((home, source))
+    return unique
+
+
+def _inspect_java_candidates(app_repo: str) -> List[Check]:
+    candidates: List[Check] = []
+    for home, source in _gradle_java_homes(app_repo):
+        exe = home / "bin" / ("java.exe" if os.name == "nt" else "java")
+        if not exe.is_file():
+            candidates.append(Check("JDK 候选", False, found=str(home), detail=source + "；未找到 bin/java"))
+            continue
+        try:
+            out = subprocess.run([str(exe), "-version"], capture_output=True, text=True, timeout=10,
+                                 env={**os.environ, "JAVA_HOME": str(home)})
+            raw = out.stderr or out.stdout
+            line = next((item.strip() for item in raw.splitlines()
+                         if re.search(r'\bversion\s+"?\d', item, re.I)), "")
+            match = re.search(r'\bversion\s+"?(\d+)', line, re.I)
+            major = int(match.group(1)) if match else 0
+            if major == 1:
+                legacy = re.search(r'\bversion\s+"?1\.(\d+)', line, re.I)
+                major = int(legacy.group(1)) if legacy else major
+            ok = out.returncode == 0 and major > 0
+            candidates.append(Check("JDK 候选", ok, found=str(exe) if ok else str(home),
+                                    detail=source + "；" + (line or "无法解析 Java 版本"), version=major or None))
+        except Exception as exc:
+            candidates.append(Check("JDK 候选", False, found=str(home),
+                                    detail=source + "；执行失败：" + type(exc).__name__))
+    return candidates
+
+
+def _java_candidate_requirement_check(name: str, candidates: List[Check], required: Optional[int],
+                                      detail_prefix: str, exact: bool = False) -> Check:
+    if required is None:
+        return Check(name, False, detail=detail_prefix, hint="无法从 Gradle 配置推导 Java 要求")
+    valid = [item for item in candidates if item.ok and item.version is not None and
+             (item.version == required if exact else item.version >= required)]
+    items = [{"path": item.found, "result": item.detail} for item in candidates]
+    discovery_note = "候选来自 JAVA_HOME/PATH 与 Gradle 显式属性；未复刻 Gradle 的全部自动发现来源"
+    if valid:
+        selected = valid[0]
+        rule = "版本必须等于 Java %d" % required if exact else "版本至少为 Java %d" % required
+        return Check(name, True, found=selected.found,
+                     detail="%s：%s；候选满足：%s。%s" %
+                     (detail_prefix, rule, selected.detail, discovery_note),
+                     items=items, version=selected.version)
+    rule = "版本必须等于 Java %d" % required if exact else "版本至少为 Java %d" % required
+    return Check(name, False, detail="%s：未发现满足要求（%s）的显式候选。%s" %
+                 (detail_prefix, rule, discovery_note),
+                 hint="检查 Gradle Java 安装配置，或在 JAVA_HOME/PATH 中提供所需 JDK",
+                 items=items)
+
+
 def _project_java_requirements(app_repo: str) -> Dict[str, Any]:
     """从 wrapper、daemon criteria 与 app 编译配置读取 Java 版本要求。"""
     root = Path(app_repo)
@@ -293,14 +384,14 @@ def selftest(app_repo: str) -> Dict[str, Any]:
             "Gradle 启动 JVM", java, client_min,
             "无法从 Gradle wrapper 版本推导启动 JVM 要求",
             "Gradle %s 客户端运行要求" % (wrapper_version or "wrapper")))
-        checks.append(_java_requirement_check(
-            "Gradle daemon JVM", java, requirements["daemon"] or java.version,
-            "无法读取 daemon JVM criteria，且无法确认默认 daemon JVM",
+        java_candidates = _inspect_java_candidates(app_repo)
+        checks.append(_java_candidate_requirement_check(
+            "Gradle daemon JVM", java_candidates,
+            requirements["daemon"] or java.version,
             "gradle/gradle-daemon-jvm.properties" if requirements["daemon"] else
-            "未配置 daemon criteria，沿用启动 JVM", exact=bool(requirements["daemon"])))
-        checks.append(_java_requirement_check(
-            "项目编译 toolchain", java, requirements["toolchain"],
-            "无法从 app Gradle 配置读取 Java toolchain / 编译版本",
+            "未配置 daemon criteria；要求与启动 JVM 版本一致", exact=bool(requirements["daemon"])))
+        checks.append(_java_candidate_requirement_check(
+            "项目编译 toolchain", java_candidates, requirements["toolchain"],
             "app/build.gradle(.kts) 中的 Java 配置", exact=True))
         checks.append(_find_android_sdk(app_repo if repo_ok else ""))
         checks.append(_find_gradle_home(app_repo if repo_ok else ""))
