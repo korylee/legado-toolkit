@@ -5,6 +5,7 @@ import { ElMessage, ElMessageBox } from "element-plus";
 import { api, subscribeJob } from "../api/client";
 import { getDetail, listTags, saveSource, sourceExists } from "../api/sources";
 import { appDebug, appPreflight, jvmDebug } from "../api/rules";
+import { jvmSelftest } from "../api/jvm.js";
 import { jobFailReason } from "../utils/jobs";
 import {
   canonicalTag, ensureTagMeta, isQualityTag, isStatusTag,
@@ -44,6 +45,12 @@ function readAppHost() {
 const loading = ref(false);
 const appHost = ref(readAppHost());  // App 的 IP（连 App 调试用）
 const appDebugging = ref(false);
+const jvmEnv = ref(null);
+const jvmEnvLoading = ref(false);
+const jvmEnvTitle = computed(() => {
+  if (jvmEnvLoading.value) return "正在检查本机引擎环境…";
+  return jvmEnv.value?.ok ? "本机引擎可用" : "本机引擎不可用";
+});
 //: 调试通道：**默认本机引擎**（App 的源码跑在本机，不填 IP、不推送）。连 App 那条
 //: 留着——登录态、网络出口、WebView 都在手机上，那是它不可替代的地方
 const debugChannel = ref("jvm");
@@ -481,6 +488,7 @@ watch(() => [props.modelValue, props.sourceUrl], async ([show, url]) => {
   // （域名框解禁、标题错成「另存为新源」、跳过查重），而用户以为自己只是在编辑。
   isDuplicate.value = false;
   loadTagOptions();
+  void loadJvmEnvironment();
   activeTab.value = url ? "basic" : "quick";
   activeRuleTab.value = "search";
   extActive.value = ["request"];
@@ -660,6 +668,17 @@ async function quickGenerate() {
 // 跑不了 JS 规则的源更是只有 App 那边验得了（Rhino / cookie / webView 全在 App 里）。
 // 结果**直接塞进 testResult**——App 调试返回的形状与离线回放一致，
 // 所以卡片与调试抽屉零改动。
+async function loadJvmEnvironment() {
+  jvmEnvLoading.value = true;
+  try {
+    jvmEnv.value = await jvmSelftest();
+  } catch (e) {
+    jvmEnv.value = { ok: false, checks: [{ name: "自检接口", hint: "环境自检失败：" + e }] };
+  } finally {
+    jvmEnvLoading.value = false;
+  }
+}
+
 async function debugRun(keyOverride = "", rerunStep = "") {
   // keyOverride：「从此步重跑」拼好的分段 key（--/++/绝对URL）。空串走表单里选的入口
   // ——两个通道认的是**同一套 key 形态**（都跑 App 的分派），所以这里共享
@@ -673,7 +692,13 @@ async function debugRun(keyOverride = "", rerunStep = "") {
   testResult.value = null;
   testStale.value = false;
   if (debugChannel.value === "jvm") {
-    // 本机引擎：**不填 IP、不推送、不预检**——它跑的就是 App 的源码。
+    if (jvmEnvLoading.value || !jvmEnv.value?.ok) {
+      const first = (jvmEnv.value?.checks || []).find((item) => !item.ok);
+      return ElMessage.warning(first
+        ? `${first.name}：${first.hint || "环境自检未通过"}`
+        : "正在检查本机引擎环境，请稍候");
+    }
+    // 本机引擎：**不填 IP、不推送**；调试前已自动自检，它跑的就是 App 的源码。
     // 返回值与连 App 那条同形状，只是 source 是 "jvm"
     appDebugging.value = true;
     try {
@@ -1323,6 +1348,7 @@ async function doSave(s) {
             <!-- 唯一的按钮：该不该先推送由预检的三态决定（App 里没有 / 是旧版本 /
                  一致），用户不必知道这一层。推送走 App 的 HTTP 接口，幂等 -->
             <el-button type="primary" size="small" :loading="appDebugging"
+                       :disabled="debugChannel === 'jvm' && (jvmEnvLoading || !jvmEnv?.ok)"
                        @click="debugRun()">
               {{ debugChannel === "jvm" ? "开始调试" : "连 App 调试" }}
             </el-button>
@@ -1332,6 +1358,13 @@ async function doSave(s) {
                预检现在是失焦触发的，不给在途状态就成了「点完什么也没发生」 -->
           <!-- 本机引擎的登录态提示：登录墙的源要在**我们自己的浏览器 profile** 里
                登一次（A3），之后按源 URL 自动带上——不说的话用户只会看到「需登录」 -->
+          <el-alert v-if="debugChannel === 'jvm'" :type="jvmEnvLoading ? 'info' : (jvmEnv?.ok ? 'success' : 'error')"
+                    :closable="false" show-icon style="margin-top: 8px"
+                    :title="jvmEnvTitle">
+            <div v-for="item in (jvmEnv?.checks || [])" :key="item.name" class="muted" style="font-size: 12px">
+              {{ item.name }}：{{ item.found || item.hint || (item.ok ? '可用' : '未通过') }}
+            </div>
+          </el-alert>
           <p v-if="debugChannel === 'jvm'" class="muted" style="margin: 6px 0 0">
             需登录的源：先用 <code>scripts/jvm_login.py</code> 打开浏览器登录一次，
             之后调试会自动带上登录态。

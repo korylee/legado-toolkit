@@ -80,7 +80,7 @@ class _RunCase(unittest.TestCase):
         #: 用 daemon、桩整个被绕过，测试**真的跑一次调试**（实测：3 条断言失败、
         #: 还真的连了 example.com）。选常驻还是选 Gradle 由 `DefaultLauncherTests`
         #: 单独测（它打的是 dump 的桩），这里只关心「拉起之后的组装」。
-        self._patch("default_launcher", lambda notes: jvm_debug._run_launcher)
+        self._patch("default_launcher", lambda notes, **kw: jvm_debug._run_launcher)
         self.launcher_calls = []
 
     def _fetch_pages(self, steps, source, proxy="", cache="auto", engine_html=None):
@@ -257,7 +257,7 @@ class RunJvmDebugTests(_RunCase):
         """**降落必须说出来**（D2）：常驻回落了却静默，用户只会觉得「也没快多少」，
         而真正的问题（daemon 起不来）永远没人发现。附注落在第一条 step 上——
         抽屉已经在渲染它（`.debug-notes`）。"""
-        def fake_default(notes):
+        def fake_default(notes, **kwargs):
             notes.append("这次没能用常驻进程（DaemonError: 起不来），已改用 Gradle（启动慢一些）")
             return self._fake_launcher(events=self._fixture_events(), meta={"code": 0})
 
@@ -276,7 +276,7 @@ class RunJvmDebugTests(_RunCase):
     def test_no_launch_note_when_the_default_path_is_clean(self) -> None:
         """正常走常驻时**不许**多出一行附注：那是噪音，而且会让「抽屉里带黄点」
         失去意义（黄点必须等价于「这一步真有问题」）。"""
-        def fake_default(notes):
+        def fake_default(notes, **kwargs):
             return self._fake_launcher(events=self._fixture_events(), meta={"code": 0})
 
         self._patch("default_launcher", fake_default)
@@ -367,6 +367,28 @@ class DefaultLauncherTests(unittest.TestCase):
         self.assertEqual(gradle_calls, [1], "回落目标必须是 Gradle")
         self.assertEqual(rc, 0)
         self.assertTrue(any("Gradle" in n for n in notes), notes)
+
+
+class RuntimeDumpConsistencyTests(unittest.TestCase):
+    def test_runtime_path_drift_is_reported(self) -> None:
+        dump = {
+            "workingDir": "X:/app",
+            "javaHomeEnv": "X:/jdk",
+            "environment": {
+                "JAVA_HOME": "X:/jdk",
+                "ANDROID_HOME": "X:/sdk-old",
+                "GRADLE_USER_HOME": "X:/.gradle",
+            },
+        }
+        runtime = {
+            "LEGADO_REPO": "X:/app",
+            "JAVA_HOME": "X:/jdk",
+            "ANDROID_HOME": "X:/sdk",
+            "GRADLE_USER_HOME": "X:/.gradle",
+        }
+        self.assertIn("ANDROID_HOME", jvm_debug._runtime_dump_mismatch(dump, runtime))
+        dump["environment"]["ANDROID_HOME"] = "X:/sdk"
+        self.assertEqual(jvm_debug._runtime_dump_mismatch(dump, runtime), "")
 
 
 class GradleDumpRefreshTests(unittest.TestCase):

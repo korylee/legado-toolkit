@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -59,10 +60,11 @@ def _common_jdk_candidates() -> List[Path]:
         Path(os.environ["JAVA_HOME"]) if os.environ.get("JAVA_HOME") else None,
         # vfox 管理的 JDK 排在最前：用户既然用它管版本，就该以它为准
         *_vfox_java_candidates(),
-        Path("C:/Program Files/Java"),
-        Path("C:/Program Files/Eclipse Adoptium"),
-        Path("D:/Program Files/Java"),
-        Path("C:/Program Files/Android/Android Studio/jbr"),   # AS 自带 JBR
+        *(Path(os.environ[key]) / subdir
+          for key in ("ProgramFiles", "ProgramFiles(x86)") if os.environ.get(key)
+          for subdir in ("Java", "Eclipse Adoptium")),
+        *(Path(os.environ[key]) / "Android/Android Studio/jbr"
+          for key in ("ProgramFiles", "ProgramFiles(x86)") if os.environ.get(key)),
     ]
     return [p for p in out if p]
 
@@ -90,7 +92,9 @@ def _find_java() -> Check:
                     if exe.exists():
                         candidates.append(exe)
     # 3) PATH 里的 java
-    candidates.append(Path("java.exe" if os.name == "nt" else "java"))
+    path_java = shutil.which("java.exe" if os.name == "nt" else "java")
+    if path_java:
+        candidates.append(Path(path_java))
 
     for exe in candidates:
         if not exe.exists() and not str(exe).lower().endswith(("java.exe", "java")):
@@ -134,9 +138,9 @@ def _find_android_sdk(app_repo: str) -> Check:
                     break
         except Exception:
             pass
-    for d in (Path("C:/Android/Sdk"), Path("D:/Android/Sdk"),
-              Path(os.environ.get("LOCALAPPDATA", "")) / "Android/Sdk"):
-        candidates.append(d)
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if local_app_data:
+        candidates.append(Path(local_app_data) / "Android/Sdk")
     seen = set()
     for c in candidates:
         if not c or str(c) in seen:
@@ -174,6 +178,22 @@ def _find_gradle_home(app_repo: str) -> Check:
     return Check("Gradle 用户目录", False, hint="先填 App 源码目录", items=tried)
 
 
+def process_environment(result: Dict[str, Any], base: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    """构造实际交给 Gradle 启动器的环境；只接受同一次自检解析出的路径。"""
+    runtime = result.get("runtime")
+    if not result.get("ok") or not isinstance(runtime, dict) or not runtime:
+        raise ValueError("JVM 环境自检未通过，不能启动 Gradle")
+    env = dict(os.environ if base is None else base)
+    env.update({
+        "LEGADO_REPO": str(runtime["app_repo"]),
+        "JAVA_HOME": str(runtime["java_home"]),
+        "ANDROID_HOME": str(runtime["android_sdk"]),
+        "ANDROID_SDK_ROOT": str(runtime["android_sdk"]),
+        "GRADLE_USER_HOME": str(runtime["gradle_user_home"]),
+    })
+    return env
+
+
 def selftest(app_repo: str) -> Dict[str, Any]:
     """全量自检：app_repo → 仓库可用性 → JDK → SDK → gradle-home → 启动器是否在。"""
     app_repo = (app_repo or "").strip()
@@ -190,10 +210,10 @@ def selftest(app_repo: str) -> Dict[str, Any]:
         checks.append(Check("App 源码目录", True, found=app_repo))
 
     if repo_ok:
-        init_script = Path(app_repo).parent  # 不假设；启动器在管理仓库里
+        launcher = Path(__file__).resolve().parents[1] / "appservice" / "legado-gradle.bat"
         checks.append(Check(
-            "启动器（appservice/legado-gradle.bat）", Path("appservice/legado-gradle.bat").exists(),
-            found="appservice/legado-gradle.bat" if Path("appservice/legado-gradle.bat").exists() else "",
+            "启动器（appservice/legado-gradle.bat）", launcher.is_file(),
+            found=str(launcher) if launcher.is_file() else "",
             hint="管理仓库根下缺 appservice/ 目录——git pull 或重新检出"))
 
         checks.append(_find_java())
@@ -201,9 +221,24 @@ def selftest(app_repo: str) -> Dict[str, Any]:
         checks.append(_find_gradle_home(app_repo if repo_ok else ""))
 
     ok = all(c.ok for c in checks)
+    by_name = {c.name: c for c in checks}
+    java = by_name.get("JDK")
+    sdk = by_name.get("Android SDK")
+    gradle = by_name.get("Gradle 用户目录")
+    runtime = {}
+    if repo_ok and java and java.ok and sdk and sdk.ok and gradle and gradle.ok:
+        java_exe = Path(java.found).resolve()
+        app_root = Path(app_repo).expanduser().resolve()
+        runtime = {
+            "app_repo": str(app_root),
+            "java_exe": str(java_exe),
+            "java_home": str(java_exe.parent.parent),
+            "android_sdk": str(Path(sdk.found).expanduser().resolve()),
+            "gradle_user_home": str(Path(gradle.found).expanduser().resolve()),
+        }
     return {
         "ok": ok,
         "checks": [c.__dict__ for c in checks],
         "repo_ok": repo_ok,
-        "app_repo": app_repo,
+        "runtime": runtime,
     }

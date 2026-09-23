@@ -42,12 +42,13 @@ class _Base(unittest.TestCase):
         (self.probe / "appservice" / "legado-gradle.bat").write_text("@echo off\n",
                                                                     encoding="utf-8")
         self.gradle_calls = 0
+        self.runtime_seen = None
         self.gradle_result = 0
         self.no_output = False
         for p in (
             mock.patch.object(jvm_api, "_AGSVC", self.probe / "appservice"),
             mock.patch.object(jvm_api, "data_dir", lambda: self.probe / "data"),
-            mock.patch.object(jvm_api, "selftest", lambda repo: {"ok": True, "checks": []}),
+            mock.patch.object(jvm_api, "selftest", lambda repo: {"ok": True, "checks": [], "runtime": {"app_repo": "X:/repo", "java_home": "X:/jdk", "android_sdk": "X:/sdk", "gradle_user_home": "X:/.gradle"}}),
             mock.patch.object(jvm_api, "_write_meta", lambda rows: "testbatch"),
             mock.patch.object(jvm_api, "_run_gradle", self._fake_gradle),
             mock.patch.object(jvm_api.settings_store, "load",
@@ -63,7 +64,8 @@ class _Base(unittest.TestCase):
         self._put_source("https://b.com", "普通源")
         self._put_source("https://c.com/", "另一条")
 
-    def _fake_gradle(self, args_path=None) -> int:
+    def _fake_gradle(self, args_path=None, runtime=None) -> int:
+        self.runtime_seen = runtime
         self.gradle_calls += 1
         self.args_seen = pathlib.Path(args_path).read_text(encoding="utf-8")
         source_path = next(line.split("=", 1)[1] for line in self.args_seen.splitlines()
@@ -117,6 +119,38 @@ class _Base(unittest.TestCase):
 
 
 class ScopeTests(_Base):
+    def test_queued_job_uses_runtime_snapshot_captured_at_submission(self) -> None:
+        submitted = {}
+        original = {
+            "app_repo": "X:/repo", "java_home": "X:/jdk",
+            "android_sdk": "X:/sdk", "gradle_user_home": "X:/.gradle",
+        }
+
+        async def submit_job():
+            def capture_submit(kind, payload, lane=None):
+                submitted["payload"] = payload
+                return "queued-job"
+
+            with mock.patch.object(jvm_api, "Store", lambda *a, **kw: Store(self.db)), \
+                 mock.patch.object(jvm_api, "selftest", lambda repo: {
+                     "ok": True, "checks": [], "runtime": dict(original)}), \
+                 mock.patch.object(jvm_api.runner, "submit", side_effect=capture_submit):
+                return await jvm_api.jvm_run(JvmRunRequest(urls=["https://a.com"]))
+
+        response = asyncio.run(submit_job())
+        self.assertTrue(response["started"])
+        self.assertEqual(submitted["payload"]["runtime"], original)
+
+        changed = dict(original, java_home="Y:/new-jdk")
+        with mock.patch.object(jvm_api, "selftest", lambda repo: {
+                "ok": True, "checks": [], "runtime": changed}), \
+             mock.patch("core.jvm_health.store_checks", lambda *a, **kw: 0):
+            result = asyncio.run(jvm_api.run_jvm_job(
+                "queued-job", Store(self.db), submitted["payload"]))
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(self.runtime_seen, original)
+
     def test_selector_matches_despite_case_and_trailing_slash(self) -> None:
         """**归一后才比**：库里那条的原文是 `https://A.com/`（大写 + 尾斜杠），
         而列表页给的是归一化过的 `https://a.com`。不归一的话这里会一条都不跑。"""

@@ -93,5 +93,32 @@ class VfoxJavaTests(unittest.TestCase):
             self.assertLess(cands.index(self.sdks), cands.index(legacy[0]))
 
 
+class ProcessEnvironmentTests(unittest.TestCase):
+    def test_only_runtime_snapshot_paths_override_the_process_environment(self) -> None:
+        resolved = {
+            "app_repo": "X:/app",
+            "java_home": "X:/jdk",
+            "java_exe": "X:/jdk/bin/java.exe",
+            "android_sdk": "X:/sdk",
+            "gradle_user_home": "X:/.gradle",
+        }
+        env = jvm_env.process_environment({"ok": True, "runtime": resolved}, {
+            "JAVA_HOME": "Y:/stale-jdk",
+            "ANDROID_HOME": "Y:/stale-sdk",
+            "GRADLE_USER_HOME": "Y:/.gradle",
+            "KEEP_ME": "inherited",
+        })
+        self.assertEqual(env["LEGADO_REPO"], resolved["app_repo"])
+        self.assertEqual(env["JAVA_HOME"], resolved["java_home"])
+        self.assertEqual(env["ANDROID_HOME"], resolved["android_sdk"])
+        self.assertEqual(env["ANDROID_SDK_ROOT"], resolved["android_sdk"])
+        self.assertEqual(env["GRADLE_USER_HOME"], resolved["gradle_user_home"])
+        self.assertEqual(env["KEEP_ME"], "inherited")
+
+    def test_incomplete_selftest_cannot_produce_a_launch_environment(self) -> None:
+        with self.assertRaisesRegex(ValueError, "自检未通过"):
+            jvm_env.process_environment({"ok": False, "runtime": {}})
+
+
 if __name__ == "__main__":
     unittest.main()

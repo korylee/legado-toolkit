@@ -38,7 +38,7 @@ from backend.schemas import JvmRunRequest
 from core.paths import data_dir
 from core.store import Store
 from core import settings_store
-from core.jvm_env import selftest
+from core.jvm_env import process_environment, selftest
 from core.loader import _normalize_url
 from core.paths import ARGS_PARTS
 
@@ -201,7 +201,8 @@ def _tail_process_output(value: Any, limit: int = 4000) -> str:
     return str(value).strip()[-limit:]
 
 
-def _run_gradle(timeout_min: int = 90, args_path: Optional[Path] = None) -> Dict[str, Any]:
+def _run_gradle(timeout_min: int = 90, args_path: Optional[Path] = None,
+                runtime: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     """调启动器跑批（阻塞直到 Gradle 退出）。保留退出码和输出尾部。
 
     以前这里只返回整数。Gradle 在测试 JVM 启动前失败时，调用方只能知道结果文件
@@ -211,11 +212,14 @@ def _run_gradle(timeout_min: int = 90, args_path: Optional[Path] = None) -> Dict
     `core.jvm_direct.dump_is_stale` 与 `core.jvm_debug.default_launcher` 那两处，别在这抄）。
     """
     exe = _launcher()
-    env = {**os.environ,
+    if not runtime:
+        raise ValueError("JVM runtime 快照缺失，拒绝使用后端进程环境启动")
+    env = process_environment({"ok": True, "runtime": runtime})
+    env.update({
            "LEGADO_TEST_JVM_ENV_OUT": str(data_dir() / "app_probe" / "test_jvm_env.json"),
            # **必须显式告诉它参数文件在哪**：不给就退回「挨着启动器找」，那里没有，
            # 于是启动器打印一句「跳过」之后什么都不跑（一次看不出来的空跑）
-           "LEGADO_APPSERVICE_ARGS": str(args_path or _args_file())}
+           "LEGADO_APPSERVICE_ARGS": str(args_path or _args_file())})
     try:
         proc = subprocess.run(
             ["cmd", "/c", str(exe), ":app:testAppDebugUnitTest",
@@ -295,6 +299,27 @@ def jvm_selftest():
     return selftest(conf.get("app_repo", ""))
 
 
+@router.post("/pick-app-repo")
+def pick_app_repo():
+    """打开本机原生目录选择器；浏览器 file input 无法提供可用的本机路径。"""
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        try:
+            selected = filedialog.askdirectory(
+                title="选择 Legado App 源码仓库目录", mustexist=True)
+        finally:
+            root.destroy()
+    except Exception as e:
+        raise HTTPException(503, "无法打开本机目录选择器：%s；也可以直接输入目录路径" % e)
+    return {"path": str(Path(selected).resolve()) if selected else "",
+            "cancelled": not bool(selected)}
+
+
 @router.post("/run")
 async def jvm_run(body: Optional[JvmRunRequest] = None):
     conf = settings_store.load().get("jvm", {})
@@ -365,7 +390,7 @@ async def jvm_run(body: Optional[JvmRunRequest] = None):
         "jvm_run",
         {"prep": prep, "total": len(rows), "run_dir": str(run_dir),
          "source_file": str(src_file), "args_file": str(args_path),
-         "out_path": str(out_path)},
+         "out_path": str(out_path), "runtime": dict(st_conf.get("runtime") or {})},
         lane="jvm",
     )
     return dict(prep, **{"job_id": job_id})
@@ -403,8 +428,8 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
         RUN_LOCK.acquire()
         try:
             gradle = _normalize_gradle_result(
-                _run_gradle(args_path=args_path) if args_path is not None
-                else _run_gradle())
+                _run_gradle(args_path=args_path, runtime=payload.get("runtime"))
+                if args_path is not None else _run_gradle(runtime=payload.get("runtime")))
             code = gradle.get("exit")
             if not out_path.exists():
                 return dict(prep, **{"ok": False, "exit": code,

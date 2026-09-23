@@ -82,7 +82,7 @@ class _Base(unittest.TestCase):
         f.write_text(json.dumps([{"bookSourceUrl": "https://a.com"}]), encoding="utf-8")
         return f
 
-    def _fake_gradle(self, args_path=None) -> int:
+    def _fake_gradle(self, args_path=None, runtime=None) -> int:
         self.gradle_calls += 1
         self.args_seen = pathlib.Path(args_path).read_text(encoding="utf-8")
         if self.fail_gradle:

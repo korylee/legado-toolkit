@@ -97,7 +97,8 @@ def _write_args(src_file: str, key: str, out_file: str, timeout: int, cookie: st
     target.write_text("\n".join(lines + [""]), encoding="utf-8", newline="\n")
 
 
-def _run_launcher(timeout_min: int = 20, args_path: Optional[pathlib.Path] = None) -> Tuple[int, float, str, str]:
+def _run_launcher(timeout_min: int = 20, args_path: Optional[pathlib.Path] = None,
+                  env_snapshot: Optional[Dict[str, str]] = None) -> Tuple[int, float, str, str]:
     """拉一次 Gradle（阻塞）。返回 `(退出码, 墙钟秒, stdout, stderr)`。
 
     单独一个函数是为了让测试能把它换成假的——**不跑 Gradle 也能测组装逻辑**。
@@ -109,7 +110,7 @@ def _run_launcher(timeout_min: int = 20, args_path: Optional[pathlib.Path] = Non
     就会让常驻一直被「类可能是旧的」挡在外面，直到有人手工 `--refresh`。
     """
     t0 = time.time()
-    env = {**os.environ,
+    env = {**(env_snapshot or os.environ),
            "LEGADO_TEST_JVM_ENV_OUT": str(data_path("app_probe", "test_jvm_env.json")),
            # 参数文件在哪：**必须显式告诉它**（`AppserviceEnv.loadArgs` 的第 1 候选）。
            # 不给的话它退回「挨着启动器找」——那里现在没有这个文件，而表现是启动器
@@ -130,21 +131,40 @@ def _read_ndjson(path: str) -> List[Dict[str, Any]]:
     return [json.loads(x) for x in f.read_text(encoding="utf-8").splitlines() if x.strip()]
 
 
-def _env_error() -> str:
+def _env_error() -> Tuple[str, Dict[str, str]]:
     """环境不可用时的**可执行**提示（不自检就开跑，只会在 Gradle 里炸出一堆看不懂的错）。"""
     from core import jvm_env, settings_store
 
     conf = settings_store.load().get("jvm", {})
     st = jvm_env.selftest(conf.get("app_repo", ""))
     if st.get("ok"):
-        return ""
+        return "", jvm_env.process_environment(st)
     bad = [c for c in (st.get("checks") or []) if not c.get("ok")]
     first = bad[0] if bad else {}
     hint = first.get("hint") or "在「设置 → JVM 校验」里填 App 源码目录并自检"
-    return "本机引擎不可用：%s —— %s" % (first.get("name") or "环境自检未通过", hint)
+    return "本机引擎不可用：%s —— %s" % (first.get("name") or "环境自检未通过", hint), {}
 
 
-def default_launcher(notes: List[str], args_path: Optional[pathlib.Path] = None) -> Callable[[], Tuple[int, float, str, str]]:
+def _runtime_dump_mismatch(dump: Dict[str, Any], env_snapshot: Dict[str, str]) -> str:
+    """返回 dump 与当前预检路径的首个差异；不一致时不能复用直起/常驻环境。"""
+    checks = [
+        ("workingDir", dump.get("workingDir"), env_snapshot.get("LEGADO_REPO")),
+        ("JAVA_HOME", (dump.get("environment") or {}).get("JAVA_HOME")
+         or dump.get("javaHomeEnv"), env_snapshot.get("JAVA_HOME")),
+        ("ANDROID_HOME", (dump.get("environment") or {}).get("ANDROID_HOME"),
+         env_snapshot.get("ANDROID_HOME")),
+        ("GRADLE_USER_HOME", (dump.get("environment") or {}).get("GRADLE_USER_HOME"),
+         env_snapshot.get("GRADLE_USER_HOME")),
+    ]
+    for name, actual, expected in checks:
+        if not actual or not expected or os.path.normcase(os.path.normpath(str(actual))) != \
+                os.path.normcase(os.path.normpath(str(expected))):
+            return "%s（dump=%s；本次自检=%s）" % (name, actual or "缺失", expected or "缺失")
+    return ""
+
+
+def default_launcher(notes: List[str], args_path: Optional[pathlib.Path] = None,
+                     env_snapshot: Optional[Dict[str, str]] = None) -> Callable[[], Tuple[int, float, str, str]]:
     """产品默认的拉起方式（S5-A 第二期 D2）：**优先常驻 daemon，不可用回落 Gradle**。
 
     两条边界，都是实测教训：
@@ -161,7 +181,12 @@ def default_launcher(notes: List[str], args_path: Optional[pathlib.Path] = None)
     """
     from core import jvm_daemon, jvm_direct
     target_args = args_path or ARGS
-    fallback = _run_launcher if target_args == ARGS else (lambda: _run_launcher(args_path=target_args))
+    if env_snapshot is None and target_args == ARGS:
+        fallback = _run_launcher
+    elif env_snapshot is None:
+        fallback = lambda: _run_launcher(args_path=target_args)
+    else:
+        fallback = lambda: _run_launcher(args_path=target_args, env_snapshot=env_snapshot)
 
     try:
         if jvm_direct.dump_is_stale():
@@ -169,6 +194,12 @@ def default_launcher(notes: List[str], args_path: Optional[pathlib.Path] = None)
                          "已改用 Gradle（启动慢一些）")
             return fallback
         dump = jvm_direct.load_dump(warn_stale=False)
+        if env_snapshot is not None:
+            mismatch = _runtime_dump_mismatch(dump, env_snapshot)
+            if mismatch:
+                notes.append("这次没能用常驻进程（运行环境与当前自检不同：%s），已改用 Gradle（启动慢一些）"
+                             % mismatch)
+                return fallback
     except Exception as e:                       # dump 读不了（权限/损坏）也别挡住调试
         notes.append("这次没能用常驻进程（读 dump 失败：%s），已改用 Gradle（启动慢一些）" % e)
         return fallback
@@ -351,7 +382,11 @@ def run_jvm_debug(source: Dict[str, Any],
     if not str(src.get("bookSourceUrl", "") or "").strip():
         out["error"] = "缺少 bookSourceUrl（它同时是 cookie 注入的键，不能空）"
         return out
-    env_err = _env_error()
+    preflight = _env_error()
+    if isinstance(preflight, tuple):
+        env_err, env_snapshot = preflight
+    else:  # 测试/CLI 覆盖旧的提示钩子时仍可直接替换
+        env_err, env_snapshot = str(preflight or ""), dict(os.environ)
     if env_err:
         out["error"] = env_err
         return out
@@ -393,9 +428,10 @@ def run_jvm_debug(source: Dict[str, Any],
         if launcher:
             launch = launcher
         elif owns_run_dir:
-            launch = default_launcher(launch_notes, args_path=args_path)
+            launch = default_launcher(launch_notes, args_path=args_path,
+                                      env_snapshot=env_snapshot)
         else:
-            launch = default_launcher(launch_notes)
+            launch = default_launcher(launch_notes, env_snapshot=env_snapshot)
         _, cost, _so, _se = launch()
     except Exception:
         if owns_run_dir:

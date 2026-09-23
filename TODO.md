@@ -21,12 +21,12 @@
 ---
 
 ### 条目：jvm-env-readiness · JVM 配置、自检与实际启动环境统一
-状态：todo
+状态：doing
 依赖：无
 优先级：P0
 背景：JVM 校验、调试与 Gradle refresh 依赖 App 源码目录、JDK、Android SDK 和 Gradle 环境；目前用户难以在操作前判断这些配置是否可用，也缺少证据保证自检与实际启动使用同一组路径。启动器中的个人路径回退会让错误配置被静默掩盖，失败原因也可能止于后端日志。
-约束：自检和实际启动必须共用同一份解析后的环境配置，并展示实际采用的 App 源码目录、JDK、Android SDK 与 Gradle 用户目录。移除个人绝对路径回退；自动发现失败或路径无效时允许用户输入/修改 App 源码目录，并提供能回填本机真实路径的目录选择按钮（不能用只返回浏览器文件名/句柄的控件冒充路径选择）。文件类配置才提供文件选择；当前 App 源码配置是目录。单条校验、调试和 refresh 启动前自动预检；未配置或未通过时阻止启动并说明缺项，不要求用户额外手动运行自检。启动器/Gradle 的底层错误必须沿 API 到达界面。本 P0 一并完成 `jvm-runtime-snapshot` 的环境对拍；审查 appservice 内逻辑，逐项说明其是否承担不可替代的测试桥接职责，只有确认重复时才删除，不做路线迁移。
-验收：覆盖自动发现成功、未发现、错误路径、JDK/SDK 缺失和 Gradle 启动失败；目录选择、手工输入、取消选择后保留原值均符合预期。界面能在校验/调试前准确显示可用状态、实际路径及修复动作。refresh、直起、常驻及实际校验/调试各留独立可追溯快照；至少完成一次真实对拍，逐项归因 workingDir / user.dir、classpath、jvmArgs、systemProperties 与 environment 的差异，快照不得进入判定链或互相覆盖。错误配置不会落入个人路径或调用方环境继续运行。完成 appservice 逻辑清单并为保留/删除结论提供调用链依据。
+约束：自检和实际启动必须共用同一份解析后的环境配置，并展示实际采用的 App 源码目录、JDK、Android SDK 与 Gradle 用户目录。移除个人绝对路径回退；自动发现失败或路径无效时允许用户输入/修改 App 源码目录，并提供能回填本机真实路径的目录选择按钮（不能用只返回浏览器文件名/句柄的控件冒充路径选择）。文件类配置才提供文件选择；当前 App 源码配置是目录。单条校验、调试和 refresh 启动前自动预检；未配置或未通过时阻止启动并说明缺项，不要求用户额外手动运行自检。启动器/Gradle 的底层错误必须沿 API 到达界面。`jvm-runtime-snapshot` 保持独立待办，作为后续 JVM 对拍工作，不以环境路径校验代替实际 JVM 快照；审查 appservice 内逻辑，逐项说明其是否承担不可替代的测试桥接职责，只有确认重复时才删除，不做路线迁移。
+验收：覆盖自动发现成功、未发现、错误路径、JDK/SDK 缺失和 Gradle 启动失败；目录选择、手工输入、取消选择后保留原值均符合预期。界面能在校验/调试前准确显示可用状态、实际路径及修复动作。提交任务时固定 runtime 快照，排队期间配置变化仍使用该快照；错误配置不会落入个人路径或调用方环境继续运行。完成 appservice 逻辑清单并为保留/删除结论提供调用链依据。实际 JVM 快照字段与真实 Gradle 对拍由 `jvm-runtime-snapshot` 验收。
 指针：core/jvm_direct.py，core/jvm_daemon.py，core/jvm_debug.py，backend/api/jvm.py，frontend/src/views/SourcesView.vue，appservice/legado-test.init.gradle，TODO.md（jvm-runtime-snapshot）
 
 ## 1 · 排队

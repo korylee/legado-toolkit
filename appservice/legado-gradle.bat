@@ -12,30 +12,32 @@ REM NOTE: this file MUST keep CRLF line endings. Mixed LF/CRLF makes cmd
 REM splice lines together, which silently corrupts the gradle arguments.
 setlocal
 
-if "%LEGADO_REPO%"=="" set "LEGADO_REPO=D:\Documents\GitHub\legado-with-MD3"
-REM JAVA_HOME: honor a **usable** one (shell / vfox export), else derive it.
-REM Judging by "java.exe exists" rather than "variable is non-empty" is
-REM deliberate: an empty or whitespace JAVA_HOME is worse than an unset one --
-REM gradlew would abort with "invalid directory" instead of falling through.
-REM vfox keeps SDKs under %USERPROFILE%\.vfox\sdks\java (JDK root directly, or
-REM <version> subdirs when several are installed). The backend also passes a
-REM discovered JAVA_HOME via the environment (core/jvm_env.py).
-if exist "%JAVA_HOME%\bin\java.exe" goto java_ready
-if exist "%USERPROFILE%\.vfox\sdks\java\bin\java.exe" (
-  set "JAVA_HOME=%USERPROFILE%\.vfox\sdks\java"
-  goto java_ready
+REM Runtime paths are resolved once by core/jvm_env.py and passed to this launcher.
+if "%LEGADO_REPO%"=="" (
+  echo [error] LEGADO_REPO is not set; run the JVM environment self-test first.
+  exit /b 1
 )
-for /d %%D in ("%USERPROFILE%\.vfox\sdks\java\*") do (
-  if not defined JAVA_FROM_VFOX if exist "%%D\bin\java.exe" (
-    set "JAVA_FROM_VFOX=1"
-    set "JAVA_HOME=%%D"
-  )
+if "%JAVA_HOME%"=="" (
+  echo [error] JAVA_HOME is not set; run the JVM environment self-test first.
+  exit /b 1
 )
-:java_ready
-if not exist "%JAVA_HOME%\bin\java.exe" set "JAVA_HOME=D:\Program Files\Java\jdk-21.0.12.1+1"
+if "%ANDROID_HOME%"=="" (
+  echo [error] ANDROID_HOME is not set; run the JVM environment self-test first.
+  exit /b 1
+)
+if "%GRADLE_USER_HOME%"=="" (
+  echo [error] GRADLE_USER_HOME is not set; run the JVM environment self-test first.
+  exit /b 1
+)
+if not exist "%JAVA_HOME%\bin\java.exe" (
+  echo [error] java.exe not found under JAVA_HOME: %JAVA_HOME%
+  exit /b 1
+)
+if not exist "%ANDROID_HOME%" (
+  echo [error] Android SDK not found: %ANDROID_HOME%
+  exit /b 1
+)
 echo [appservice] JAVA_HOME=%JAVA_HOME%
-if "%GRADLE_USER_HOME%"=="" set "GRADLE_USER_HOME=D:\.gradle"
-if "%ANDROID_HOME%"=="" set "ANDROID_HOME=D:\Android\Sdk"
 set "LEGADO_APPSERVICE_DIR=%~dp0"
 
 if not exist "%LEGADO_REPO%\gradlew.bat" (

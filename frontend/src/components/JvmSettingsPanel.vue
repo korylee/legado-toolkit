@@ -3,8 +3,11 @@
     <!-- 配置 -->
     <el-form label-width="120px" size="small" @submit.prevent>
       <el-form-item label="App 源码目录">
-        <el-input v-model="conf.app_repo" placeholder="legado-with-MD3 仓库的本地路径，如 D:\Documents\GitHub\legado-with-MD3"
-                  clearable :disabled="saving" />
+        <div style="display: flex; gap: 8px; width: 100%">
+          <el-input v-model="conf.app_repo" placeholder="legado-with-MD3 仓库的本地路径，如 D:\path\to\legado-with-MD3"
+                    clearable :disabled="saving" />
+          <el-button :disabled="saving || picking" :loading="picking" @click="pickAppRepo">选择目录</el-button>
+        </div>
         <div class="muted" style="font-size: 12px; margin-top: 2px">
           其余环境（JDK / Android SDK / Gradle 目录）由「自检」自动推导，不需要填
         </div>
@@ -94,12 +97,13 @@
 import { ref, reactive, computed, onMounted } from "vue";
 import { ElMessage } from "element-plus";
 import { getSettings, patchSettings } from "../api/settings";
-import { jvmSelftest, jvmResults } from "../api/jvm.js";
+import { jvmSelftest, jvmResults, pickJvmAppRepo } from "../api/jvm.js";
 
 //: 这一页只剩**配置**一项（App 源码目录）；跑批参数在列表页的弹框里，不在这
 const conf = reactive({ app_repo: "", proxy: "" });   // proxy 属 network 段（这台机器怎么出去）
 const selftest = ref(null);
 const checking = ref(false);
+const picking = ref(false);
 const saving = ref(false);
 const lastRun = ref(null);
 const r2 = ref({ count: 0, dist: {} });
@@ -111,10 +115,30 @@ onMounted(async () => {
     conf.proxy = (s.values.network || {}).proxy || "";
   } catch (e) { /* 设置接口挂了就保持默认，自检按钮仍可用 */ }
   try {
+    selftest.value = await jvmSelftest();
+  } catch (e) {
+    selftest.value = { ok: false, checks: [{ name: "自检接口", hint: "自检失败：" + e }] };
+  }
+  try {
     r2.value = await jvmResults();
     if (r2.value.count) lastRun.value = { dist: r2.value.dist, count: r2.value.count };
   } catch (e) { /* 无历史结果 */ }
 });
+
+async function pickAppRepo() {
+  picking.value = true;
+  try {
+    const result = await pickJvmAppRepo();
+    if (!result.cancelled && result.path) {
+      conf.app_repo = result.path;
+      await doSelftest();
+    }
+  } catch (e) {
+    ElMessage.error("选择目录失败：" + e);
+  } finally {
+    picking.value = false;
+  }
+}
 
 async function doSelftest() {
   checking.value = true;
@@ -140,7 +164,8 @@ async function save() {
                                     network: { proxy: conf.proxy } });
     conf.app_repo = (s.values.jvm || {}).app_repo || "";
     conf.proxy = (s.values.network || {}).proxy || "";
-    ElMessage.success("已保存，下次跑批生效");
+    selftest.value = await jvmSelftest();
+    ElMessage.success("配置已保存并完成环境自检");
   } catch (e) {
     ElMessage.error("保存失败：" + e);
   } finally {
