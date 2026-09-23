@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional
 from core.constants import *
 from core.urls import abs_url as _abs_url
 from core.fetch import (fetch, extract_keyword, probe_search_endpoint,
-                          _page_has_search_results)
+                          _page_has_search_results, _too_small_to_be_a_page)
 from core.analyzer import analyze_search_page, analyze_detail_page
 from core.app_debug import want_of_page
 from core.build import build_source, load_sources, save_sources
@@ -263,6 +263,36 @@ def run_add(url, name="", source_type="novel", group="📖新增源",
         print("❌ 无法获取搜索页 HTML，中止。")
         return AddResult(1, "抓不到搜索页 HTML（常见搜索端点也探测过了）："
                             "页面不可达、要登录，或站点结构特殊")
+
+    # 2.4) **「有字节」不等于「拿到了页面」**：抓回来一份明显不是站点的东西时，判据在**引擎那侧**
+    # （`interstitial_marker` 要 28KB 那份材料才判得出「安全验证」），所以这里必须去问引擎——
+    # 就地降级成「搜索不可用 → 仅发现」会把**「机器过不去那道验证」读成「站点不能搜」**，
+    # 产出是一条静默的空源、rc=0，而原因一路被压掉（AGENTS #4；实测 18read.net 回 2 字节的
+    # `CN`，见 lessons §八十九）。
+    if not discover and _too_small_to_be_a_page(html):
+        n = len(html.encode("utf-8"))
+        print("   ℹ️  抓回来这一份只有 %d 字节（不像站点），改用本机引擎取这一页…" % n)
+        try:
+            from core.jvm_debug import page_from_engine
+            from core.quality import interstitial_marker
+            engine_html = page_from_engine(url, timeout=120)
+        except Exception as e:
+            print("   ❌ 改用引擎取这一页没成：%s" % e)
+            return AddResult(1, "抓回来的页面只有 %d 字节（不像站点），改用引擎重取也失败：%s。"
+                                "这一段规则先不给——按这份材料写规则会生成取不到东西的源"
+                             % (n, str(e)[:120]))
+        left = interstitial_marker(engine_html)
+        if left:
+            # 与 `_page_for_analysis` 同一条纪律：**按拦截页写规则是假成功**
+            print("   ❌ 引擎取回来的还是拦截页（%s）——机器过不去那道验证" % left)
+            return AddResult(1, "这一页要人工过一次验证（引擎取回来的是拦截页：%s）。"
+                                "跑 scripts/jvm_login.py 在桥那个 profile 里把这一页过一遍"
+                                "（凭据会留在 profile 里，之后就是通的），或连 App / 用真机调试。"
+                                "这一段规则先不给" % left)
+        print("   ✅ 已改用引擎取回的那份（%d 字节）" % len(engine_html))
+        analysis_notes.append(
+            "我们抓的那份只有 %d 字节（不像站点），已改用本机引擎取回的那份 HTML" % n)
+        html = engine_html
 
     # 2.5) 仅发现模式判定：
     #   强制 discover 参数，或搜索探测失败但页面可打开（无搜索结果/无关键词）→ 自动降级

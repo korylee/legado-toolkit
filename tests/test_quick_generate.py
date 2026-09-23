@@ -166,6 +166,37 @@ class RunAddTests(unittest.TestCase):
         self.assertNotEqual(out.error.strip(), "生成失败")
         self.assertGreater(len(out.error), 6, out.error)
 
+    def test_two_byte_body_is_not_a_page_and_asks_the_engine(self):
+        """**「有字节」不等于「拿到了页面」**：2 字节的 `CN` 不许被当成「站点不能搜」。
+
+        实测（2026-09-22）：`18read.net` 回的是 2 字节的 `CN`，而拦截页判据要 28KB 那份
+        材料才判得出——于是这条路**没走到引擎**就降级成「仅发现」，落一条 rc=0 的空源，
+        原因一路被压掉（lessons §八十九）。这条测试钉住：小得不像页面时**去问引擎**，
+        引擎说还是拦截页就**带原因失败**，不许静默降级。
+        """
+        with mock.patch("core.jvm_debug.page_from_engine",
+                        return_value="<html><title>请稍候…</title>安全验证</html>") as eng:
+            out = self._run(_fake_fetch("CN"))
+        self._case(out, 1, "2 字节不是页面 → 要人工过验证")
+        self.assertTrue(eng.called, "小得不像页面时必须去问引擎（判据在那一侧）")
+        # 原因要走到用户眼前：说清是**拦截页**，并给出可执行的下一步
+        self.assertIn("验证", out.error)
+        self.assertIn("jvm_login", out.error)
+        self.assertFalse(self.out.exists(), "拦截页不许落成源")
+
+    def test_engine_html_is_used_when_ours_is_not_a_page(self):
+        """引擎取回**真页面**时照常往下走（不是一遇到小材料就失败）。
+
+        用真 fixture 当引擎的那份（它是有结果的搜索页），这样断言的是「换了材料之后
+        确实拿它推了规则」，而不是「跑到了某个分支」。
+        """
+        with mock.patch("core.jvm_debug.page_from_engine", return_value=self.html):
+            out = self._run(_fake_fetch("CN"))
+        self._case(out, 0, "引擎那份是真页面 → 照常生成")
+        src = json.loads(self.out.read_text(encoding="utf-8"))[0]
+        self.assertTrue(src["ruleSearch"]["bookList"], src["ruleSearch"])
+        self.assertTrue(src["ruleSearch"]["bookUrl"], src["ruleSearch"])
+
 
 class RunAddJobReasonTests(unittest.TestCase):
     """job 那一层：`AddResult.error` 要**原样**进 result_json。

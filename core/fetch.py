@@ -131,6 +131,9 @@ def parse_source_header(raw: str) -> tuple:
 PAGE_CACHE_TTL = 300                 # 秒
 PAGE_CACHE_MAX_PAGES = 200           # 按页数计的 LRU 上限
 PAGE_CACHE_MAX_BYTES = 1024 * 1024   # 单页上限；**超出的不缓存**（理由见 _cache_put）
+#: 一个页面至少该有这么大。**低于它就当「没抓到页面」**（不是「没搜到结果」）——
+#: 实测反爬站回的是 2 字节的 `CN`；判据与理由见 `_too_small_to_be_a_page`。
+MIN_PAGE_BYTES = 200
 
 #: 每次抓取用哪种缓存策略（``fetch_ex(cache=...)``）
 CACHE_AUTO = "auto"        # 命中就用，缺失/过期就抓（默认）
@@ -431,6 +434,21 @@ def make_search_url_template(url: str, keyword: str) -> str:
     if "{{key}}" not in template:
         template = re.sub(r"([?&](?:q|key|search|keyword|wd|kw|searchkey)=)[^&#]*", r"\1{{key}}", template)
     return template
+def _too_small_to_be_a_page(html: str) -> bool:
+    """这份材料小得**不可能是一个页面**（不是「没搜到结果」，是「压根没抓到页面」）。
+
+    判据只有一条长度下界，理由：实测两个极端都出现过——反爬站回的是 **2 字节的 `CN`**
+    （`18read.net`），浏览器错误页则是 **317KB**（那个靠 `interstitial_marker` /
+    `isBrowserError` 判，不是这里）。这里管的是**下界这一侧**。
+
+    为什么值得单独一道闸门：`if html:` 这种判据会把 2 字节的 `CN` 当成「拿到了页面」，
+    于是下游把「机器过不去那道验证」读成「站点不能搜」——**产出是一条静默的空源**
+    （AGENTS #4；lessons §八十九）。它比 `_page_has_search_results` 更靠前：那条问的是
+    「这份页面里有没有结果」，它问的是「这算不算一份页面」。
+    """
+    return len((html or "").encode("utf-8")) < MIN_PAGE_BYTES
+
+
 def _page_has_search_results(html: str, keyword: str) -> bool:
     """判断搜索页是否真的返回了结果：
     1) 页面不含「无结果/表单页」强信号

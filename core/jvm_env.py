@@ -100,8 +100,10 @@ def _find_java() -> Check:
             out = subprocess.run(
                 [str(exe), "-version"], capture_output=True, text=True, timeout=10,
                 env={**os.environ, "JAVA_HOME": str(exe.parent.parent)})
-            ver = (out.stderr or out.stdout).splitlines()[0] if (out.stderr or out.stdout) else ""
-            m = re.search(r'"?(\d+)\.?', ver)
+            raw_version = out.stderr or out.stdout
+            ver = next((line.strip() for line in raw_version.splitlines()
+                        if re.search(r'\bversion\s+"?\d', line, re.I)), "")
+            m = re.search(r'\bversion\s+"?(\d+)', ver, re.I)
             major = int(m.group(1)) if m else 0
             tried.append({"path": str(exe), "result": ver.strip()[:60]})
             if major >= 17:
