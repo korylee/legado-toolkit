@@ -27,6 +27,7 @@ class Check:
     detail: str = ""       # 探测过程的关键信息（给界面 tooltip）
     hint: str = ""         # ok=False 时的建议动作
     items: List[Dict[str, str]] = field(default_factory=list)  # 探测过的候选
+    version: Optional[int] = None
 
 
 def _find_java() -> Check:
@@ -56,15 +57,72 @@ def _find_java() -> Check:
                         if re.search(r'\bversion\s+"?\d', line, re.I)), "")
             m = re.search(r'\bversion\s+"?(\d+)', ver, re.I)
             major = int(m.group(1)) if m else 0
+            if major == 1:
+                legacy = re.search(r'\bversion\s+"?1\.(\d+)', ver, re.I)
+                major = int(legacy.group(1)) if legacy else major
             tried.append({"path": str(exe), "result": ver.strip()[:60]})
-            if major >= 17:
-                return Check("JDK", True, found=str(exe), detail=source + "；" + ver.strip(),
-                             items=tried)
-            tried[-1]["result"] += "（版本低于 17，不满足 Gradle 9 要求）"
+            if major > 0:
+                return Check("Java 安装", True, found=str(exe),
+                             detail=source + "；" + ver.strip(), items=tried, version=major)
         except Exception as e:
             tried.append({"path": str(exe), "result": "执行失败: %s" % type(e).__name__})
-    return Check("JDK", False, hint="安装 JDK 17+（Gradle daemon 需要 21，推荐直接装 21）",
-                 items=tried)
+    return Check("Java 安装", False,
+                 hint="安装有效的 JDK，并设置 JAVA_HOME 或 PATH", items=tried)
+
+
+def _project_java_requirements(app_repo: str) -> Dict[str, Any]:
+    """从 wrapper、daemon criteria 与 app 编译配置读取 Java 版本要求。"""
+    root = Path(app_repo)
+    requirements: Dict[str, Any] = {"wrapper": None, "daemon": None, "toolchain": None}
+    wrapper = root / "gradle" / "wrapper" / "gradle-wrapper.properties"
+    try:
+        text = wrapper.read_text(encoding="utf-8", errors="replace")
+        match = re.search(r"distributionUrl=.*?gradle-(\d+(?:\.\d+)+)(?:-[^/\\]+)?-(?:bin|all)\.zip", text)
+        if match:
+            requirements["wrapper"] = match.group(1)
+    except OSError:
+        pass
+
+    daemon = root / "gradle" / "gradle-daemon-jvm.properties"
+    try:
+        for line in daemon.read_text(encoding="utf-8", errors="replace").splitlines():
+            match = re.match(r"\s*toolchainVersion\s*=\s*(\d+)\s*$", line)
+            if match:
+                requirements["daemon"] = int(match.group(1))
+                break
+    except OSError:
+        pass
+
+    for relative in ("app/build.gradle.kts", "app/build.gradle"):
+        try:
+            text = (root / relative).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        versions = [int(value) for value in re.findall(
+            r"(?:JavaVersion\.VERSION_|JavaLanguageVersion\.of\s*\()\s*(\d+)", text)]
+        versions.extend(int(value) for value in re.findall(
+            r"jvmToolchain\s*\(\s*(\d+)\s*\)", text))
+        if versions:
+            requirements["toolchain"] = max(versions)
+            break
+    return requirements
+
+
+def _java_requirement_check(name: str, java: Check, required: Optional[int],
+                            missing_hint: str, detail_prefix: str,
+                            exact: bool = False) -> Check:
+    if required is None:
+        return Check(name, False, detail=detail_prefix, hint=missing_hint)
+    if java.version is None:
+        return Check(name, False, detail=detail_prefix,
+                     hint="先修复 Gradle 启动 JVM；无法确认当前 Java 版本")
+    ok = java.version == required if exact else java.version >= required
+    relation = "必须匹配" if exact else "至少需要"
+    detail = "%s：%s Java %d，当前 Java %d" % (detail_prefix, relation, required, java.version)
+    return Check(name, ok, found=java.found if ok else "", detail=detail,
+                 hint="当前 JAVA_HOME/PATH 的 Java %d 不满足该项要求 Java %d；请安装并选择对应 JDK"
+                 % (java.version, required) if not ok else "",
+                 version=java.version)
 
 
 def _java_property_value(raw: str) -> str:
@@ -191,7 +249,7 @@ def process_environment(result: Dict[str, Any], base: Optional[Dict[str, str]] =
 
 
 def selftest(app_repo: str) -> Dict[str, Any]:
-    """全量自检：app_repo → 仓库可用性 → JDK → SDK → gradle-home → 启动器是否在。"""
+    """全量自检：项目、Gradle client/daemon/toolchain Java、SDK、Gradle 用户目录与启动器。"""
     app_repo = (app_repo or "").strip()
     repo_ok = bool(app_repo) and (Path(app_repo) / "gradlew.bat").exists() or \
         bool(app_repo) and (Path(app_repo) / "gradlew").exists()
@@ -219,13 +277,37 @@ def selftest(app_repo: str) -> Dict[str, Any]:
             hint=("当前没有非 Windows 启动器" if not supported_platform else
                   "管理仓库根下缺 appservice/ 目录——git pull 或重新检出")))
 
-        checks.append(_find_java())
+        java = _find_java()
+        checks.append(java)
+        requirements = _project_java_requirements(app_repo)
+        wrapper_version = requirements["wrapper"]
+        wrapper_ok = wrapper_version is not None
+        checks.append(Check(
+            "Gradle wrapper", wrapper_ok,
+            found="Gradle " + wrapper_version if wrapper_ok else "",
+            detail="从 gradle/wrapper/gradle-wrapper.properties 读取",
+            hint="无法读取 wrapper 版本；检查 distributionUrl 配置" if not wrapper_ok else ""))
+        wrapper_major = int(wrapper_version.split(".", 1)[0]) if wrapper_version else None
+        client_min = 17 if wrapper_major is not None and wrapper_major >= 9 else 8
+        checks.append(_java_requirement_check(
+            "Gradle 启动 JVM", java, client_min,
+            "无法从 Gradle wrapper 版本推导启动 JVM 要求",
+            "Gradle %s 客户端运行要求" % (wrapper_version or "wrapper")))
+        checks.append(_java_requirement_check(
+            "Gradle daemon JVM", java, requirements["daemon"] or java.version,
+            "无法读取 daemon JVM criteria，且无法确认默认 daemon JVM",
+            "gradle/gradle-daemon-jvm.properties" if requirements["daemon"] else
+            "未配置 daemon criteria，沿用启动 JVM", exact=bool(requirements["daemon"])))
+        checks.append(_java_requirement_check(
+            "项目编译 toolchain", java, requirements["toolchain"],
+            "无法从 app Gradle 配置读取 Java toolchain / 编译版本",
+            "app/build.gradle(.kts) 中的 Java 配置", exact=True))
         checks.append(_find_android_sdk(app_repo if repo_ok else ""))
         checks.append(_find_gradle_home(app_repo if repo_ok else ""))
 
     ok = all(c.ok for c in checks)
     by_name = {c.name: c for c in checks}
-    java = by_name.get("JDK")
+    java = by_name.get("Java 安装")
     sdk = by_name.get("Android SDK")
     gradle = by_name.get("Gradle 用户目录")
     runtime = {}

@@ -2,7 +2,7 @@
 """JVM 校验服务的后端接口（S2）。
 
 三个端点：
-  GET  /api/jvm/selftest   环境自检（只读：推导 JDK/SDK/gradle-home，不装东西）
+  GET  /api/jvm/selftest   环境自检（只读：检查 Gradle/Java/SDK/gradle-home，不装东西）
   POST /api/jvm/run        提交跑批（subprocess 调启动器；进入 JVM lane 后后台执行）
   GET  /api/jvm/results    最近一批结论（从 meta 读，供列表合并展示）
 

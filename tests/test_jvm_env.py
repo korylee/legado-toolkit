@@ -42,6 +42,16 @@ class EnvironmentDiscoveryTests(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertEqual(result.found, str(exe))
 
+    def test_java_eight_legacy_version_is_parsed(self) -> None:
+        home = self.root / "jdk8"
+        exe = self._java(home)
+        info = SimpleNamespace(stderr='java version "1.8.0_402"', stdout="", returncode=0)
+        with patch.dict(os.environ, {"JAVA_HOME": str(home)}, clear=False), \
+                patch("core.jvm_env.subprocess.run", return_value=info):
+            result = jvm_env._find_java()
+        self.assertTrue(result.ok)
+        self.assertEqual(8, result.version)
+
     def test_invalid_java_home_does_not_fall_back(self) -> None:
         with patch.dict(os.environ, {"JAVA_HOME": str(self.root / "missing")}, clear=False), \
                 patch("core.jvm_env.shutil.which", return_value="C:/other/bin/java.exe"), \
@@ -64,13 +74,42 @@ class EnvironmentDiscoveryTests(unittest.TestCase):
         repo = self.root / "app"
         (repo / "app").mkdir(parents=True)
         (repo / "app" / "build.gradle.kts").write_text(
-            "android {\n    compileSdk = 37\n}\n", encoding="utf-8")
+            "android {\n    compileSdk = 37\n}\n"
+            "android { compileOptions { sourceCompatibility = JavaVersion.VERSION_21 } }\n"
+            "kotlin { jvmToolchain { languageVersion.set(JavaLanguageVersion.of(21)) } }\n",
+            encoding="utf-8")
+        (repo / "gradle" / "wrapper").mkdir(parents=True)
+        (repo / "gradle" / "wrapper" / "gradle-wrapper.properties").write_text(
+            "distributionUrl=https\\://services.gradle.org/distributions/gradle-9.6.1-bin.zip\n",
+            encoding="utf-8")
+        (repo / "gradle").mkdir(exist_ok=True)
+        (repo / "gradle" / "gradle-daemon-jvm.properties").write_text(
+            "toolchainVersion=21\n", encoding="utf-8")
         return repo
 
     def _sdk(self, name: str, platform: str = "android-37") -> Path:
         sdk = self.root / name
         (sdk / "platforms" / platform).mkdir(parents=True)
         return sdk
+
+    def test_project_java_requirements_are_read_from_gradle_configuration(self) -> None:
+        repo = self._repo()
+        self.assertEqual(
+            {"wrapper": "9.6.1", "daemon": 21, "toolchain": 21},
+            jvm_env._project_java_requirements(str(repo)))
+
+    def test_java_17_meets_gradle_9_launcher_but_not_daemon_or_toolchain_21(self) -> None:
+        java = jvm_env.Check("Java 安装", True, found="X:/jdk17/bin/java.exe", version=17)
+        launcher = jvm_env._java_requirement_check(
+            "Gradle 启动 JVM", java, 17, "missing", "Gradle 9.6.1")
+        daemon = jvm_env._java_requirement_check(
+            "Gradle daemon JVM", java, 21, "missing", "daemon criteria", exact=True)
+        toolchain = jvm_env._java_requirement_check(
+            "项目编译 toolchain", java, 21, "missing", "project toolchain", exact=True)
+        self.assertTrue(launcher.ok)
+        self.assertFalse(daemon.ok)
+        self.assertFalse(toolchain.ok)
+        self.assertIn("当前 Java 17", daemon.detail)
 
     def test_sdk_requires_project_compile_sdk(self) -> None:
         repo, sdk = self._repo(), self._sdk("sdk")

@@ -152,7 +152,8 @@ pnpm build
 1. 设置 → 「JVM 校验」页签 → 只填**一个**路径：App 源码目录。
    JDK 从 `JAVA_HOME` 或 `PATH` 查找，Android SDK 从仓库 `local.properties` 或 SDK 环境变量查找；
    Gradle 用户目录使用 `GRADLE_USER_HOME` 或 Gradle 默认目录。环境项不用逐个填写。
-2. 同一个页签里点「自检环境」：逐项全绿才能跑批。首次编译要十几分钟（在下载依赖），
+2. 同一个页签里点「自检环境」：逐项检查 Gradle wrapper 启动 JVM、daemon criteria、项目编译 toolchain、SDK 与 Gradle 用户目录；
+   版本要求从 App 仓库配置读取。逐项全绿才能跑批。首次编译要十几分钟（在下载依赖），
    属正常现象。**这一页只配环境**（App 源码目录 + 自检 + 最近一次的结果）。
 3. **跑批的入口在书源列表**：工具栏「全量校验」（或先勾选几条 → 「校验选中」）→
    「开始校验」。一次调用跑完即退（后端起 `appservice` 子进程）。
