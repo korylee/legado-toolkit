@@ -22,6 +22,7 @@ from core.analyzer import analyze_search_page
 from services.add_source import run_add
 
 FIXTURE = pathlib.Path(__file__).parent / "fixtures" / "samsbook_search_shaosong.html"
+MANGA_FIXTURE = pathlib.Path(__file__).parent / "fixtures" / "manhuayu88_search_wo.html"
 KEYWORD = "绍宋"
 #: 搜索 URL（关键词在 query 里，`extract_keyword` 认得出来）
 URL = "http://example.com/search.php?q=" + KEYWORD
@@ -69,7 +70,7 @@ class AnalyzeSearchPageTests(unittest.TestCase):
         不再成立——`[历史]绍宋` 会被当成作者名写进规则（AGENTS #12 那一类：判据要跟着改）。
         """
         html = ('<div class="book-list"><div class="item">'
-                '<p class="nm">[历史]绍宋</p>'
+                '<p class="nm"><a href="/book/1">[历史]绍宋</a></p>'
                 '<p class="au">作者：榴弹怕水</p></div></div>')
         a = analyze_search_page(html, KEYWORD)
         self.assertNotIn(".nm", a["author"], a)
@@ -94,6 +95,15 @@ class AnalyzeSearchPageTests(unittest.TestCase):
         a = analyze_search_page(self.html, "这本书页面上没有")
         self.assertEqual(a["results"], 0)
         self.assertTrue(a["note"], "认不出时必须给出原因（AGENTS #4）")
+
+    def test_manga_media_cards_do_not_use_search_heading_as_list(self):
+        html = MANGA_FIXTURE.read_text(encoding="utf-8")
+        a = analyze_search_page(html, "我")
+        self.assertEqual(a["results"], 2, a)
+        self.assertEqual(a["bookList"], ".columns .media", a)
+        self.assertEqual(a["name"], ".media-content .title", a)
+        self.assertEqual(a["bookUrl"], ".media-content .title@href", a)
+        self.assertNotIn("h1", a["bookList"])
 
 
 class RunAddTests(unittest.TestCase):
@@ -141,6 +151,19 @@ class RunAddTests(unittest.TestCase):
         # 详情页那一步也走通了（stub 页面）——目录规则跟着生成
         self.assertTrue(src.get("ruleToc", {}).get("chapterList"), src.get("ruleToc"))
 
+    def test_incomplete_search_rules_are_not_saved(self):
+        incomplete = {
+            "results": 1, "bookList": ".columns .media", "name": ".title",
+            "bookUrl": "", "coverUrl": "", "author": "", "intro": "",
+            "note": "详情链接没有找到",
+        }
+        with mock.patch("services.add_source.analyze_search_page",
+                        return_value=incomplete):
+            out = self._run()
+        self._case(out, 1, "缺少 bookUrl 不应落盘")
+        self.assertIn("详情链接规则", out.error)
+        self.assertFalse(self.out.exists(), "搜索规则不完整时不许写成功源")
+
     def test_existing_source_reports_rc2_with_a_reason(self):
         self._case(self._run(), 0)
         self._case(self._run(), 2, "第二次是同 URL 已存在")
@@ -183,6 +206,14 @@ class RunAddTests(unittest.TestCase):
         self.assertIn("验证", out.error)
         self.assertIn("jvm_login", out.error)
         self.assertFalse(self.out.exists(), "拦截页不许落成源")
+
+    def test_engine_error_reaches_add_result_without_zero_event_mask(self):
+        with mock.patch("core.jvm_debug.page_from_engine",
+                        side_effect=RuntimeError("IllegalStateException: profile locked")):
+            out = self._run(_fake_fetch("CN"))
+        self._case(out, 1, "引擎异常必须原样到达快速生成结果")
+        self.assertIn("IllegalStateException: profile locked", out.error)
+        self.assertNotIn("一条事件都没收到", out.error)
 
     def test_engine_html_is_used_when_ours_is_not_a_page(self):
         """引擎取回**真页面**时照常往下走（不是一遇到小材料就失败）。

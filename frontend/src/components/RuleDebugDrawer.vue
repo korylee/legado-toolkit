@@ -48,8 +48,10 @@ const props = defineProps({
   //: 「从此步重跑」在途（父组件的 appDebugging）。重跑是 App 实测动作，
   //: 在途时按钮要转圈、并挡住连点——两次分段调试的 WS 会话会互相顶掉
   rerunning: { type: Boolean, default: false },
+  //: 自动生成失败时保留的上游原因；调试材料是补救路径，不得覆盖这条原因。
+  entryError: { type: String, default: "" },
 });
-const emit = defineEmits(["update:modelValue", "goto", "rerunFrom"]);
+const emit = defineEmits(["update:modelValue", "goto", "rerunFrom", "applyRule"]);
 
 const visible = computed({
   get: () => props.modelValue,
@@ -238,10 +240,24 @@ function selectStep(name) {
   replayResult.value = null;   // 上一步的重放结论不适用于当前这步
 }
 
-//: 当前步骤的规则（取自表单，所以改完规则就能立刻重放看效果）
-const currentRule = computed(
-  () => (props.rules || {})[(current.value || {}).name] || "",
-);
+//: 当前步骤的规则。编辑先落在抽屉草稿里，用户点“应用”后才回填父表单；
+//: 这样输入一个字符就能先看网页视图里的命中高亮，不会把半成品静默写入源。
+const draftRule = ref("");
+const currentRule = computed(() => draftRule.value);
+watch([current, () => props.rules], ([step, rules]) => {
+  draftRule.value = (rules || {})[(step || {}).name] || "";
+}, { immediate: true, deep: true });
+
+function applyDraftRule(replay = false) {
+  const field = FIELD_OF_STEP[(current.value || {}).name];
+  if (!field) return;
+  emit("applyRule", { field, rule: draftRule.value });
+  if (replay) doReplay();
+}
+
+function resetDraftRule() {
+  draftRule.value = (props.rules || {})[(current.value || {}).name] || "";
+}
 //: 重放要同时满足：这一步对应一个页面的 HTML、这一步有规则可回放、
 //: 且这一步确实是一条规则步骤（explore 的规则结构不同，不给重放）
 const canReplay = computed(
@@ -795,7 +811,10 @@ function copyPage() {
       </el-tag>
     </template>
 
-    <el-empty v-if="!steps.length" description="没有调试结果" :image-size="80" />
+    <el-alert v-if="entryError" type="warning" :closable="false" show-icon
+              style="margin-bottom: 10px"
+              :title="'自动生成未完成：' + entryError" />
+    <el-empty v-if="!steps.length" description="没有调试结果；可先检查上面的原因或重新调试" :image-size="80" />
 
     <template v-else>
       <!-- 定层横幅（九-1）：**先定层，再写规则**。摆在这儿是因为它改变的是「下一步做什么」
@@ -845,6 +864,24 @@ function copyPage() {
         <!-- 失败就直接把人送到对应的规则页签，省掉自己翻页签找字段 -->
         <el-button v-if="current.verdict === 'fail'" size="small" type="primary" plain
                    @click="gotoRuleField(current)">去改规则</el-button>
+      </div>
+
+      <div v-if="current && FIELD_OF_STEP[current.name]" class="rule-editor">
+        <div class="rule-editor-head">
+          <b>当前步骤规则</b>
+          <span class="muted">编辑后可立即看网页视图命中高亮；应用仍只是草稿，不会自动保存。</span>
+        </div>
+        <el-input v-model="draftRule" type="textarea" :rows="2"
+                  class="rule-editor-input" spellcheck="false"
+                  placeholder="输入 Legado 规则，例如 .media-content .title@href" />
+        <div class="toolbar rule-editor-actions">
+          <el-button size="small" @click="resetDraftRule">撤销编辑</el-button>
+          <el-button size="small" @click="applyDraftRule(false)">应用到表单</el-button>
+          <el-button size="small" type="primary" plain
+                     :loading="replaying" @click="applyDraftRule(true)">
+            应用并重新调试本步
+          </el-button>
+        </div>
       </div>
 
       <p v-if="current && current.reason" class="debug-reason">{{ current.reason }}</p>
@@ -1206,6 +1243,19 @@ function copyPage() {
 }
 .debug-step-tab.active { border-color: #409eff; color: #409eff; }
 .debug-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.rule-editor {
+  margin: 8px 0 10px;
+  padding: 8px 10px;
+  background: #f5faff;
+  border: 1px solid #d9ecff;
+  border-radius: 4px;
+}
+.rule-editor-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px; }
+.rule-editor-input :deep(textarea) {
+  font-family: Consolas, Monaco, monospace;
+  font-size: 12px;
+}
+.rule-editor-actions { margin-top: 6px; }
 /* 原样渲染：App 给的行首已带对齐的 [mm:ss.SSS]，再叠一层我们自己量的耗时
    就是两套时间戳，反而更难读。pre-wrap 保住行内空格 */
 .debug-event {

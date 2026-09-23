@@ -376,8 +376,8 @@ object DebugService {
         // 于是「收到两条就断了」会返回 0——正好是这一批要消灭的那种静默截断。
         val n = count.get()
         val code = when {
-            n == 0 -> ZERO_EVENT
             failure.get().isNotEmpty() -> BAD_INPUT      // 进程内异常：什么都没跑完
+            n == 0 -> ZERO_EVENT
             timedOut.get() -> TIMEOUT
             !sawTerminal.get() -> TRUNCATED
             else -> OK
@@ -414,6 +414,7 @@ object DebugService {
             "network" to ShadowBackstageWebView.lastNetwork.orEmpty(),
             "network_events" to ShadowBackstageWebView.lastNetworkEvents,
             "network_types" to ShadowBackstageWebView.lastNetworkTypes,
+            "network_drops" to ShadowBackstageWebView.lastNetworkDrops,
             "browser_cleanup" to BrowserBridge.lastCleanupNote,
             "timeout_sec" to timeoutSec,
             "key" to key,

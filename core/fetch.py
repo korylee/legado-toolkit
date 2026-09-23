@@ -446,7 +446,12 @@ def _too_small_to_be_a_page(html: str) -> bool:
     （AGENTS #4；lessons §八十九）。它比 `_page_has_search_results` 更靠前：那条问的是
     「这份页面里有没有结果」，它问的是「这算不算一份页面」。
     """
-    return len((html or "").encode("utf-8")) < MIN_PAGE_BYTES
+    text = html or ""
+    if re.search(r"<(?:html|head|body)\b", text, re.I):
+        # 短的、结构完整的“无结果页”仍然是页面，不应因长度闸门被误送去
+        # 引擎；真正需要兜底的是 `CN` 这类没有文档结构的响应。
+        return False
+    return len(text.encode("utf-8")) < MIN_PAGE_BYTES
 
 
 def _page_has_search_results(html: str, keyword: str) -> bool:
@@ -462,7 +467,7 @@ def _page_has_search_results(html: str, keyword: str) -> bool:
     if any(m in html for m in EMPTY_RESULT_MARKERS):
         return False
     # 详情页链接信号（cyppt 类 /novel26888/，koudaimh 类 /manhua/xxx）
-    if re.search(r'/[a-z]*(?:novel|book|detail|read|comic|manhua|info|show|chapter)\d*/', html, re.I):
+    if re.search(r'/[a-z]*(?:novel|book|detail|read|comic|manga|manhua|info|show|chapter)\d*/', html, re.I):
         # 关键词限定：页面必须真的包含搜索词（或其前 2 字符，兼容变体标题）
         if keyword in html:
             return True

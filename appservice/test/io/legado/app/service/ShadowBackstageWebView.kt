@@ -68,6 +68,8 @@ class ShadowBackstageWebView {
         var lastNetworkEvents: Int = 0
         @Volatile
         var lastNetworkTypes: String = ""
+        @Volatile
+        var lastNetworkDrops: String = ""
 
         /** 关掉就退回真实现——做对照实验用（不做对照就证明不了差异来自 shadow）。 */
         @Volatile
@@ -80,7 +82,7 @@ class ShadowBackstageWebView {
         fun reset() {
             calls.set(0); lastUrl.set(""); lastJsLen.set(0); lastIsRule.set(false)
             rendered.set(0); lastRenderMs.set(0L); lastReason.set("")
-            lastNetwork = null; lastNetworkEvents = 0; lastNetworkTypes = ""
+            lastNetwork = null; lastNetworkEvents = 0; lastNetworkTypes = ""; lastNetworkDrops = ""
             lastCookieLen.set(0); lastCookieNote.set("")
         }
     }
@@ -156,6 +158,7 @@ class ShadowBackstageWebView {
         lastNetwork = r.network
         lastNetworkEvents = r.networkEvents
         lastNetworkTypes = r.networkTypes
+        lastNetworkDrops = r.networkDrops
         // A3：**渲染完顺手把这一页的 cookie 收进 `CookieStore`**——上游
         // `BackstageWebView.setCookie()` 就是这一步（`onPageFinished` → 取 WebView 的
         // cookie → `CookieStore.setCookie(tag, cookie)`），区别只是我们的来源是 CDP

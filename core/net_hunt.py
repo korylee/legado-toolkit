@@ -155,6 +155,39 @@ def jsonpath_candidates(body: str, limit: int = 3) -> List[Dict[str, Any]]:
     return found
 
 
+def _json_html_fragment_candidates(body: str, limit: int = 3) -> List[Dict[str, Any]]:
+    """找 JSON 信封里「数组元素全是 HTML 片段」的字段。
+
+    这和 ``jsonpath_candidates`` 是两种不同的响应形状：这里不猜字段含义，
+    只确认材料确实是 HTML，再把它交给已有的 HTML 页面分析器。
+    """
+    try:
+        data = json.loads(body)
+    except Exception:
+        return []
+    if not isinstance(data, dict):
+        return []
+
+    found: List[Dict[str, Any]] = []
+
+    def walk(node, path: str):
+        if len(found) >= limit:
+            return
+        if isinstance(node, list) and node and all(
+                isinstance(item, str) and item.lstrip().startswith("<") for item in node):
+            found.append({"path": "$%s" % path, "fragments": node})
+            return
+        if isinstance(node, dict):
+            for key, value in node.items():
+                walk(value, "%s.%s" % (path, key))
+        elif isinstance(node, list):
+            for value in node[:3]:
+                walk(value, path)
+
+    walk(data, "")
+    return found
+
+
 def rules_from_response(entry: Dict[str, Any], keyword: str = "") -> Dict[str, Any]:
     """把一条**接口响应**变成规则草稿。返回 `{kind, rules, search_url, note}`（可能空）。
 
@@ -178,6 +211,22 @@ def rules_from_response(entry: Dict[str, Any], keyword: str = "") -> Dict[str, A
     out["search_url"] = url + options
 
     if _looks_json(body):
+        html_cands = _json_html_fragment_candidates(body)
+        if html_cands:
+            best = html_cands[0]
+            from core.analyzer import analyze_search_page
+            a = analyze_search_page("\n".join(best["fragments"]), keyword)
+            if a.get("bookList"):
+                out.update({"kind": "html", "rules": {
+                    "bookList": a["bookList"], "name": a["name"], "bookUrl": a["bookUrl"],
+                    "author": a["author"], "coverUrl": a["coverUrl"]}})
+                out["note"] = ("接口响应是 JSON 信封，装的是 HTML 片段：从 %s 取出 %d 个片段"
+                               "拼接后按搜索页推断规则（与搜索页共用同一套推断）" %
+                               (best["path"], len(best["fragments"])))
+                return out
+            out["note"] = ("接口响应是 JSON 信封，装的是 HTML 片段，但没推断出列表规则"
+                           "（%s）" % best["path"])
+            return out
         cands = jsonpath_candidates(body)
         if not cands:
             out["note"] = "接口响应是 JSON，但没找到「同构对象数组」（字段对不上），没敢提字段规则"
@@ -208,17 +257,38 @@ def rules_from_response(entry: Dict[str, Any], keyword: str = "") -> Dict[str, A
 
 # ------------------------------------------------------------------ 对外的一步
 
+def _network_diagnostic_note(diagnostics: Dict[str, Any]) -> str:
+    """把引擎侧的抓包计数变成 L4 无候选时可执行的附注。"""
+    d = diagnostics or {}
+    bits: List[str] = []
+    types = str(d.get("types") or "").strip()
+    drops = str(d.get("drops") or "").strip()
+    events = int(d.get("events") or 0)
+    if types:
+        bits.append("请求类型：%s" % types)
+    if events:
+        bits.append("Network 事件：%d" % events)
+    if drops:
+        bits.append("被过滤原因计数：%s" % drops)
+    elif types:
+        bits.append("没有收到被过滤原因计数")
+    return "L4 抓包诊断：" + "；".join(bits) if bits else "L4 没有抓到网络诊断数据"
+
+
 def search_api_via_engine(url: str, keyword: str, timeout: int = 120) -> Optional[Dict[str, Any]]:
     """让引擎渲染这一页、**看它实际发了哪些请求**，挑出搜索接口并提规则（L4 的收口）。
 
-    拿不到就返回 None（调用方按「这条路没走通」处理，别把原因吞掉——上面每处都有 note）。
+    引擎成功但没有可用接口时仍返回空规则结果，并保留网络过滤计数；只有引擎本身失败时
+    才返回 None。这样「没有候选」与「没有材料」不会再混成一句话。
     """
     from core.jvm_debug import page_from_engine
     from core.app_debug import network_entries
     try:
-        _html, entries = page_from_engine(url, timeout=timeout, with_requests=True)
+        captured = page_from_engine(url, timeout=timeout, with_requests=True)
     except Exception:
         return None
+    _html, entries = captured[:2]
+    diagnostics = captured[2] if len(captured) > 2 else {}
     entries = network_entries(entries) if not isinstance(entries, list) else entries
     picks = pick_data_requests(entries, want="list", keyword=keyword)
     for pick in picks:
@@ -226,5 +296,8 @@ def search_api_via_engine(url: str, keyword: str, timeout: int = 120) -> Optiona
         if got.get("rules"):
             got["why"] = pick["why"]
             got["request"] = {k: v for k, v in pick["entry"].items() if k != "body"}
+            got["network_diagnostics"] = diagnostics
             return got
-    return None
+    return {"kind": "", "rules": {}, "search_url": "",
+            "note": _network_diagnostic_note(diagnostics),
+            "network_diagnostics": diagnostics}

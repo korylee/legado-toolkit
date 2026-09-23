@@ -69,7 +69,9 @@ object BrowserBridge {
                       /** 流过来的 `Network.*` 事件条数（诊断：0 = 域没启用或事件没到）。 */
                       val networkEvents: Int = 0,
                       /** 请求按类型的计数（`XHR=0,Document=1,…`）：让「没抓到接口」自解释。 */
-                      val networkTypes: String = "")
+                      val networkTypes: String = "",
+                      /** 请求被响应材料闸门过滤的原因计数（`status=1,mime=2,…`）。 */
+                      val networkDrops: String = "")
 
     fun findBrowser(): String? = CANDIDATES.firstOrNull { File(it).isFile }
 
@@ -375,10 +377,14 @@ object BrowserBridge {
                     finalUrl.take(60) + "），不是站点", url = finalUrl)
             }
             return when {
-                !body.isNullOrEmpty() -> Result(true, body = body, url = finalUrl,
-                    network = collectNetwork(ws, tapped.toList(), tapQueue, 5000),
-                    networkEvents = networkEventCount(tapped.toList()),
-                    networkTypes = networkTypeCount(tapped.toList()))
+                !body.isNullOrEmpty() -> {
+                    val capture = collectNetwork(ws, tapped.toList(), tapQueue, 5000)
+                    Result(true, body = body, url = finalUrl,
+                        network = capture.entries,
+                        networkEvents = networkEventCount(tapped.toList()),
+                        networkTypes = networkTypeCount(tapped.toList()),
+                        networkDrops = capture.drops)
+                }
                 jsRetryTimes > 0 -> Result(false, reason = "js_empty: 求值 $tries 次仍为空",
                                            url = finalUrl)
                 else -> Result(false, reason = "render_empty: 渲染后 DOM 为空", url = finalUrl)
@@ -489,7 +495,8 @@ object BrowserBridge {
         return n
     }
 
-    internal fun networkRequests(messages: List<String>, limit: Int = NET_LIMIT): List<Map<String, Any?>> {
+    internal fun networkRequests(messages: List<String>, limit: Int = NET_LIMIT,
+                                 onDrop: ((String) -> Unit)? = null): List<Map<String, Any?>> {
         val sent = LinkedHashMap<String, MutableMap<String, Any?>>()
         for (msg in messages) {
             val o = runCatching { JSONObject(msg) }.getOrNull() ?: continue
@@ -502,7 +509,10 @@ object BrowserBridge {
                     // **只留 XHR / Fetch**：文档 / 图片 / 脚本不是「接口」，留着只会把上限挤掉
                     val type = params.optString("type")
                     if (type != "XHR" && type != "Fetch") continue
-                    if (sent.size >= limit) continue
+                    if (sent.size >= limit) {
+                        onDrop?.invoke("limit")
+                        continue
+                    }
                     val item = mutableMapOf<String, Any?>(
                         "requestId" to id,
                         "url" to req.optString("url"),
@@ -531,34 +541,59 @@ object BrowserBridge {
      * `Network.getResponseBody` 必须在响应还在内存里时问（页面导航 / 清缓存之后就没了），
      * 所以这一步紧跟在渲染之后做。
      */
+    internal data class NetworkCapture(val entries: List<Map<String, Any?>>, val drops: String)
+
+    internal fun networkDropReason(status: Int, mime: String): String? = when {
+        status !in 200..399 -> "status"
+        NET_MIME_OK.none { mime.lowercase().contains(it) } -> "mime"
+        else -> null
+    }
+
     private fun collectNetwork(ws: WebSocket, messages: List<String>,
                                inbox: LinkedBlockingQueue<String>,
-                               timeoutMs: Long): List<Map<String, Any?>> {
+                               timeoutMs: Long): NetworkCapture {
         val out = mutableListOf<Map<String, Any?>>()
+        val drops = LinkedHashMap<String, Int>()
+        fun drop(reason: String) { drops[reason] = (drops[reason] ?: 0) + 1 }
         var id = 700
-        for (item in networkRequests(messages)) {
+        for (item in networkRequests(messages, onDrop = ::drop)) {
             val mime = item["mime"] as? String ?: ""
             val status = (item["status"] as? Int) ?: 0
-            if (status !in 200..399) continue
-            if (NET_MIME_OK.none { mime.lowercase().contains(it) }) continue
+            val dropReason = networkDropReason(status, mime)
+            if (dropReason != null) {
+                drop(dropReason)
+                continue
+            }
             val rid = item["requestId"] as? String ?: continue
             val got = runCatching {
                 evalJson(ws, id++, "Network.getResponseBody",
                          JSONObject().put("requestId", rid), inbox, timeoutMs)
-            }.getOrNull() ?: continue
+            }.getOrNull()
+            if (got == null) {
+                drop("response_body")
+                continue
+            }
             val raw = got.optString("body", "")
             val encoded = got.optBoolean("base64Encoded", false)
-            val text = if (encoded) runCatching {
-                String(java.util.Base64.getDecoder().decode(raw), Charsets.UTF_8)
-            }.getOrDefault("") else raw
-            if (text.isEmpty()) continue
+            val text = if (encoded) {
+                try {
+                    String(java.util.Base64.getDecoder().decode(raw), Charsets.UTF_8)
+                } catch (_: IllegalArgumentException) {
+                    drop("body_decode")
+                    continue
+                }
+            } else raw
+            if (text.isEmpty()) {
+                drop("empty_body")
+                continue
+            }
             val row = LinkedHashMap<String, Any?>()
             for ((k, v) in item) if (k != "requestId") row[k] = v
             row["body"] = text.take(NET_BODY_LIMIT)
             row["truncated"] = text.length > NET_BODY_LIMIT
             out.add(row)
         }
-        return out
+        return NetworkCapture(out, drops.entries.joinToString(",") { "${it.key}=${it.value}" })
     }
 
     /** 发一条 CDP 命令并取回它的 `result` 对象（抓包用：`Network.getResponseBody`）。 */

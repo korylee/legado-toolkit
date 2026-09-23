@@ -164,6 +164,7 @@ const testResult = ref(null);
 const testStale = ref(false);      // 规则已改动，结果过期
 const debugVisible = ref(false);   // 调试抽屉
 const debugStep = ref("");         // 抽屉打开时定位到哪一步
+const generationError = ref("");   // 自动生成失败原因，随调试材料一起展示
 const systemTags = ref([]);
 const manualStatus = ref("");
 // 健康状态是否锁定。锁定是开关语义，不该靠「select 的空值」表达——
@@ -468,6 +469,7 @@ watch(form, () => {
 watch(() => [props.modelValue, props.sourceUrl], async ([show, url]) => {
   if (!show) return;
   testResult.value = null;
+  generationError.value = "";
   // 关弹窗时抽屉会被 destroy-on-close 卸载，但 debugVisible 会留在 true，
   // 下次打开就会自己弹出来；而且挂载时 modelValue 已是 true，
   // 抽屉里那个没有 immediate 的 watch 不触发，:initial-step 会被忽略
@@ -526,14 +528,58 @@ async function applyGenerated(result) {
   statusLocked.value = false;
   userTags.value = parsed.user;
   quickVerify.value = result.verify || null;
+  generationError.value = "";
+  // 自动生成得到的是草稿。把生成时的 JVM 验证直接作为调试工作台的首屏证据，
+  // 不再让用户回到右侧再点一次；没有可用步骤时才补跑一次本机调试。
+  testResult.value = result.verify && Array.isArray(result.verify.steps)
+    && result.verify.steps.length ? result.verify : null;
+  testStale.value = false;
+  debugChannel.value = "jvm";
+  debugTarget.value = "search";
+  debugQuery.value = String(result.keyword || "").trim();
+  debugStep.value = "search";
   activeTab.value = "rules";
   activeRuleTab.value = "search";
   syncRawFromForm();
   expandTestFailures(result.verify || null);
-  ElMessage.success("已生成候选源，可在下方手动修改规则后保存");
+  debugVisible.value = true;
+  ElMessage.success("已生成候选源，已打开调试工作台；确认规则后再保存");
   await nextTick();
-  const el = document.querySelector(".edit-dialog .main-rule-form");
-  if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+  if (!testResult.value) await debugRun();
+}
+
+function keywordFromSearchUrl(url) {
+  try {
+    const parsed = new URL(url);
+    for (const key of ["q", "keyword", "kw", "wd", "query", "search", "key"]) {
+      const value = parsed.searchParams.get(key);
+      if (value) return value.trim();
+    }
+  } catch (e) { /* 让调试入口继续用默认关键词 */ }
+  return "";
+}
+
+async function openDebugForGenerationFailure(reason) {
+  const url = quickUrl.value.trim();
+  generationError.value = String(reason || "自动生成未完成");
+  if (url) {
+    // 只写当前草稿，失败分支也不落 SQLite；调试需要源 URL 才能让 App 引擎取页。
+    form.value.bookSourceUrl = url;
+    if (!String(form.value.bookSourceName || "").trim()) {
+      try { form.value.bookSourceName = new URL(url).hostname; } catch (e) { /* ignore */ }
+    }
+  }
+  testResult.value = null;
+  testStale.value = false;
+  debugChannel.value = "jvm";
+  debugTarget.value = "search";
+  debugQuery.value = keywordFromSearchUrl(url);
+  debugStep.value = "search";
+  activeTab.value = "rules";
+  activeRuleTab.value = "search";
+  debugVisible.value = true;
+  await nextTick();
+  if (url) await debugRun();
 }
 
 async function quickGenerate() {
@@ -580,14 +626,18 @@ async function quickGenerate() {
           // 失败原因在后端的 result_json.error 里（连「进程重启没写终态」那种也有，
           // 见 Store.fail_orphan_jobs）。只显示 status 字面量等于把原因丢了
           const why = jobFailReason(d.result_json);
-          ElMessage.error("生成失败：" + (why || d.status || "未知错误"));
+          const message = why || d.status || "未知错误";
+          ElMessage.error("生成失败，已打开调试工作台：" + message);
+          void openDebugForGenerationFailure(message);
           return;
         }
         let result = {};
         try { result = JSON.parse(d.result_json || "{}"); } catch (e) { result = {}; }
         if (!result.ok) {
           quickProgress.value = "";
-          ElMessage.error(result.error || "生成失败");
+          const message = result.error || "生成失败";
+          ElMessage.error("生成失败，已打开调试工作台：" + message);
+          void openDebugForGenerationFailure(message);
           return;
         }
         quickProgress.value = "";
@@ -1371,6 +1421,7 @@ async function doSave(s) {
          首帧落到 steps[0] 而忽略 :initial-step -->
     <RuleDebugDrawer v-model="debugVisible" :result="testResult"
                      :initial-step="debugStep" :rules="ruleByStep"
+                     :entry-error="generationError"
                      :source-type="Number(form.bookSourceType) || 0"
                      :enabled-cookie-jar="!!form.enabledCookieJar"
                      :source="form"

@@ -18,31 +18,45 @@
 
 ## 0 · 现在做
 
-### 条目：L4-verify · L4 生成验证的收尾验收
+### 条目：jvm-dump-gate · dump 缺字段时禁止静默继承调用方环境
 状态：todo
 依赖：无
-优先级：P0
-背景：L4「观察到的请求」那一半已交付（桥开 `Network` 域、侧车写 `network`、
-  `core/net_hunt.py` 挑数据请求并把响应变成规则）。剩下的是把它的边界验完。
-约束：受保护站点要先人工预热 profile；快照只覆盖加载期发出的请求，懒加载 / 滚动
-  后才发的抓不到——这是设计边界，不要当缺陷修。
-验收：在一张受保护站点上预热 profile 后跑通一次，拿到「URL + method + body」并
-  由响应生成一条规则；把快照边界（加载期 vs 懒加载）写成一条可复现的记录。
-指针：lessons §八十四，core/net_hunt.py，tests/test_net_hunt.py
+优先级：P1
+背景：`load_dump()` 现在只检查文件存在与新鲜度。`run_direct()` 和 daemon 启动又把缺失的
+  `workingDir` / `environment` 退化成调用方 CWD / 环境，`classpath`、`jvmArgs`、
+  `systemProperties` 的缺失也会悄悄改变直起参数。
+约束：在 dump 入口和直起/常驻边界都做显式 schema 闸门；必需键要校验存在、类型与非空语义，
+  不许用 `or None` / `or {}` 兜底。`javaLauncher` / `javaHomeEnv` 与 `maxHeapSize` 的
+  fallback 也要明确是否属于闸门范围。错误必须逐字段说明，并指向「运行一次 `--refresh`」；
+  产品回到 Gradle 时也必须把该原因带到用户眼前。
+验收：手工删掉 dump 的 `workingDir`、`classpath`、`environment` 各跑一次直起与常驻入口；
+  均在启动子进程前明确报错或留下可见原因，不得继承当前 CWD / 环境继续运行。
+指针：core/jvm_direct.py，core/jvm_daemon.py，core/jvm_debug.py
 
-### 条目：L4-drop-reason · 被抓到但有响应体的过滤要记丢弃原因
-状态：todo
-依赖：L4-verify
-优先级：P0
-背景：`network_types` 里出现 `Fetch=n` 而一条都没留时，看不出是被状态码还是被
-  mime 挡的——现在只能看到「没留」，看不到「为什么没留」。
-约束：只加计数，不改变挑选结论。
-验收：一次实测里每条被丢掉的请求都能说出丢弃原因。
-指针：lessons §八十四，core/net_hunt.py
 
 ---
 
 ## 1 · 排队
+
+### 条目：jvm-runtime-snapshot · 让 JVM 实际运行环境与 dump 对拍
+状态：todo
+依赖：jvm-dump-gate
+优先级：P1
+背景：dump 记录的是 Gradle 任务声明的环境，当前没有证据证明 JVM 实际拿到的环境与它一致。
+  本条吸收原「jvm-dump-parity」：refresh 与产品都使用同一个 test task，但仍需把声明与实际
+  运行时逐字段对拍，不能用任务名相同代替。
+约束：snapshot 只进排障，不进入任何判定链。编码统一复用 `ServiceJson`；`ServiceJsonTest`
+  只负责无 Robolectric 的编码器形状测试，实际快照挂在 `DebugService.main` / `ValidateService.main`
+  等真实入口。对拍口径必须先定义清楚：路径归一化后比较 `workingDir` ↔ `user.dir`；按项比较
+  `classpath` ↔ `java.class.path`；把 `maxHeapSize` 派生的 `-Xmx` 纳入后再比 `jvmArgs` ↔
+  `getInputArguments()`；dump 声明的 `systemProperties` 与 JVM 对应键比对，不能把显式属性表
+  冒充完整 `System.getProperties()`。不同入口的 snapshot 不得互相覆盖。
+验收：refresh、直起、常驻各留一份可追溯 snapshot；完成一次真实对拍，workingDir / classpath /
+  jvmArgs / systemProperties / environment 每个差异逐条归因。差异若会导致今天的静默继承或
+  参数漂移，转入 `jvm-dump-gate` 的约束或修复范围。
+指针：core/jvm_direct.py，appservice/legado-test.init.gradle，appservice/test/io/legado/app/service/ServiceJson.kt，
+  appservice/test/io/legado/app/service/ServiceJsonTest.kt，appservice/test/io/legado/app/service/DebugService.kt，
+  appservice/test/io/legado/app/service/ValidateService.kt，lessons §六十五
 
 ### 条目：proj-3-drop · 前端摘掉本地投影
 状态：todo
@@ -224,15 +238,6 @@
 验收：B/C 档每组能看到并排的可用性对比。
 指针：lessons §三十四，core/dups.py
 
-### 条目：dup-bulk · 合并重复源：「一键处理所有 A 档」
-状态：todo
-依赖：dup-bc
-优先级：P2
-背景：按建议批量应用。
-约束：同站点 + 行为指纹的判据照 lessons §三十四；`tags_added` 只回真增，软删除放最后。
-验收：一键处理能批量应用，且可回退处有记录。
-指针：lessons §三十四，core/dups.py
-
 ### 条目：dup-keep · 合并重复源：「都留着并记住」（需持久化）
 状态：todo
 依赖：无
@@ -325,23 +330,29 @@
 ### 条目：webview-content · webView 型正文（本地与 JVM 都验不了）
 状态：todo
 依赖：无
-优先级：P2
+优先级：P1
 背景：这一条不是「语法回放不了」，是「**取数**拿不到」——正文本身就是 `params`
-  加密 + `xhr_mode`，图片地址只在解密后的 JS 对象里。
+  加密 + `xhr_mode`，图片地址只在解密后的 JS 对象里；漫画鱼章节页就是该形态，静态 HTML
+  没有图片，运行时图片还会变成 `blob:` URL。
 约束：**别把 `content_ok=None` 当成源有问题**；别为了「让本地能验」把 webView
-  选项去掉。调试通道已能验这一类（`ShadowBackstageWebView` 委托浏览器桥）。
-验收：调试通道对这类源能拿到正文；跑批那条路要么同样能验，要么结论里明确标
-  「这类源跑批不可信」。
-指针：lessons §四十九 / §六十 / §七十五
+  选项去掉。调试工作台要明确标出 L2/L3，静态网页视图不能框选时给出「使用本机引擎 / 连
+  App 调试」动作；运行时 DOM / 命中片段的来源必须标明，不能把静态补抓冒充 App 页面。
+验收：调试工作台对这类源能拿到运行时正文或明确给出不可判定原因；若能取得运行时 DOM，
+  命中源码与框选高亮使用同一份材料；跑批那条路要么同样能验，要么结论里明确标「这类源跑批
+  不可信」。
+指针：lessons §四十九 / §六十 / §七十五，appservice/test/io/legado/app/service/ShadowBackstageWebView.kt
 
 ### 条目：unknown-outlet · 「没结论」缺产品出口
 状态：todo
 依赖：无
-优先级：P2
-背景：步骤级 unknown、以及待验证，界面上只有解释文案，没有转化动作。
-约束：归宿是真机复检通道（`S5B-real`），别新造一条通道。
-验收：这类结论旁边有一个能点的动作（如「连 App 验一次」）。
-指针：lessons §五十二
+优先级：P1
+背景：步骤级 unknown、动态正文和生成后未验证，界面上只有解释文案，没有把用户带到已经
+  存在的调试工作台。
+约束：优先回到当前源的调试工作台；只有本机引擎无法复现、需要用户网络出口或 WebView
+  登录态时，才继续指向 `S5B-real`。不新造第三条验证通道。
+验收：unknown 结果旁边有可点击动作；点击后能带着当前源、步骤和 URL 打开调试；需要真机
+  时动作明确显示「连 App 调试 / 真机复检」，并保留原因。
+指针：lessons §五十二，frontend/src/components/RuleDebugDrawer.vue
 
 ### 条目：strengthen-contract · 用契约测试钉住那个隐式约定
 状态：todo
@@ -357,25 +368,44 @@
 ### 条目：strengthen-hint · 没验成时补一句可执行的话
 状态：todo
 依赖：无
-优先级：P2
-背景：那条路已经存在（「开始调试」），只是没人告诉用户。
-约束：文案要说到动作，不解释机制（lessons §四十六）。
-验收：没验成时界面上有一句指向「开始调试」的可执行提示。
-指针：lessons §四十六 / §七十八
+优先级：P1
+背景：生成或验证没成时，当前提示仍容易停在原因文字；用户不知道下一步应进入哪个步骤、
+  该看哪份 HTML。
+约束：文案只指向动作：打开调试工作台、选择失败步骤、查看命中源码或框选节点；不把未知
+  说成规则失败，也不重复解释引擎机制。
+验收：生成失败、验证 unknown、动态正文三种结果各有一句可点击的下一步提示，并能带入对应
+  步骤和 URL。
+指针：lessons §四十六 / §七十八，frontend/src/components/RuleDebugDrawer.vue
 
 ### 条目：strengthen-src · 给生成后的验证标出处
 状态：todo
 依赖：无
-优先级：P2
+优先级：P1
 背景：它是**生成时那一版规则**的结果，**改完规则要重验才作数**。今天这块 UI 没说，
   属于静默过期。
-约束：与抽屉「重新调试本步」同一条纪律。
-验收：生成结果条上标明出处；改了规则后能看出结论已过期。
-指针：lessons §七十八
+约束：验证结果必须标明本机引擎 / App 实测、生成时规则快照和当前规则是否一致；规则回填
+  后只让对应步骤过期，不能把整份结果继续显示成当前结论。与抽屉「重新调试本步」同一条纪律。
+验收：生成结果条上标明出处；改搜索、目录或正文任一规则后，对应验证结论显示过期并提供
+  「重新调试本步」；未改动的步骤仍保留可用结论。
+指针：lessons §七十八，frontend/src/components/SourceEditDialog.vue，frontend/src/components/RuleDebugDrawer.vue
 
 ---
 
 ## 3 · 待决策
+
+### 条目：jvm-runtime-tmp · 明确 java.io.tmpdir 的归属
+状态：blocked
+依赖：jvm-runtime-snapshot
+优先级：P2
+阻塞于：先完成 JVM 实际运行时快照，确认 tmpdir 的真实来源与落盘位置
+背景：当前 dump 没有 `java.io.tmpdir`；它可能由 JVM 按平台规则推导，也可能在未来被显式注入。
+  在快照完成前，不能把「统一运行目录」表述成已经覆盖临时目录。
+约束：根据一次真实快照二选一：① 在 dump / 注入点显式设置到 `data/` 下目录，并保持单一
+  事实来源；② 明确记录 tmpdir 是平台继承值、不属于 dump 推导范围。不要同时保留两套来源，
+  也不要把快照内容接入判定链。
+验收：能用一次实际运行证明临时文件落点，并在一处明确写出 tmpdir 的来源；若选择显式注入，
+  同时验证直起、常驻与 Gradle 的落点一致。
+指针：core/jvm_direct.py，appservice/legado-test.init.gradle，appservice/test/io/legado/app/service/BrowserSession.kt
 
 ### 条目：ai-verify · 十-7 AI 提议验收换真引擎
 状态：blocked
@@ -577,6 +607,20 @@
 验收：见 lessons 对应节。
 指针：lessons §八十六 / §八十七，git commit 9b29ece / 405db1e
 
+### 条目：done-l4-verify · L4 生成验证的收尾验收
+状态：done
+依赖：无
+优先级：P0
+背景：把 L4「观察到的请求」那条链的边界验完（真靶子由浏览器桥扫出来，库里的源
+  选不出来——能写出 `searchUrl` 的源恰恰不需要 L4）。
+约束：受保护站点要先人工预热 profile；快照只覆盖加载期发出的请求，懒加载 / 滚动
+  后才发的抓不到——这是设计边界，不要当缺陷修。
+验收：见 lessons §八十九——观察链路在靶子上通（`GET dogemanga.com/_search` +
+  95KB 响应体、判据齐全）；快照边界做成了**受控可复现演示**；顺带修掉一个真 bug
+  （2 字节的 `CN` 被当成「拿到了页面」→ 生成链落一条 rc=0 的空源，原因被压掉）。
+指针：lessons §八十九，git commit 88c48c6；
+  证据脚本 `data/out/l4_probe.py` / `l4_snapshot_boundary.py`
+
 ### 条目：done-s5a · S5-A 调试通道（A1–A4 + D0–D2 + 第三期 matched_html 回填）
 状态：done
 依赖：无
@@ -584,7 +628,7 @@
 背景：通道 + cookie 注入 + 接进产品 + 直起 / 常驻 daemon + `matched_html` 回填。
 约束：接口能力与协议见 lessons §五十一。
 验收：见 lessons 对应节。
-指针：lessons §五十九 ~ §六十七 / §七十五
+指针：lessons §五十一 / §五十九 / §六十 / §六十五 / §六十六 / §七十五
 
 ### 条目：done-app-engine · 引擎收成一台：健康改由 App 引擎判（B0–B3）
 状态：done

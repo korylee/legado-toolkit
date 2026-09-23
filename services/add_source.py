@@ -337,7 +337,7 @@ def run_add(url, name="", source_type="novel", group="📖新增源",
                 l4 = net_hunt.search_api_via_engine(url, keyword, timeout=120)
             except Exception as e:
                 print(f"   ⚠️  L4 那一步没成：{e}")
-            if l4:
+            if l4 and l4.get("rules"):
                 print(f"   ✅ 找到接口：{l4['request']['method']} {l4['request']['url']}")
                 print(f"      判据：{l4['why']}；{l4['note']}")
                 analysis_notes.append(
@@ -351,12 +351,32 @@ def run_add(url, name="", source_type="novel", group="📖新增源",
                             "coverUrl": l4["rules"].get("coverUrl", ""),
                             "intro": "", "note": l4["note"]}
             else:
+                if l4 and l4.get("note"):
+                    analysis["note"] = l4["note"]
                 print("❌ 未能推断出列表规则，可能页面无搜索结果或结构特殊。")
                 if analysis.get("note"):
                     print(f"  原因：{analysis['note']}")
                 return AddResult(1, analysis.get("note")
                                  or "未能从搜索页推断出列表规则（页面结构特殊？）"
                                     "——L4 也看过了：引擎渲染时这一页没发出可用的接口请求")
+
+    # 搜索模式必须形成一条完整的列表链。只有 bookList 的半成品会让 App
+    # 静默取空，尤其是把页面标题误认成书名时，不能继续落成“成功源”。
+    # 仅发现模式本来就没有搜索规则，不走这道闸门。
+    if not discover_mode:
+        required = {
+            "bookList": "列表规则",
+            "name": "书名规则",
+            "bookUrl": "详情链接规则",
+        }
+        missing = [label for key, label in required.items() if not str(analysis.get(key) or "").strip()]
+        if missing:
+            reason = (analysis.get("note") or "页面上没有足够的搜索结果材料").strip()
+            return AddResult(
+                1,
+                "搜索规则不完整，缺少%s：%s。已停止保存；请打开调试工作台查看搜索页源码，"
+                "并补齐列表、书名和详情链接规则。" % ("、".join(missing), reason),
+            )
 
     # 3.5) 交互确认：分析已完成，此时再问名称/类型/分组/主库最有依据
     if interactive:

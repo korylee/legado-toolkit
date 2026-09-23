@@ -146,11 +146,16 @@ class RunJvmDebugTests(_RunCase):
         """真 fixture 走一遍：形状必须与设备通道同形（前端零改动接得上）。"""
         self._patch("_run_launcher", self._fake_launcher(
             events=self._fixture_events(),
-            meta={"code": 0, "cookie_len": 11, "hint": "", "error": ""}))
+            meta={"code": 0, "cookie_len": 11, "hint": "", "error": "",
+                  "network_events": 3, "network_types": "Fetch=1,XHR=1",
+                  "network_drops": "mime=1"}))
         r = self._run()
         self.assertEqual(r["source"], "jvm")
         self.assertEqual(r["code"], 0)
         self.assertEqual(r["cookie_len"], 11)
+        self.assertEqual(r["network_events"], 3)
+        self.assertEqual(r["network_types"], "Fetch=1,XHR=1")
+        self.assertEqual(r["network_drops"], "mime=1")
         self.assertEqual(r["error"], "")
         self.assertTrue(r["steps"], "必须解析出分段")
         self.assertTrue(all({"name"} <= set(s) for s in r["steps"]))
@@ -198,6 +203,17 @@ class RunJvmDebugTests(_RunCase):
         r = self._run()
         self.assertEqual(r["steps"], [])
         self.assertIn("两种成因", r["error"])
+
+    def test_zero_events_prefers_the_sidecar_error(self) -> None:
+        self._patch("_run_launcher", self._fake_launcher(events=[], meta={
+            # 兼容旧启动器仍写 code=2 的情况：error 是更具体的证据。
+            "code": 2, "hint": "通用零事件提示",
+            "error": "IllegalStateException: browser profile locked"}))
+        r = self._run()
+        self.assertEqual(r["steps"], [])
+        self.assertIn("IllegalStateException: browser profile locked", r["error"])
+        self.assertNotIn("通用零事件提示", r["error"])
+
 
     def test_args_are_restored_after_the_run(self) -> None:
         """跑批与调试共用 `args.properties`：跑完必须还原（否则跑批参数被顶掉）。"""
@@ -267,6 +283,18 @@ class RunJvmDebugTests(_RunCase):
         r = self._run()
         notes = r["steps"][0]["notes"]
         self.assertFalse([n for n in notes if "常驻" in n], notes)
+
+
+class PageFromEngineErrorTests(unittest.TestCase):
+    def test_page_from_engine_surfaces_the_sidecar_error(self) -> None:
+        from core.jvm_debug import page_from_engine
+
+        with mock.patch("core.jvm_debug.run_jvm_debug", return_value={
+            "pages": [], "error": "本机引擎异常：IllegalStateException: profile locked",
+        }):
+            with self.assertRaises(RuntimeError) as ctx:
+                page_from_engine("https://example.com/search?q=我")
+        self.assertIn("IllegalStateException: profile locked", str(ctx.exception))
 
 
 class DefaultLauncherTests(unittest.TestCase):

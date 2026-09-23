@@ -11,6 +11,16 @@ from core.fetch import fetch
 _TITLE_DECOR_RE = re.compile(r"^\s*[\[【(（][^\]】)）]{1,10}[\]】)）]\s*")
 
 
+def _is_static_link(href: str) -> bool:
+    """过滤资源/导航链接，但允许带查询参数的详情页。"""
+    low = (href or "").lower()
+    if any(h != "?" and h in low for h in STATIC_LINK_HINTS):
+        return True
+    # `?` 本身不是静态资源：`/book?id=1` 可能是详情页，但普通搜索/分页链接
+    # 不能成为 bookUrl 的兜底候选。
+    return "?" in low and not any(h in low for h in DETAIL_LINK_HINTS)
+
+
 def _strip_title_decor(text: str) -> str:
     """去掉书名开头的 `[分类]` / `【分类】` / `（完）` 这类标注。"""
     return _TITLE_DECOR_RE.sub("", text or "").strip()
@@ -24,26 +34,64 @@ def _leaf_text_elems(soup, keyword: str):
 
     1. 文本恰好等于关键词
     2. 去掉开头装饰后等于关键词（实测 samsbook：`[历史]绍宋`）
-    3. 文本里含关键词**且是个链接**——第 3 档必须要求链接：页面标题
+    3. 文本里含关键词**且是详情链接**——第 3 档必须要求详情链接：页面标题
        `<title>绍宋-搜索结果(共2条记录)</title>` / `<b>…</b>` 里同样含关键词，
        不挡就会把它们当书名
+
+    书名候选必须能回到详情链接。搜索页标题、搜索框、面包屑和导航里的同名文本
+    即使恰好等于关键词，也没有独立的详情 URL，不能成为结果项。
     """
     from core.html import make_soup
     tiers = {1: [], 2: [], 3: []}
+    seen_detail_urls = set()
+
+    def detail_anchor(el):
+        links = ([el] if getattr(el, "name", None) == "a" else [])
+        links += list(el.find_parents("a"))
+        for link in links:
+            href = (link.get("href") or "").strip()
+            low = href.lower()
+            if not href or _is_static_link(href):
+                continue
+            if any(h in low for h in DETAIL_LINK_HINTS):
+                return link
+        return None
+
+    def is_noise(el):
+        noise_classes = {
+            "nav", "navbar", "breadcrumb", "pagination", "pager", "menu",
+            "search-box", "search-form", "searchbar", "suggest", "autocomplete",
+        }
+        for parent in [el] + list(el.parents):
+            if getattr(parent, "name", None) in ("h1", "title", "input"):
+                return True
+            if set(parent.get("class", []) or []) & noise_classes:
+                return True
+        return False
+
     for el in soup.find_all(True):
         if el.name in ("title", "script", "style", "meta"):
             continue
         txt = el.get_text(strip=True)
         if not txt or el.find_all(True):        # 空文本 / 非叶子
             continue
+        if is_noise(el):
+            continue
+        link = detail_anchor(el)
+        if link is None:
+            continue
+        href = (link.get("href") or "").strip()
+        if href in seen_detail_urls:
+            continue
+        seen_detail_urls.add(href)
         if txt == keyword:
             tiers[1].append(el)
             continue
         if _strip_title_decor(txt) == keyword:
             tiers[2].append(el)
             continue
-        # 第 3 档：含关键词的**链接**（书名锚点几乎总是链接）
-        if keyword in txt and len(txt) <= len(keyword) + 16                 and (el.name == "a" or el.find_parent("a") is not None):
+        # 第 3 档：含关键词的**详情链接**（不能接受页面标题/搜索建议）
+        if keyword in txt and len(txt) <= len(keyword) + 16:
             tiers[3].append(el)
     for tier, why in ((1, ""),
                       (2, "书名带前缀装饰（如「[历史]绍宋」）：按「去掉开头的 [分类] 后"
@@ -53,40 +101,45 @@ def _leaf_text_elems(soup, keyword: str):
         if tiers[tier]:
             return tiers[tier], why
     return [], ""
+
+
+def _class_selector(el):
+    """返回结果项的稳定自身选择器，不把布局变体拼进 CSS。"""
+    if el is None:
+        return ""
+    classes = [c for c in (el.get("class", []) or []) if ":" not in c]
+    return "".join(f".{c}" for c in classes[:3]) if classes else (el.name or "div")
+
+
 def _nearest_list_item(name_elem):
-    """从书名元素向上找列表项（li 优先，无 li 时取含图/链接的分组 div）。"""
+    """从书名元素向上找结果卡片（li 优先，也支持 `.media` 卡片）。"""
     cur = name_elem
     while cur is not None:
         if getattr(cur, "name", None) == "li":
             return cur
         cur = cur.parent
-    # 无 li：取第一个 class 含 item/pic/book/col 的分块
+    # 无 li：优先取当前详情链接所属的结果卡片，避免把 `.media-content`
+    # 向上误判为 `.columns` 这种列表容器。
     cur = name_elem
     while cur is not None:
-        cls = " ".join(cur.get("class", []) or [])
-        if any(k in cls for k in ("item", "pic", "book", "col", "book-item", "comic")):
+        classes = set(cur.get("class", []) or [])
+        if classes & {"media", "card", "item", "result", "book", "comic", "list-item"}:
+            return cur
+        if any(re.match(r"^col(?:-|$)", c) for c in classes):
             return cur
         cur = cur.parent
     return name_elem.parent  # 兜底
+
+
 def _container_selector(list_item, container):
-    """生成 bookList 选择器：容器语义 class（list/comic/book 等）+ 列表项 tag。"""
+    """生成 bookList 选择器：列表容器 + 稳定结果卡片选择器。"""
     ctag = container.name or "div"
-    ltag = list_item.name or "div"
     ccls = [c for c in (container.get("class", []) or []) if ":" not in c]
-    # 优先语义化 class（comic-list/book-list 等），最后才允许 row/grid 等布局类
-    for c in ccls:
-        if any(k in c.lower() for k in ("booklist", "book-list", "comiclist", "comic-list",
-                                        "result", "search", "myorder", "rank", "list")):
-            return f".{c} {ltag}"
-    for c in ccls:
-        if any(k in c.lower() for k in ("book", "comic", "item", "data")):
-            return f".{c} {ltag}"
+    item_sel = _class_selector(list_item)
     if ccls:
-        return f".{ccls[0]} {ltag}"
-    lcls = [c for c in (list_item.get("class", []) or []) if ":" not in c]
-    if lcls:
-        return f".{lcls[0]}"
-    return f"{ctag} {ltag}"
+        # `.columns .media` 这类形状只选结果卡片，不把标题/封面内部 div 一并选进来。
+        return f".{ccls[0]} {item_sel}"
+    return f"{ctag} {item_sel}"
 def _path_selector(el, list_item):
     """生成从列表项到目标元素的 CSS 路径（如 `.name h3 a`）。
 
@@ -173,14 +226,16 @@ def analyze_search_page(html: str, keyword: str) -> dict:
 
     # bookUrl 规则：优先详情页特征链接
     links = [a for a in list_item.find_all("a", href=True)
-             if not any(h in (a.get("href") or "").lower() for h in STATIC_LINK_HINTS)]
+             if not _is_static_link(a.get("href") or "")]
     detail = None
     for a in links:
         href = (a.get("href") or "").lower()
         if any(h in href for h in DETAIL_LINK_HINTS):
             detail = a
             break
-    target = detail or (links[0] if links else None)
+    named_href = (named_elem.get("href") or "").strip() if getattr(named_elem, "name", None) == "a" else ""
+    target = named_elem if named_href and any(h in named_href.lower() for h in DETAIL_LINK_HINTS) \
+        else (detail or (links[0] if links else None))
     if target is not None:
         result["bookUrl"] = _path_selector(target, list_item) + "@href"
 

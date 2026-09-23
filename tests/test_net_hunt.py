@@ -32,6 +32,17 @@ JSON_API = {
         {"bookName": "我的书二", "bookUrl": "/book/2", "coverUrl": "/c/2.jpg", "author": "乙"},
     ]}}, ensure_ascii=False),
 }
+# JSON 信封：数组元素本身是 HTML 片段，不是同构对象。
+HTML_ENVELOPE_API = {
+    "url": "https://dogemanga.com/_search?keyword=" + KEYWORD, "method": "GET", "post_data": "",
+    "status": 200, "mime": "application/json",
+    "body": json.dumps({"manga_cards": [
+        '<div class="comic-list"><div class="item"><a href="/manga/1">我</a>'
+        '<span class="author">甲</span></div></div>',
+        '<div class="comic-list"><div class="item"><a href="/manga/2">我二</a>'
+        '<span class="author">乙</span></div></div>',
+    ]}, ensure_ascii=False),
+}
 #: 埋点：也走 XHR、也带 body，但**不是接口**
 NOISE = {
     "url": "https://a.com/report/statistics?t=1", "method": "POST", "post_data": json.dumps(
@@ -93,6 +104,20 @@ class RulesFromResponseTests(unittest.TestCase):
         self.assertEqual(got["rules"], {})
         self.assertIn("同构对象数组", got["note"])
 
+    def test_json_envelope_of_html_fragments_reuses_html_inference(self):
+        got = rules_from_response(HTML_ENVELOPE_API, KEYWORD)
+        self.assertEqual(got["kind"], "html")
+        self.assertTrue(got["rules"]["bookList"], got)
+        self.assertTrue(got["rules"]["bookUrl"], got)
+        self.assertIn("JSON 信封", got["note"])
+        self.assertIn("HTML 片段", got["note"])
+
+    def test_json_string_fields_are_not_treated_as_html_fragments(self):
+        plain = dict(JSON_API, body=json.dumps({"title": "<not a result>", "message": "ok"}))
+        got = rules_from_response(plain, KEYWORD)
+        self.assertEqual(got["rules"], {})
+        self.assertNotIn("JSON 信封", got["note"])
+
 
 class JsonPathTests(unittest.TestCase):
 
@@ -143,24 +168,27 @@ class ShapeGateTests(unittest.TestCase):
 
 
 class EngineStepTests(unittest.TestCase):
-    """`search_api_via_engine`：拿不到就返回 None（调用方按「这条路没走通」处理）。"""
+    """`search_api_via_engine`：引擎失败返回 None，空候选保留抓包诊断。"""
 
     URL = "https://a.com/s?q=我"
 
     def test_with_requests_hands_back_the_captured_requests(self):
         """`page_from_engine(..., with_requests=True)` 要**真的把抓包带回来**。
 
-        这条盯的是那一句 `return html, list(out.get("network") or [])`——
+        这条盯的是那一句 `return html, list(out.get("network") or []), diagnostics`——
         上面几个测试把它整个换掉了，所以它坏掉也没人知道（变异验证抓到的缺口）。
         """
         from unittest import mock
         from core.jvm_debug import page_from_engine
         fake = {"pages": [{"url": self.URL, "origin": "engine", "html": "<html>页</html>"}],
-                "network": [HTML_API], "error": ""}
+                "network": [HTML_API], "network_events": 3,
+                "network_types": "Fetch=1,XHR=1", "network_drops": "mime=1", "error": ""}
         with mock.patch("core.jvm_debug.run_jvm_debug", return_value=fake):
-            html, entries = page_from_engine(self.URL, with_requests=True)
+            html, entries, diagnostics = page_from_engine(self.URL, with_requests=True)
         self.assertEqual(html, "<html>页</html>")
         self.assertEqual([e["url"] for e in entries], [HTML_API["url"]])
+        self.assertEqual(diagnostics, {"events": 3, "types": "Fetch=1,XHR=1",
+                                       "drops": "mime=1"})
         with mock.patch("core.jvm_debug.run_jvm_debug", return_value=fake):
             self.assertIsInstance(page_from_engine(self.URL), str,
                                   "不带那个开关时仍是老契约（只给 HTML）")
@@ -173,19 +201,25 @@ class EngineStepTests(unittest.TestCase):
 
     def test_a_picked_api_comes_back_with_its_evidence(self):
         from unittest import mock
+        fake_diagnostics = {"events": 3, "types": "Fetch=1,XHR=1", "drops": "mime=1"}
         with mock.patch("core.jvm_debug.page_from_engine",
-                        return_value=("<html>页面</html>", [HTML_API, NOISE])):
+                        return_value=("<html>页面</html>", [HTML_API, NOISE], fake_diagnostics)):
             got = search_api_via_engine("https://a.com/s?q=我", KEYWORD)
         self.assertIsNotNone(got)
         self.assertEqual(got["request"]["url"], HTML_API["url"])
         self.assertTrue(got["why"])
         self.assertTrue(got["rules"]["bookList"])
+        self.assertEqual(got["network_diagnostics"], fake_diagnostics)
 
-    def test_no_usable_request_is_a_none(self):
+    def test_no_usable_request_keeps_drop_reasons(self):
         from unittest import mock
+        fake_diagnostics = {"events": 2, "types": "Fetch=1", "drops": "status=1"}
         with mock.patch("core.jvm_debug.page_from_engine",
-                        return_value=("<html>页面</html>", [NOISE])):
-            self.assertIsNone(search_api_via_engine("https://a.com/s?q=我", KEYWORD))
+                        return_value=("<html>页面</html>", [], fake_diagnostics)):
+            got = search_api_via_engine("https://a.com/s?q=我", KEYWORD)
+        self.assertEqual(got["rules"], {})
+        self.assertIn("Fetch=1", got["note"])
+        self.assertIn("status=1", got["note"])
 
 
 if __name__ == "__main__":

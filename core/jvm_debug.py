@@ -300,8 +300,12 @@ def page_from_engine(url: str, *, timeout: int = 60, render: bool = True,
                             % (out.get("code_text") or "未见输出")))
     html = str(hit.get("html") or "")
     if with_requests:
-        # L4 的材料：这一页**实际发过的接口请求**（侧车 `network` 键，L4 说明见 `core/net_hunt`）
-        return html, list(out.get("network") or [])
+        # L4 的材料：请求本身 +「为什么没留下」的计数（L4 说明见 `core/net_hunt`）。
+        return html, list(out.get("network") or []), {
+            "events": int(out.get("network_events") or 0),
+            "types": str(out.get("network_types") or ""),
+            "drops": str(out.get("network_drops") or ""),
+        }
     return html
 
 
@@ -386,11 +390,25 @@ def run_jvm_debug(source: Dict[str, Any],
     out["cost_sec"] = round(cost, 1)
     out["cookie_len"] = int(meta.get("cookie_len") or 0)
     out["hint"] = str(meta.get("hint") or "")
+    # L4 诊断：network 是过滤后的可用材料，下面三项说明「浏览器发过什么」以及
+    # 「为什么材料没有留下」。只进排障，不参与调试结论。
+    out["network_events"] = int(meta.get("network_events") or 0)
+    out["network_types"] = str(meta.get("network_types") or "")
+    out["network_drops"] = str(meta.get("network_drops") or "")
     # 事件：与设备通道**同形** `[{"t": 秒, "text": 原文}]`（抽屉按这个渲染）
     out["events"] = [{"t": round((e.get("elapsed_ms") or 0) / 1000.0, 3),
                       "text": e.get("text", "")} for e in events_raw]
     if not events_raw:
-        out["error"] = "本机引擎一条事件都没收到。" + out["hint"]
+        # 侧车错误比“零事件”更具体：旧启动器即使仍写 code=2，
+        # 只要留下 error 就不能把进程内异常洗成通用的零事件诊断。
+        sidecar_error = str(meta.get("error") or "").strip()
+        if sidecar_error:
+            out["error"] = "本机引擎异常：" + sidecar_error
+        elif code == 4:
+            out["error"] = "本机引擎入参/输入错误：见侧车"
+        else:
+            out["error"] = "本机引擎一条事件都没收到。" + out["hint"]
+        out["network"] = network_entries(meta.get("network"))
         return out
 
     # 第三期 matched_html 回填（TODO §一点八）：本机引擎会把每段规则命中的 DOM 带回来，
@@ -416,10 +434,13 @@ def run_jvm_debug(source: Dict[str, Any],
     out["network"] = network_entries(meta.get("network"))
     out["steps"] = steps
     out["all_ok"] = all(s["ok"] for s in steps)
-    if code == 2:
+    sidecar_error = str(meta.get("error") or "").strip()
+    if sidecar_error:
+        out["error"] = "本机引擎异常：" + sidecar_error
+    elif code == 2:
         out["error"] = "本机引擎一条事件都没收到。" + out["hint"]
     elif code == 4:
-        out["error"] = "本机引擎入参/输入错误：%s" % (meta.get("error") or "见侧车")
+        out["error"] = "本机引擎入参/输入错误：见侧车"
     elif code in (3, 5) and steps:
         # 超时/截断：**保留部分结果**，把状态写进第一条 step 的附注（同「补抓失败」
         # 那一手：结论比诊断重要）。`all_ok` 不因此变 False——它只说「有没有 fail」

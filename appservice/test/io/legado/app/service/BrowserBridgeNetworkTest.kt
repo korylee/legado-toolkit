@@ -95,6 +95,14 @@ class BrowserBridgeNetworkTest {
     }
 
     @Test
+    fun response_filter_reasons_distinguish_status_and_mime() {
+        assertEquals("status", BrowserBridge.networkDropReason(0, "application/json"))
+        assertEquals("status", BrowserBridge.networkDropReason(403, "application/json"))
+        assertEquals("mime", BrowserBridge.networkDropReason(200, "image/png"))
+        assertEquals(null, BrowserBridge.networkDropReason(200, "application/json"))
+    }
+
+    @Test
     fun the_event_count_counts_every_network_message() {
         val msgs = listOf(request("1", "https://a.com/x", "XHR"),
                           response("1", 200, "application/json"),
