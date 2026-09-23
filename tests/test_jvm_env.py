@@ -130,6 +130,29 @@ class EnvironmentDiscoveryTests(unittest.TestCase):
         self.assertEqual("Gradle installations.paths", found[str(configured)])
         self.assertEqual("Gradle fromEnv:JDK_FOR_GRADLE", found[str(from_env)])
 
+    def test_gradle_user_home_managed_jdks_are_discovered(self) -> None:
+        repo = self._repo()
+        gradle_home = self.root / "gradle-home"
+        managed = gradle_home / "jdks" / "jdk-21"
+        self._java(managed)
+        with patch.dict(os.environ, {"GRADLE_USER_HOME": str(gradle_home)}, clear=False):
+            homes = jvm_env._gradle_java_homes(str(repo))
+        found = {str(home): source for home, source in homes}
+        self.assertEqual("Gradle User Home/jdks", found[str(managed)])
+
+    def test_daemon_criteria_excludes_java_home_only_from_daemon_candidates(self) -> None:
+        repo = self._repo()
+        configured_home = self.root / "configured-daemon-jdk"
+        self._java(configured_home)
+        (repo / "gradle.properties").write_text(
+            "org.gradle.java.home=" + str(configured_home).replace("\\", "\\\\") + chr(10),
+            encoding="utf-8")
+        with patch.dict(os.environ, {"GRADLE_USER_HOME": str(self.root / "gradle-home")}, clear=False):
+            toolchain_homes = jvm_env._gradle_java_homes(str(repo))
+            daemon_homes = jvm_env._gradle_java_homes(str(repo), daemon_criteria=True)
+        self.assertIn(configured_home, [home for home, _ in toolchain_homes])
+        self.assertNotIn(configured_home, [home for home, _ in daemon_homes])
+
     def test_toolchain_requirement_selects_matching_jdk_candidate(self) -> None:
         candidates = [
             jvm_env.Check("JDK 候选", True, found="X:/jdk17/bin/java.exe", detail="JAVA_HOME", version=17),

@@ -24,7 +24,7 @@
 状态：doing
 依赖：无
 优先级：P0
-背景：JVM 校验、调试与 Gradle refresh 依赖 App 源码目录、JDK、Android SDK 和 Gradle 环境；daemon/toolchain 已按 Gradle 显式 JDK 属性、JAVA_HOME/PATH 的候选版本分别检查，但 Gradle 原生自动发现来源尚未完整复刻，结果会注明静态检查边界。固定安装目录猜测、SDK 版本硬编码和盘符根目录回退已移除；Gradle `.bat` 启动器仍意味着当前链路实际限于 Windows。
+背景：JVM 校验、调试与 Gradle refresh 依赖 App 源码目录、JDK、Android SDK 和 Gradle 环境；daemon 与 toolchain 候选已分开，Gradle User Home `jdks/` 也纳入发现，但 Gradle 原生自动发现来源尚未完整复刻，结果会注明静态检查边界。固定安装目录猜测、SDK 版本硬编码和盘符根目录回退已移除；Gradle `.bat` 启动器仍意味着当前链路实际限于 Windows。
 约束：按以下顺序改造环境解析：①App 源码目录仍为主配置；优先从 `JAVA_HOME`、`PATH`、`ANDROID_HOME` / `ANDROID_SDK_ROOT`、App 仓库 `local.properties` 和 Gradle 项目配置读取可验证的权威值，不再依赖固定盘符、`ProgramFiles`、`LOCALAPPDATA` 或特定版本目录作为成功条件；②分别识别启动 Gradle 所需 JDK 与项目编译 toolchain 的要求，按 App 仓库 wrapper / Gradle daemon criteria / toolchain 配置推导并检查，不用一个最低版本常量代替；③Android SDK 按项目实际 `compileSdk` 检查所需平台，安装提示不得另写一套 SDK 版本；④Gradle 用户目录遵循 Gradle 默认值或明确配置，只有经验证确有同卷约束时才应用该约束，不得默认写盘符根目录，且需检查可创建/写入；⑤自动发现不唯一或缺失时再展示可选的高级路径输入/原生选择，不把所有路径强制变成日常必填项；⑥明确支持的操作系统，若保留 Windows-only `.bat`，非 Windows 自检必须明确报不支持；若要支持其他系统则为其提供对应启动器。自检、实际启动与排队任务继续共用同一份已解析 runtime 快照。单条校验、调试和 refresh 启动前自动预检，未通过时阻止启动并把底层原因传到界面。移除个人绝对路径回退；保留 appservice 中承担不可替代测试桥接职责的逻辑。`jvm-runtime-snapshot` 仍独立验收，不以路径一致性代替 JVM 实际快照对拍。
 验收：在 Windows 非标准安装目录、仅靠 `PATH` / `local.properties`、环境变量与项目配置冲突、JDK/SDK 缺失、无效或只读 Gradle 用户目录、跨卷仓库等情况下，发现结果与实际启动一致且能说明采用/拒绝原因；SDK 检查与项目 `compileSdk` 一致。支持范围内各系统的启动器均能执行，范围外系统在启动前明确拒绝。高级路径输入/选择、取消选择后保留原值均符合预期。校验/调试前显示真实可用状态和路径；排队期间配置变化仍使用提交时快照。Gradle 启动失败原因到达界面；完成 appservice 逻辑清单并用调用链说明保留结论。实际 JVM 快照由 `jvm-runtime-snapshot` 验收。
 指针：core/jvm_direct.py，core/jvm_daemon.py，core/jvm_debug.py，backend/api/jvm.py，frontend/src/views/SourcesView.vue，appservice/legado-test.init.gradle，TODO.md（jvm-runtime-snapshot）
