@@ -42,6 +42,94 @@ DUMP_NAME = "test_jvm_env.json"
 REFRESH_TEST = "io.legado.app.service.ServiceJsonTest"
 
 
+class DumpSchemaError(ValueError):
+    """dump 不能安全用于直起/常驻时的结构错误。"""
+
+
+def _dump_error(issues: List[str]) -> DumpSchemaError:
+    details = "；".join(issues) or "结构不是对象"
+    return DumpSchemaError(
+        "JVM dump 字段无效：%s；请运行一次 `scripts/jvm_debug_direct.py --refresh`"
+        % details)
+
+
+def validate_dump(dump: Any) -> Dict[str, Any]:
+    """校验直起所需的完整运行环境，禁止缺字段时继承调用方状态。
+
+    `javaLauncher` / `javaHomeEnv` 是两个明确的 Java 来源，至少有一个非空即可；
+    `maxHeapSize` 是 Gradle 任务的显式配置，缺失时不能静默退回 JVM 默认堆。
+    `jvmArgs` 与 `systemProperties` 可以是空集合，但键和集合类型必须存在且正确。
+    """
+    if not isinstance(dump, dict):
+        raise _dump_error([])
+
+    issues: List[str] = []
+
+    def required_string(name: str) -> Optional[str]:
+        if name not in dump:
+            issues.append("缺少 %s" % name)
+            return None
+        value = dump[name]
+        if not isinstance(value, str) or not value.strip():
+            issues.append("%s 必须是非空字符串" % name)
+            return None
+        return value
+
+    required_string("workingDir")
+    required_string("classpath")
+    required_string("maxHeapSize")
+
+    if "environment" not in dump:
+        issues.append("缺少 environment")
+    elif not isinstance(dump["environment"], dict):
+        issues.append("environment 必须是对象")
+    else:
+        for key, value in dump["environment"].items():
+            if not isinstance(key, str) or not key:
+                issues.append("environment 的键必须是非空字符串")
+                break
+            if not isinstance(value, str):
+                issues.append("environment.%s 必须是字符串" % key)
+                break
+
+    if "jvmArgs" not in dump:
+        issues.append("缺少 jvmArgs")
+    elif not isinstance(dump["jvmArgs"], list):
+        issues.append("jvmArgs 必须是数组")
+    elif any(not isinstance(value, str) or not value.strip()
+             for value in dump["jvmArgs"]):
+        issues.append("jvmArgs 的每一项必须是非空字符串")
+
+    if "systemProperties" not in dump:
+        issues.append("缺少 systemProperties")
+    elif not isinstance(dump["systemProperties"], dict):
+        issues.append("systemProperties 必须是对象")
+    else:
+        for key, value in dump["systemProperties"].items():
+            if not isinstance(key, str) or not key:
+                issues.append("systemProperties 的键必须是非空字符串")
+                break
+            if value is not None and not isinstance(value, str):
+                issues.append("systemProperties.%s 必须是字符串或 null" % key)
+                break
+
+    java_launcher = dump.get("javaLauncher")
+    java_home = dump.get("javaHomeEnv")
+    if java_launcher is not None and (not isinstance(java_launcher, str)
+                                      or not java_launcher.strip()):
+        issues.append("javaLauncher 必须是非空字符串或 null")
+    if java_home is not None and (not isinstance(java_home, str)
+                                  or not java_home.strip()):
+        issues.append("javaHomeEnv 必须是非空字符串或 null")
+    if not ((isinstance(java_launcher, str) and java_launcher.strip())
+            or (isinstance(java_home, str) and java_home.strip())):
+        issues.append("javaLauncher 与 javaHomeEnv 至少一个必须有值")
+
+    if issues:
+        raise _dump_error(issues)
+    return dump
+
+
 def dump_path() -> pathlib.Path:
     return pathlib.Path(data_path("app_probe", DUMP_NAME))
 
@@ -80,6 +168,11 @@ def refresh(timeout_min: int = 30) -> int:
         for ln in (p.stdout or "").strip().splitlines()[-8:]:
             print("  | " + ln)
         return 1
+    try:
+        load_dump(warn_stale=False)
+    except (OSError, ValueError) as e:
+        print("dump 结构无效：%s" % e)
+        return 1
     print("dump 完成：%s（%.1fs）" % (out, cost))
     return 0
 
@@ -89,7 +182,13 @@ def load_dump(warn_stale: bool = True) -> Dict[str, Any]:
     if not p.exists():
         raise FileNotFoundError(
             "没有 dump（%s）：先跑一次 `scripts/jvm_debug_direct.py --refresh`" % p)
-    dump = json.loads(p.read_text(encoding="utf-8"))
+    try:
+        dump = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        raise DumpSchemaError(
+            "JVM dump 无法读取：%s；请运行一次 `scripts/jvm_debug_direct.py --refresh`" % e
+        ) from e
+    validate_dump(dump)
     if warn_stale and dump_is_stale():
         print("⚠️  dump 早于 appservice 的 Kotlin 源码——类可能不是最新的，"
               "建议先 `--refresh`（否则时间与结论都不是真实产物的）")
@@ -101,17 +200,16 @@ def java_exe(dump: Dict[str, Any]) -> str:
 
     **`javaLauncher` 是 JDK 根目录**（`installationPath`），要自己拼 `bin/java`。
     """
+    validate_dump(dump)
     exe_name = "java.exe" if os.name == "nt" else "java"
     cand = dump.get("javaLauncher")
     if cand:
         p = pathlib.Path(str(cand))
         return str(p / "bin" / exe_name) if p.is_dir() else str(p)
-    jh = (dump.get("javaHomeEnv") or os.environ.get("JAVA_HOME") or "").rstrip("\\/")
+    jh = str(dump.get("javaHomeEnv") or "").rstrip("\\/")
     if jh:
-        exe = pathlib.Path(jh) / "bin" / exe_name
-        if exe.exists():
-            return str(exe)
-    return "java"
+        return str(pathlib.Path(jh) / "bin" / exe_name)
+    raise DumpSchemaError("JVM dump 没有 Java 启动来源；请运行一次 `scripts/jvm_debug_direct.py --refresh`")
 
 
 def _quote(arg: str) -> str:
@@ -119,14 +217,14 @@ def _quote(arg: str) -> str:
 
 
 def java_argv(dump: Dict[str, Any], main_class: str = LAUNCHER_CLASS) -> List[str]:
+    validate_dump(dump)
     argv: List[str] = []
-    heap = str(dump.get("maxHeapSize") or "").strip()
+    heap = dump["maxHeapSize"]
     # 堆要显式带上：它是 Test 任务的另一个属性、不在 jvmArgs 里，而它正是为
     # 「全量跑批 OOM」设的 3g——漏了就等于悄悄把堆退回默认值（实测过）
-    if heap:
-        argv.append("-Xmx" + heap)
-    argv += [a for a in (dump.get("jvmArgs") or []) if str(a).strip()]
-    for k, v in (dump.get("systemProperties") or {}).items():
+    argv.append("-Xmx" + heap)
+    argv += list(dump["jvmArgs"])
+    for k, v in dump["systemProperties"].items():
         if v is None:      # 空值不能写 -Dk=null：那是把 null 当字符串传进去
             continue
         argv.append("-D%s=%s" % (k, v))
@@ -152,15 +250,19 @@ def java_command(dump: Dict[str, Any], main_class: str = LAUNCHER_CLASS,
 
 
 def java_env(dump: Dict[str, Any]) -> Dict[str, str]:
-    return {**os.environ, **(dump.get("environment") or {})}
+    validate_dump(dump)
+    # dump 记录的是 Gradle 测试 JVM 的完整环境；不能再合并当前调用方环境，
+    # 否则缺失或漂移的变量会让直起和 Gradle 跑出不同结论。
+    return dict(dump["environment"])
 
 
 def run_direct(dump: Dict[str, Any], main_class: str = LAUNCHER_CLASS, timeout: int = 300,
                use_argfile: bool = True) -> Tuple[int, float, str, str]:
     """直起一次，返回 `(退出码, 墙钟秒, stdout, stderr)`（签名同 `_run_launcher`）。"""
+    validate_dump(dump)
     cmd = java_command(dump, main_class, use_argfile=use_argfile)
     t0 = time.time()
-    p = subprocess.run(cmd, cwd=dump.get("workingDir") or None, env=java_env(dump),
+    p = subprocess.run(cmd, cwd=dump["workingDir"], env=java_env(dump),
                        capture_output=True, text=True, errors="replace", timeout=timeout)
     return p.returncode, time.time() - t0, (p.stdout or ""), (p.stderr or "")
 

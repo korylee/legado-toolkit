@@ -192,8 +192,20 @@ def _export_sources_file(st, urls: Optional[List[str]] = None,
     return path
 
 
-def _run_gradle(timeout_min: int = 90, args_path: Optional[Path] = None) -> int:
-    """调启动器跑批（阻塞直到 Gradle 退出）。返回退出码。
+def _tail_process_output(value: Any, limit: int = 4000) -> str:
+    """把子进程输出收敛成可放进任务结果的文本尾部。"""
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", errors="replace")
+    return str(value).strip()[-limit:]
+
+
+def _run_gradle(timeout_min: int = 90, args_path: Optional[Path] = None) -> Dict[str, Any]:
+    """调启动器跑批（阻塞直到 Gradle 退出）。保留退出码和输出尾部。
+
+    以前这里只返回整数。Gradle 在测试 JVM 启动前失败时，调用方只能知道结果文件
+    不存在，真正的 wrapper/native-platform 错误被丢掉。
 
     **顺手刷新 dump**：与 `core.jvm_debug._run_launcher` 同一条不变式（机制在
     `core.jvm_direct.dump_is_stale` 与 `core.jvm_debug.default_launcher` 那两处，别在这抄）。
@@ -204,13 +216,51 @@ def _run_gradle(timeout_min: int = 90, args_path: Optional[Path] = None) -> int:
            # **必须显式告诉它参数文件在哪**：不给就退回「挨着启动器找」，那里没有，
            # 于是启动器打印一句「跳过」之后什么都不跑（一次看不出来的空跑）
            "LEGADO_APPSERVICE_ARGS": str(args_path or _args_file())}
-    proc = subprocess.run(
-        ["cmd", "/c", str(exe), ":app:testAppDebugUnitTest",
-         "--tests", "io.legado.app.service.ValidateServiceLauncher", "--rerun"],
-        cwd=str(_AGSVC), env=env, capture_output=True, text=True,
-        timeout=timeout_min * 60, errors="replace",
-    )
-    return proc.returncode
+    try:
+        proc = subprocess.run(
+            ["cmd", "/c", str(exe), ":app:testAppDebugUnitTest",
+             "--tests", "io.legado.app.service.ValidateServiceLauncher", "--rerun"],
+            cwd=str(_AGSVC), env=env, capture_output=True, text=True,
+            timeout=timeout_min * 60, errors="replace",
+        )
+        return {
+            "exit": proc.returncode,
+            "stdout": _tail_process_output(proc.stdout),
+            "stderr": _tail_process_output(proc.stderr),
+        }
+    except subprocess.TimeoutExpired as exc:
+        return {
+            "exit": None,
+            "stdout": _tail_process_output(exc.stdout),
+            "stderr": _tail_process_output(exc.stderr),
+            "error": "Gradle 运行超过 %d 分钟" % timeout_min,
+        }
+
+
+def _normalize_gradle_result(raw: Any) -> Dict[str, Any]:
+    """兼容旧调用方/测试桩返回整数，同时统一真实执行结果形状。"""
+    if isinstance(raw, dict):
+        result = dict(raw)
+        result["stdout"] = _tail_process_output(result.get("stdout"))
+        result["stderr"] = _tail_process_output(result.get("stderr"))
+        return result
+    return {"exit": raw, "stdout": "", "stderr": ""}
+
+
+def _gradle_failure_reason(result: Dict[str, Any]) -> str:
+    """生成能直接指导排查的 Gradle 失败原因。"""
+    code = result.get("exit")
+    pieces = ["启动器没有产出结果文件"]
+    if code is not None:
+        pieces.append("Gradle 退出码 %s" % code)
+    if result.get("error"):
+        pieces.append(str(result["error"]))
+    for label, key in (("stderr", "stderr"), ("stdout", "stdout")):
+        text = str(result.get(key) or "").strip()
+        if text:
+            pieces.append("Gradle %s 尾部：\n%s" % (label, text))
+    pieces.append("请先看上面的 Gradle 输出，再处理启动环境")
+    return "\n".join(pieces)
 
 
 def _read_results(path: Path) -> List[Dict[str, Any]]:
@@ -334,7 +384,7 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
     立刻能进来踩同一份 `args.properties`（TODO 里记着的那处）。搬进任务体之后，取消
     最多把这条 job 记成 cancelled，锁仍跟着**执行它的线程**走（它跑完才放）。
     """
-    from core.jvm_debug import BUSY_REASON, RUN_LOCK
+    from core.jvm_debug import RUN_LOCK
 
     # 新任务从提交时生成的目录取输入/输出；旧的直接调用测试仍允许不带目录。
     run_dir_value = str(payload.get("run_dir") or "").strip()
@@ -348,15 +398,18 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
     prep = dict(payload.get("prep") or {})
 
     def _work() -> Dict[str, Any]:
-        if not RUN_LOCK.acquire(blocking=False):
-            _cleanup_run_dir(run_dir)
-            return dict(prep, **{"ok": False, "reason": BUSY_REASON})
+        # The async lane queues JVM jobs; acquire here in the worker thread as well.
+        # This also waits for any non-lane holder instead of failing the submitted job.
+        RUN_LOCK.acquire()
         try:
-            code = (_run_gradle(args_path=args_path) if args_path is not None
-                    else _run_gradle())
+            gradle = _normalize_gradle_result(
+                _run_gradle(args_path=args_path) if args_path is not None
+                else _run_gradle())
+            code = gradle.get("exit")
             if not out_path.exists():
                 return dict(prep, **{"ok": False, "exit": code,
-                                    "reason": "启动器没有产出结果文件（看 Gradle 输出定位）"})
+                                    "reason": _gradle_failure_reason(gradle),
+                                    "gradle": gradle})
             rows = _read_results(out_path)
             batch = _write_meta(rows)
             # **上一版结论的快照必须在落库之前读**：跑完再读，每条源都是 old == new，
@@ -376,7 +429,7 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
             items = check_items_from_checks(
                 {u: fresh[u] for u in names if u in fresh}, names=names)
             dist = Counter(r.get("state") for r in rows)
-            return dict(prep, **{
+            result = dict(prep, **{
                 "ok": code == 0, "exit": code, "batch": batch,
                 "count": len(rows), "dist": dict(dist), "checks": n_checks,
                 # 结果体与**本地校验那条同形状**（前端单条校验两条路都读它）：
@@ -386,6 +439,9 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
                 "transitions": summarize_transitions(prev_checks, items),
                 "items": items[:ITEMS_LIMIT],
             })
+            if code != 0:
+                result["gradle"] = gradle
+            return result
         finally:
             RUN_LOCK.release()
             _cleanup_run_dir(run_dir)

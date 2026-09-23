@@ -144,6 +144,19 @@ class TestContractWithKotlinSource(unittest.TestCase):
                           "退出码 %d（%s）不见了：它是调用方唯一的分派依据" % (code, label))
 
 
+class TestGradleArgsPathContract(unittest.TestCase):
+    """Gradle 任务输入必须和实际传给测试 JVM 的参数文件是同一份。"""
+
+    INIT = (pathlib.Path(__file__).parent.parent /
+            "appservice/legado-test.init.gradle")
+
+    def test_task_input_follows_explicit_args_path(self):
+        text = self.INIT.read_text(encoding="utf-8")
+        self.assertIn("environmentVariable('LEGADO_APPSERVICE_ARGS')", text)
+        self.assertIn("orElse(new File(appservice, 'args.properties').absolutePath)", text)
+        self.assertNotIn("inputs.file(new File(appservice, 'args.properties'))", text)
+
+
 class TestLoginMarkerParity(unittest.TestCase):
     """登录墙特征词**两侧必须逐词相同**（A3）。
 

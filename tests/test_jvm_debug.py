@@ -329,6 +329,17 @@ class DefaultLauncherTests(unittest.TestCase):
         self.assertIs(got, jvm_debug._run_launcher)
         self.assertTrue(any("dump" in n for n in notes), notes)
 
+    def test_invalid_dump_reason_reaches_gradle_fallback(self) -> None:
+        notes: list = []
+        error = jvm_direct.DumpSchemaError(
+            "JVM dump 字段无效：缺少 environment；请运行一次 --refresh")
+        with mock.patch.object(jvm_direct, "dump_is_stale", lambda: False), \
+             mock.patch.object(jvm_direct, "load_dump", side_effect=error):
+            got = jvm_debug.default_launcher(notes)
+        self.assertIs(got, jvm_debug._run_launcher)
+        self.assertTrue(any("environment" in n for n in notes), notes)
+        self.assertTrue(any("--refresh" in n for n in notes), notes)
+
     def test_daemon_failure_falls_back_to_gradle_not_direct(self) -> None:
         """常驻半路死了 → **回落 Gradle**（不是直起）。
 

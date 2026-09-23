@@ -21,6 +21,7 @@ import json
 import pathlib
 import shutil
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -126,28 +127,28 @@ class _Base(unittest.TestCase):
 
 
 class BusyTests(_Base):
-    """"另一个 JVM 任务在跑"时，跑批**什么都不许动**。"""
+    """另一个 JVM 任务在跑时，新任务等待锁释放后再执行。"""
 
     def setUp(self) -> None:
         super().setUp()
         jvm_debug.RUN_LOCK.acquire()
-        self.addCleanup(jvm_debug.RUN_LOCK.release)
+        self.addCleanup(self._release_if_locked)
 
-    def test_busy_reports_reason_and_touches_nothing(self) -> None:
+    @staticmethod
+    def _release_if_locked() -> None:
+        if jvm_debug.RUN_LOCK.locked():
+            jvm_debug.RUN_LOCK.release()
+
+    def test_busy_job_waits_for_existing_jvm_lock(self) -> None:
+        release = threading.Timer(0.1, jvm_debug.RUN_LOCK.release)
+        release.start()
         r = self._call()
-        self.assertFalse(r["started"])
-        self.assertEqual(r["reason"], jvm_debug.BUSY_REASON)
-        self.assertIn("另一个 JVM 任务在跑", r["reason"])
-        # 一条命令都没发、参数文件也没被改写（改写了会把在跑的那个调试参数弄脏）
-        self.assertEqual(self.gradle_calls, 0)
-        self.assertFalse(self._args_file().exists())
-
-    def test_busy_does_not_release_someone_elses_lock(self) -> None:
-        """**释放别人的锁**是这类改动最容易犯的错：一次误释放之后，
-        「忙」这个状态就再也挡不住并发了（两边都以为自己是唯一持有者）。"""
-        self._call()
-        self.assertTrue(jvm_debug.RUN_LOCK.locked())
-
+        release.join()
+        self.assertTrue(r["started"])
+        self.assertTrue(r["ok"])
+        self.assertEqual(self.gradle_calls, 1)
+        self.assertIn("keyword=我", self.args_seen)
+        self.assertFalse(jvm_debug.RUN_LOCK.locked())
 
 class FreeTests(_Base):
     def test_runs_and_releases_the_lock(self) -> None:

@@ -42,6 +42,8 @@ class _Base(unittest.TestCase):
         (self.probe / "appservice" / "legado-gradle.bat").write_text("@echo off\n",
                                                                     encoding="utf-8")
         self.gradle_calls = 0
+        self.gradle_result = 0
+        self.no_output = False
         for p in (
             mock.patch.object(jvm_api, "_AGSVC", self.probe / "appservice"),
             mock.patch.object(jvm_api, "data_dir", lambda: self.probe / "data"),
@@ -67,11 +69,13 @@ class _Base(unittest.TestCase):
         source_path = next(line.split("=", 1)[1] for line in self.args_seen.splitlines()
                            if line.startswith("file="))
         self.batch_seen = json.loads(pathlib.Path(source_path).read_text(encoding="utf-8"))
+        if self.no_output:
+            return self.gradle_result
         out = pathlib.Path(args_path).parent / "results.jsonl"
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps({"url": "https://a.com", "state": "ok"}),
                        encoding="utf-8")
-        return 0
+        return self.gradle_result
 
     def _put_source(self, url: str, name: str) -> None:
         # 用真 API 写源（`upsert_sources` 会建表+算 fingerprint）：比手写 INSERT 更接近
@@ -101,7 +105,8 @@ class _Base(unittest.TestCase):
             if run_job and r.get("job_id"):
                 # **传真的 store**：任务体要读一次「跑之前的 checks 快照」算变化，
                 # 传 None 会当场 AttributeError（生产里 runner 一定会给 store）
-                await jvm_api.run_jvm_job("testjob", Store(self.db), submitted["payload"])
+                got = await jvm_api.run_jvm_job("testjob", Store(self.db), submitted["payload"])
+                return dict(r, **got)
             return r
 
         with mock.patch.object(jvm_api, "Store", lambda *a, **kw: Store(self.db)),              mock.patch("core.jvm_health.store_checks", lambda *a, **kw: 0):
@@ -211,6 +216,21 @@ class FilterScopeTests(_Base):
         """两者都给时**勾选优先**：勾是明确意图，筛选是「这一屏里的」。"""
         self._call(urls=["https://b.com"], filt={"q": "普通"})
         self.assertEqual([s["bookSourceUrl"] for s in self._batch()], ["https://b.com"])
+
+
+class GradleDiagnosticTests(_Base):
+    def test_missing_output_keeps_gradle_tail(self) -> None:
+        """启动 JVM 前失败时，任务结果必须带真实 Gradle 输出。"""
+        self.no_output = True
+        self.gradle_result = {
+            "exit": 1,
+            "stdout": "",
+            "stderr": "Failed to load native library 'native-platform.dll'",
+        }
+        out = self._call(urls=["https://a.com"])
+        self.assertFalse(out["ok"])
+        self.assertIn("native-platform.dll", out["reason"])
+        self.assertEqual(out["gradle"]["exit"], 1)
 
 
 class ResultShapeTests(_Base):

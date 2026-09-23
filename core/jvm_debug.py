@@ -165,6 +165,8 @@ def default_launcher(notes: List[str], args_path: Optional[pathlib.Path] = None)
 
     try:
         if jvm_direct.dump_is_stale():
+            notes.append("这次没能用常驻进程（dump 过期，建议先运行一次 --refresh），"
+                         "已改用 Gradle（启动慢一些）")
             return fallback
         dump = jvm_direct.load_dump(warn_stale=False)
     except Exception as e:                       # dump 读不了（权限/损坏）也别挡住调试

@@ -215,6 +215,7 @@ def start(dump: Dict[str, Any], idle_sec: int = DEFAULT_IDLE_SEC,
           boot_timeout: int = DEFAULT_BOOT_TIMEOUT) -> Dict[str, Any]:
     """拉起一个 daemon 并等它就绪。失败抛 `DaemonError`（**带日志尾巴**，别让人对着空手猜）。"""
     global _PROC, _LOG
+    jvm_direct.validate_dump(dump)
     port = pick_port()
     sig = source_sig(dump)
     cmd = jvm_direct.java_command(dump, DAEMON_CLASS)
@@ -226,7 +227,7 @@ def start(dump: Dict[str, Any], idle_sec: int = DEFAULT_IDLE_SEC,
     _LOG = open(log_path(), "a", encoding="utf-8")
     _LOG.write("\n==== %s 起 daemon：port=%s sig=%s\n" % (time.strftime("%F %T"), port, sig))
     _LOG.flush()
-    _PROC = subprocess.Popen(cmd, cwd=dump.get("workingDir") or None, env=env,
+    _PROC = subprocess.Popen(cmd, cwd=dump["workingDir"], env=env,
                              stdout=_LOG, stderr=subprocess.STDOUT)
     deadline = time.time() + max(5, boot_timeout)
     while time.time() < deadline:
@@ -245,6 +246,7 @@ def start(dump: Dict[str, Any], idle_sec: int = DEFAULT_IDLE_SEC,
 def ensure(dump: Dict[str, Any], idle_sec: int = DEFAULT_IDLE_SEC,
            boot_timeout: int = DEFAULT_BOOT_TIMEOUT) -> Dict[str, Any]:
     """拿到一个**可用**的 daemon：活着且版本对就复用，否则（重）起一个。"""
+    jvm_direct.validate_dump(dump)
     with _LOCK:
         info = _read_info()
         if info.get("port"):
