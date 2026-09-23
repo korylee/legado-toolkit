@@ -197,7 +197,7 @@ def _project_java_requirements(app_repo: str) -> Dict[str, Any]:
         except OSError:
             continue
         versions = [int(value) for value in re.findall(
-            r"(?:JavaVersion\.VERSION_|JavaLanguageVersion\.of\s*\()\s*(\d+)", text)]
+            r"JavaLanguageVersion\.of\s*\(\s*(\d+)", text)]
         versions.extend(int(value) for value in re.findall(
             r"jvmToolchain\s*\(\s*(\d+)\s*\)", text))
         if versions:

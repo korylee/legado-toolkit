@@ -98,6 +98,18 @@ class EnvironmentDiscoveryTests(unittest.TestCase):
             {"wrapper": "9.6.1", "daemon": 21, "toolchain": 21},
             jvm_env._project_java_requirements(str(repo)))
 
+    def test_source_target_compatibility_does_not_define_toolchain(self) -> None:
+        repo = self._repo()
+        (repo / "app" / "build.gradle.kts").write_text(
+            "android { compileOptions {\n"
+            "  sourceCompatibility = JavaVersion.VERSION_17\n"
+            "  targetCompatibility = JavaVersion.VERSION_17\n"
+            "} }\n",
+            encoding="utf-8")
+        requirements = jvm_env._project_java_requirements(str(repo))
+        self.assertIsNone(requirements["toolchain"])
+
+
     def test_java_17_meets_gradle_9_launcher_but_not_daemon_or_toolchain_21(self) -> None:
         java = jvm_env.Check("Java 安装", True, found="X:/jdk17/bin/java.exe", version=17)
         launcher = jvm_env._java_requirement_check(
