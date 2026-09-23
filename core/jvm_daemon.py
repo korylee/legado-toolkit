@@ -344,6 +344,7 @@ def launcher_from_args(dump: Dict[str, Any], idle_sec: int = DEFAULT_IDLE_SEC,
                        slack_sec: int = 90,
                        on_note: Optional[Callable[[str], None]] = None,
                        fallback: Optional[Callable[[], Tuple[int, float, str, str]]] = None,
+                       args_file: Optional[str] = None,
                        fallback_name: str = "直起",
                        ) -> Callable[[], Tuple[int, float, str, str]]:
     """返回一个给 `run_jvm_debug(launcher=...)` 用的可调用对象：**优先 daemon，失败回落**。
@@ -357,7 +358,7 @@ def launcher_from_args(dump: Dict[str, Any], idle_sec: int = DEFAULT_IDLE_SEC,
     """
     def _run() -> Tuple[int, float, str, str]:
         t0 = time.time()
-        cfg = params_from_args()
+        cfg = params_from_args(args_file) if args_file else params_from_args()
         try:
             info = ensure(dump, idle_sec=idle_sec, boot_timeout=boot_timeout)
             r = request(cfg, int(info["port"]), timeout=int(cfg["timeout"]) + slack_sec)

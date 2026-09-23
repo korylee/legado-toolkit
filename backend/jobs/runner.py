@@ -10,6 +10,8 @@
 import asyncio
 import traceback
 import uuid
+import weakref
+from contextlib import asynccontextmanager
 from typing import Any, Awaitable, Callable, Dict, Optional
 
 from core.store import Store, now
@@ -20,6 +22,27 @@ TASKS: Dict[str, asyncio.Task] = {}
 #: 任务类型 -> 执行函数。函数签名 (job_id, store, payload) -> result dict
 HANDLERS: Dict[str, Callable[..., Awaitable[Dict[str, Any]]]] = {}
 
+#: 进程内的有序执行 lane。每个事件循环各有一份，避免测试用多个
+#: ``asyncio.run`` 时复用已绑定到旧 loop 的 asyncio.Lock。
+_LANES: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, Dict[str, asyncio.Lock]]" = weakref.WeakKeyDictionary()
+
+
+def _lane_lock(name: str) -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    lanes = _LANES.setdefault(loop, {})
+    return lanes.setdefault(name, asyncio.Lock())
+
+
+@asynccontextmanager
+async def acquire_lane(name: str):
+    """按提交顺序串行执行一个共享资源 lane。"""
+    lock = _lane_lock(name)
+    await lock.acquire()
+    try:
+        yield
+    finally:
+        lock.release()
+
 
 def register(kind: str):
     def deco(fn):
@@ -28,7 +51,8 @@ def register(kind: str):
     return deco
 
 
-def submit(kind: str, payload: Optional[Dict[str, Any]] = None) -> str:
+def submit(kind: str, payload: Optional[Dict[str, Any]] = None,
+           lane: Optional[str] = None) -> str:
     # 创建任务记录并交给事件循环执行。必须在运行中的 loop 里调用。
     if kind not in HANDLERS:
         raise ValueError("未知任务类型: %s（可用: %s）" % (kind, ", ".join(sorted(HANDLERS))))
@@ -39,13 +63,19 @@ def submit(kind: str, payload: Optional[Dict[str, Any]] = None) -> str:
         st.create_job(job_id, kind, total=int(payload.get("total", 0) or 0), payload=payload)
     finally:
         st.close()
-    TASKS[job_id] = asyncio.create_task(_run(job_id, kind, payload))
+    TASKS[job_id] = asyncio.create_task(_run(job_id, kind, payload, lane))
     return job_id
 
 
-async def _run(job_id: str, kind: str, payload: Dict[str, Any]) -> None:
+async def _run(job_id: str, kind: str, payload: Dict[str, Any],
+               lane: Optional[str] = None) -> None:
     st = Store()
+    lock = _lane_lock(lane) if lane else None
+    acquired = False
     try:
+        if lock is not None:
+            await lock.acquire()
+            acquired = True
         st.update_job(job_id, status="running")
         result = await HANDLERS[kind](job_id, st, payload)
         st.update_job(job_id, status="done", result=result or {})
@@ -57,6 +87,8 @@ async def _run(job_id: str, kind: str, payload: Dict[str, Any]) -> None:
                       result={"error": "%s: %s" % (type(exc).__name__, exc),
                               "trace": traceback.format_exc()[-2000:]})
     finally:
+        if acquired:
+            lock.release()
         st.close()
         TASKS.pop(job_id, None)
 

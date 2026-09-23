@@ -5,6 +5,7 @@ import asyncio
 
 from fastapi import APIRouter, HTTPException
 
+from backend.jobs import runner
 from backend.schemas import (
     AppDebugRequest,
     AppHostRequest,
@@ -24,9 +25,8 @@ async def jvm_debug(body: JvmDebugRequest):
     前端抽屉与卡片零改动——`source` 是 ``"jvm"``，抽屉据此标「本机引擎」而不是
     「App 实测」。
 
-    不排队：跑批与调试共用 `appservice/args.properties`，同时跑会互相踩——锁与那句
-    提示都在 `core.jvm_debug`（拿不到就返回「另一个任务在跑」，错误体而不是 500，
-    用户侧等一下就能自己解决）。
+    后端请求进入共享的 JVM lane，按提交顺序等待；命令行等不经过后端 lane 的调用仍
+    由 `core.jvm_debug.RUN_LOCK` 做非阻塞保护。
     """
     from core.fetch import CACHE_MODES
     from core.jvm_debug import run_jvm_debug
@@ -43,11 +43,18 @@ async def jvm_debug(body: JvmDebugRequest):
     # 界面上配了代理却只走一半（我们走、App 不走）是查不出来的不一致：两边都「正常」，
     # 只有用户能看出网络出口不一样（十-3）
     from core.settings_store import resolve_proxy
-    # 同步阻塞（默认常驻 daemon，回落时才拉 Gradle），必须让出事件循环
-    return await asyncio.to_thread(
-        run_jvm_debug, dict(body.source or {}), body.key or "我",
-        int(body.timeout or 60), body.cookie or "", cache, resolve_proxy(),
-    )
+    # JVM 与批量校验共用一条有序 lane。常驻 daemon 本身也只能串行处理请求；
+    # 后来的调试请求排队，而不是拿不到 `RUN_LOCK` 后直接返回 busy。
+    async with runner.acquire_lane("jvm"):
+        work = asyncio.create_task(asyncio.to_thread(
+            run_jvm_debug, dict(body.source or {}), body.key or "我",
+            int(body.timeout or 60), body.cookie or "", cache, resolve_proxy(),
+        ))
+        try:
+            return await asyncio.shield(work)
+        except asyncio.CancelledError:
+            await asyncio.shield(work)
+            raise
 
 
 @router.post("/app-debug")

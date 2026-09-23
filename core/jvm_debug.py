@@ -20,11 +20,13 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import shutil
 import subprocess
 import threading
 import urllib.parse
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
+from uuid import uuid4
 
 from core.app_debug import (build_steps, engine_pages, fetch_debug_pages, matched_map,
                             network_entries)
@@ -69,7 +71,7 @@ BUSY_REASON = ("另一个 JVM 任务在跑（跑批与调试共用同一个参�
 
 
 def _write_args(src_file: str, key: str, out_file: str, timeout: int, cookie: str = "",
-                proxy: str = "") -> None:
+                proxy: str = "", args_path: Optional[pathlib.Path] = None) -> None:
     """写 args.properties。
 
     **必须 `newline="\n"`**：这是 git 跟踪的文件，而 `write_text` 在 Windows 上把 `\n`
@@ -90,11 +92,12 @@ def _write_args(src_file: str, key: str, out_file: str, timeout: int, cookie: st
     # 而这个文件每次运行都重写，`AppserviceEnv.loadArgs()` 现读现用
     if proxy:
         lines.append("proxy=%s" % proxy)
-    ARGS.parent.mkdir(parents=True, exist_ok=True)
-    ARGS.write_text("\n".join(lines + [""]), encoding="utf-8", newline="\n")
+    target = args_path or ARGS
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("\n".join(lines + [""]), encoding="utf-8", newline="\n")
 
 
-def _run_launcher(timeout_min: int = 20) -> Tuple[int, float, str, str]:
+def _run_launcher(timeout_min: int = 20, args_path: Optional[pathlib.Path] = None) -> Tuple[int, float, str, str]:
     """拉一次 Gradle（阻塞）。返回 `(退出码, 墙钟秒, stdout, stderr)`。
 
     单独一个函数是为了让测试能把它换成假的——**不跑 Gradle 也能测组装逻辑**。
@@ -111,7 +114,7 @@ def _run_launcher(timeout_min: int = 20) -> Tuple[int, float, str, str]:
            # 参数文件在哪：**必须显式告诉它**（`AppserviceEnv.loadArgs` 的第 1 候选）。
            # 不给的话它退回「挨着启动器找」——那里现在没有这个文件，而表现是启动器
            # 打印一句「找不到 args.properties，跳过」之后**什么都不跑**
-           "LEGADO_APPSERVICE_ARGS": str(ARGS)}
+           "LEGADO_APPSERVICE_ARGS": str(args_path or ARGS)}
     p = subprocess.run(
         ["cmd", "/c", str(LAUNCHER), ":app:testAppDebugUnitTest",
          "--tests", LAUNCHER_CLASS, "--rerun"],
@@ -141,7 +144,7 @@ def _env_error() -> str:
     return "本机引擎不可用：%s —— %s" % (first.get("name") or "环境自检未通过", hint)
 
 
-def default_launcher(notes: List[str]) -> Callable[[], Tuple[int, float, str, str]]:
+def default_launcher(notes: List[str], args_path: Optional[pathlib.Path] = None) -> Callable[[], Tuple[int, float, str, str]]:
     """产品默认的拉起方式（S5-A 第二期 D2）：**优先常驻 daemon，不可用回落 Gradle**。
 
     两条边界，都是实测教训：
@@ -157,16 +160,19 @@ def default_launcher(notes: List[str]) -> Callable[[], Tuple[int, float, str, st
     静默降级会让「常驻一直没生效」永远没人发现（而用户只会觉得「也没快多少」）。
     """
     from core import jvm_daemon, jvm_direct
+    target_args = args_path or ARGS
+    fallback = _run_launcher if target_args == ARGS else (lambda: _run_launcher(args_path=target_args))
 
     try:
         if jvm_direct.dump_is_stale():
-            return _run_launcher
+            return fallback
         dump = jvm_direct.load_dump(warn_stale=False)
     except Exception as e:                       # dump 读不了（权限/损坏）也别挡住调试
         notes.append("这次没能用常驻进程（读 dump 失败：%s），已改用 Gradle（启动慢一些）" % e)
-        return _run_launcher
-    return jvm_daemon.launcher_from_args(dump, on_note=notes.append, fallback=_run_launcher,
-                                         fallback_name="Gradle")
+        return fallback
+    return jvm_daemon.launcher_from_args(
+        dump, on_note=notes.append, fallback=fallback,
+        args_file=str(target_args), fallback_name="Gradle")
 
 
 def verify_generated(source: Dict[str, Any], keyword: str, detail_url: str = "",
@@ -320,7 +326,8 @@ def run_jvm_debug(source: Dict[str, Any],
                   ) -> Dict[str, Any]:
     """跑一次 JVM 调试，返回与设备通道同形状的结果。
 
-    ``out_path`` 只是给测试用的覆盖口（默认落在 `data/app_probe/jvm_debug.ndjson`）。
+    ``out_path`` 只是给测试用的覆盖口；未指定时会在 `data/app_probe/runs/` 下创建
+    本次调试的独立目录，完成后清理。
 
     ``launcher`` 是**「拉起那一步」的替换口**（签名同 :func:`_run_launcher`）：
     不给就用 :func:`default_launcher`——**优先常驻 daemon、不可用回落 Gradle**（D2）。
@@ -350,10 +357,21 @@ def run_jvm_debug(source: Dict[str, Any],
     if not RUN_LOCK.acquire(blocking=False):
         out["error"] = BUSY_REASON
         return out
-    saved = ARGS.read_text(encoding="utf-8") if ARGS.exists() else ""
-    ndjson = out_path or data_path("app_probe", "jvm_debug.ndjson")
-    # 源 JSON 落在 **out 同目录**：测试传临时 out 时它跟着走，不会写进真 `data/`
-    src_file = str(pathlib.Path(ndjson).parent / "jvm_debug_src.json")
+    # Web 请求不再共用固定的输出/参数文件；测试或 CLI 显式给 `out_path` 时仍保留
+    # 原来的覆盖口。每个真实请求有自己的目录，daemon 收到的路径也随请求走。
+    owns_run_dir = not bool(out_path)
+    if owns_run_dir:
+        run_dir = pathlib.Path(data_path("app_probe", "runs")) / ("debug-" + uuid4().hex)
+        run_dir.mkdir(parents=True, exist_ok=True)
+        ndjson_path = run_dir / "debug.ndjson"
+        args_path = run_dir / "args.properties"
+        saved = ""
+    else:
+        ndjson_path = pathlib.Path(str(out_path))
+        args_path = ARGS
+        saved = ARGS.read_text(encoding="utf-8") if ARGS.exists() else ""
+    ndjson = str(ndjson_path)
+    src_file = str((run_dir if owns_run_dir else ndjson_path.parent) / "source.json")
     meta_file = pathlib.Path(str(ndjson) + ".meta.json")
     code = -1
     cost = 0.0
@@ -369,8 +387,18 @@ def run_jvm_debug(source: Dict[str, Any],
         pathlib.Path(src_file).parent.mkdir(parents=True, exist_ok=True)
         pathlib.Path(src_file).write_text(json.dumps([src], ensure_ascii=False),
                                           encoding="utf-8", newline="\n")
-        _write_args(src_file, key, ndjson, timeout, cookie, proxy)
-        _, cost, _so, _se = (launcher or default_launcher(launch_notes))()
+        _write_args(src_file, key, ndjson, timeout, cookie, proxy, args_path=args_path)
+        if launcher:
+            launch = launcher
+        elif owns_run_dir:
+            launch = default_launcher(launch_notes, args_path=args_path)
+        else:
+            launch = default_launcher(launch_notes)
+        _, cost, _so, _se = launch()
+    except Exception:
+        if owns_run_dir:
+            shutil.rmtree(str(run_dir), ignore_errors=True)
+        raise
     finally:
         # 还原：跑批与调试共用这一个参数文件，别把调试的参数留在里面
         if saved:
@@ -409,6 +437,8 @@ def run_jvm_debug(source: Dict[str, Any],
         else:
             out["error"] = "本机引擎一条事件都没收到。" + out["hint"]
         out["network"] = network_entries(meta.get("network"))
+        if owns_run_dir:
+            shutil.rmtree(str(run_dir), ignore_errors=True)
         return out
 
     # 第三期 matched_html 回填（TODO §一点八）：本机引擎会把每段规则命中的 DOM 带回来，
@@ -448,4 +478,6 @@ def run_jvm_debug(source: Dict[str, Any],
             steps[0]["notes"] = list(steps[0]["notes"]) + [
                 "本机调试：%s" % out["code_text"]]
             steps[0]["has_notes"] = True
+    if owns_run_dir:
+        shutil.rmtree(str(run_dir), ignore_errors=True)
     return out

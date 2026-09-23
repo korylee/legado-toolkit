@@ -53,6 +53,7 @@ class _Base(unittest.TestCase):
         (agsvc / "legado-gradle.bat").write_text("@echo off\n", encoding="utf-8")
         self.agsvc = agsvc
         self.gradle_calls = 0
+        self.args_seen = ""
         self.fail_gradle = False
 
         for p in (
@@ -71,19 +72,21 @@ class _Base(unittest.TestCase):
             p.start()
             self.addCleanup(p.stop)
 
-    def _fake_export(self, st, urls=None, filt=None) -> pathlib.Path:
+    def _fake_export(self, st, urls=None, filt=None, dest_path=None) -> pathlib.Path:
         # 签名要与真的一致（跑批现在会传「只跑这几条」）：少了这个参数，
         # 打桩就成了「只有测试里才成立的那种函数」（实测踩过：TypeError）
         self.seen_urls = urls
-        f = self.tmp / "batch_src.json"
+        f = pathlib.Path(dest_path or (self.tmp / "batch_src.json"))
+        f.parent.mkdir(parents=True, exist_ok=True)
         f.write_text(json.dumps([{"bookSourceUrl": "https://a.com"}]), encoding="utf-8")
         return f
 
-    def _fake_gradle(self) -> int:
+    def _fake_gradle(self, args_path=None) -> int:
         self.gradle_calls += 1
+        self.args_seen = pathlib.Path(args_path).read_text(encoding="utf-8")
         if self.fail_gradle:
             raise RuntimeError("Gradle 炸了")
-        out = self.tmp / "data" / "app_probe" / "jvm_results.jsonl"
+        out = pathlib.Path(args_path).parent / "results.jsonl"
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text("\n".join(json.dumps({"url": "https://a.com/%d" % i, "state": "ok"})
                                  for i in range(3)), encoding="utf-8")
@@ -99,10 +102,17 @@ class _Base(unittest.TestCase):
         `test_jvm_health` 用真临时库盖着。
         """
         async def go():
-            r = await jvm_api.jvm_run()
+            submitted = {}
+
+            def capture_submit(kind, payload, lane=None):
+                submitted["payload"] = payload
+                return "testjob"
+
+            with mock.patch.object(jvm_api.runner, "submit", side_effect=capture_submit):
+                r = await jvm_api.jvm_run()
             if not r.get("job_id"):
                 return r
-            got = await jvm_api.run_jvm_job("testjob", _FakeStore(), {"prep": {}})
+            got = await jvm_api.run_jvm_job("testjob", _FakeStore(), submitted["payload"])
             # 前端看到的是两份拼起来：`started` 来自请求（预检），其余来自任务结果
             return dict(r, **got)
 
@@ -147,7 +157,7 @@ class FreeTests(_Base):
         self.assertTrue(r["ok"])
         self.assertEqual(r["count"], 3)
         self.assertEqual(self.gradle_calls, 1)
-        self.assertIn("keyword=我", self._args_file().read_text(encoding="utf-8"))
+        self.assertIn("keyword=我", self.args_seen)
         # 归还了，否则界面上「跑批」从此永远说「另一个任务在跑」
         self.assertFalse(jvm_debug.RUN_LOCK.locked())
 

@@ -3,8 +3,7 @@
 
 三个端点：
   GET  /api/jvm/selftest   环境自检（只读：推导 JDK/SDK/gradle-home，不装东西）
-  POST /api/jvm/run        跑批（subprocess 调启动器；同步等完成——S2 先做一次性
-                           调用形态，jobs 化留给确实嫌慢之后）
+  POST /api/jvm/run        提交跑批（subprocess 调启动器；进入 JVM lane 后后台执行）
   GET  /api/jvm/results    最近一批结论（从 meta 读，供列表合并展示）
 
 设计要点：
@@ -16,15 +15,18 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
 from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException
 from fastapi.concurrency import run_in_threadpool
@@ -81,8 +83,23 @@ def _args_file() -> Path:
     return Path(data_dir()).joinpath(*ARGS_PARTS)
 
 
+def _cleanup_run_dir(run_dir: Optional[Path]) -> None:
+    """只清理本模块创建的单次运行目录，缺失目录时绝不把当前目录当目标。"""
+    if run_dir is None:
+        return
+    root = (data_dir() / "app_probe" / "runs").resolve()
+    try:
+        target = run_dir.resolve()
+    except OSError:
+        return
+    if target.parent != root or target == root:
+        return
+    shutil.rmtree(target, ignore_errors=True)
+
+
 def _write_args(keyword: str, timeout: int, concurrency: int, limit: int,
-                out_path: Path, source_file: Path, depth: str = "search") -> None:
+                out_path: Path, source_file: Path, depth: str = "search",
+                args_path: Optional[Path] = None) -> None:
     """把跑批参数写进启动器的参数文件（Launcher 的唯一参数入口）。"""
     from core.jvm_env import selftest  # 局部导入避免循环
     repo = settings_store.load().get("jvm", {}).get("app_repo", "").strip()
@@ -105,13 +122,15 @@ def _write_args(keyword: str, timeout: int, concurrency: int, limit: int,
     # newline="\n" 是必须的：这是 **git 跟踪的文件**，而 write_text 在 Windows 上
     # 把 \n 翻成 \r\n——跑一次批工作区就脏一次（内容与 HEAD 逐字节相同，只差行尾，
     # git diff 连内容都不显示，只在 git add 时冒一句 warning）。同 agent-write-safety §三。
-    _args_file().parent.mkdir(parents=True, exist_ok=True)
-    _args_file().write_text(
+    target = args_path or _args_file()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
         "\n".join(lines) + "\n", encoding="utf-8", newline="\n")
 
 
 def _export_sources_file(st, urls: Optional[List[str]] = None,
-                         filt: Optional[Dict[str, Any]] = None) -> Path:
+                         filt: Optional[Dict[str, Any]] = None,
+                         dest_path: Optional[Path] = None) -> Path:
     """把管理库在用源导出成 JVM 侧可吃的 JSON 文件（与 S1 手工导出同一形状）。
 
     **三种范围，顺序即优先级**：
@@ -167,13 +186,13 @@ def _export_sources_file(st, urls: Optional[List[str]] = None,
     # 产出结果文件」），重则**往 App 仓库里写目录**——那是零入侵红线（AGENTS 的
     # 「App 仓库 git status 必须为空」）。`core.paths.data_dir()` 是仓库自己的解析口。
     probe_dir = data_dir() / "app_probe"
-    path = probe_dir / "jvm_batch.json"
+    path = dest_path or (probe_dir / "jvm_batch.json")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(out, ensure_ascii=False), encoding="utf-8", newline="\n")
     return path
 
 
-def _run_gradle(timeout_min: int = 90) -> int:
+def _run_gradle(timeout_min: int = 90, args_path: Optional[Path] = None) -> int:
     """调启动器跑批（阻塞直到 Gradle 退出）。返回退出码。
 
     **顺手刷新 dump**：与 `core.jvm_debug._run_launcher` 同一条不变式（机制在
@@ -184,7 +203,7 @@ def _run_gradle(timeout_min: int = 90) -> int:
            "LEGADO_TEST_JVM_ENV_OUT": str(data_dir() / "app_probe" / "test_jvm_env.json"),
            # **必须显式告诉它参数文件在哪**：不给就退回「挨着启动器找」，那里没有，
            # 于是启动器打印一句「跳过」之后什么都不跑（一次看不出来的空跑）
-           "LEGADO_APPSERVICE_ARGS": str(_args_file())}
+           "LEGADO_APPSERVICE_ARGS": str(args_path or _args_file())}
     proc = subprocess.run(
         ["cmd", "/c", str(exe), ":app:testAppDebugUnitTest",
          "--tests", "io.legado.app.service.ValidateServiceLauncher", "--rerun"],
@@ -242,24 +261,22 @@ async def jvm_run(body: Optional[JvmRunRequest] = None):
     want_filter = dict((body.filter if body else None) or {})
     want_params = dict((body.params if body else None) or {})
 
-    # **与调试共用一把锁**（`core.jvm_debug.RUN_LOCK`）：两条链都写同一个参数文件，
-    # 同时跑会互相踩。锁的理由、`BUSY_REASON` 那句话与「为什么非阻塞」都在
-    # `core.jvm_debug`（**一处写**，别在这里再抄一份因果）。
-    # 这里只是**先看一眼**（别白建一条任务、别白导出文件）；真正拿锁在任务体里，
-    # 那时拿不到就把它记进 job 结果——两个请求同时挤进来时谁拿到算谁的。
-    from core.jvm_debug import BUSY_REASON, RUN_LOCK
-    if RUN_LOCK.locked():
-        return {"started": False, "reason": BUSY_REASON}
+    # 请求先快照输入，真正执行由 `runner` 的 JVM lane 按提交顺序排队。
+    # 不能在这里抢 `RUN_LOCK`：否则多个请求仍会在 HTTP 层直接失败，而不是进入队列。
     st = Store()
-    src_file = _export_sources_file(st, want_urls, want_filter)
+    run_dir = data_dir() / "app_probe" / "runs" / ("batch-" + uuid4().hex)
+    src_file = _export_sources_file(st, want_urls, want_filter,
+                                    dest_path=run_dir / "sources.json")
     st.close()
     rows = json.loads(src_file.read_text(encoding="utf-8"))
     if want_urls and not rows:
+        _cleanup_run_dir(run_dir)
         # 一条都没匹配上：**说清楚**，别开一次空跑（那会让用户以为「跑过了、源没问题」）
         return {"started": False,
                 "reason": "选中的 %d 条源一条都没匹配上（可能已被删除，或 URL 改过）"
                           % len(want_urls)}
     if want_filter and not want_urls and not rows:
+        _cleanup_run_dir(run_dir)
         return {"started": False, "reason": "当前筛选没有命中任何源，不用跑"}
     # **本次覆盖**：逐键过 coerce（未知键丢弃、越界收敛到区间内），只作用于
     # 这一次跑批，不写回设置（理由见 schemas）。白名单见 JVM_RUN_PARAMS
@@ -279,19 +296,28 @@ async def jvm_run(body: Optional[JvmRunRequest] = None):
                             encoding="utf-8", newline="\n")
     # 绝对路径的理由同 _export_sources_file：这个路径是给**另一个进程**
     # （CWD = App 仓库根）用的，相对路径会落到 App 仓库里去
-    out_path = data_dir() / "app_probe" / "jvm_results.jsonl"
-    if out_path.exists():
-        out_path.unlink()
-    _write_args(eff.get("keyword", "我"), int(eff.get("timeout", 25)),
-                int(eff.get("concurrency", 8)), 0, out_path, src_file,
-                str(eff.get("depth", "search")))
+    out_path = run_dir / "results.jsonl"
+    args_path = run_dir / "args.properties"
+    try:
+        _write_args(eff.get("keyword", "我"), int(eff.get("timeout", 25)),
+                    int(eff.get("concurrency", 8)), 0, out_path, src_file,
+                    str(eff.get("depth", "search")), args_path=args_path)
+    except Exception:
+        _cleanup_run_dir(run_dir)
+        raise
 
     # 交给任务跑（分钟级）：预检里已经算好的那几项回给前端做进度条，
     # 也让 job 结果的形状与旧版一致（`count` / `dist` / `checks` 都是任务体填的）
     prep = {"started": True, "count": len(rows)}
     # `total` 进 payload：一次跑批没有逐条进度（一次 Gradle 调用跑一批），但**条数**
     # 要给前端算「N/N」——不给的话状态条永远停在 0
-    job_id = runner.submit("jvm_run", {"prep": prep, "total": len(rows)})
+    job_id = runner.submit(
+        "jvm_run",
+        {"prep": prep, "total": len(rows), "run_dir": str(run_dir),
+         "source_file": str(src_file), "args_file": str(args_path),
+         "out_path": str(out_path)},
+        lane="jvm",
+    )
     return dict(prep, **{"job_id": job_id})
 
 
@@ -310,16 +336,24 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
     """
     from core.jvm_debug import BUSY_REASON, RUN_LOCK
 
-    # 绝对路径的理由同 `_export_sources_file`：这个路径是给**另一个进程**（CWD =
-    # App 仓库根）用的；两边都从 `data_dir()` 算，免得把它塞进 payload 再复制一遍
-    out_path = data_dir() / "app_probe" / "jvm_results.jsonl"
+    # 新任务从提交时生成的目录取输入/输出；旧的直接调用测试仍允许不带目录。
+    run_dir_value = str(payload.get("run_dir") or "").strip()
+    run_dir = Path(run_dir_value) if run_dir_value else None
+    if run_dir is None:
+        out_path = data_dir() / "app_probe" / "jvm_results.jsonl"
+        args_path = None
+    else:
+        out_path = Path(str(payload.get("out_path") or run_dir / "results.jsonl"))
+        args_path = Path(str(payload.get("args_file") or run_dir / "args.properties"))
     prep = dict(payload.get("prep") or {})
 
     def _work() -> Dict[str, Any]:
         if not RUN_LOCK.acquire(blocking=False):
+            _cleanup_run_dir(run_dir)
             return dict(prep, **{"ok": False, "reason": BUSY_REASON})
         try:
-            code = _run_gradle()
+            code = (_run_gradle(args_path=args_path) if args_path is not None
+                    else _run_gradle())
             if not out_path.exists():
                 return dict(prep, **{"ok": False, "exit": code,
                                     "reason": "启动器没有产出结果文件（看 Gradle 输出定位）"})
@@ -354,8 +388,16 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
             })
         finally:
             RUN_LOCK.release()
+            _cleanup_run_dir(run_dir)
 
-    return await run_in_threadpool(_work)
+    work = asyncio.create_task(run_in_threadpool(_work))
+    try:
+        return await asyncio.shield(work)
+    except asyncio.CancelledError:
+        # 取消 HTTP 请求不能提前释放 JVM lane；线程里的 Gradle 仍在跑，必须等它
+        # 收尾后再让下一个任务进入。
+        await asyncio.shield(work)
+        raise
 
 
 @router.get("/results")

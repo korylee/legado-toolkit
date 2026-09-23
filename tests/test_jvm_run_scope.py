@@ -55,13 +55,19 @@ class _Base(unittest.TestCase):
         ):
             p.start()
             self.addCleanup(p.stop)
+        self.batch_seen = []
+        self.args_seen = ""
         self._put_source("https://A.com/", "大写 + 尾斜杠的原文")
         self._put_source("https://b.com", "普通源")
         self._put_source("https://c.com/", "另一条")
 
-    def _fake_gradle(self) -> int:
+    def _fake_gradle(self, args_path=None) -> int:
         self.gradle_calls += 1
-        out = self.probe / "data" / "app_probe" / "jvm_results.jsonl"
+        self.args_seen = pathlib.Path(args_path).read_text(encoding="utf-8")
+        source_path = next(line.split("=", 1)[1] for line in self.args_seen.splitlines()
+                           if line.startswith("file="))
+        self.batch_seen = json.loads(pathlib.Path(source_path).read_text(encoding="utf-8"))
+        out = pathlib.Path(args_path).parent / "results.jsonl"
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps({"url": "https://a.com", "state": "ok"}),
                        encoding="utf-8")
@@ -84,19 +90,25 @@ class _Base(unittest.TestCase):
         body = JvmRunRequest(urls=urls or [], filter=filt or {}, params=params or {})
 
         async def go():
-            r = await jvm_api.jvm_run(body)
+            submitted = {}
+
+            def capture_submit(kind, payload, lane=None):
+                submitted["payload"] = payload
+                return "testjob"
+
+            with mock.patch.object(jvm_api.runner, "submit", side_effect=capture_submit):
+                r = await jvm_api.jvm_run(body)
             if run_job and r.get("job_id"):
                 # **传真的 store**：任务体要读一次「跑之前的 checks 快照」算变化，
                 # 传 None 会当场 AttributeError（生产里 runner 一定会给 store）
-                await jvm_api.run_jvm_job("testjob", Store(self.db), {"prep": {}})
+                await jvm_api.run_jvm_job("testjob", Store(self.db), submitted["payload"])
             return r
 
         with mock.patch.object(jvm_api, "Store", lambda *a, **kw: Store(self.db)),              mock.patch("core.jvm_health.store_checks", lambda *a, **kw: 0):
             return asyncio.run(go())
 
     def _batch(self) -> list:
-        f = self.probe / "data" / "app_probe" / "jvm_batch.json"
-        return json.loads(f.read_text(encoding="utf-8")) if f.exists() else []
+        return self.batch_seen
 
 
 class ScopeTests(_Base):
@@ -187,15 +199,13 @@ class FilterScopeTests(_Base):
     def test_depth_param_reaches_the_args_file(self) -> None:
         """参数要真的落到给 JVM 的那份 `args.properties` 上——不落就是"填了没用"。"""
         self._call(params={"depth": "content"})
-        args = (self.probe / "data" / "app_probe" / "args.properties").read_text(encoding="utf-8")
-        self.assertIn("depth=content", args)
+        self.assertIn("depth=content", self.args_seen)
 
     def test_unknown_param_key_is_dropped(self) -> None:
         """未知键丢掉、不报错（`settings_store.coerce` 的契约）；合法键照常生效。"""
         self._call(params={"nope": 1, "depth": "toc"})
-        args = (self.probe / "data" / "app_probe" / "args.properties").read_text(encoding="utf-8")
-        self.assertIn("depth=toc", args)
-        self.assertNotIn("nope", args)
+        self.assertIn("depth=toc", self.args_seen)
+        self.assertNotIn("nope", self.args_seen)
 
     def test_selection_wins_over_filter(self) -> None:
         """两者都给时**勾选优先**：勾是明确意图，筛选是「这一屏里的」。"""
@@ -215,8 +225,15 @@ class ResultShapeTests(_Base):
         body = JvmRunRequest(urls=["https://a.com"], filter={}, params={})
 
         async def go():
-            r = await jvm_api.jvm_run(body)
-            return r, await jvm_api.run_jvm_job("testjob", Store(self.db), {"prep": {}})
+            submitted = {}
+
+            def capture_submit(kind, payload, lane=None):
+                submitted["payload"] = payload
+                return "testjob"
+
+            with mock.patch.object(jvm_api.runner, "submit", side_effect=capture_submit):
+                r = await jvm_api.jvm_run(body)
+            return r, await jvm_api.run_jvm_job("testjob", Store(self.db), submitted["payload"])
 
         # DNS 交叉验证要打桩：`store_checks` 默认会真去探测（测试不许联网）
         async def _fake_probe(host):
