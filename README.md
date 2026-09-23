@@ -144,13 +144,14 @@ pnpm build
 前置（缺一不可）：
 
 - 「阅读」App 仓库的本地克隆（如 `D:\Documents\GitHub\legado-with-MD3`）
-- JDK 21 + Android SDK
-- Gradle 缓存——**必须与 App 仓库同盘**（跨盘会走拷贝，慢到不可用）
+- Gradle 可启动的 JDK 与 Android SDK 平台（平台版本按 App 的 `compileSdk` 检查）
+- Gradle 用户目录：默认使用当前用户的 `.gradle`，也可通过 `GRADLE_USER_HOME` 指定
 
 步骤：
 
 1. 设置 → 「JVM 校验」页签 → 只填**一个**路径：App 源码目录。
-   JDK / Android SDK / Gradle 用户目录**全部自动推导**，不用填。
+   JDK 从 `JAVA_HOME` 或 `PATH` 查找，Android SDK 从仓库 `local.properties` 或 SDK 环境变量查找；
+   Gradle 用户目录使用 `GRADLE_USER_HOME` 或 Gradle 默认目录。环境项不用逐个填写。
 2. 同一个页签里点「自检环境」：逐项全绿才能跑批。首次编译要十几分钟（在下载依赖），
    属正常现象。**这一页只配环境**（App 源码目录 + 自检 + 最近一次的结果）。
 3. **跑批的入口在书源列表**：工具栏「全量校验」（或先勾选几条 → 「校验选中」）→
@@ -372,5 +373,3 @@ $env:LEGADO_DATA_DIR = "D:\legado-data"
 注意：deploy/fnos/ 是阅读服务器 + 小说下载器的 NAS 部署示例，不是本管理台的前端部署方案。
 
 ---
-
-

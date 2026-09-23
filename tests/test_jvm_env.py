@@ -9,88 +9,99 @@
 from __future__ import annotations
 
 import os
+import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from core import jvm_env
 
 
-class VfoxJavaTests(unittest.TestCase):
-    """vfox 的 JDK 发现。
-
-    vfox 把 SDK 装在 `<root>/sdks/<name>`，**java 插件两种布局都见过**：
-    单版本时 JDK 根直接落在 `sdks/java/`，多版本时在 `sdks/java/<version>/`。
-    只认一种的话，另一种布局下会「明明装了却报找不到 JDK」。
-    """
-
+class EnvironmentDiscoveryTests(unittest.TestCase):
     def setUp(self) -> None:
-        import tempfile
-
-        self._tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self._tmp.name)
-        self._old = os.environ.get("VFOX_HOME")
-        os.environ["VFOX_HOME"] = str(self.root)
-        # 默认的 ~/.vfox 若真的存在，会与本用例的临时根混淆——显式指向临时根即可，
-        # 因为实现优先读 VFOX_HOME
-        self.sdks = self.root / "sdks" / "java"
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
 
     def tearDown(self) -> None:
-        if self._old is None:
-            os.environ.pop("VFOX_HOME", None)
-        else:
-            os.environ["VFOX_HOME"] = self._old
-        self._tmp.cleanup()
+        self.tmp.cleanup()
 
-    def _make_jdk(self, *parts: str) -> Path:
-        d = self.sdks.joinpath(*parts)
-        (d / "bin").mkdir(parents=True, exist_ok=True)
-        (d / "bin" / ("java.exe" if os.name == "nt" else "java")).write_text("")
-        return d
+    def _java(self, home: Path) -> Path:
+        exe = home / "bin" / ("java.exe" if os.name == "nt" else "java")
+        exe.parent.mkdir(parents=True, exist_ok=True)
+        exe.write_text("", encoding="utf-8")
+        return exe
 
-    def test_single_version_jdk_root(self) -> None:
-        """单版本布局：JDK 根就是 sdks/java 本身。"""
-        self._make_jdk()
-        self.assertEqual(jvm_env._vfox_java_candidates(), [self.sdks])
+    def test_java_home_is_used(self) -> None:
+        home = self.root / "jdk"
+        exe = self._java(home)
+        info = SimpleNamespace(stderr='openjdk version "21.0.1"', stdout="", returncode=0)
+        with patch.dict(os.environ, {"JAVA_HOME": str(home)}, clear=False), \
+                patch("core.jvm_env.subprocess.run", return_value=info):
+            result = jvm_env._find_java()
+        self.assertTrue(result.ok)
+        self.assertEqual(result.found, str(exe))
 
-    def test_versioned_subdirs_newest_first(self) -> None:
-        """多版本布局：sdks/java/<version>/，按目录名倒序（新版优先）。"""
-        self._make_jdk("17.0.9")
-        self._make_jdk("21.0.1")
-        got = [p.name for p in jvm_env._vfox_java_candidates()]
-        self.assertEqual(got, ["21.0.1", "17.0.9"])
+    def test_invalid_java_home_does_not_fall_back(self) -> None:
+        with patch.dict(os.environ, {"JAVA_HOME": str(self.root / "missing")}, clear=False), \
+                patch("core.jvm_env.shutil.which", return_value="C:/other/bin/java.exe"), \
+                patch("core.jvm_env.subprocess.run") as run:
+            result = jvm_env._find_java()
+        self.assertFalse(result.ok)
+        run.assert_not_called()
 
-    def test_missing_root_is_not_an_error(self) -> None:
-        """没装 vfox 不是错误（这条链只是候选之一，后面的目录会兜住）。"""
-        self.assertEqual(jvm_env._vfox_java_candidates(), [])
+    def test_path_is_used_when_java_home_is_absent(self) -> None:
+        exe = self._java(self.root / "jdk")
+        info = SimpleNamespace(stderr='openjdk version "21.0.1"', stdout="", returncode=0)
+        with patch.dict(os.environ, {}, clear=True), \
+                patch("core.jvm_env.shutil.which", return_value=str(exe)), \
+                patch("core.jvm_env.subprocess.run", return_value=info):
+            result = jvm_env._find_java()
+        self.assertTrue(result.ok)
+        self.assertIn("PATH", result.detail)
 
-    def test_home_fallback_when_env_absent(self) -> None:
-        """没有 VFOX_HOME 时退回 ~/.vfox——**这是绝大多数用户的形态**
-        （vfox 默认就装在那儿，没人会去设那个环境变量）。"""
-        os.environ.pop("VFOX_HOME", None)
-        home = self.root / "fakehome"
-        (home / ".vfox" / "sdks" / "java" / "bin").mkdir(parents=True)
-        (home / ".vfox" / "sdks" / "java" / "bin" /
-         ("java.exe" if os.name == "nt" else "java")).write_text("")
-        old_home = Path.home
-        Path.home = classmethod(lambda cls: home)          # type: ignore[assignment]
-        try:
-            got = jvm_env._vfox_java_candidates()
-        finally:
-            Path.home = old_home                            # type: ignore[assignment]
-        self.assertEqual(got, [home / ".vfox" / "sdks" / "java"])
+    def _repo(self) -> Path:
+        repo = self.root / "app"
+        (repo / "app").mkdir(parents=True)
+        (repo / "app" / "build.gradle.kts").write_text(
+            "android {\n    compileSdk = 37\n}\n", encoding="utf-8")
+        return repo
 
-    def test_vfox_ranks_before_legacy_dirs(self) -> None:
-        """vfox 排在常见安装目录之前：用户既然用它管版本，就该以它为准。
+    def _sdk(self, name: str, platform: str = "android-37") -> Path:
+        sdk = self.root / name
+        (sdk / "platforms" / platform).mkdir(parents=True)
+        return sdk
 
-        顺序反了的话，机器上同时存在旧的手装 JDK 时，会静默用旧的那个——
-        而用户刚在 vfox 里切换过版本、正是想让它生效。
-        """
-        self._make_jdk()
-        cands = jvm_env._common_jdk_candidates()
-        self.assertIn(self.sdks, cands)
-        legacy = [c for c in cands if "Program Files" in str(c)]
-        if legacy:
-            self.assertLess(cands.index(self.sdks), cands.index(legacy[0]))
+    def test_sdk_requires_project_compile_sdk(self) -> None:
+        repo, sdk = self._repo(), self._sdk("sdk")
+        with patch.dict(os.environ, {"ANDROID_HOME": str(sdk)}, clear=False):
+            result = jvm_env._find_android_sdk(str(repo))
+        self.assertTrue(result.ok)
+        self.assertEqual(Path(result.found), sdk)
+
+    def test_local_properties_is_authoritative(self) -> None:
+        repo = self._repo()
+        configured, other = self._sdk("configured"), self._sdk("other")
+        escaped = str(configured).replace("\\", "\\\\")
+        (repo / "local.properties").write_text("sdk.dir=" + escaped + "\n", encoding="utf-8")
+        with patch.dict(os.environ, {"ANDROID_HOME": str(other)}, clear=False):
+            result = jvm_env._find_android_sdk(str(repo))
+        self.assertTrue(result.ok)
+        self.assertEqual(Path(result.found), configured)
+
+    def test_other_platform_version_does_not_pass(self) -> None:
+        repo, sdk = self._repo(), self._sdk("sdk", "android-36")
+        with patch.dict(os.environ, {"ANDROID_HOME": str(sdk)}, clear=False):
+            result = jvm_env._find_android_sdk(str(repo))
+        self.assertFalse(result.ok)
+        self.assertIn("platforms;android-37", result.hint)
+
+    def test_gradle_home_uses_default_not_app_drive(self) -> None:
+        with tempfile.TemporaryDirectory() as home:
+            with patch.dict(os.environ, {}, clear=True), patch.object(Path, "home", return_value=Path(home)):
+                result = jvm_env._find_gradle_home("X:/app")
+        self.assertTrue(result.ok)
+        self.assertEqual(Path(result.found), Path(home) / ".gradle")
 
 
 class ProcessEnvironmentTests(unittest.TestCase):
