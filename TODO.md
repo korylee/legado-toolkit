@@ -24,9 +24,9 @@
 状态：doing
 依赖：无
 优先级：P0
-背景：JVM 校验、调试与 Gradle refresh 依赖 App 源码目录、JDK、Android SDK 和 Gradle 环境；目前用户难以在操作前判断这些配置是否可用，也缺少证据保证自检与实际启动使用同一组路径。启动器中的个人路径回退会让错误配置被静默掩盖，失败原因也可能止于后端日志。
-约束：自检和实际启动必须共用同一份解析后的环境配置，并展示实际采用的 App 源码目录、JDK、Android SDK 与 Gradle 用户目录。移除个人绝对路径回退；自动发现失败或路径无效时允许用户输入/修改 App 源码目录，并提供能回填本机真实路径的目录选择按钮（不能用只返回浏览器文件名/句柄的控件冒充路径选择）。文件类配置才提供文件选择；当前 App 源码配置是目录。单条校验、调试和 refresh 启动前自动预检；未配置或未通过时阻止启动并说明缺项，不要求用户额外手动运行自检。启动器/Gradle 的底层错误必须沿 API 到达界面。`jvm-runtime-snapshot` 保持独立待办，作为后续 JVM 对拍工作，不以环境路径校验代替实际 JVM 快照；审查 appservice 内逻辑，逐项说明其是否承担不可替代的测试桥接职责，只有确认重复时才删除，不做路线迁移。
-验收：覆盖自动发现成功、未发现、错误路径、JDK/SDK 缺失和 Gradle 启动失败；目录选择、手工输入、取消选择后保留原值均符合预期。界面能在校验/调试前准确显示可用状态、实际路径及修复动作。提交任务时固定 runtime 快照，排队期间配置变化仍使用该快照；错误配置不会落入个人路径或调用方环境继续运行。完成 appservice 逻辑清单并为保留/删除结论提供调用链依据。实际 JVM 快照字段与真实 Gradle 对拍由 `jvm-runtime-snapshot` 验收。
+背景：JVM 校验、调试与 Gradle refresh 依赖 App 源码目录、JDK、Android SDK 和 Gradle 环境；当前虽统一了自检与启动快照，但 `jvm_env` 仍用 Windows 安装目录猜测 JDK/SDK、分散硬编码 JDK 与 SDK 版本，并把 Gradle 用户目录回退到盘符根目录。换盘符、非标准安装位置或非 Windows 环境会漏检、选错或无法启动；Gradle `.bat` 启动器也意味着当前链路实际限于 Windows。
+约束：按以下顺序改造环境解析：①App 源码目录仍为主配置；优先从 `JAVA_HOME`、`PATH`、`ANDROID_HOME` / `ANDROID_SDK_ROOT`、App 仓库 `local.properties` 和 Gradle 项目配置读取可验证的权威值，不再依赖固定盘符、`ProgramFiles`、`LOCALAPPDATA` 或特定版本目录作为成功条件；②分别识别启动 Gradle 所需 JDK 与项目编译 toolchain 的要求，按 App 仓库 wrapper / Gradle daemon criteria / toolchain 配置推导并检查，不用一个最低版本常量代替；③Android SDK 按项目实际 `compileSdk` 检查所需平台，安装提示不得另写一套 SDK 版本；④Gradle 用户目录遵循 Gradle 默认值或明确配置，只有经验证确有同卷约束时才应用该约束，不得默认写盘符根目录，且需检查可创建/写入；⑤自动发现不唯一或缺失时再展示可选的高级路径输入/原生选择，不把所有路径强制变成日常必填项；⑥明确支持的操作系统，若保留 Windows-only `.bat`，非 Windows 自检必须明确报不支持；若要支持其他系统则为其提供对应启动器。自检、实际启动与排队任务继续共用同一份已解析 runtime 快照。单条校验、调试和 refresh 启动前自动预检，未通过时阻止启动并把底层原因传到界面。移除个人绝对路径回退；保留 appservice 中承担不可替代测试桥接职责的逻辑。`jvm-runtime-snapshot` 仍独立验收，不以路径一致性代替 JVM 实际快照对拍。
+验收：在 Windows 非标准安装目录、仅靠 `PATH` / `local.properties`、环境变量与项目配置冲突、JDK/SDK 缺失、无效或只读 Gradle 用户目录、跨卷仓库等情况下，发现结果与实际启动一致且能说明采用/拒绝原因；SDK 检查与项目 `compileSdk` 一致。支持范围内各系统的启动器均能执行，范围外系统在启动前明确拒绝。高级路径输入/选择、取消选择后保留原值均符合预期。校验/调试前显示真实可用状态和路径；排队期间配置变化仍使用提交时快照。Gradle 启动失败原因到达界面；完成 appservice 逻辑清单并用调用链说明保留结论。实际 JVM 快照由 `jvm-runtime-snapshot` 验收。
 指针：core/jvm_direct.py，core/jvm_daemon.py，core/jvm_debug.py，backend/api/jvm.py，frontend/src/views/SourcesView.vue，appservice/legado-test.init.gradle，TODO.md（jvm-runtime-snapshot）
 
 ## 1 · 排队
