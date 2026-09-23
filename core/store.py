@@ -165,6 +165,7 @@ DDL = [
         total       INTEGER DEFAULT 0,
         payload     TEXT DEFAULT '',
         result_json TEXT DEFAULT '',
+        retry_of    TEXT NOT NULL DEFAULT '',
         expires_at  TEXT NOT NULL DEFAULT '',
         pinned      INTEGER NOT NULL DEFAULT 0,
         created_at  TEXT NOT NULL,
@@ -251,6 +252,7 @@ class Store:
         # list_jobs 只是显示时 LIMIT 50，表本身无限增长
         ("expires_at", "TEXT NOT NULL DEFAULT ''"),
         ("pinned", "INTEGER NOT NULL DEFAULT 0"),
+        ("retry_of", "TEXT NOT NULL DEFAULT ''"),
     ]}
 
     #: v_sources 视图每次重建：CREATE VIEW IF NOT EXISTS 不会更新已存在的视图定义
@@ -1448,27 +1450,29 @@ class Store:
         后起的会把先起的在跑任务标成 failed——任务本身还在跑，结束时会把真实终态
         写回去。属于短暂的显示错乱，不是数据损坏。
         """
+        expiry = time.strftime(
+            "%Y-%m-%d %H:%M:%S",
+            time.localtime(time.time() + JOBS_TTL_DAYS * 86400))
         with self.conn:
             cur = self.conn.execute(
-                "UPDATE jobs SET status = 'failed', result_json = ?, updated_at = ?"
+                "UPDATE jobs SET status = 'failed', result_json = ?, updated_at = ?, expires_at = ?"
                 " WHERE status IN ('running', 'pending')",
                 (json.dumps({"error": "进程重启，任务没写终态（崩溃或被强杀）"},
-                            ensure_ascii=False), now()))
+                            ensure_ascii=False), now(), expiry))
         return cur.rowcount or 0
 
     def sweep_jobs(self) -> int:
         """清掉过期的任务，返回清了几条。**在建新任务时顺带扫**（对齐 export.py 的
         `sweep_exports`，不另开定时器）。
 
-        **跑着的任务不特殊保护**：过期时间是 7 天，一个校验任务跑不了 7 天。
-        真正会留下的是**僵尸行**——服务端重启后状态永远停在 running/pending、
-        再也没人推进它。给 running 开豁免，恰恰会让这些僵尸永远清不掉。
-        （僵尸行的**即时**收尾在 `fail_orphan_jobs`：进程一启动就把它们标成 failed，
-        不用等这 7 天。）
+        **只清理终态任务**：运行中的任务即使超过原始期限也不能被定时器删掉。
+        服务重启时先由 `fail_orphan_jobs` 把孤儿任务标成 failed，再由这里按新的
+        终态保留期清理；因此进程死掉的任务也不会永久占住任务列表。
         """
         with self.conn:
             cur = self.conn.execute(
-                "DELETE FROM jobs WHERE pinned = 0 AND expires_at < ?", (now(),))
+                "DELETE FROM jobs WHERE pinned = 0 AND expires_at < ?"
+                " AND status IN ('done', 'failed', 'cancelled')", (now(),))
         return cur.rowcount or 0
 
     def _backfill_job_expiry(self) -> None:
@@ -1486,7 +1490,8 @@ class Store:
                 "COALESCE(datetime(updated_at, '+%d days'), '') WHERE expires_at = ''"
                 % JOBS_TTL_DAYS)
 
-    def create_job(self, job_id: str, kind: str, total: int = 0, payload=None) -> None:
+    def create_job(self, job_id: str, kind: str, total: int = 0, payload=None,
+                   retry_of: str = "") -> None:
         ts = now()
         expires = time.strftime(
             "%Y-%m-%d %H:%M:%S",
@@ -1494,11 +1499,12 @@ class Store:
         self.sweep_jobs()          # 顺带清理（对齐 exports 的时机）
         with self.conn:
             self.conn.execute(
-                "INSERT INTO jobs(id,kind,status,progress,total,payload,"
+                "INSERT INTO jobs(id,kind,status,progress,total,payload,retry_of,"
                 "expires_at,pinned,created_at,updated_at)"
-                " VALUES (?,?,?,?,?,?,?,0,?,?)",
+                " VALUES (?,?,?,?,?,?,?,?,0,?,?)",
                 (job_id, kind, "pending", 0, int(total),
-                 json.dumps(payload or {}, ensure_ascii=False), expires, ts, ts))
+                 json.dumps(payload or {}, ensure_ascii=False), retry_of or "",
+                 expires, ts, ts))
 
     def update_job(self, job_id: str, status=None, progress=None, total=None,
                    result=None) -> None:
@@ -1506,6 +1512,12 @@ class Store:
         if status is not None:
             sets.append("status = ?")
             args.append(status)
+            if status in ("done", "failed", "cancelled"):
+                terminal_expiry = time.strftime(
+                    "%Y-%m-%d %H:%M:%S",
+                    time.localtime(time.time() + JOBS_TTL_DAYS * 86400))
+                sets.append("expires_at = ?")
+                args.append(terminal_expiry)
         if progress is not None:
             sets.append("progress = ?")
             args.append(int(progress))
@@ -1525,9 +1537,17 @@ class Store:
 
     def list_jobs(self, limit: int = 50) -> List[Dict[str, Any]]:
         return [dict(r) for r in self.conn.execute(
-            "SELECT id, kind, status, progress, total, created_at, updated_at"
+            "SELECT id, kind, status, progress, total, retry_of, expires_at, created_at, updated_at"
             " FROM jobs ORDER BY created_at DESC LIMIT ?", (int(limit),))]
 
+    def delete_job(self, job_id: str) -> bool:
+        """删除一条已结束的任务，运行中的任务必须先取消。"""
+        with self.conn:
+            cur = self.conn.execute(
+                "DELETE FROM jobs WHERE id = ? AND status IN ('done', 'failed', 'cancelled')",
+                (job_id,),
+            )
+        return bool(cur.rowcount)
 
     # ---------------------------------------------------------------- exports
     def create_export(self, uid: str, name: str, urls, filename: str,

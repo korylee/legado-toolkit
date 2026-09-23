@@ -28,7 +28,12 @@ async def _lifespan(_app: FastAPI):
     #   - backend/__main__.py：--reload 下跑在监督进程里，热重载重启子进程时不会执行
     #   - lifespan：跑在**服务进程**里，每次启动/重启都执行一次
     runner.recover_orphans()
-    yield
+    runner.sweep_expired()
+    await runner.start_job_sweeper()
+    try:
+        yield
+    finally:
+        await runner.stop_job_sweeper()
 
 
 app = FastAPI(title="Legado 书源管理", version="0.1.0",

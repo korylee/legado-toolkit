@@ -19,6 +19,11 @@ from core.store import Store, now
 #: 正在运行的任务 {job_id: asyncio.Task}
 TASKS: Dict[str, asyncio.Task] = {}
 
+# 任务过期清理的巡检间隔。TTL 本身由 core.store.JOBS_TTL_DAYS 定义，这里只负责
+# 让清理不依赖“恰好又有人提交了新任务”。
+JOB_SWEEP_INTERVAL_SECONDS = 3600
+_JOB_SWEEPER: Optional[asyncio.Task] = None
+
 #: 任务类型 -> 执行函数。函数签名 (job_id, store, payload) -> result dict
 HANDLERS: Dict[str, Callable[..., Awaitable[Dict[str, Any]]]] = {}
 
@@ -52,7 +57,7 @@ def register(kind: str):
 
 
 def submit(kind: str, payload: Optional[Dict[str, Any]] = None,
-           lane: Optional[str] = None) -> str:
+           lane: Optional[str] = None, retry_of: str = "") -> str:
     # 创建任务记录并交给事件循环执行。必须在运行中的 loop 里调用。
     if kind not in HANDLERS:
         raise ValueError("未知任务类型: %s（可用: %s）" % (kind, ", ".join(sorted(HANDLERS))))
@@ -60,7 +65,8 @@ def submit(kind: str, payload: Optional[Dict[str, Any]] = None,
     payload = payload or {}
     st = Store()
     try:
-        st.create_job(job_id, kind, total=int(payload.get("total", 0) or 0), payload=payload)
+        st.create_job(job_id, kind, total=int(payload.get("total", 0) or 0),
+                      payload=payload, retry_of=retry_of)
     finally:
         st.close()
     TASKS[job_id] = asyncio.create_task(_run(job_id, kind, payload, lane))
@@ -113,6 +119,47 @@ def recover_orphans() -> int:
     if n:
         print("警告: 上次进程结束时 %d 个任务没写终态，已标为 failed" % n, flush=True)
     return n
+
+
+def sweep_expired() -> int:
+    """清理已过期的终态任务，供启动和后台巡检共用。"""
+    st = Store()
+    try:
+        return st.sweep_jobs()
+    finally:
+        st.close()
+
+
+async def start_job_sweeper() -> None:
+    """启动任务 TTL 巡检；只应由服务 lifespan 调用。"""
+    global _JOB_SWEEPER
+    if _JOB_SWEEPER is not None and not _JOB_SWEEPER.done():
+        return
+
+    async def _loop() -> None:
+        while True:
+            await asyncio.sleep(JOB_SWEEP_INTERVAL_SECONDS)
+            try:
+                sweep_expired()
+            except Exception as exc:
+                # 清理失败不能影响任务执行；下一轮继续重试，并把原因留在日志里。
+                print("警告：任务过期清理失败：%s" % exc, flush=True)
+
+    _JOB_SWEEPER = asyncio.create_task(_loop())
+
+
+async def stop_job_sweeper() -> None:
+    """停止服务关闭时的任务 TTL 巡检。"""
+    global _JOB_SWEEPER
+    task = _JOB_SWEEPER
+    _JOB_SWEEPER = None
+    if task is None:
+        return
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
 
 
 def cancel(job_id: str) -> bool:

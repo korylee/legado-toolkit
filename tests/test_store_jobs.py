@@ -5,12 +5,13 @@
 一个校验任务几十 KB（带 `items[:500]`），攒几百条就是几十 MB，而且没有上限。
 
 对照组就在同一个文件里——`exports` 有 `expires_at` + `pinned` + `sweep_exports`。
-这里照它的形状补一套。区别只有一个：**任务不特殊保护 `running`**（见下）。
+这里照它的形状补一套。任务 TTL 只清理终态，`running` / `pending` 由执行生命周期负责。
 """
 
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+import json
 import os
 import shutil
 import unittest
@@ -57,6 +58,7 @@ class JobRetentionTests(unittest.TestCase):
         """
         with Store(self.db) as st:
             st.create_job("old", "check")
+            st.update_job("old", status="done")
             st.create_job("keep", "check")
             self._expire(st, "old")
             st.create_job("new", "check")      # 这一次创建会顺带扫一遍
@@ -112,20 +114,39 @@ class JobRetentionTests(unittest.TestCase):
         self.assertIn("legacy", ids, "老任务被立刻扫掉了——回填没生效")
         self.assertIn("new", ids)
 
-    def test_long_running_jobs_are_not_protected(self) -> None:
-        """**跑着的任务不特殊保护**。
-
-        看着像漏了，其实是有意的：过期时间是 7 天，而一个校验任务跑不了 7 天。
-        真正会留下的是**僵尸行**——服务端重启后状态永远停在 running/pending、
-        再也没人推进它。给 running 开豁免，恰恰会让这些僵尸永远清不掉。
-        """
+    def test_long_running_jobs_are_protected(self) -> None:
+        """自动清理不能删除仍由执行线程持有的任务。"""
         with Store(self.db) as st:
             st.create_job("zombie", "check")
             st.update_job("zombie", status="running")
             self._expire(st, "zombie")
             st.create_job("new", "check")
-            self.assertNotIn("zombie", self._ids(st))
+            self.assertIn("zombie", self._ids(st))
 
+    def test_terminal_jobs_are_swept_after_expiry(self) -> None:
+        with Store(self.db) as st:
+            st.create_job("done", "check")
+            st.update_job("done", status="done")
+            self._expire(st, "done")
+            st.create_job("new", "check")
+            self.assertNotIn("done", self._ids(st))
+
+    def test_delete_job_only_removes_terminal_rows(self) -> None:
+        with Store(self.db) as st:
+            st.create_job("pending", "check")
+            st.create_job("done", "check")
+            st.update_job("done", status="done")
+            self.assertFalse(st.delete_job("pending"))
+            self.assertTrue(st.delete_job("done"))
+            self.assertIsNotNone(st.get_job("pending"))
+            self.assertIsNone(st.get_job("done"))
+
+    def test_retry_origin_is_kept_on_job(self) -> None:
+        with Store(self.db) as st:
+            st.create_job("retry", "ping", payload={"steps": 1}, retry_of="old")
+            row = st.get_job("retry")
+            self.assertEqual(row["retry_of"], "old")
+            self.assertEqual(json.loads(row["payload"]), {"steps": 1})
 
 if __name__ == "__main__":
     unittest.main()
@@ -138,9 +159,7 @@ if __name__ == "__main__":
 #         → test_old_rows_are_backfilled_not_swept 红
 #         **这条是整个机制里唯一会弄丢用户数据的地方**：补列后老行的 expires_at 是
 #         空串，空串按字符串比较小于任何时间戳 → 不清一次就把历史任务全删了
-#  M30  sweep 的 WHERE 加 `status NOT IN ('running','pending')`（给跑着的开豁免）
-#         → test_long_running_jobs_are_not_protected 红
-#         → test_expired_jobs_are_swept **也红**——`create_job` 建出来的就是 pending，
-#           豁免之后它们永远不会被清。这条顺带证明了「不做豁免」是必须的
+#  M30  sweep 去掉终态过滤（把 pending/running 一并删掉）
+#         → test_long_running_jobs_are_protected 红：执行中的任务不能被 TTL 清理
 #  M31  sweep 的 WHERE 去掉 `pinned = 0`
 #         → test_pinned_jobs_survive 红
