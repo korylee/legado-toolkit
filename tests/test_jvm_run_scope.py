@@ -408,6 +408,61 @@ class ResultShapeTests(_Base):
         self.assertIn("Gradle", result["execution_note"])
         self.assertEqual(self.gradle_calls, 1)
 
+    def test_single_uses_daemon_when_gradle_readiness_is_incomplete(self) -> None:
+        def fake_daemon(_dump, args_file):
+            args = pathlib.Path(args_file).read_text(encoding="utf-8")
+            out = pathlib.Path(next(line.split("=", 1)[1] for line in args.splitlines()
+                                    if line.startswith("out=")))
+            out.write_text(json.dumps({"url": "https://a.com", "state": "ok"}),
+                           encoding="utf-8")
+            return {"code": 0, "cost_ms": 3, "error": ""}
+
+        incomplete = {"ok": False, "checks": [{"id": "android_sdk", "ok": False,
+                                                 "hint": "缺少 platforms;android-37"}]}
+        executable = {"ok": True, "checks": [], "reason": "", "source_sig": "sig"}
+        with mock.patch.object(jvm_api, "readiness", return_value=incomplete), \
+             mock.patch.object(jvm_api, "execution_readiness", return_value=executable), \
+             mock.patch("core.jvm_direct.load_dump", return_value={
+                 "workingDir": "C:/repo", "classpath": "x", "maxHeapSize": "3g",
+                 "environment": {}, "jvmArgs": [], "systemProperties": {},
+                 "javaHomeEnv": "C:/jdk"}), \
+             mock.patch("core.jvm_validate_daemon.run", side_effect=fake_daemon) as daemon:
+            _request, result = self._run_single()
+
+        self.assertEqual(result["execution_mode"], "validate_daemon")
+        self.assertEqual(result["execution_plan"], "validate_daemon")
+        self.assertEqual(self.gradle_calls, 0)
+        daemon.assert_called_once()
+
+    def test_single_does_not_fallback_when_preparation_is_incomplete(self) -> None:
+        incomplete = {"ok": False, "checks": [{"id": "android_sdk", "ok": False,
+                                                 "hint": "缺少 platforms;android-37"}]}
+        executable = {"ok": True, "checks": [], "reason": "", "source_sig": "sig"}
+        with mock.patch.object(jvm_api, "readiness", return_value=incomplete), \
+             mock.patch.object(jvm_api, "execution_readiness", return_value=executable), \
+             mock.patch("core.jvm_direct.load_dump", return_value={
+                 "workingDir": "C:/repo", "classpath": "x", "maxHeapSize": "3g",
+                 "environment": {}, "jvmArgs": [], "systemProperties": {},
+                 "javaHomeEnv": "C:/jdk"}), \
+             mock.patch("core.jvm_validate_daemon.run", side_effect=RuntimeError("端口不可用")):
+            _request, result = self._run_single()
+
+        self.assertFalse(result["ok"])
+        self.assertIn("不回退 Gradle", result["reason"])
+        self.assertEqual(result["execution_mode"], "validate_daemon")
+        self.assertEqual(self.gradle_calls, 0)
+
+    def test_batch_still_requires_complete_gradle_readiness(self) -> None:
+        incomplete = {"ok": False, "checks": [{"id": "android_sdk", "ok": False,
+                                                 "hint": "缺少 platforms;android-37"}]}
+        with mock.patch.object(jvm_api, "readiness", return_value=incomplete):
+            result = self._call()
+
+        self.assertFalse(result["started"])
+        self.assertIn("readiness", result)
+        self.assertNotIn("execution_readiness", result)
+        self.assertEqual(self.gradle_calls, 0)
+
 
 class ExportTests(_Base):
     """导出这一步本身。**这里曾经是个真缺陷**：`export_sources()` 给的是解析好的书源

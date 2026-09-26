@@ -208,6 +208,122 @@ def load_dump(warn_stale: bool = True) -> Dict[str, Any]:
     return dump
 
 
+def _execution_check(name: str, ok: bool, detail: str = "",
+                     hint: str = "") -> Dict[str, Any]:
+    return {"id": name, "name": name, "ok": bool(ok),
+            "detail": detail, "hint": hint}
+
+
+def _classpath_entries(classpath: str) -> List[str]:
+    return [item.strip().strip('"') for item in classpath.split(os.pathsep)
+            if item.strip()]
+
+
+def _missing_classpath_entries(classpath: str) -> List[str]:
+    """找出直起 JVM 必须存在的 classpath 项。
+
+    Java 的 classpath 只把末尾的 ``*`` 当目录通配符；这里不展开 jar，
+    只确认目录本身存在，避免把一个大目录的内容复制到 manifest 里。
+    """
+    missing: List[str] = []
+    for entry in _classpath_entries(classpath):
+        path = pathlib.Path(entry)
+        if entry.endswith("*"):
+            path = path.parent
+        if not path.exists():
+            missing.append(entry)
+    return missing
+
+
+def execution_readiness(dump: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """检查单条 Validate daemon 可以直接复用的运行时，不触碰 Gradle/SDK。
+
+    这是完整 ``jvm_env.readiness`` 的轻量 sibling：它只验证已经生成的
+    JVM dump、dump 引用的文件、Java 启动器和源码是否仍与编译产物匹配。
+    不下载、不编译，也不把这个结果冒充完整准备态。
+    """
+    checks: List[Dict[str, Any]] = []
+    path = dump_path()
+    if dump is None:
+        try:
+            dump = load_dump(warn_stale=False)
+        except Exception as exc:
+            reason = ("runtime snapshot 不可用：%s；请先刷新 runtime snapshot"
+                      "（scripts/jvm_debug_direct.py --refresh）" % exc)
+            checks.append(_execution_check(
+                "runtime_snapshot", False, reason,
+                "先完成一次 JVM 环境准备并刷新 runtime snapshot"))
+            return {"ok": False, "checks": checks, "reason": reason,
+                    "dump_path": str(path), "source_sig": ""}
+
+    try:
+        validate_dump(dump)
+    except Exception as exc:
+        reason = ("runtime snapshot 不可用：%s；请先刷新 runtime snapshot"
+                  "（scripts/jvm_debug_direct.py --refresh）" % exc)
+        checks.append(_execution_check(
+            "runtime_snapshot", False, reason,
+            "先刷新 runtime snapshot，不能直接复用当前文件"))
+        return {"ok": False, "checks": checks, "reason": reason,
+                "dump_path": str(path), "source_sig": ""}
+
+    stale = dump_is_stale()
+    checks.append(_execution_check(
+        "runtime_snapshot", not stale,
+        "snapshot=%s" % path,
+        "snapshot 早于 appservice Kotlin 源码，请先刷新" if stale else ""))
+
+    working_dir = pathlib.Path(str(dump["workingDir"]))
+    working_ok = working_dir.is_dir()
+    checks.append(_execution_check(
+        "working_directory", working_ok, str(working_dir),
+        "dump 引用的 workingDir 不存在，请刷新 snapshot" if not working_ok else ""))
+
+    missing = _missing_classpath_entries(str(dump["classpath"]))
+    classpath_ok = not missing
+    detail = "classpath %d 项" % len(_classpath_entries(str(dump["classpath"])))
+    if missing:
+        detail += "；缺失：" + "、".join(missing[:5])
+        if len(missing) > 5:
+            detail += " 等 %d 项" % len(missing)
+    checks.append(_execution_check(
+        "runtime_classpath", classpath_ok, detail,
+        "classpath 中有文件消失，请重新刷新 runtime snapshot" if not classpath_ok else ""))
+
+    try:
+        java = pathlib.Path(java_exe(dump))
+        java_ok = java.is_file()
+        java_detail = str(java)
+    except Exception as exc:
+        java_ok = False
+        java_detail = str(exc)
+    checks.append(_execution_check(
+        "java_executable", java_ok, java_detail,
+        "dump 引用的 Java 不存在，请刷新 snapshot 或修复 JDK" if not java_ok else ""))
+
+    try:
+        # 延迟导入避免 jvm_direct <-> jvm_daemon 的模块初始化循环；两条 daemon
+        # 客户端仍共用同一份源码签名实现。
+        from core.jvm_daemon import source_sig
+        sig = source_sig(dump)
+    except Exception as exc:
+        sig = ""
+        checks.append(_execution_check(
+            "source_signature", False, str(exc),
+            "无法读取 appservice 测试源码，请检查源码目录"))
+    else:
+        checks.append(_execution_check(
+            "source_signature", True, sig,
+            ""))
+
+    failed = [item for item in checks if not item["ok"]]
+    reason = "；".join(
+        "%s：%s" % (item["name"], item.get("hint") or item.get("detail") or "未通过")
+        for item in failed)
+    return {"ok": not failed, "checks": checks, "reason": reason,
+            "dump_path": str(path), "source_sig": sig}
+
+
 def java_exe(dump: Dict[str, Any]) -> str:
     """用 Gradle 自己会 fork 的那个 JVM（dump 里的 `javaLauncher`），其次 JAVA_HOME。
 

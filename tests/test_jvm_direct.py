@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from core import jvm_daemon, jvm_direct
@@ -90,6 +91,34 @@ class BoundaryTests(unittest.TestCase):
                     with self.assertRaises(jvm_direct.DumpSchemaError):
                         jvm_daemon.ensure(dump)
                 start.assert_not_called()
+
+
+class ExecutionReadinessTests(unittest.TestCase):
+    def test_missing_snapshot_returns_actionable_reason(self) -> None:
+        missing = Path("D:/missing/test_jvm_env.json")
+        with mock.patch.object(jvm_direct, "dump_path", return_value=missing):
+            result = jvm_direct.execution_readiness()
+
+        self.assertFalse(result["ok"])
+        self.assertIn("snapshot", result["reason"])
+        self.assertIn("刷新", result["reason"])
+        self.assertEqual(result["dump_path"], str(missing))
+
+    def test_valid_snapshot_does_not_require_android_sdk_or_gradle(self) -> None:
+        dump = valid_dump(
+            workingDir=str(Path.cwd()),
+            classpath=__file__,
+        )
+        with mock.patch.object(jvm_direct, "dump_path", return_value=Path(__file__)), \
+             mock.patch.object(jvm_direct, "dump_is_stale", return_value=False), \
+             mock.patch.object(jvm_direct, "java_exe", return_value=__file__):
+            result = jvm_direct.execution_readiness(dump)
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual({item["id"] for item in result["checks"]}, {
+            "runtime_snapshot", "working_directory", "runtime_classpath",
+            "java_executable", "source_signature",
+        })
 
 
 if __name__ == "__main__":

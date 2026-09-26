@@ -39,6 +39,7 @@ from core.paths import data_dir
 from core.store import Store
 from core import settings_store
 from core.jvm_env import process_environment, readiness
+from core.jvm_direct import execution_readiness
 from core.loader import _normalize_url
 from core.paths import ARGS_PARTS
 
@@ -386,11 +387,6 @@ async def jvm_run(body: Optional[JvmRunRequest] = None):
     if not conf.get("app_repo"):
         raise HTTPException(400, "JVM 校验未配置：请先在设置里填 App 源码目录并自检")
 
-    # 自检不过就不开跑——跑一半 OOM/路径错只会浪费时间
-    st_conf = readiness(conf.get("app_repo", ""), conf.get("android_sdk_dir", ""))
-    if not st_conf["ok"]:
-        return {"started": False, "readiness": st_conf}
-
     #: 只跑这几条源（列表页勾选的）。空 = 全部在用源
     want_urls = [u for u in ((body.urls if body else []) or []) if str(u or "").strip()]
     want_filter = dict((body.filter if body else None) or {})
@@ -429,6 +425,28 @@ async def jvm_run(body: Optional[JvmRunRequest] = None):
         rows = rows[:limit]
         src_file.write_text(json.dumps(rows, ensure_ascii=False),
                             encoding="utf-8", newline="\n")
+
+    # 完整 readiness 是 Gradle/SDK 的准备态；单条请求可以只依赖已有的
+    # runtime snapshot + Validate daemon。必须在最终截断后再判断 single，
+    # 否则「全量 + limit=1」会误走批量规则。
+    st_conf = readiness(conf.get("app_repo", ""), conf.get("android_sdk_dir", ""))
+    single = len(rows) == 1
+    exec_conf: Dict[str, Any] = {}
+    preparation_ready = bool(st_conf.get("ok"))
+    allow_gradle_fallback = preparation_ready
+    if not preparation_ready:
+        if not single:
+            _cleanup_run_dir(run_dir)
+            return {"started": False, "readiness": st_conf}
+        exec_conf = execution_readiness()
+        if not exec_conf.get("ok"):
+            _cleanup_run_dir(run_dir)
+            return {
+                "started": False,
+                "reason": exec_conf.get("reason") or "单条 JVM 执行态未就绪",
+                "readiness": st_conf,
+                "execution_readiness": exec_conf,
+            }
     # 绝对路径的理由同 _export_sources_file：这个路径是给**另一个进程**
     # （CWD = App 仓库根）用的，相对路径会落到 App 仓库里去
     out_path = run_dir / "results.jsonl"
@@ -443,7 +461,12 @@ async def jvm_run(body: Optional[JvmRunRequest] = None):
 
     # 交给任务跑（分钟级）：预检里已经算好的那几项回给前端做进度条，
     # 也让 job 结果的形状与旧版一致（`count` / `dist` / `checks` 都是任务体填的）
-    prep = {"started": True, "count": len(rows)}
+    prep = {
+        "started": True,
+        "count": len(rows),
+        "execution_plan": "validate_daemon" if single else "gradle",
+        "preparation_ready": preparation_ready,
+    }
     # `total` 进 payload：一次跑批没有逐条进度（一次 Gradle 调用跑一批），但**条数**
     # 要给前端算「N/N」——不给的话状态条永远停在 0
     job_id = runner.submit(
@@ -451,7 +474,10 @@ async def jvm_run(body: Optional[JvmRunRequest] = None):
          {"prep": prep, "total": len(rows), "run_dir": str(run_dir),
           "source_file": str(src_file), "args_file": str(args_path),
           "out_path": str(out_path), "runtime": dict(st_conf.get("runtime") or {}),
-          "single": len(rows) == 1,
+          "single": single,
+          "allow_gradle_fallback": allow_gradle_fallback,
+          "execution_readiness": exec_conf,
+          "readiness": st_conf,
           "readiness_fingerprint": st_conf.get("fingerprint", ""),
           "readiness_checked_at": st_conf.get("checked_at", "")},
         lane="jvm",
@@ -496,14 +522,19 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
             gradle: Dict[str, Any] = {}
             daemon_response: Dict[str, Any] = {}
 
-            # 单条校验是交互路径：优先复用常驻 Validate JVM。daemon 只负责执行，
-            # 结果仍从同一个 results.jsonl 读回；任何启动/协议/产物问题都保留原因并
-            # 回到 Gradle，不能把常驻失败伪装成源结论。
+            # 单条校验优先复用常驻 Validate JVM。daemon 只负责执行，结果仍从同一个
+            # results.jsonl 读回；准备态不完整时，daemon 失败不能偷偷再开 Gradle。
             if payload.get("single") and args_path is not None:
                 try:
                     from core import jvm_validate_daemon, jvm_direct
 
                     dump = jvm_direct.load_dump(warn_stale=False)
+                    if (payload.get("execution_readiness") and
+                            not payload.get("allow_gradle_fallback", True)):
+                        current_exec = execution_readiness(dump)
+                        if not current_exec.get("ok"):
+                            raise jvm_validate_daemon.ValidateDaemonError(
+                                current_exec.get("reason") or "单条 JVM 执行态在排队期间失效")
                     daemon_response = jvm_validate_daemon.run(dump, str(args_path))
                     daemon_code = daemon_response.get("code")
                     if daemon_code != 0:
@@ -523,6 +554,18 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
                         out_path.unlink()
                     except OSError:
                         pass
+
+                    if not payload.get("allow_gradle_fallback", True):
+                        return dict(prep, **{
+                            "ok": False,
+                            "exit": None,
+                            "reason": (daemon_failure + "；完整 Gradle 准备态未通过，"
+                                       "本次不回退 Gradle，避免再次触发冷启动/缺 SDK"),
+                            "execution_mode": "validate_daemon",
+                            "execution_note": "单条执行态失败，未使用 Gradle fallback",
+                            "readiness": payload.get("readiness") or {},
+                            "execution_readiness": payload.get("execution_readiness") or {},
+                        })
 
             if execution_mode != "validate_daemon":
                 gradle = _normalize_gradle_result(

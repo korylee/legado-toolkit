@@ -21,7 +21,7 @@
 ---
 
 ### 条目：jvm-single-fast-path · 单条校验脱离 Gradle 冷启动
-状态：todo
+状态：doing
 依赖：jvm-runtime-snapshot, jvm-task-manifest
 优先级：P0
 背景：当前单条校验从 `POST /api/jvm/run` 进入 Gradle + `ValidateServiceLauncher`；服务重启后每次都要重新配置/启动 Gradle，导致本应快速反馈的单源校验长时间卡在启动阶段。完整 App 构建环境（包括项目声明的 Android SDK 平台）只应是首次准备、刷新 runtime snapshot 和 Gradle fallback 的前置条件，不能让已有有效 snapshot 的单条执行每次重复走完整环境检查。调试 daemon 的结果不能直接冒充校验结论，两者必须继续使用各自的协议和判定口径。
