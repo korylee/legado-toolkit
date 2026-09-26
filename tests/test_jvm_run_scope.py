@@ -186,7 +186,8 @@ class ScopeTests(_Base):
         with self.assertRaises(asyncio.CancelledError):
             await task
 
-    def test_cancel_waits_for_worker_and_cleans_run_dir(self) -> None:
+    def test_batch_cancel_keeps_run_dir_for_resume(self) -> None:
+        """批量取消**保留**运行目录：已完成块的 DONE/results 是重试恢复的依据。"""
         run_dir = self.probe / "data" / "app_probe" / "runs" / "cancelled"
         run_dir.mkdir(parents=True)
         source_file = run_dir / "sources.json"
@@ -200,7 +201,7 @@ class ScopeTests(_Base):
             allow_gradle_fallback=True, runtime={"app_repo": "X:/repo"},
             readiness={"ok": True}, execution_readiness={},
             readiness_fingerprint="", readiness_checked_at="", source_count=1,
-            urls=["https://a.com"], params={"keyword": "我"})
+            urls=["https://a.com"], params={"keyword": "我"}, chunks=[1])
         control = {"started": threading.Event(), "release": threading.Event()}
         payload = {"prep": {"started": True}, "manifest": manifest,
                    **control}
@@ -215,7 +216,9 @@ class ScopeTests(_Base):
                 await self._cancelled_job(payload)
 
         asyncio.run(go())
-        self.assertFalse(run_dir.exists())
+        # 取消不伪装完成，但批量现场保留（重试恢复的依据）；锁必须已归还
+        self.assertTrue(run_dir.exists())
+        self.assertTrue((run_dir / "args.properties").exists())
         from core.jvm_debug import RUN_LOCK
         self.assertTrue(RUN_LOCK.acquire(blocking=False))
         RUN_LOCK.release()
@@ -235,9 +238,11 @@ class ScopeTests(_Base):
         result = asyncio.run(go())
         manifest = submitted["payload"]["manifest"]
         self.assertEqual(result["job_id"], "manifest-job")
-        self.assertEqual(manifest["schema"], 2)
+        self.assertEqual(manifest["schema"], 3)
         self.assertEqual(manifest["source_count"], 1)
         self.assertEqual(manifest["execution_plan"], "validate_daemon")
+        # 单条不分块，但大小序列同样冻结在 manifest 里
+        self.assertEqual(manifest["chunks"], [1])
         # 归一化的范围与生效参数也是「提交即冻结」的输入（AGENTS #5：库里归一化
         # 过的 URL 与导出原文必须在这里统一）
         self.assertEqual(manifest["urls"], ["https://a.com"])
@@ -752,6 +757,89 @@ class RunDirRetentionTests(_Base):
         self.assertLessEqual(len(list(runs.glob("batch-*"))), FAILED_RUN_DIR_CAP)
         # 保留的必须是最新那个（本次失败现场），而不是任意 cap 个
         self.assertTrue(self._latest_batch_dir().exists())
+
+
+class ChunkExecutionTests(_Base):
+    """批量分块：一块一次 JVM 占用，块间交还调度权，失败中止余下块，重试跳过已完成块。"""
+
+    _CHUNK_SETTINGS = {"network": {"proxy": ""},
+                       "jvm": {"app_repo": "X:/repo", "keyword": "我", "timeout": 25,
+                               "concurrency": 8, "limit": 2, "depth": "search",
+                               "chunk_size": 1}}
+
+    def test_batch_runs_one_gradle_call_per_chunk(self) -> None:
+        with mock.patch.object(jvm_api.settings_store, "load",
+                               lambda: dict(self._CHUNK_SETTINGS)):
+            result = self._call()
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(self.gradle_calls, 2)
+        self.assertEqual(len(result["chunk_reports"]), 2)
+        self.assertEqual(result["count"], 2)
+
+    def test_chunk_failure_aborts_remaining_chunks(self) -> None:
+        calls = {"n": 0}
+
+        def flaky_gradle(args_path=None, runtime=None):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                return {"exit": 1, "stdout": "", "stderr": "boom"}
+            return self._fake_gradle(args_path=args_path, runtime=runtime)
+
+        with mock.patch.object(jvm_api.settings_store, "load",
+                               lambda: dict(self._CHUNK_SETTINGS)),              mock.patch.object(jvm_api, "_run_gradle", side_effect=flaky_gradle):
+            result = self._call()
+        self.assertFalse(result["ok"])
+        self.assertIn("第 2/2 块失败", result["reason"])
+        self.assertEqual(calls["n"], 2)
+        self.assertFalse(result["chunk_reports"][1]["ok"])
+
+    def test_retry_skips_completed_chunks(self) -> None:
+        """重试恢复：DONE 标记在的块不重跑，只补失败块——不重复请求站点。"""
+        submitted = {}
+
+        def capture_submit(kind, payload, lane=None):
+            submitted["payload"] = payload
+            return "resume-job"
+
+        calls = {"n": 0}
+
+        def flaky_gradle(args_path=None, runtime=None):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                return {"exit": 1, "stdout": "", "stderr": "boom"}
+            return self._fake_gradle(args_path=args_path, runtime=runtime)
+
+        async def go():
+            with mock.patch.object(jvm_api, "Store",
+                                   lambda *a, **kw: Store(self.db)),                  mock.patch.object(jvm_api.runner, "submit",
+                                   side_effect=capture_submit),                  mock.patch.object(jvm_api.settings_store, "load",
+                                   lambda: dict(self._CHUNK_SETTINGS)),                  mock.patch("core.jvm_health.store_checks",
+                            lambda *a, **kw: 0),                  mock.patch.object(jvm_api, "_run_gradle",
+                                   side_effect=flaky_gradle):
+                await jvm_api.jvm_run(
+                    JvmRunRequest(urls=["https://a.com", "https://b.com"]))
+                return await jvm_api.run_jvm_job(
+                    "resume-job", Store(self.db), submitted["payload"])
+
+        asyncio.run(go())                     # 第一轮：第 2 块失败，目录保留
+        saved_payload = submitted["payload"]
+        calls["n"] = 0
+
+        async def retry():
+            with mock.patch.object(jvm_api, "Store",
+                                   lambda *a, **kw: Store(self.db)),                  mock.patch.object(jvm_api.settings_store, "load",
+                                   lambda: dict(self._CHUNK_SETTINGS)),                  mock.patch("core.jvm_health.store_checks",
+                            lambda *a, **kw: 0),                  mock.patch.object(jvm_api, "_run_gradle",
+                                   side_effect=flaky_gradle):
+                return await jvm_api.run_jvm_job(
+                    "resume-job-2", Store(self.db), saved_payload)
+
+        result = asyncio.run(retry())
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(calls["n"], 1)       # 只有第 2 块真跑了
+        resumed = [c for c in result["chunk_reports"] if c.get("resumed")]
+        self.assertEqual(len(resumed), 1)
+
 
 
 class GradleLogTests(unittest.TestCase):

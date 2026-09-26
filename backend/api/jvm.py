@@ -107,16 +107,18 @@ def _build_jvm_manifest(*, run_dir: Path, source_file: Path, args_file: Path,
                         execution_readiness: Dict[str, Any],
                         readiness_fingerprint: str,
                         readiness_checked_at: str, source_count: int,
-                        urls: List[str], params: Dict[str, Any]) -> Dict[str, Any]:
+                        urls: List[str], params: Dict[str, Any],
+                        chunks: Optional[List[int]] = None) -> Dict[str, Any]:
     """生成一次提交即固定的 JVM 任务输入快照。
 
     ``payload`` 会落库，但 worker 仍不应依赖多处散落字段重新推导路径和执行计划。
     manifest 的哈希只覆盖实际字段；worker 读到后先验哈希，再消费这份快照。
     ``urls`` 是归一化后的范围（AGENTS #5），``params`` 是本次生效的校验参数——
     两者都是「提交即冻结」的输入，落进运行目录的 manifest.json 后不可再改。
+    ``chunks`` 是批量分块的大小序列（按 urls 顺序切分；单条=[1]），同样冻结。
     """
     manifest = {
-        "schema": 2,
+        "schema": 3,
         "run_dir": str(run_dir),
         "source_file": str(source_file),
         "args_file": str(args_file),
@@ -132,6 +134,7 @@ def _build_jvm_manifest(*, run_dir: Path, source_file: Path, args_file: Path,
         "readiness_checked_at": str(readiness_checked_at or ""),
         "urls": [str(u) for u in urls],
         "params": dict(params or {}),
+        "chunks": [int(n) for n in (chunks or [])],
     }
     encoded = json.dumps(manifest, ensure_ascii=False, sort_keys=True,
                          separators=(",", ":"))
@@ -149,7 +152,8 @@ def _job_retry_of(job_id: str) -> str:
     return str(row.get("retry_of") or "")
 
 
-def _write_run_manifest(run_dir: Path, manifest: Dict[str, Any], job_id: str) -> None:
+def _write_run_manifest(run_dir: Path, manifest: Dict[str, Any], job_id: str,
+                        chunk: str = "") -> None:
     """把本次任务的输入信封写进运行目录（不可变的复查交付物）。
 
     SQLite 仍是任务管理事实源；这个文件让「重启/异常退出后这次任务用了什么
@@ -162,7 +166,7 @@ def _write_run_manifest(run_dir: Path, manifest: Dict[str, Any], job_id: str) ->
         "schema": 1,
         "job_id": job_id,
         "owner_pid": os.getpid(),
-        "chunk": "",
+        "chunk": chunk,
         "generation": 1,
         "retry_of": _job_retry_of(job_id),
         "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -209,10 +213,11 @@ def _manifest_error(manifest: Any) -> str:
         "source_count", "single", "execution_plan", "allow_gradle_fallback",
         "runtime", "readiness", "execution_readiness",
         "readiness_fingerprint", "readiness_checked_at", "urls", "params",
+        "chunks",
     }
     missing = sorted(required - set(manifest))
-    if missing or manifest.get("schema") != 2:
-        detail = "缺少字段：%s" % ", ".join(missing) if missing else "schema 不是 2"
+    if missing or manifest.get("schema") != 3:
+        detail = "缺少字段：%s" % ", ".join(missing) if missing else "schema 不是 3"
         return "JVM 任务 manifest 结构不受支持：%s" % detail
     if not isinstance(manifest.get("runtime"), dict) or not isinstance(manifest.get("readiness"), dict):
         return "JVM 任务 manifest 结构不受支持：runtime/readiness 不是对象"
@@ -479,17 +484,18 @@ _PROGRESS_POLL_INTERVAL = 1.0
 
 
 def _tail_progress(job_id: str, out_path: Path, stop: threading.Event,
-                   interval: float, cap: int = 0) -> None:
+                   interval: float, cap: int = 0, base: int = 0) -> None:
     """跑批期间把 results.jsonl 已落盘的完整行数当进度上报。
 
     Kotlin 侧每写完一条源就 flush（`ValidateService.kt` 的 writer 回调），数 ``\\n``
     就是「实际完成几条」，不是估的——这与「不编假进度」不冲突，编的是没有依据的数。
     文件还没出现（JVM 尚未写出第一条）时保持安静，不把 0 反复写库。
+    分块执行时 ``base`` 是前面各块已完成条数（跨块累计）。
     """
     while not stop.wait(interval):
         try:
             with open(out_path, "rb") as fh:
-                done = fh.read().count(b"\n")
+                done = base + fh.read().count(b"\n")
         except OSError:
             continue
         if cap and done > cap:
@@ -636,6 +642,10 @@ async def jvm_run(body: Optional[JvmRunRequest] = None):
         "preparation_ready": preparation_ready,
     }
     execution_plan = "validate_daemon" if single else "gradle"
+    # 分块大小（提交即冻结）：settings 的 jvm.chunk_size，越界值已被 coerce 收敛
+    cs = int(eff.get("chunk_size") or 0) or 25
+    n = len(rows)
+    chunk_sizes = [cs] * (n // cs) + ([n % cs] if n % cs else []) or [n]
     manifest = _build_jvm_manifest(
         run_dir=run_dir, source_file=src_file, args_file=args_path,
         out_path=out_path, single=single, execution_plan=execution_plan,
@@ -648,6 +658,7 @@ async def jvm_run(body: Optional[JvmRunRequest] = None):
         source_count=len(rows),
         urls=[_normalize_url(str(r.get("bookSourceUrl") or "")) for r in rows],
         params={k: eff.get(k) for k in JVM_RUN_PARAMS},
+        chunks=chunk_sizes,
     )
     # `total` 进 payload：一次跑批没有逐条进度（一次 Gradle 调用跑一批），但**条数**
     # 要给前端算「N/N」——不给的话状态条永远停在 0
@@ -716,10 +727,12 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
         else payload.get("execution_readiness"))
     readiness_snapshot = (manifest.get("readiness") if has_manifest
                           else payload.get("readiness"))
+    source_file_value = str((manifest.get("source_file") if has_manifest
+                             else payload.get("source_file")) or "").strip()
 
-    def _work() -> Dict[str, Any]:
-        # The async lane queues JVM jobs; acquire here in the worker thread as well.
-        # This also waits for any non-lane holder instead of failing the submitted job.
+    cancelled = threading.Event()
+
+    def _single_work() -> Dict[str, Any]:
         RUN_LOCK.acquire()
         tail_stop = threading.Event()
         tail = threading.Thread(
@@ -735,16 +748,7 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
             if run_dir is not None and has_manifest:
                 _write_run_manifest(run_dir, manifest, job_id)
                 _persist_runtime_snapshot(run_dir)
-            result = _execute(tail_stop, tail)
-            # 成功或用户取消：运行目录是过程产物，结论已入库，清掉；失败保留——
-            # manifest/日志/结果文件是「这次为什么失败」的唯一现场，堆积由
-            # prune_stale_run_dirs 的上限兜底。
-            if cancelled.is_set() or result.get("ok"):
-                _cleanup_run_dir(run_dir)
-            else:
-                from core.jvm_debug import prune_stale_run_dirs
-                prune_stale_run_dirs(root=data_dir() / "app_probe" / "runs")
-            return result
+            return _execute_single(tail_stop, tail)
         finally:
             # 早退路径（如 daemon 失败不回退）也从这里停轮询；set/join 可重入，
             # 成功路径上已经停过一次
@@ -752,7 +756,7 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
             tail.join(5)
             RUN_LOCK.release()
 
-    def _execute(tail_stop: threading.Event, tail: threading.Thread) -> Dict[str, Any]:
+    def _execute_single(tail_stop: threading.Event, tail: threading.Thread) -> Dict[str, Any]:
         from backend.jobs import runner as job_runner
 
         execution_mode = "gradle_fallback"
@@ -881,17 +885,213 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
             result["runtime_snapshot"] = snapshot
         return result
 
-    cancelled = threading.Event()
-    work = asyncio.create_task(run_in_threadpool(_work))
+    def _chunk_work(idx: int, total: int, chunk_dir: Optional[Path],
+                    chunk_args: Optional[Path], chunk_out: Path,
+                    base_done: int, batch: str,
+                    tail_stop: threading.Event, tail: threading.Thread) -> Dict[str, Any]:
+        from backend.jobs import runner as job_runner
+
+        RUN_LOCK.acquire()
+        try:
+            if has_manifest and chunk_dir is not None:
+                _write_run_manifest(chunk_dir, manifest, job_id,
+                                    chunk="%d/%d" % (idx + 1, total))
+            job_runner.update_phase(job_id, "starting_gradle")
+            gradle = _normalize_gradle_result(_run_gradle(args_path=chunk_args, runtime=runtime))
+            code = gradle.get("exit")
+            snapshot_reason = _runtime_snapshot_failure_reason(gradle)
+            if snapshot_reason:
+                return {"index": idx, "ok": False, "exit": code,
+                        "reason": snapshot_reason, "gradle": gradle}
+            if code != 0 or not chunk_out.exists():
+                return {"index": idx, "ok": False, "exit": code,
+                        "reason": (_gradle_failure_reason(gradle) if gradle
+                                   else "没有产出结果文件"),
+                        "gradle": gradle}
+            # 读结果前先停本块轮询：终值以解析出的 rows 为准（理由同单条）
+            tail_stop.set()
+            tail.join(5)
+            job_runner.update_phase(job_id, "reading_results")
+            rows = _read_results(chunk_out)
+            job_runner.update_progress(job_id, base_done + len(rows))
+            job_runner.update_phase(job_id, "saving_results")
+            from core import jvm_health
+            jvm_health.store_checks(rows, batch=batch, store=st)
+            # 块完成标记（文件即状态）：重试恢复据此跳过已完成块
+            if chunk_dir is not None:
+                (chunk_dir / "DONE").write_text("", encoding="utf-8")
+            return {"index": idx, "ok": True, "count": len(rows)}
+        finally:
+            tail_stop.set()
+            tail.join(5)
+            RUN_LOCK.release()
+
+    def _chunk_completed(chunk_dir: Path) -> bool:
+        """块完成判据（文件即状态）：DONE 标记在，且 results.jsonl 可整读。"""
+        if not (chunk_dir / "DONE").is_file():
+            return False
+        try:
+            _read_results(chunk_dir / "results.jsonl")
+            return True
+        except (OSError, ValueError):
+            return False
+
+    async def _run_batch() -> Dict[str, Any]:
+        from backend.jobs import runner as job_runner
+
+        rows_all = (json.loads(Path(source_file_value).read_text(encoding="utf-8"))
+                    if source_file_value else [])
+        sizes = [int(n) for n in (manifest.get("chunks") or [])] if has_manifest else []
+        if not sizes or sum(sizes) != len(rows_all):
+            sizes = [len(rows_all)]      # legacy / 清单不可信：整批一块，行为同旧版
+        chunks: List[List[dict]] = []
+        pos = 0
+        for n in sizes:
+            chunks.append(rows_all[pos:pos + n])
+            pos += n
+
+        if run_dir is not None and has_manifest:
+            _write_run_manifest(run_dir, manifest, job_id)
+            _persist_runtime_snapshot(run_dir)
+        job_runner.update_phase(job_id, "starting_gradle")
+        # **上一版结论的快照必须在落库之前读**：跑完再读，每条源都是 old == new，
+        # 「这次变了什么」会永远答「没变」（与单条同规矩，理由见 ops.run_check_job）
+        prev_checks = st.checks_map()
+        batch = _write_meta([])
+        chunk_reports: List[Dict[str, Any]] = []
+        all_rows: List[dict] = []
+        base_done = 0
+        abort_reason = ""
+        for idx, chunk_rows in enumerate(chunks):
+            if idx > 0:
+                # 块间交还 lane：排队者（调试等）按优先级插队，本批随后重新取许可。
+                # 这是「批量不饿死调试、调试不饿死批量」的机制本体。
+                lane.release()
+                await lane.acquire("batch", job_id)
+            if cancelled.is_set():
+                abort_reason = abort_reason or "用户取消，剩余块未启动"
+                break
+            chunk_dir = (run_dir / ("chunk-%02d" % (idx + 1))
+                         if (run_dir is not None and has_manifest) else None)
+            if chunk_dir is not None and _chunk_completed(chunk_dir):
+                # 重试恢复：DONE 标记在 → 该块结论已在库，只汇总不重跑
+                rows = _read_results(chunk_dir / "results.jsonl")
+                all_rows.extend(rows)
+                base_done += len(rows)
+                job_runner.update_progress(job_id, base_done)
+                chunk_reports.append({"index": idx, "ok": True,
+                                      "count": len(rows), "resumed": True})
+                continue
+            if chunk_dir is not None:
+                chunk_dir.mkdir(parents=True, exist_ok=True)
+                chunk_src = chunk_dir / "sources.json"
+                chunk_out = chunk_dir / "results.jsonl"
+                chunk_args = chunk_dir / "args.properties"
+                chunk_src.write_text(json.dumps(chunk_rows, ensure_ascii=False),
+                                     encoding="utf-8", newline="\n")
+                params = (manifest.get("params") or {})
+                _write_args(str(params.get("keyword") or "我"),
+                            int(params.get("timeout") or 25),
+                            int(params.get("concurrency") or 8), 0,
+                            chunk_out, chunk_src,
+                            str(params.get("depth") or "search"),
+                            args_path=chunk_args)
+            else:
+                chunk_out, chunk_args = out_path, args_path
+            tail_stop = threading.Event()
+            tail = threading.Thread(
+                target=_tail_progress, name="jvm-progress-tail",
+                args=(job_id, chunk_out, tail_stop, _PROGRESS_POLL_INTERVAL,
+                      len(chunk_rows), base_done), daemon=True)
+            tail.start()
+            work = asyncio.create_task(run_in_threadpool(
+                _chunk_work, idx, len(chunks), chunk_dir, chunk_args,
+                chunk_out, base_done, batch, tail_stop, tail))
+            try:
+                report = await asyncio.shield(work)
+            except asyncio.CancelledError:
+                # 取消不能绕过仍在跑的块线程：等它收尾再传播（与单条同规矩）
+                cancelled.set()
+                report = await asyncio.shield(work)
+                chunk_reports.append(report)
+                abort_reason = "用户取消，剩余块未启动"
+                break
+            chunk_reports.append(report)
+            if cancelled.is_set():
+                abort_reason = abort_reason or "用户取消，剩余块未启动"
+                break
+            if not report.get("ok"):
+                # 环境级失败（Gradle/快照漂移）：余下块不再启动——不是源的问题，
+                # 别把它们也记成失败；已完成块的结论已在库
+                abort_reason = ("第 %d/%d 块失败：%s"
+                                % (idx + 1, len(chunks), report.get("reason") or ""))
+                break
+            all_rows.extend(_read_results(chunk_out))
+            base_done += int(report.get("count") or 0)
+
+        if cancelled.is_set():
+            # 批量取消**保留**运行目录：已完成块的 DONE/results 是重试恢复的依据
+            from core.jvm_debug import prune_stale_run_dirs
+            prune_stale_run_dirs(root=data_dir() / "app_probe" / "runs")
+            raise asyncio.CancelledError()
+
+        names = {_normalize_url(str(r.get("url") or "")): str(r.get("name") or "")
+                 for r in all_rows}
+        fresh = st.checks_map()
+        items = check_items_from_checks(
+            {u: fresh[u] for u in names if u in fresh}, names=names)
+        dist = Counter(r.get("state") for r in all_rows)
+        result = dict(prep, **{
+            "ok": not abort_reason, "exit": None if abort_reason else 0,
+            "batch": batch, "count": len(all_rows), "dist": dict(dist),
+            "checks": sum(r.get("count", 0) for r in chunk_reports if r.get("ok")),
+            "execution_mode": "gradle_fallback",
+            "execution_note": "批量按块执行 Gradle，块间交还调度权",
+            "checked": len(items), "cached": 0, "fetched": len(items),
+            "transitions": summarize_transitions(prev_checks, items),
+            "items": items[:ITEMS_LIMIT],
+            "chunk_reports": chunk_reports,
+        })
+        if abort_reason:
+            result["reason"] = abort_reason
+        # 成功清现场；失败/取消保留——已完成块的 DONE/results 是重试恢复的依据
+        if result["ok"]:
+            _cleanup_run_dir(run_dir)
+        else:
+            from core.jvm_debug import prune_stale_run_dirs
+            prune_stale_run_dirs(root=data_dir() / "app_probe" / "runs")
+        return result
+
+    # jvm_run 自管 lane（runner._run 不再代持）：批量按块交还许可重排队
+    lane = runner.lane("jvm")
+    await lane.acquire("batch", job_id)
     try:
-        return await asyncio.shield(work)
-    except asyncio.CancelledError:
-        # 取消 HTTP 请求不能提前释放 JVM lane；线程里的 Gradle 仍在跑，必须等它
-        # 收尾后再让下一个任务进入。标记取消：运行目录照常清理（结论没入库，
-        # 现场也没有复查价值——「取消不遗留」是单条快速路径验收钉过的行为）。
-        cancelled.set()
-        await asyncio.shield(work)
-        raise
+        if single:
+            work = asyncio.create_task(run_in_threadpool(_single_work))
+            try:
+                result = await asyncio.shield(work)
+            except asyncio.CancelledError:
+                # 单条取消沿用「不遗留」：结论没入库，现场没有复查价值
+                cancelled.set()
+                await asyncio.shield(work)
+                _cleanup_run_dir(run_dir)
+                raise
+            if result.get("ok"):
+                _cleanup_run_dir(run_dir)
+            else:
+                from core.jvm_debug import prune_stale_run_dirs
+                prune_stale_run_dirs(root=data_dir() / "app_probe" / "runs")
+            return result
+        try:
+            return await _run_batch()
+        except asyncio.CancelledError:
+            # 批量取消**保留**运行目录：已完成块的 DONE/results 是重试恢复的依据
+            cancelled.set()
+            from core.jvm_debug import prune_stale_run_dirs
+            prune_stale_run_dirs(root=data_dir() / "app_probe" / "runs")
+            raise
+    finally:
+        lane.release()
 
 
 @router.get("/results")

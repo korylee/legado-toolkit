@@ -129,6 +129,12 @@ def _lane(name: str) -> _Lane:
     return _LANES.setdefault(loop, {}).setdefault(name, _Lane())
 
 
+def lane(name: str) -> _Lane:
+    """取一条 lane（公开口）：给要**自管 lane 生命周期**的任务体用——
+    jvm_run 的批量按块交还许可重排队，持有者不能是 runner._run。"""
+    return _lane(name)
+
+
 def lane_snapshot(name: str) -> Dict[str, Any]:
     return _lane(name).snapshot()
 
@@ -194,7 +200,9 @@ def update_progress(job_id: str, progress: int) -> None:
 async def _run(job_id: str, kind: str, payload: Dict[str, Any],
                lane: Optional[str] = None) -> None:
     st = Store()
-    lane_obj = _lane(lane) if lane else None
+    # jvm_run 的 lane 由任务体自己持有（run_jvm_job）：批量按块交还许可重排队，
+    # 块边界在 handler 内部，runner 在外层持锁会让「块间让位」失效。
+    lane_obj = _lane(lane) if (lane and kind != "jvm_run") else None
     acquired = False
     try:
         if kind == "jvm_run":

@@ -96,6 +96,9 @@ DEFAULTS: Dict[str, Dict[str, Any]] = {
         #: 会让全量耗时成倍增长（搜索档实测 17 分钟 / 3774 条）。**默认值不许
         #: 静默改变既有行为的成本**——想验得更深由用户在设置里选，界面上会写清代价。
         "depth": "search",
+        #: 批量分块大小：每块一次 JVM 占用，块间交还 lane（调试可插队）、
+        #: 块完成即入库（取消/崩溃后可恢复）。默认 25 实测可调。
+        "chunk_size": 25,
     },
 }
 
@@ -105,6 +108,7 @@ LIMITS: Dict[str, tuple] = {
     "jvm_timeout": (5, 120),
     "jvm_concurrency": (1, 32),
     "jvm_limit": (0, 100000),
+    "jvm_chunk_size": (5, 200),
     # 枚举型（与 probe_depth 同形）：前端据此渲染下拉，不在 JS 里再写一份
     "jvm_depth": JVM_DEPTHS,
 }
@@ -262,6 +266,8 @@ _SPECS: Dict[tuple, Any] = {
         v, DEFAULTS["jvm"]["concurrency"], *LIMITS["jvm_concurrency"]),
     ("jvm", "limit"): lambda v: _to_int(
         v, DEFAULTS["jvm"]["limit"], *LIMITS["jvm_limit"]),
+    ("jvm", "chunk_size"): lambda v: _to_int(
+        v, DEFAULTS["jvm"]["chunk_size"], *LIMITS["jvm_chunk_size"]),
     ("jvm", "depth"): lambda v: (str(v).strip().lower()
                                  if str(v).strip().lower() in JVM_DEPTHS
                                  else DEFAULTS["jvm"]["depth"]),
