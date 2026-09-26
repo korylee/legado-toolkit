@@ -141,9 +141,10 @@ async def retry_job(job_id: str, st=Depends(get_store)):
         raise HTTPException(409, "任务仍在运行，不能重试")
     kind = str(job.get("kind") or "")
     if kind == "jvm_run":
-        # JVM 任务的 payload 指向一次性 run_dir，任务结束时目录已经清理，
-        # 不能把旧路径原样交给下一次执行。
-        raise HTTPException(409, "JVM 任务不能直接重试，请从校验入口重新提交")
+        # jvm_run 可以重试：run_jvm_job 会扫描原运行目录里已完成块（DONE 标记）
+        # 并跳过，只补失败/未跑的块；目录已被清理（成功或单条取消）时等价于重跑。
+        # 注意「正在运行」的拦截在上面已经挡掉了 pending/running。
+        pass
     if kind not in runner.HANDLERS:
         raise HTTPException(409, "任务类型当前不可重试：%s" % (kind or "未知"))
     try:

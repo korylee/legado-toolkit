@@ -21,28 +21,49 @@
 > 2026-09-26 排期（评估结论）：引擎线八步已走完 ①②③，第一波封顶「环境」章节，
 > 第二波补引擎最后的韧性与公平缺口；④ worker 线是触发式的——批量吞吐被封 IP
 > 硬约束压着，等下次真要跑全量再启动。
+> 同日插入调试体验两条 P0（均为当日实测的现行缺陷，见各条背景）；预算分层与
+> 前端循环、等待的跟进条目排在 §1。工作台重构同日已拍板（轻量编辑起步 /
+> 编辑弹框调试卡保留「入口+摘要」/ 四期节奏），拆为 ux-debug-session 与
+> ux-debug-shell 两条，依赖链钉了先后。
+
+### 条目：jvm-dump-gate · 常驻选路的 dump 对拍把模块目录当成仓库根
+状态：todo
+依赖：无
+优先级：P0
+背景：2026-09-26 同机四次调试全部打出「运行环境与当前自检不同：workingDir」并回落
+  Gradle——每次多付约 13 秒启动。dump 的 `workingDir` 是测试 JVM 的**模块目录**
+  （`…legado-with-MD3\app`），`LEGADO_REPO` 来自 settings 的 `app_repo`（**仓库根**），
+  `core.jvm_debug._runtime_dump_mismatch` 直接比字符串、永远不等；而 runtime-snapshot
+  那条对拍链的 workingDir 已按归一口径落地（lessons §九十）——同一份事实两套口径。
+约束：归一判据与 runtime-snapshot 那条**共用一处实现**，别各写一份；归一后仍要能判出
+  「dump 是另一个 App 仓库的」，不能放宽成永远相等。
+验收：`app_repo` 填仓库根时调试走上常驻、回落附注消失；`app_repo` 指向别的仓库仍回落
+  且写明原因；选路闸门与 runtime-snapshot 对拍对同一份 dump 结论一致。
+指针：core/jvm_debug.py，core/jvm_runtime_snapshot.py，lessons §九十
+
+### 条目：jvm-webview-nav · webView 段的相对地址静默等满渲染预算
+状态：todo
+依赖：无
+优先级：P0
+背景：2026-09-26 实测（口袋漫画，正文重跑 key `--/manhua/…/73.html` 带 webView 选项）：
+  墙钟 75.5 秒后 content fail，侧车 `render_timeout: 60000ms 内没有 load 事件`，整页
+  HTML 与命中源码全空。链条：抽屉拼 key 用的段 url 是**相对路径** → 上游 `Debug` 的
+  `--` 分支不设 `book.tocUrl` → `getAbsoluteURL` 空 base 原样返回 → shadow 桥把相对地址
+  交给 CDP `Page.navigate`（CDP 要绝对 URL，导航失败）→ 桥不读 navigate 响应、只等
+  load/domContent 事件，等满渲染预算。全链调试 tocUrl 是全的，所以卡的正是
+  「目录好了之后单独重跑正文」这个最常用的动作。
+约束：① `BrowserBridge` 要读 `Page.navigate` 的响应，失败立即带原因返回，不等事件；
+  ② 相对地址在**我们这一侧**补全（`core.jvm_debug` 拼 key 或 `DebugService` 按
+  `bookSourceUrl` 补，桥导航前兜底解析也可），CLI 与界面两条入口同时被护住。不动上游
+  `Debug.kt` 的分派语义；本条只管「别把预算花在必然失败的导航上」，webView 取数能力
+  是另一条（webview-content）。
+验收：同一 key 重跑正文段秒级返回——地址补全则渲染照常，补不了则立即 fail 且原因
+  指明地址形态；不再出现「60 秒零事件等满」的形态。
+指针：appservice/test/io/legado/app/service/BrowserBridge.kt，appservice/test/io/legado/app/service/ShadowBackstageWebView.kt，core/jvm_debug.py，Debug.kt
 
 ---
 
 ## 1 · 排队
-
-### 条目：jvm-scheduler-policy · 调试优先但不能饿死批量校验
-状态：todo
-依赖：无
-优先级：P1
-背景：（路线图第二波）当前 `jvm` lane 已把调试、批量校验和生成后验证收进同一条进程内有序队列，能够避免并发改写 JVM 参数与输出；但严格 FIFO 会让交互调试被长批次挡住，简单地让调试永远插队又会让批量任务长期不运行。
-约束：调试请求优先；批量任务按有限工作单元让出执行权，并设置老化/公平规则，不能依赖 HTTP 连接是否仍存活。优先级只能影响排队顺序，不能绕过同一 JVM/profile 的独占约束。生命周期状态固定为 `queued`、`running`、`cancel_requested`、`succeeded`、`failed`、`cancelled`；执行阶段至少区分 `waiting_readiness`、`starting_worker`、`starting_gradle`、`configuring`、`compiling`、`running_validate`、`reading_results`、`saving_results` 和 `finished`。状态、阶段、取消和原因继续写入 jobs/SSE，不能只存在内存。
-验收：同时提交一个长批量任务、多个调试任务和第二个批量任务；调试任务在当前工作单元结束后优先获得执行权，第二个批量任务最终也能运行。前端能看到当前阶段、实际执行方式和最近一段启动日志；服务端重启或关闭页面不改变已提交任务的生命周期语义，取消不会在子进程退出前伪装成已完成。
-指针：backend/jobs/runner.py，core/store.py，lessons §六十八 / §七十四
-
-### 条目：jvm-batch-chunk · 批量校验按可恢复分块执行
-状态：todo
-依赖：jvm-scheduler-policy, jvm-task-manifest
-优先级：P1
-背景：（路线图第二波，与 scheduler-policy 一次设计落地）批量请求目前以一个 JVM job 持有 lane；即使结果已逐条落盘，长批次仍会长时间占住交互调试，取消或进程退出后也缺少明确的分块边界。该条同时承载批量执行的阶段状态、日志尾部和运行目录隔离，不另建“Gradle 进度”条目。
-约束：分块单位必须是带归一化 URL、参数快照和来源的独立记录，并引用任务 manifest 中冻结的 runtime snapshot；每块完成即落盘并可从已有结果跳过，不能把整批结果重新拼成唯一事实。每个 job/chunk 使用 manifest 规定的独立 args、结果文件和运行目录；块大小、重试和并发上限由设置/测量决定，不在调用点散落常量；块之间释放调度权。单条失败只影响该条，环境错误不得归因给源。
-验收：一个批次被拆成多个块；中途取消或模拟进程退出后重启，已完成块不重复请求、未完成块可继续。每块能报告 queued、starting、running_validate、reading_results、saving_results 和失败原因；启动失败保留日志尾部；报告能区分批次、块、URL、stage、来源和失败原因。
-指针：backend/api/jvm.py，core/jvm_debug.py，core/store.py，lessons §五十三 / §五十四
 
 ### 条目：jvm-request-coalesce · 合并重复的进行中请求
 状态：blocked
@@ -91,6 +112,108 @@
     归属性名判定（AGENTS #21）。现状已是此语义
     （`core/rules/replayer.py:55-66`），缺的是逐词契约测试与 App 侧末段回填分支
     （`DebugService.kt:519-526,536-541`）。
+
+### 条目：debug-false-pass · 空 content 规则的假 pass 与段失败的下一步
+状态：todo
+依赖：无
+优先级：P1
+背景：content 规则为空时 App 短路（`WebBook.getContentAwait` 直接返回章节链接、不抓
+  页面），`build_steps` 按事件判 pass。2026-09-26 实测：库里口袋漫画的记录（09-23
+  更新后 content 规则已丢）调试正文段 0.1 秒「通过」，整页没抓、侧车
+  `engine_html_urls=0`——看着一切正常。同族：渲染失败只留一段 Java 异常文本，没有
+  下一步。
+约束：空规则的段显式标「没验（规则为空）」，不许落成 pass——判据在 `build_steps`
+  一层做，不动上游；段失败按原因给可执行下一步（与 strengthen-hint 同一纪律：只指向
+  动作，如「先试最新章节」「在浏览器 profile 里人工过一次」）；原因要一路走到用户
+  眼前（AGENTS #4）。
+验收：空 content 规则的该段显示「没验」而非通过；渲染超时/失败的段带下一步动作；
+  两者都有断言钉住（改行为回退断言会红）。
+指针：core/app_debug.py，appservice/test/io/legado/app/service/ShadowBackstageWebView.kt，lessons §八十
+
+### 条目：jvm-debug-budget · 调试的墙钟预算分层
+状态：todo
+依赖：无
+优先级：P1
+背景：整链超时与桥的渲染超时同为 60 秒（前端写死传 60），webView 段的渲染预算永远先
+  被整链掐死；流跑完之后还有命中回填（30 秒预算）与补抓页面，都在用户感知的「一次
+  调试」之外——2026-09-26 实测单段正文重跑总墙钟 75.5 秒，其中渲染 60、拉起 13。
+约束：渲染预算从剩余整链预算里取（或 webView 段自动上调整链超时），两者不得同值
+  互掐；调试超时的默认值与上下界按 AGENTS #8 收进 `core/settings_store`，前端不再
+  写死；预算口径摆到调试入口（同跑批弹框：代价由事实说）；补抓的记账口径在
+  site-req-opt ④，本条不重复。
+验收：webView 源调试不再因「渲染预算=整链预算」提前判超时；开跑前能看到预算口径；
+  默认值只在 settings_store 一处。
+指针：core/jvm_debug.py，core/settings_store.py，appservice/test/io/legado/app/service/BrowserBridge.kt，frontend/src/components/SourceEditDialog.vue
+
+### 条目：ux-debug-wait · 调试等待态可见可取消
+状态：todo
+依赖：无
+优先级：P1
+背景：调试是一次普通 fetch（无超时、无取消、无进度），等待期只有按钮转圈；事件流
+  明明逐行 flush 落盘（DebugService 逐行写 NDJSON），Python 却只在进程结束后一次性
+  读。2026-09-26 实测最坏组合（回落 Gradle + 渲染等满预算）用户要盯转圈约两分钟。
+约束：小步不依赖 jobs 化：等待区显示已等待秒数与预算口径；前端加 AbortController
+  让用户能松手（后端取消另立口径，本条不装完成）。完整版（排队可见、阶段状态、
+  服务端取消、NDJSON tail 成实时段事件）与 jvm-scheduler-policy 合流，别做两套。
+验收：调试进行中能看到已等待时长与当前阶段（至少有墙钟秒数）；点取消后界面立即
+  恢复可操作，不再锁到超时。
+指针：frontend/src/components/SourceEditDialog.vue，frontend/src/api/client.js，core/jvm_debug.py，backend/jobs/runner.py
+
+### 条目：ux-debug-loop · 重跑不清场，上一份结果可对比
+状态：todo
+依赖：无
+优先级：P1
+背景：重跑第一行就 `testResult.value = null`：上一次的步骤、命中的 DOM、抽屉子页签
+  全部清零，重跑完成前抽屉空转——「改一点 → 跑 → 和上次比」的最后一环只能靠记忆。
+  另外成功自动开抽屉、失败只留在卡片上，而失败恰恰最需要抽屉的诊断区。
+约束：结果容器一次定型为「最近 K 次运行」（K 小、内存友好：历史只留步骤摘要与
+  结论，完整 HTML 只留最近一份）——先做两份再改数组是二次改形状；对比取最后两份，
+  逐段标注「与上次相同 / 变了 / 新失败」，**对比键是（段名, URL）**：URL 变了标
+  「换了目标」，不与「值变了」混。失败与成功同样自动进抽屉；默认子页签随 verdict
+  走（失败→诊断，成功→提取值），事件流与源码按需展开。过期判定与 strengthen-src
+  是同一份事实（改了哪段规则哪段过期），别做两套。
+验收：重跑完成后上次结论仍可见且有差异标记（换了 URL 的段单独可辨）；失败步骤
+  直达诊断区；改规则→重跑→对比不丢中间状态；有断言钉住「重跑不清空结果」。
+指针：frontend/src/components/SourceEditDialog.vue，frontend/src/components/RuleDebugDrawer.vue
+
+### 条目：ux-debug-session · 调试状态收拢为 useDebugSession（第二期）
+状态：todo
+依赖：ux-debug-loop, ux-debug-wait
+优先级：P1
+背景：调试状态散在两个组件（弹框 `testResult`/`appDebugging`/`debugTarget`/`debugQuery`，
+  抽屉 `draftRule`/`preselRes`/`subTab`），靠 props/emit 对接——草稿/应用两层与
+  `rerunning` 跨组件传递都是这个分裂的产物。2026-09-26 拍板整体重构走四期：**先收
+  状态、再换壳**——不抽状态，三栏布局只会把 props/emit 地狱放大。
+约束：模块级单例 composable（同 `useMobile` 先例，不引 pinia）；每键一个写者：
+  `source`（会话源**深拷贝**快照 + 指纹比对过期，不落库）、`result`/`prevResult`、
+  `run`（已等待/预算/取消）、`entry`（关键词/目标 + 上次值记忆）、`channel`（jvm /
+  连 App，含预检三态与推送确认）；列表页、编辑弹框、快速生成失败三个入口填充
+  **同一个 session.source**。**第一刀是补测试**：抽屉提示逻辑先抽 utils 纯函数钉住
+  （fe-drawer-tests 那笔账），再动组件；连 App 通道在这一期就必须可用（预检/推送/
+  真机验收的固定流程不能断）。
+验收：弹框与抽屉改为消费 session，行为零变化（现有断言全绿 + 变异抽查）；两个
+  组件里不再有调试状态的第二写者；提示逻辑有可跑断言。
+指针：frontend/src/components/SourceEditDialog.vue，frontend/src/components/RuleDebugDrawer.vue，frontend/src/composables/useMobile.js
+
+### 条目：ux-debug-shell · 工作台换壳：全页三栏 + 入口统一（第三、四期）
+状态：todo
+依赖：ux-debug-session
+优先级：P1
+背景：2026-09-26 拍板整体重构（轻量编辑起步 / 编辑弹框调试卡保留「入口+摘要」/
+  四期节奏）：新路由 `#/debug/:url` 全页三栏——左步骤轨 + 运行入口、中判定·诊断·
+  证据、右规则编辑；RuleDebugDrawer 的证据区组件**原样搬入，不重做**。jobs/SSE
+  （jvm-scheduler-policy）落地后只换 session 内部的 run 实现，三栏组件不感知。
+约束：右栏**轻量编辑起步**——只编当前步骤那条规则、直接写 session.source，
+  「应用并重跑」= 写快照 + 触发 run；完整 rules 表单留弹框。入口状态（key/channel）
+  进 URL query，刷新可恢复；键盘流：Enter 重跑、Esc 取消。旧 drawer 留一个提交
+  周期灰度对照，确认无功能缺口再删。**第四期收尾同批做**：删草稿/应用层；改掉指
+  RuleDebugDrawer.vue / SourceEditDialog.vue 的 TODO 与 lessons 指针（strengthen-src /
+  strengthen-hint / unknown-outlet / fe-drawer-tests / proj-3）；新文案过
+  tools/check_copy.py；清掉为 dialog/teleport 写的不带 scoped 样式（AGENTS #15）；
+  枚举继续从 `/api/settings` 取（AGENTS #7 / #8）。
+验收：列表页到调试 ≤ 一次点击；改规则→重跑→对比在工作台内闭环；连 App 通道过
+  一次真机验收；全量测试与文案机检绿；旧 drawer 删除后按清单逐项确认无功能缺口。
+指针：frontend/src/router/index.js，frontend/src/components/RuleDebugDrawer.vue，frontend/src/components/SourceEditDialog.vue
 
 ## 2 · 按需
 
@@ -429,6 +552,20 @@
   「重新调试本步」；未改动的步骤仍保留可用结论。
 指针：lessons §七十八，frontend/src/components/SourceEditDialog.vue，frontend/src/components/RuleDebugDrawer.vue
 
+### 条目：ux-debug-config · 调试入口降噪与状态记忆
+状态：todo
+依赖：无
+优先级：P2
+背景：调试卡用三排控件起手（通道 radio、5 个目标 chips、关键词框）加常驻的环境自检
+  alert 与登录提示；目标 chips 只改 placeholder 和 key 前缀（不改变 App 分派），关键词
+  每次重填——高频动作被低频配置压住。
+约束：目标收敛为一个入口选择并**记住上次的关键词与目标**（下次默认复用，能记住的
+  状态别让人重填）；环境自检 alert 通过时收起、失败才展开；通道 radio 保留但降为
+  次要控件；高频动作不得塞进折叠菜单。
+验收：二次调试零输入可复跑上次目标；不滚动首屏能看到「开始调试」与上次关键词；
+  相关断言与文案机检同步更新。
+指针：frontend/src/components/SourceEditDialog.vue
+
 ---
 
 ## 3 · 待决策
@@ -609,6 +746,24 @@
 约束：actual 差异报告只进排障，不进入源健康判定链；对拍口径（workingDir 归一、classpath 按项、-Xmx 纳入后比 jvmArgs、systemProperties 逐键）已按原约束落地。
 验收：修复与边界测试看 `git log`（406941c classpath 只钉负载文件；同日 run_direct 注入本次 args 路径，修复直起 0 事件）。
 指针：core/jvm_direct.py，core/jvm_runtime_snapshot.py，appservice/test/io/legado/app/service/ServiceJson.kt，lessons §九十
+
+### 条目：jvm-scheduler-policy · 调试优先但不能饿死批量校验
+状态：done
+依赖：无
+优先级：P1
+背景：2026-09-27 交付：lane 从 FIFO asyncio.Lock 升级为 _Lane——unit 边界按有效优先级发放许可（debug=0 恒定；batch=10，等待超阈值后逐级老化到 floor=2，仍高于调试），调试越过排在前面的批量，批量靠老化最终必跑；被取消的获许可者立即转交许可，lane 不死锁。排队现状经 GET /api/jobs/lane 可观测。生命周期沿用存量词表（pending/done，与约束里 queued/succeeded 同义——不迁移历史行，理由同 AGENTS #17）。多方并发真实演练未做，调度语义由 lane 单测四条覆盖。
+约束：优先级只影响排队顺序，不绕过同一 JVM/profile 的独占约束；老化常量集中在 runner 模块顶部（无实测依据不进 settings）。
+验收：lane 单测四条（插队/老化/快照/取消转交）+ 全量 994 条绿；细节与提交看 `git log`（17117c6）。
+指针：backend/jobs/runner.py，backend/api/rules.py，backend/api/jobs.py，lessons §六十八 / §七十四
+
+### 条目：jvm-batch-chunk · 批量校验按可恢复分块执行
+状态：done
+依赖：jvm-scheduler-policy, jvm-task-manifest
+优先级：P1
+背景：2026-09-27 交付：批量按 jvm.chunk_size（settings 新键，默认 25、限幅 [5,200]）分块，块大小提交时冻结进 manifest（schema 3）；每块独立运行目录/args/results 与块级 manifest 信封，块完成即 store_checks 入库并写 DONE 标记；块间交还 lane 重排队（与 scheduler-policy 同一机制）；块环境级失败中止余下块并明说「第 N/M 块失败」，不把环境错误归因给源；重试（POST /api/jobs/{id}/retry 已对 jvm_run 放开）扫描原目录 DONE 块只补失败块。真实环境两块验收：6 条源 5+1 两块全部入库（105s）。
+约束：分块引用冻结的 runtime snapshot；重试不覆盖旧产物（uuid 目录 + DONE 文件即状态）；单条不分块，取消语义不变（单条不遗留、批量保留现场供恢复）。
+验收：单元测试钉住分块调用数/失败中止/重试恢复 + 全量 994 条绿；真实两块验收见上。
+指针：backend/api/jvm.py，backend/jobs/runner.py，core/settings_store.py，backend/api/jobs.py，lessons §五十三 / §五十四
 
 ### 条目：jvm-env-readiness · JVM 环境收尾与跨平台启动器
 状态：done

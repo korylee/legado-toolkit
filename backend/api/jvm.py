@@ -730,6 +730,18 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
     source_file_value = str((manifest.get("source_file") if has_manifest
                              else payload.get("source_file")) or "").strip()
 
+    if run_dir is not None:
+        # 重试的运行目录可能已被清理（成功/单条取消）：就地重建，旧块（若有）
+        # 的 DONE/results 不受影响——那是重试恢复要扫的
+        run_dir.mkdir(parents=True, exist_ok=True)
+        if has_manifest and single and args_path is not None:
+            params = (manifest.get("params") or {})
+            _write_args(str(params.get("keyword") or "我"),
+                        int(params.get("timeout") or 25),
+                        int(params.get("concurrency") or 8), 0,
+                        out_path, Path(source_file_value or (run_dir / "sources.json")),
+                        str(params.get("depth") or "search"), args_path=args_path)
+
     cancelled = threading.Event()
 
     def _single_work() -> Dict[str, Any]:
