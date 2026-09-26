@@ -222,7 +222,9 @@ def start(dump: Dict[str, Any], idle_sec: int = DEFAULT_IDLE_SEC,
     env = {**jvm_direct.java_env(dump),
            "LEGADO_DAEMON_PORT": str(port),
            "LEGADO_DAEMON_IDLE_SEC": str(int(idle_sec)),
-           "LEGADO_DAEMON_SIG": sig}
+           "LEGADO_DAEMON_SIG": sig,
+           "LEGADO_TEST_JVM_ENV_OUT": str(jvm_direct.dump_path()),
+           "LEGADO_TEST_JVM_LAUNCH_MODE": "daemon"}
     log_path().parent.mkdir(parents=True, exist_ok=True)
     _LOG = open(log_path(), "a", encoding="utf-8")
     _LOG.write("\n==== %s 起 daemon：port=%s sig=%s\n" % (time.strftime("%F %T"), port, sig))
@@ -237,6 +239,8 @@ def start(dump: Dict[str, Any], idle_sec: int = DEFAULT_IDLE_SEC,
             info = {"pid": _PROC.pid, "port": port, "sig": sig, "idle_sec": int(idle_sec),
                     "started_at": time.strftime("%F %T")}
             _write_info(info)
+            from core.jvm_runtime_snapshot import compare_runtime_snapshot
+            compare_runtime_snapshot("daemon", "daemon")
             return info
         time.sleep(0.2)
     _kill_proc()

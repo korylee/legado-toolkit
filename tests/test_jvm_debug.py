@@ -421,8 +421,10 @@ class EndpointTests(_RunCase):
         super().setUp()
         self.seen = {}
 
-        def fake_run(source, key, timeout, cookie, cache, proxy="", out_path=""):
-            self.seen.update(source=source, key=key, timeout=timeout, cookie=cookie, cache=cache)
+        def fake_run(source, key, timeout, cookie, cache, proxy="", out_path="",
+                     readiness_result=None):
+            self.seen.update(source=source, key=key, timeout=timeout, cookie=cookie,
+                             cache=cache, readiness=readiness_result)
             return {"source": "jvm", "steps": [{"name": "search", "ok": True}], "pages": [],
                     "all_ok": True, "events": [], "error": ""}
 
@@ -442,6 +444,7 @@ class EndpointTests(_RunCase):
         self.assertEqual(self.seen["timeout"], 90)
         self.assertEqual(self.seen["cookie"], "a=1")
         self.assertEqual(self.seen["cache"], "only")
+        self.assertIsNotNone(self.seen["readiness"])
 
     def test_unknown_cache_is_400(self) -> None:
         with self.assertRaises(HTTPException) as ctx:

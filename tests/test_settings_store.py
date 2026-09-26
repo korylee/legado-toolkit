@@ -97,6 +97,7 @@ class SettingsStoreTests(unittest.TestCase):
 
     def test_path_is_stripped(self) -> None:
         self.assertEqual(S.coerce("jvm", "app_repo", "  X:/repo  "), "X:/repo")
+        self.assertEqual(S.coerce("jvm", "android_sdk_dir", "  X:/sdk  "), "X:/sdk")
 
     def test_proxy_rejects_non_http_schemes(self) -> None:
         """上游拿正则匹配代理串：`https://` 匹配不到会直接抛异常，留着比丢掉更糟。"""

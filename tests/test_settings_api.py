@@ -59,6 +59,10 @@ class PatchSemanticsTests(SettingsApiTestCase):
         patch_settings(SettingsPatch(network={"proxy": "http://p:1"}))
         self.assertEqual(S.load()["jvm"]["app_repo"], "X:/repo")
 
+    def test_android_sdk_directory_is_saved(self):
+        patch_settings(SettingsPatch(jvm={"android_sdk_dir": " X:/sdk "}))
+        self.assertEqual(S.load()["jvm"]["android_sdk_dir"], "X:/sdk")
+
     def test_explicit_null_restores_that_key_to_default(self):
         patch_settings(SettingsPatch(network={"proxy": "http://p:1"}))
         patch_settings(SettingsPatch(network={"proxy": None}))

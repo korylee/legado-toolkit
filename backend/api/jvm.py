@@ -2,7 +2,7 @@
 """JVM 校验服务的后端接口（S2）。
 
 三个端点：
-  GET  /api/jvm/selftest   环境自检（只读：检查 Gradle/Java/SDK/gradle-home，不装东西）
+  GET  /api/jvm/readiness  环境就绪检查（只读，不下载、不构建）
   POST /api/jvm/run        提交跑批（subprocess 调启动器；进入 JVM lane 后后台执行）
   GET  /api/jvm/results    最近一批结论（从 meta 读，供列表合并展示）
 
@@ -38,7 +38,7 @@ from backend.schemas import JvmRunRequest
 from core.paths import data_dir
 from core.store import Store
 from core import settings_store
-from core.jvm_env import process_environment, selftest
+from core.jvm_env import process_environment, readiness
 from core.loader import _normalize_url
 from core.paths import ARGS_PARTS
 
@@ -101,7 +101,6 @@ def _write_args(keyword: str, timeout: int, concurrency: int, limit: int,
                 out_path: Path, source_file: Path, depth: str = "search",
                 args_path: Optional[Path] = None) -> None:
     """把跑批参数写进启动器的参数文件（Launcher 的唯一参数入口）。"""
-    from core.jvm_env import selftest  # 局部导入避免循环
     repo = settings_store.load().get("jvm", {}).get("app_repo", "").strip()
     st_conf = settings_store.load().get("jvm", {})
     if not repo:
@@ -215,8 +214,26 @@ def _run_gradle(timeout_min: int = 90, args_path: Optional[Path] = None,
     if not runtime:
         raise ValueError("JVM runtime 快照缺失，拒绝使用后端进程环境启动")
     env = process_environment({"ok": True, "runtime": runtime})
+    snapshot_dump = data_dir() / "app_probe" / "test_jvm_env.json"
+    snapshot_actual = Path(str(snapshot_dump) + ".actual.gradle.validate.json")
+    snapshot_report = snapshot_actual.with_suffix(".comparison.json")
+    snapshot_dump.parent.mkdir(parents=True, exist_ok=True)
+    for stale in (snapshot_dump, snapshot_actual, snapshot_report):
+        try:
+            stale.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
+
+    def with_runtime_snapshot(result: Dict[str, Any]) -> Dict[str, Any]:
+        from core.jvm_runtime_snapshot import compare_runtime_snapshot
+        result["runtime_snapshot"] = compare_runtime_snapshot(
+            "gradle", "validate", path=snapshot_actual, runtime=runtime)
+        return result
     env.update({
-           "LEGADO_TEST_JVM_ENV_OUT": str(data_dir() / "app_probe" / "test_jvm_env.json"),
+           "LEGADO_TEST_JVM_ENV_OUT": str(snapshot_dump),
+           "LEGADO_TEST_JVM_LAUNCH_MODE": "gradle",
            # **必须显式告诉它参数文件在哪**：不给就退回「挨着启动器找」，那里没有，
            # 于是启动器打印一句「跳过」之后什么都不跑（一次看不出来的空跑）
            "LEGADO_APPSERVICE_ARGS": str(args_path or _args_file())})
@@ -227,18 +244,18 @@ def _run_gradle(timeout_min: int = 90, args_path: Optional[Path] = None,
             cwd=str(_AGSVC), env=env, capture_output=True, text=True,
             timeout=timeout_min * 60, errors="replace",
         )
-        return {
+        return with_runtime_snapshot({
             "exit": proc.returncode,
             "stdout": _tail_process_output(proc.stdout),
             "stderr": _tail_process_output(proc.stderr),
-        }
+        })
     except subprocess.TimeoutExpired as exc:
-        return {
+        return with_runtime_snapshot({
             "exit": None,
             "stdout": _tail_process_output(exc.stdout),
             "stderr": _tail_process_output(exc.stderr),
             "error": "Gradle 运行超过 %d 分钟" % timeout_min,
-        }
+        })
 
 
 def _normalize_gradle_result(raw: Any) -> Dict[str, Any]:
@@ -267,6 +284,28 @@ def _gradle_failure_reason(result: Dict[str, Any]) -> str:
     return "\n".join(pieces)
 
 
+
+def _runtime_snapshot_failure_reason(result: Dict[str, Any]) -> str:
+    """环境就绪快照漂移时阻断入库，其他快照问题只保留为诊断。"""
+    snapshot = result.get("runtime_snapshot")
+    if not isinstance(snapshot, dict):
+        return ""
+    differences = snapshot.get("differences")
+    if not isinstance(differences, dict):
+        return ""
+    environment = differences.get("readinessEnvironment")
+    if not isinstance(environment, dict) or not environment:
+        return ""
+    details = []
+    for name, values in environment.items():
+        if isinstance(values, dict):
+            details.append("%s（提交时=%s，实际=%s）" %
+                           (name, values.get("declared"), values.get("actual")))
+        else:
+            details.append("%s（%s）" % (name, values))
+    return "JVM 实际启动环境与提交时的环境就绪快照不一致：" + "；".join(details)
+
+
 def _read_results(path: Path) -> List[Dict[str, Any]]:
     text = path.read_text(encoding="utf-8")
     if text.lstrip().startswith("["):
@@ -293,10 +332,10 @@ def _write_meta(rows: List[Dict[str, Any]]) -> str:
     return batch
 
 
-@router.get("/selftest")
-def jvm_selftest():
+@router.get("/readiness")
+def jvm_readiness():
     conf = settings_store.load().get("jvm", {})
-    return selftest(conf.get("app_repo", ""))
+    return readiness(conf.get("app_repo", ""), conf.get("android_sdk_dir", ""))
 
 
 @router.post("/pick-app-repo")
@@ -320,6 +359,27 @@ def pick_app_repo():
             "cancelled": not bool(selected)}
 
 
+@router.post("/pick-android-sdk")
+def pick_android_sdk():
+    """打开本机原生目录选择器，选择 Android SDK 根目录。"""
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        try:
+            selected = filedialog.askdirectory(
+                title="选择 Android SDK 根目录", mustexist=True)
+        finally:
+            root.destroy()
+    except Exception as e:
+        raise HTTPException(503, "无法打开本机目录选择器：%s；也可以直接输入目录路径" % e)
+    return {"path": str(Path(selected).resolve()) if selected else "",
+            "cancelled": not bool(selected)}
+
+
 @router.post("/run")
 async def jvm_run(body: Optional[JvmRunRequest] = None):
     conf = settings_store.load().get("jvm", {})
@@ -327,9 +387,9 @@ async def jvm_run(body: Optional[JvmRunRequest] = None):
         raise HTTPException(400, "JVM 校验未配置：请先在设置里填 App 源码目录并自检")
 
     # 自检不过就不开跑——跑一半 OOM/路径错只会浪费时间
-    st_conf = selftest(conf.get("app_repo", ""))
+    st_conf = readiness(conf.get("app_repo", ""), conf.get("android_sdk_dir", ""))
     if not st_conf["ok"]:
-        return {"started": False, "selftest": st_conf}
+        return {"started": False, "readiness": st_conf}
 
     #: 只跑这几条源（列表页勾选的）。空 = 全部在用源
     want_urls = [u for u in ((body.urls if body else []) or []) if str(u or "").strip()]
@@ -388,9 +448,12 @@ async def jvm_run(body: Optional[JvmRunRequest] = None):
     # 要给前端算「N/N」——不给的话状态条永远停在 0
     job_id = runner.submit(
         "jvm_run",
-        {"prep": prep, "total": len(rows), "run_dir": str(run_dir),
-         "source_file": str(src_file), "args_file": str(args_path),
-         "out_path": str(out_path), "runtime": dict(st_conf.get("runtime") or {})},
+         {"prep": prep, "total": len(rows), "run_dir": str(run_dir),
+          "source_file": str(src_file), "args_file": str(args_path),
+          "out_path": str(out_path), "runtime": dict(st_conf.get("runtime") or {}),
+          "single": len(rows) == 1,
+          "readiness_fingerprint": st_conf.get("fingerprint", ""),
+          "readiness_checked_at": st_conf.get("checked_at", "")},
         lane="jvm",
     )
     return dict(prep, **{"job_id": job_id})
@@ -427,13 +490,64 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
         # This also waits for any non-lane holder instead of failing the submitted job.
         RUN_LOCK.acquire()
         try:
-            gradle = _normalize_gradle_result(
-                _run_gradle(args_path=args_path, runtime=payload.get("runtime"))
-                if args_path is not None else _run_gradle(runtime=payload.get("runtime")))
-            code = gradle.get("exit")
+            execution_mode = "gradle_fallback"
+            execution_note = "批量任务直接使用 Gradle"
+            daemon_failure = ""
+            gradle: Dict[str, Any] = {}
+            daemon_response: Dict[str, Any] = {}
+
+            # 单条校验是交互路径：优先复用常驻 Validate JVM。daemon 只负责执行，
+            # 结果仍从同一个 results.jsonl 读回；任何启动/协议/产物问题都保留原因并
+            # 回到 Gradle，不能把常驻失败伪装成源结论。
+            if payload.get("single") and args_path is not None:
+                try:
+                    from core import jvm_validate_daemon, jvm_direct
+
+                    dump = jvm_direct.load_dump(warn_stale=False)
+                    daemon_response = jvm_validate_daemon.run(dump, str(args_path))
+                    daemon_code = daemon_response.get("code")
+                    if daemon_code != 0:
+                        raise jvm_validate_daemon.ValidateDaemonError(
+                            "daemon 返回 code=%s%s" %
+                            (daemon_code,
+                             ("：" + str(daemon_response.get("error"))
+                              if daemon_response.get("error") else "")))
+                    if not out_path.exists():
+                        raise jvm_validate_daemon.ValidateDaemonError(
+                            "daemon 返回成功但没有产出结果文件")
+                    execution_mode = "validate_daemon"
+                    execution_note = "单条校验复用常驻 Validate JVM"
+                except Exception as exc:
+                    daemon_failure = "常驻 Validate JVM 未完成：%s" % exc
+                    try:
+                        out_path.unlink()
+                    except OSError:
+                        pass
+
+            if execution_mode != "validate_daemon":
+                gradle = _normalize_gradle_result(
+                    _run_gradle(args_path=args_path, runtime=payload.get("runtime"))
+                    if args_path is not None else _run_gradle(runtime=payload.get("runtime")))
+                code = gradle.get("exit")
+                execution_note = (daemon_failure + "；已使用 Gradle 完成本次校验"
+                                  if daemon_failure else execution_note)
+            else:
+                code = daemon_response.get("code")
+
+            snapshot_reason = _runtime_snapshot_failure_reason(gradle)
+            if snapshot_reason:
+                return dict(prep, **{"ok": False, "exit": code,
+                                    "reason": snapshot_reason,
+                                    "execution_mode": execution_mode,
+                                    "execution_note": execution_note,
+                                    "gradle": gradle})
             if not out_path.exists():
                 return dict(prep, **{"ok": False, "exit": code,
-                                    "reason": _gradle_failure_reason(gradle),
+                                    "reason": (_gradle_failure_reason(gradle)
+                                               if gradle else
+                                               "常驻 Validate JVM 没有产出结果文件"),
+                                    "execution_mode": execution_mode,
+                                    "execution_note": execution_note,
                                     "gradle": gradle})
             rows = _read_results(out_path)
             batch = _write_meta(rows)
@@ -457,6 +571,8 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
             result = dict(prep, **{
                 "ok": code == 0, "exit": code, "batch": batch,
                 "count": len(rows), "dist": dict(dist), "checks": n_checks,
+                "execution_mode": execution_mode,
+                "execution_note": execution_note,
                 # 结果体与**本地校验那条同形状**（前端单条校验两条路都读它）：
                 # checked / items / transitions 是回填与摘要要的，cached 这条链
                 # **没有页面缓存**（每次都真抓），报 0 是实话
@@ -466,6 +582,12 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
             })
             if code != 0:
                 result["gradle"] = gradle
+            if daemon_failure:
+                result["daemon_fallback_reason"] = daemon_failure
+            snapshot = gradle.get("runtime_snapshot")
+            if (isinstance(snapshot, dict) and
+                    (snapshot.get("error") or snapshot.get("differences"))):
+                result["runtime_snapshot"] = snapshot
             return result
         finally:
             RUN_LOCK.release()

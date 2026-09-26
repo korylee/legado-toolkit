@@ -147,14 +147,23 @@ pnpm build
 - Gradle 可启动的 JDK 与 Android SDK 平台（平台版本按 App 的 `compileSdk` 检查）
 - Gradle 用户目录：默认使用当前用户的 `.gradle`，也可通过 `GRADLE_USER_HOME` 指定
 
+Gradle Wrapper 分发包需要先显式准备；校验与调试不会在启动链中自动联网下载。
+执行 `uv run python scripts/prepare_gradle.py --app-repo <App源码目录>`，脚本会校验并写入
+Gradle 官方缓存目录，不改写 App 仓库。下载地址可通过 `--distribution-url`、
+`LEGADO_GRADLE_DISTRIBUTION_URL` 或 `data/jvm.properties` 中的
+`gradle.distribution.url` 配置；未配置时使用 Wrapper 自己声明的 `distributionUrl`。
+
 步骤：
 
-1. 设置 → 「JVM 校验」页签 → 只填**一个**路径：App 源码目录。
-   JDK 从 `JAVA_HOME` 或 `PATH` 查找，Android SDK 从仓库 `local.properties` 或 SDK 环境变量查找；
-   Gradle 用户目录使用 `GRADLE_USER_HOME` 或 Gradle 默认目录。环境项不用逐个填写。
-2. 同一个页签里点「自检环境」：逐项检查 Gradle wrapper 启动 JVM、daemon criteria、项目编译 toolchain、SDK 与 Gradle 用户目录；
-   版本要求从 App 仓库配置读取。逐项全绿才能跑批。首次编译要十几分钟（在下载依赖），
-   属正常现象。**这一页只配环境**（App 源码目录 + 自检 + 最近一次的结果）。
+1. 设置 → 「JVM 校验」页签 → 填 App 源码目录；Android SDK 默认从仓库
+   `local.properties`、JVM 设置里的可选 SDK 目录、SDK 环境变量或 `PATH` 中的 Android 工具发现。
+   自动发现失败时，可直接输入 SDK 根目录或点击「选择目录」。项目 `local.properties` 优先，若与管理台
+   SDK 目录不一致，自检会提示冲突。JDK 从 `JAVA_HOME` 或 `PATH` 查找，Gradle 用户目录使用
+   `GRADLE_USER_HOME` 或 Gradle 默认目录。
+2. 同一个页签里点「自检环境」：逐项检查 Gradle wrapper 启动 JVM、daemon criteria、项目编译 toolchain、SDK、
+   Gradle 用户目录和 Wrapper 分发包缓存；版本要求从 App 仓库配置读取。逐项全绿才能跑批。
+   如果分发包未准备，自检会给出 `uv run python scripts/prepare_gradle.py` 命令；下载完成后重新自检。
+   **这一页只配环境**（App 源码目录 + 自检 + 最近一次的结果）。
 3. **跑批的入口在书源列表**：工具栏「全量校验」（或先勾选几条 → 「校验选中」）→
    「开始校验」。一次调用跑完即退（后端起 `appservice` 子进程）。
    没勾选 = 全部在用书源（受「条数上限」约束）；勾了 = 只跑这几条（那时条数上限不参与）。

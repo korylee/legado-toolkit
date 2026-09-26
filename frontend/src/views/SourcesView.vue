@@ -129,6 +129,7 @@ const checkTipText = computed(() => {
   if (c.hitDowngrades) {
     bits.push(c.hitDowngrades + " 个源命中判定降级（规则无法回放，已按「命中」处理）");
   }
+  if (c.executionNote) bits.push(c.executionNote);
   return bits.join(" · ");
 });
 
@@ -219,9 +220,9 @@ async function runJvmBatch() {
   try {
     const r = await jvmRun(payload);
     if (!r.started) {
-      // 没起来的几种原因要分开说：另一个 JVM 任务在跑（reason）、自检没过（selftest）、
+      // 没起来的几种原因要分开说：另一个 JVM 任务在跑（reason）、环境就绪检查没过（readiness）、
       // 选中的源一条都没匹配上 / 筛选没命中（reason）——都说成「自检未通过」会把原因指反
-      ElMessage.warning(r.reason || "环境自检未通过，不能跑批");
+      ElMessage.warning(r.reason || "环境就绪检查未通过，不能跑批");
       jvmRunning.value = false;
       return;
     }
@@ -532,6 +533,7 @@ function parseCheckResult(resultJson) {
     // 写库失败要单独报：结果没落库时列表状态不会变，而列表上完全看不出来
     saveFailures: r.save_failures || 0,
     hitDowngrades: r.hit_downgrades || 0,
+    executionNote: r.execution_note || "",
   };
 }
 
@@ -560,12 +562,12 @@ async function checkSources(urls = []) {
     if (viaEngine) {
       const r = await jvmRun({ urls });
       if (!r.started) {
-        // 引擎没起来的几种原因分开说（reason = 忙 / 空范围，selftest = 环境没过）——
+        // 引擎没起来的几种原因分开说（reason = 忙 / 空范围，readiness = 环境没过）——
         // 都说成「自检未通过」会把原因指反（与跑批那条同一套说法）
         checking.value = false;
         checkingUrls.value = new Set();
         ElMessage.warning(r.reason
-          || "本机引擎不可用：先在「设置 → JVM 校验」里填 App 源码目录并自检");
+          || "本机引擎不可用：先在「设置 → JVM 校验」里填 App 源码目录并检查环境");
         return;
       }
       jobId = r.job_id;

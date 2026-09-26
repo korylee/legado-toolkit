@@ -30,6 +30,8 @@ async def jvm_debug(body: JvmDebugRequest):
     """
     from core.fetch import CACHE_MODES
     from core.jvm_debug import run_jvm_debug
+    from core import settings_store
+    from core.jvm_env import readiness
 
     # 与 /app-debug 同一条纪律：枚举严格比，**不静默退回默认**——用户选了
     # 「忽略缓存重抓」却因为拼错而每次都联网，界面上分辨不出来
@@ -43,12 +45,16 @@ async def jvm_debug(body: JvmDebugRequest):
     # 界面上配了代理却只走一半（我们走、App 不走）是查不出来的不一致：两边都「正常」，
     # 只有用户能看出网络出口不一样（十-3）
     from core.settings_store import resolve_proxy
+    jvm_conf = settings_store.load().get("jvm", {})
+    readiness_result = readiness(
+        jvm_conf.get("app_repo", ""), jvm_conf.get("android_sdk_dir", ""))
     # JVM 与批量校验共用一条有序 lane。常驻 daemon 本身也只能串行处理请求；
     # 后来的调试请求排队，而不是拿不到 `RUN_LOCK` 后直接返回 busy。
     async with runner.acquire_lane("jvm"):
         work = asyncio.create_task(asyncio.to_thread(
             run_jvm_debug, dict(body.source or {}), body.key or "我",
             int(body.timeout or 60), body.cookie or "", cache, resolve_proxy(),
+            readiness_result=readiness_result,
         ))
         try:
             return await asyncio.shield(work)

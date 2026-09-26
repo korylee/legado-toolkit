@@ -87,6 +87,7 @@ DEFAULTS: Dict[str, Dict[str, Any]] = {
     },
     "jvm": {
         "app_repo": "",
+        "android_sdk_dir": "",
         "keyword": "我",
         "timeout": 25,
         "concurrency": 8,
@@ -253,6 +254,7 @@ def _migrate_legacy(data: Dict[str, Any]) -> None:
 _SPECS: Dict[tuple, Any] = {
     ("network", "proxy"): _to_app_proxy,
     ("jvm", "app_repo"): _to_path,
+    ("jvm", "android_sdk_dir"): _to_path,
     ("jvm", "keyword"): lambda v: (str(v).strip() or DEFAULTS["jvm"]["keyword"]),
     ("jvm", "timeout"): lambda v: _to_int(
         v, DEFAULTS["jvm"]["timeout"], *LIMITS["jvm_timeout"]),

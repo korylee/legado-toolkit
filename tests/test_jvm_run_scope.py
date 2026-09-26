@@ -11,7 +11,7 @@
 3. **选了具体几条就不看条数上限**：否则「选了 20 条只跑了 3 条」是一次看不出来的截断。
 
 不跑 Gradle、不联网：`_export_sources_file` 用真的（它只读库 + 写一个临时 JSON），
-`_run_gradle` / `selftest` / `Store` 打桩。
+`_run_gradle` / `readiness` / `Store` 打桩。
 """
 
 from __future__ import annotations
@@ -48,7 +48,7 @@ class _Base(unittest.TestCase):
         for p in (
             mock.patch.object(jvm_api, "_AGSVC", self.probe / "appservice"),
             mock.patch.object(jvm_api, "data_dir", lambda: self.probe / "data"),
-            mock.patch.object(jvm_api, "selftest", lambda repo: {"ok": True, "checks": [], "runtime": {"app_repo": "X:/repo", "java_home": "X:/jdk", "android_sdk": "X:/sdk", "gradle_user_home": "X:/.gradle"}}),
+            mock.patch.object(jvm_api, "readiness", lambda repo, sdk="": {"ok": True, "checks": [], "runtime": {"app_repo": "X:/repo", "java_home": "X:/jdk", "android_sdk": "X:/sdk", "gradle_user_home": "X:/.gradle"}}),
             mock.patch.object(jvm_api, "_write_meta", lambda rows: "testbatch"),
             mock.patch.object(jvm_api, "_run_gradle", self._fake_gradle),
             mock.patch.object(jvm_api.settings_store, "load",
@@ -125,6 +125,13 @@ class ScopeTests(_Base):
             "app_repo": "X:/repo", "java_home": "X:/jdk",
             "android_sdk": "X:/sdk", "gradle_user_home": "X:/.gradle",
         }
+        readiness_snapshot = {
+            "ok": True,
+            "checks": [],
+            "runtime": dict(original),
+            "fingerprint": "sha256:submission-snapshot",
+            "checked_at": "2026-09-24T12:00:00Z",
+        }
 
         async def submit_job():
             def capture_submit(kind, payload, lane=None):
@@ -132,24 +139,63 @@ class ScopeTests(_Base):
                 return "queued-job"
 
             with mock.patch.object(jvm_api, "Store", lambda *a, **kw: Store(self.db)), \
-                 mock.patch.object(jvm_api, "selftest", lambda repo: {
-                     "ok": True, "checks": [], "runtime": dict(original)}), \
+                mock.patch.object(jvm_api, "readiness", lambda repo, sdk="": dict(readiness_snapshot)), \
                  mock.patch.object(jvm_api.runner, "submit", side_effect=capture_submit):
                 return await jvm_api.jvm_run(JvmRunRequest(urls=["https://a.com"]))
 
         response = asyncio.run(submit_job())
         self.assertTrue(response["started"])
         self.assertEqual(submitted["payload"]["runtime"], original)
+        self.assertEqual(submitted["payload"]["readiness_fingerprint"],
+                         readiness_snapshot["fingerprint"])
+        self.assertEqual(submitted["payload"]["readiness_checked_at"],
+                         readiness_snapshot["checked_at"])
 
         changed = dict(original, java_home="Y:/new-jdk")
-        with mock.patch.object(jvm_api, "selftest", lambda repo: {
-                "ok": True, "checks": [], "runtime": changed}), \
+        with mock.patch.object(jvm_api, "readiness", side_effect=AssertionError(
+                "执行阶段不应重新检查环境")), \
              mock.patch("core.jvm_health.store_checks", lambda *a, **kw: 0):
             result = asyncio.run(jvm_api.run_jvm_job(
                 "queued-job", Store(self.db), submitted["payload"]))
 
         self.assertTrue(result["ok"])
         self.assertEqual(self.runtime_seen, original)
+
+    def test_readiness_environment_drift_does_not_store_result(self) -> None:
+        self.gradle_result = {
+            "exit": 0,
+            "stdout": "",
+            "stderr": "",
+            "runtime_snapshot": {
+                "differences": {
+                    "readinessEnvironment": {
+                        "JAVA_HOME": {
+                            "declared": "X:/jdk",
+                            "actual": "Y:/jdk",
+                        },
+                    },
+                },
+            },
+        }
+        result = self._call(urls=["https://a.com"])
+        self.assertFalse(result["ok"])
+        self.assertIn("实际启动环境", result["reason"])
+        self.assertIn("JAVA_HOME", result["reason"])
+        self.assertEqual(result["gradle"], self.gradle_result)
+        with Store(self.db) as st:
+            self.assertNotIn("https://a.com", st.checks_map())
+
+    def test_missing_runtime_snapshot_is_diagnostic_only(self) -> None:
+        self.gradle_result = {
+            "exit": 0,
+            "stdout": "",
+            "stderr": "",
+            "runtime_snapshot": {"error": "actual snapshot missing"},
+        }
+        result = self._call(urls=["https://a.com"])
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["runtime_snapshot"]["error"],
+                         "actual snapshot missing")
 
     def test_selector_matches_despite_case_and_trailing_slash(self) -> None:
         """**归一后才比**：库里那条的原文是 `https://A.com/`（大写 + 尾斜杠），
@@ -328,6 +374,39 @@ class ResultShapeTests(_Base):
         _r, out = self._run_single()
         self.assertEqual(out["transitions"]["changed"], {})
         self.assertEqual(out["transitions"]["first_checked"], 0)
+
+    def test_single_prefers_validate_daemon(self) -> None:
+        def fake_daemon(_dump, args_file):
+            args = pathlib.Path(args_file).read_text(encoding="utf-8")
+            out = pathlib.Path(next(line.split("=", 1)[1] for line in args.splitlines()
+                                    if line.startswith("out=")))
+            out.write_text(json.dumps({"url": "https://a.com", "state": "ok"}),
+                           encoding="utf-8")
+            return {"code": 0, "cost_ms": 3, "error": ""}
+
+        with mock.patch("core.jvm_direct.load_dump", return_value={
+                "workingDir": "C:/repo", "classpath": "x", "maxHeapSize": "3g",
+                "environment": {}, "jvmArgs": [], "systemProperties": {},
+                "javaHomeEnv": "C:/jdk"}), \
+             mock.patch("core.jvm_validate_daemon.run", side_effect=fake_daemon) as daemon:
+            _request, result = self._run_single()
+        self.assertEqual(result["execution_mode"], "validate_daemon")
+        self.assertIn("常驻 Validate JVM", result["execution_note"])
+        daemon.assert_called_once()
+        self.assertEqual(self.gradle_calls, 0)
+
+    def test_single_daemon_failure_falls_back_with_reason(self) -> None:
+        with mock.patch("core.jvm_direct.load_dump", return_value={
+                "workingDir": "C:/repo", "classpath": "x", "maxHeapSize": "3g",
+                "environment": {}, "jvmArgs": [], "systemProperties": {},
+                "javaHomeEnv": "C:/jdk"}), \
+             mock.patch("core.jvm_validate_daemon.run",
+                        side_effect=RuntimeError("端口不可用")):
+            _request, result = self._run_single()
+        self.assertEqual(result["execution_mode"], "gradle_fallback")
+        self.assertIn("端口不可用", result["daemon_fallback_reason"])
+        self.assertIn("Gradle", result["execution_note"])
+        self.assertEqual(self.gradle_calls, 1)
 
 
 class ExportTests(_Base):

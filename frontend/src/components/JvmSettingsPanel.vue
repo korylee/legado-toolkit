@@ -9,7 +9,17 @@
           <el-button :disabled="saving || picking" :loading="picking" @click="pickAppRepo">选择目录</el-button>
         </div>
         <div class="muted" style="font-size: 12px; margin-top: 2px">
-          其余环境（JDK / Android SDK / Gradle 目录）由「自检」自动推导，不需要填
+          App 源码目录必填；Android SDK 默认从项目或环境变量自动发现，发现失败时可在这里指定
+        </div>
+      </el-form-item>
+      <el-form-item label="Android SDK 目录">
+        <div style="display: flex; gap: 8px; width: 100%">
+          <el-input v-model="conf.android_sdk_dir" placeholder="可选，如 D:\Android\Sdk"
+                    clearable :disabled="saving" />
+          <el-button :disabled="saving || pickingSdk" :loading="pickingSdk" @click="pickAndroidSdk">选择目录</el-button>
+        </div>
+        <div class="muted" style="font-size: 12px; margin-top: 2px">
+          项目 local.properties 优先；此处与 local.properties 不一致时会明确提示冲突
         </div>
       </el-form-item>
       <!-- 代理：**这台机器怎么出去**（环境类配置，不是"这次怎么跑"）。两条引擎路
@@ -29,7 +39,7 @@
     </el-form>
 
     <div style="display: flex; gap: 8px; margin: 4px 0 12px; align-items: center">
-      <el-button size="small" :loading="checking" @click="doSelftest">自检环境</el-button>
+      <el-button size="small" :loading="checking" @click="runReadiness">检查环境</el-button>
       <el-button size="small" type="primary" :loading="saving" @click="save">保存配置</el-button>
       <span v-if="saving" class="muted" style="font-size: 12px">保存中…</span>
     </div>
@@ -47,8 +57,33 @@
     </el-alert>
 
     <!-- 自检结果 -->
-    <el-alert v-if="selftest && !selftest.ok" type="error" :closable="false" title="环境自检未通过" />
-    <el-table v-if="selftest" :data="selftest.checks" size="small" style="margin: 8px 0">
+    <el-alert v-if="readiness && !readiness.ok" type="error" :closable="false" title="环境就绪检查未通过" />
+    <el-descriptions v-if="readiness" :column="2" size="small" border style="margin: 8px 0">
+      <el-descriptions-item label="检查时间">{{ readiness.checked_at || "—" }}</el-descriptions-item>
+      <el-descriptions-item label="运行方式">{{ launchModeText }}</el-descriptions-item>
+      <el-descriptions-item label="Java">
+        {{ readiness.runtime?.java?.version || "—" }} · {{ readiness.runtime?.java?.home || "未解析" }}
+      </el-descriptions-item>
+      <el-descriptions-item label="Gradle daemon JVM">
+        {{ readiness.runtime?.daemon_java?.version || "—" }} · {{ readiness.runtime?.daemon_java?.home || "未解析" }}
+      </el-descriptions-item>
+      <el-descriptions-item label="项目 toolchain">
+        {{ readiness.runtime?.toolchain_java?.version || "—" }} · {{ readiness.runtime?.toolchain_java?.home || "未解析" }}
+      </el-descriptions-item>
+      <el-descriptions-item label="Android SDK">
+        {{ readiness.runtime?.compile_sdk || "—" }} · {{ readiness.runtime?.android_sdk || "未解析" }}
+        <span v-if="readiness.runtime?.android_sdk_source" class="muted">
+          （{{ readiness.runtime.android_sdk_source }}）
+        </span>
+      </el-descriptions-item>
+      <el-descriptions-item label="Gradle 用户目录">
+        {{ readiness.runtime?.gradle_user_home || "未解析" }}
+      </el-descriptions-item>
+      <el-descriptions-item label="Wrapper 缓存">
+        {{ readiness.runtime?.wrapper_distribution_cache || "未就绪" }}
+      </el-descriptions-item>
+    </el-descriptions>
+    <el-table v-if="readiness" :data="readiness.checks" row-key="id" size="small" style="margin: 8px 0">
       <el-table-column label="检查项" prop="name" width="220" />
       <el-table-column label="状态" width="70">
         <template #default="{ row }">
@@ -97,27 +132,34 @@
 import { ref, reactive, computed, onMounted } from "vue";
 import { ElMessage } from "element-plus";
 import { getSettings, patchSettings } from "../api/settings";
-import { jvmSelftest, jvmResults, pickJvmAppRepo } from "../api/jvm.js";
+import { jvmReadiness, jvmResults, pickJvmAppRepo, pickJvmAndroidSdk } from "../api/jvm.js";
 
 //: 这一页只剩**配置**一项（App 源码目录）；跑批参数在列表页的弹框里，不在这
-const conf = reactive({ app_repo: "", proxy: "" });   // proxy 属 network 段（这台机器怎么出去）
-const selftest = ref(null);
+const conf = reactive({ app_repo: "", android_sdk_dir: "", proxy: "" });
+const readiness = ref(null);
 const checking = ref(false);
 const picking = ref(false);
+const pickingSdk = ref(false);
 const saving = ref(false);
 const lastRun = ref(null);
 const r2 = ref({ count: 0, dist: {} });
+
+const launchModeText = computed(() => {
+  const mode = readiness.value?.runtime?.launch_mode;
+  return mode === "daemon_or_gradle" ? "优先 daemon，失败时走 Gradle" : (mode || "—");
+});
 
 onMounted(async () => {
   try {
     const s = await getSettings();
     conf.app_repo = (s.values.jvm || {}).app_repo || "";
+    conf.android_sdk_dir = (s.values.jvm || {}).android_sdk_dir || "";
     conf.proxy = (s.values.network || {}).proxy || "";
   } catch (e) { /* 设置接口挂了就保持默认，自检按钮仍可用 */ }
   try {
-    selftest.value = await jvmSelftest();
+    readiness.value = await jvmReadiness();
   } catch (e) {
-    selftest.value = { ok: false, checks: [{ name: "自检接口", hint: "自检失败：" + e }] };
+    readiness.value = { ok: false, checks: [{ name: "环境就绪接口", hint: "检查失败：" + e }] };
   }
   try {
     r2.value = await jvmResults();
@@ -131,7 +173,7 @@ async function pickAppRepo() {
     const result = await pickJvmAppRepo();
     if (!result.cancelled && result.path) {
       conf.app_repo = result.path;
-      await doSelftest();
+      await runReadiness();
     }
   } catch (e) {
     ElMessage.error("选择目录失败：" + e);
@@ -140,15 +182,30 @@ async function pickAppRepo() {
   }
 }
 
-async function doSelftest() {
+async function pickAndroidSdk() {
+  pickingSdk.value = true;
+  try {
+    const result = await pickJvmAndroidSdk();
+    if (!result.cancelled && result.path) {
+      conf.android_sdk_dir = result.path;
+      await runReadiness();
+    }
+  } catch (e) {
+    ElMessage.error("选择 Android SDK 目录失败：" + e);
+  } finally {
+    pickingSdk.value = false;
+  }
+}
+
+async function runReadiness() {
   checking.value = true;
   try {
     // 先保存路径，自检读的是后端设置
-    await patchSettings({ jvm: { app_repo: conf.app_repo },
+    await patchSettings({ jvm: { app_repo: conf.app_repo, android_sdk_dir: conf.android_sdk_dir },
                           network: { proxy: conf.proxy } });
-    selftest.value = await jvmSelftest();
+    readiness.value = await jvmReadiness();
   } catch (e) {
-    ElMessage.error("自检失败: " + e);
+    ElMessage.error("环境检查失败：" + e);
   } finally {
     checking.value = false;
   }
@@ -160,12 +217,13 @@ async function save() {
     // 以后端收敛后的值为准（填了越界的值会被收掉，界面要跟着变）
     // 只发**这一页编辑的**那一个键：PATCH 的 exclude_unset 语义保证其余键不动
     // （跑批参数那几项仍然存在设置里，只是不再有界面）
-    const s = await patchSettings({ jvm: { app_repo: conf.app_repo },
+    const s = await patchSettings({ jvm: { app_repo: conf.app_repo, android_sdk_dir: conf.android_sdk_dir },
                                     network: { proxy: conf.proxy } });
     conf.app_repo = (s.values.jvm || {}).app_repo || "";
+    conf.android_sdk_dir = (s.values.jvm || {}).android_sdk_dir || "";
     conf.proxy = (s.values.network || {}).proxy || "";
-    selftest.value = await jvmSelftest();
-    ElMessage.success("配置已保存并完成环境自检");
+    readiness.value = await jvmReadiness();
+    ElMessage.success("配置已保存并完成环境检查");
   } catch (e) {
     ElMessage.error("保存失败：" + e);
   } finally {

@@ -5,7 +5,7 @@ import { ElMessage, ElMessageBox } from "element-plus";
 import { api, subscribeJob } from "../api/client";
 import { getDetail, listTags, saveSource, sourceExists } from "../api/sources";
 import { appDebug, appPreflight, jvmDebug } from "../api/rules";
-import { jvmSelftest } from "../api/jvm.js";
+import { jvmReadiness } from "../api/jvm.js";
 import { jobFailReason } from "../utils/jobs";
 import {
   canonicalTag, ensureTagMeta, isQualityTag, isStatusTag,
@@ -671,9 +671,9 @@ async function quickGenerate() {
 async function loadJvmEnvironment() {
   jvmEnvLoading.value = true;
   try {
-    jvmEnv.value = await jvmSelftest();
+    jvmEnv.value = await jvmReadiness();
   } catch (e) {
-    jvmEnv.value = { ok: false, checks: [{ name: "自检接口", hint: "环境自检失败：" + e }] };
+    jvmEnv.value = { ok: false, checks: [{ name: "环境就绪接口", hint: "环境检查失败：" + e }] };
   } finally {
     jvmEnvLoading.value = false;
   }

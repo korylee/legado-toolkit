@@ -37,9 +37,8 @@ from core.jvm_debug import AGSVC, LAUNCHER, LAUNCHER_CLASS
 from core.paths import data_path
 
 DUMP_NAME = "test_jvm_env.json"
-#: refresh 用最便宜的那个测试：dump 挂在**所有** test 任务上，跑哪个都能拿到，
-#: 而 `DebugServiceLauncher` 会真跑一次调试，白花一次站点请求。
-REFRESH_TEST = "io.legado.app.service.ServiceJsonTest"
+#: refresh 用独立的轻量入口采集 JVM 实际快照，不触发站点请求。
+REFRESH_TEST = "io.legado.app.service.RuntimeSnapshotTest"
 
 
 class DumpSchemaError(ValueError):
@@ -154,7 +153,19 @@ def refresh(timeout_min: int = 30) -> int:
     out.parent.mkdir(parents=True, exist_ok=True)
     if out.exists():
         out.unlink()
-    env = {**os.environ, "LEGADO_TEST_JVM_ENV_OUT": str(out)}
+    env = {**os.environ, "LEGADO_TEST_JVM_ENV_OUT": str(out),
+           "LEGADO_TEST_JVM_LAUNCH_MODE": "refresh"}
+    from core.gradle_distribution import GradleDistributionError, distribution_status
+    try:
+        wrapper_cache = distribution_status(
+            env.get("LEGADO_REPO", ""), env.get("GRADLE_USER_HOME", ""))
+    except (GradleDistributionError, OSError) as exc:
+        print("Gradle Wrapper 自检失败：%s" % exc)
+        return 1
+    if wrapper_cache.get("status") != "ready":
+        print("Gradle Wrapper 未准备：%s；请先执行 `uv run python scripts/prepare_gradle.py`"
+              % wrapper_cache.get("reason", "缓存中没有分发包"))
+        return 1
     t0 = time.time()
     p = subprocess.run(
         ["cmd", "/c", str(LAUNCHER), ":app:testAppDebugUnitTest", "--tests", REFRESH_TEST,
@@ -174,6 +185,8 @@ def refresh(timeout_min: int = 30) -> int:
         print("dump 结构无效：%s" % e)
         return 1
     print("dump 完成：%s（%.1fs）" % (out, cost))
+    from core.jvm_runtime_snapshot import compare_runtime_snapshot
+    compare_runtime_snapshot("refresh", "refresh")
     return 0
 
 
@@ -262,7 +275,10 @@ def run_direct(dump: Dict[str, Any], main_class: str = LAUNCHER_CLASS, timeout: 
     validate_dump(dump)
     cmd = java_command(dump, main_class, use_argfile=use_argfile)
     t0 = time.time()
-    p = subprocess.run(cmd, cwd=dump["workingDir"], env=java_env(dump),
+    env = java_env(dump)
+    env["LEGADO_TEST_JVM_ENV_OUT"] = str(dump_path())
+    env["LEGADO_TEST_JVM_LAUNCH_MODE"] = "direct"
+    p = subprocess.run(cmd, cwd=dump["workingDir"], env=env,
                        capture_output=True, text=True, errors="replace", timeout=timeout)
     return p.returncode, time.time() - t0, (p.stdout or ""), (p.stderr or "")
 
@@ -270,5 +286,8 @@ def run_direct(dump: Dict[str, Any], main_class: str = LAUNCHER_CLASS, timeout: 
 def direct_launcher(dump: Dict[str, Any], timeout: int = 300) -> Callable[[], Tuple[int, float, str, str]]:
     """给 `run_jvm_debug(launcher=...)` 用的可调用对象。"""
     def _run() -> Tuple[int, float, str, str]:
-        return run_direct(dump, LAUNCHER_CLASS, timeout=timeout)
+        result = run_direct(dump, LAUNCHER_CLASS, timeout=timeout)
+        from core.jvm_runtime_snapshot import compare_runtime_snapshot
+        compare_runtime_snapshot("direct", "debug")
+        return result
     return _run

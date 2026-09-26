@@ -1,10 +1,14 @@
 package io.legado.app.service
 
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonObject
+import java.io.File
+import java.lang.management.ManagementFactory
 
 /**
  * 结论行（`Map<String, Any?>` → JSON）的**唯一**编码器。
@@ -26,6 +30,35 @@ import kotlinx.serialization.json.JsonPrimitive
  * 多打几个字，是上面这两条**不报错**的漂移。
  */
 object ServiceJson {
+
+    /** Capture the live test JVM beside its task declaration without affecting task outcomes. */
+    fun writeRuntimeSnapshot(entry: String) {
+        val dumpPath = System.getenv("LEGADO_TEST_JVM_ENV_OUT")?.takeIf { it.isNotBlank() }
+        if (dumpPath == null) {
+            System.err.println("[appservice] JVM runtime snapshot skipped: LEGADO_TEST_JVM_ENV_OUT missing")
+            return
+        }
+        try {
+            val declared = Json.parseToJsonElement(File(dumpPath).readText(Charsets.UTF_8)).jsonObject
+            val declaredProperties = declared["systemProperties"]?.jsonObject.orEmpty()
+            val declaredEnvironment = declared["environment"]?.jsonObject.orEmpty()
+            val actual = linkedMapOf<String, Any?>(
+                "entry" to entry,
+                "launchMode" to (System.getenv("LEGADO_TEST_JVM_LAUNCH_MODE") ?: "gradle"),
+                "workingDir" to System.getProperty("user.dir"),
+                "classpath" to System.getProperty("java.class.path"),
+                "jvmArgs" to ManagementFactory.getRuntimeMXBean().inputArguments,
+                "systemProperties" to declaredProperties.keys.associateWith { System.getProperty(it) },
+                "environment" to declaredEnvironment.keys.associateWith { System.getenv(it) },
+            )
+            val output = File("$dumpPath.actual.${actual["launchMode"]}.$entry.json")
+            output.parentFile?.mkdirs()
+            output.writeText(Json.encodeToString(JsonObject.serializer(), toJsonObject(actual)), Charsets.UTF_8)
+            println("[appservice] JVM runtime snapshot: ${output.absolutePath}")
+        } catch (e: Exception) {
+            System.err.println("[appservice] JVM runtime snapshot failed (does not affect run): $e")
+        }
+    }
 
     /** `Map<String, Any?>` → `JsonObject`。键序按入参（结论行是人要读的，别改成无序容器）。 */
     fun toJsonObject(data: Map<String, Any?>): JsonObject =

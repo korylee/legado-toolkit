@@ -278,6 +278,7 @@ class JvmSettingsPatch(BaseModel):
     的约定：收敛全部交给 settings_store.coerce。"""
 
     app_repo: Optional[str] = None
+    android_sdk_dir: Optional[str] = None
     keyword: Optional[str] = None
     timeout: Optional[int] = None
     concurrency: Optional[int] = None

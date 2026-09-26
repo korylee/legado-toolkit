@@ -5,17 +5,33 @@
          一堆看不懂的错。 -->
     <div class="row">
       <el-tag v-if="checking" size="small" type="info">正在自检…</el-tag>
-      <el-tag v-else-if="selftest && selftest.ok" size="small" type="success">
-        自检通过
+      <el-tag v-else-if="readiness && readiness.ok" size="small" type="success">
+        环境可用
       </el-tag>
-      <el-tag v-else-if="selftest" size="small" type="danger">自检未通过</el-tag>
-      <el-button size="small" link type="primary" :loading="checking" @click="runSelftest">
-        重新自检
+      <el-tag v-else-if="readiness" size="small" type="danger">环境不可用</el-tag>
+      <el-button size="small" link type="primary" :loading="checking" @click="runReadiness">
+        重新检查
       </el-button>
     </div>
 
-    <el-alert v-if="selftest && !selftest.ok" type="error" :closable="false" show-icon
+    <el-alert v-if="readiness && !readiness.ok" type="error" :closable="false" show-icon
               style="margin: 8px 0" :title="blockReason" />
+    <el-descriptions v-if="readiness" :column="2" size="small" border style="margin: 8px 0">
+      <el-descriptions-item label="检查时间">{{ readiness.checked_at || "—" }}</el-descriptions-item>
+      <el-descriptions-item label="运行方式">{{ launchModeText }}</el-descriptions-item>
+      <el-descriptions-item label="Java">
+        {{ readiness.runtime?.java?.version || "—" }} · {{ readiness.runtime?.java?.home || "未解析" }}
+      </el-descriptions-item>
+      <el-descriptions-item label="Android SDK">
+        {{ readiness.runtime?.compile_sdk || "—" }} · {{ readiness.runtime?.android_sdk || "未解析" }}
+      </el-descriptions-item>
+      <el-descriptions-item label="Gradle 用户目录">
+        {{ readiness.runtime?.gradle_user_home || "未解析" }}
+      </el-descriptions-item>
+      <el-descriptions-item label="Wrapper 缓存">
+        {{ readiness.runtime?.wrapper_distribution_cache || "未就绪" }}
+      </el-descriptions-item>
+    </el-descriptions>
 
     <!-- 本次怎么跑：**在这里调**（原来只读、得去设置页改——那是"配置"的住法，
          而这些是"这次动作"的参数）。默认值来自后端（`settings_store.DEFAULTS`），
@@ -76,7 +92,7 @@
 // 本次改动**不写回设置**——形状同本地校验的 `check: {...}`。
 import { ref, computed, onMounted } from "vue";
 import { getSettings } from "../api/settings";
-import { jvmSelftest } from "../api/jvm.js";
+import { jvmReadiness } from "../api/jvm.js";
 import { depthCost, depthHintText, depthOptions } from "../utils/jvmDepth";
 
 const props = defineProps({
@@ -94,11 +110,16 @@ const depthOpts = computed(() => depthOptions(limits.value));
 //: 本次跑批的参数（可编辑）。种子来自 `settings.values.jvm`——那是用户在设置页
 //: 时代留下的那套值，仍然当基准用；这里改了只影响这一次
 const run = ref({ keyword: "我", timeout: 25, concurrency: 8, depth: "search", limit: 0 });
-const selftest = ref(null);
+const readiness = ref(null);
 const checking = ref(false);
 
+const launchModeText = computed(() => {
+  const mode = readiness.value?.runtime?.launch_mode;
+  return mode === "daemon_or_gradle" ? "优先 daemon，失败时走 Gradle" : (mode || "—");
+});
+
 const blockReason = computed(() => {
-  const bad = ((selftest.value || {}).checks || []).filter((c) => !c.ok);
+  const bad = ((readiness.value || {}).checks || []).filter((c) => !c.ok);
   const first = bad[0] || {};
   return (first.name ? first.name + "：" : "") + (first.hint || "环境自检未通过");
 });
@@ -120,18 +141,18 @@ async function load() {
       limit: conf.value.limit ?? s.defaults?.jvm?.limit ?? 0,
     };
   } catch (e) { /* 设置接口挂了就只跑自检，参数留空 */ }
-  await runSelftest();
+  await runReadiness();
 }
 
-async function runSelftest() {
+async function runReadiness() {
   checking.value = true;
   try {
-    selftest.value = await jvmSelftest();
+    readiness.value = await jvmReadiness();
   } catch (e) {
-    selftest.value = { ok: false, checks: [{ name: "自检接口", hint: "自检失败：" + e }] };
+    readiness.value = { ok: false, checks: [{ name: "环境就绪接口", hint: "检查失败：" + e }] };
   } finally {
     checking.value = false;
-    emit("ready", !!selftest.value?.ok);
+    emit("ready", !!readiness.value?.ok);
   }
 }
 

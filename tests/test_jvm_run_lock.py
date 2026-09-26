@@ -61,7 +61,7 @@ class _Base(unittest.TestCase):
             mock.patch.object(jvm_api, "_AGSVC", agsvc),
             mock.patch.object(jvm_api, "data_dir", lambda: self.tmp / "data"),
             mock.patch.object(jvm_api, "Store", _FakeStore),
-            mock.patch.object(jvm_api, "selftest", lambda repo: {"ok": True, "checks": []}),
+            mock.patch.object(jvm_api, "readiness", lambda repo, sdk="": {"ok": True, "checks": []}),
             mock.patch.object(jvm_api, "_export_sources_file", self._fake_export),
             mock.patch.object(jvm_api, "_write_meta", lambda rows: "testbatch"),
             mock.patch.object(jvm_api, "_run_gradle", self._fake_gradle),

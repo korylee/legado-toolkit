@@ -112,6 +112,7 @@ def _run_launcher(timeout_min: int = 20, args_path: Optional[pathlib.Path] = Non
     t0 = time.time()
     env = {**(env_snapshot or os.environ),
            "LEGADO_TEST_JVM_ENV_OUT": str(data_path("app_probe", "test_jvm_env.json")),
+           "LEGADO_TEST_JVM_LAUNCH_MODE": "gradle",
            # 参数文件在哪：**必须显式告诉它**（`AppserviceEnv.loadArgs` 的第 1 候选）。
            # 不给的话它退回「挨着启动器找」——那里现在没有这个文件，而表现是启动器
            # 打印一句「找不到 args.properties，跳过」之后**什么都不跑**
@@ -121,6 +122,8 @@ def _run_launcher(timeout_min: int = 20, args_path: Optional[pathlib.Path] = Non
          "--tests", LAUNCHER_CLASS, "--rerun"],
         cwd=str(AGSVC), env=env, capture_output=True, text=True, errors="replace",
         timeout=timeout_min * 60)
+    from core.jvm_runtime_snapshot import compare_runtime_snapshot
+    compare_runtime_snapshot("gradle", "debug")
     return p.returncode, time.time() - t0, (p.stdout or ""), (p.stderr or "")
 
 
@@ -131,18 +134,21 @@ def _read_ndjson(path: str) -> List[Dict[str, Any]]:
     return [json.loads(x) for x in f.read_text(encoding="utf-8").splitlines() if x.strip()]
 
 
-def _env_error() -> Tuple[str, Dict[str, str]]:
-    """环境不可用时的**可执行**提示（不自检就开跑，只会在 Gradle 里炸出一堆看不懂的错）。"""
+def _env_error(readiness_result: Optional[Dict[str, Any]] = None) -> Tuple[str, Dict[str, str]]:
+    """把提交时的 readiness 快照转换成执行前置结果。"""
     from core import jvm_env, settings_store
 
-    conf = settings_store.load().get("jvm", {})
-    st = jvm_env.selftest(conf.get("app_repo", ""))
+    if readiness_result is None:
+        conf = settings_store.load().get("jvm", {})
+        readiness_result = jvm_env.readiness(
+            conf.get("app_repo", ""), conf.get("android_sdk_dir", ""))
+    st = readiness_result
     if st.get("ok"):
         return "", jvm_env.process_environment(st)
     bad = [c for c in (st.get("checks") or []) if not c.get("ok")]
     first = bad[0] if bad else {}
-    hint = first.get("hint") or "在「设置 → JVM 校验」里填 App 源码目录并自检"
-    return "本机引擎不可用：%s —— %s" % (first.get("name") or "环境自检未通过", hint), {}
+    hint = first.get("hint") or "在「设置 → JVM 校验」里填 App 源码目录并检查环境"
+    return "本机引擎不可用：%s —— %s" % (first.get("name") or "环境就绪检查未通过", hint), {}
 
 
 def _runtime_dump_mismatch(dump: Dict[str, Any], env_snapshot: Dict[str, str]) -> str:
@@ -356,7 +362,8 @@ def run_jvm_debug(source: Dict[str, Any],
                   proxy: str = "",
                   out_path: str = "",
                   launcher: Optional[Callable[[], Tuple[int, float, str, str]]] = None,
-                  ) -> Dict[str, Any]:
+                  readiness_result: Optional[Dict[str, Any]] = None,
+                   ) -> Dict[str, Any]:
     """跑一次 JVM 调试，返回与设备通道同形状的结果。
 
     ``out_path`` 只是给测试用的覆盖口；未指定时会在 `data/app_probe/runs/` 下创建
@@ -382,7 +389,10 @@ def run_jvm_debug(source: Dict[str, Any],
     if not str(src.get("bookSourceUrl", "") or "").strip():
         out["error"] = "缺少 bookSourceUrl（它同时是 cookie 注入的键，不能空）"
         return out
-    preflight = _env_error()
+    # Web 调试由路由在提交时生成 readiness；CLI/旧调用没有快照时才现场探测。
+    # 这样排队后不会因为用户改了设置或 PATH 而换一套 JVM。
+    preflight = (_env_error(readiness_result) if readiness_result is not None
+                 else _env_error())
     if isinstance(preflight, tuple):
         env_err, env_snapshot = preflight
     else:  # 测试/CLI 覆盖旧的提示钩子时仍可直接替换

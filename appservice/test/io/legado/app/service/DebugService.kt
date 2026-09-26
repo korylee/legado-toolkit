@@ -138,6 +138,7 @@ object DebugService {
 
     @JvmStatic
     fun main(args: Array<String>): Int {
+        ServiceJson.writeRuntimeSnapshot("debug")
         var file: String? = null
         var key = ""
         var outPath = ""

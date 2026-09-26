@@ -20,14 +20,14 @@
 
 ---
 
-### 条目：jvm-env-readiness · JVM 配置、自检与实际启动环境统一
-状态：doing
-依赖：无
+### 条目：jvm-single-fast-path · 单条校验脱离 Gradle 冷启动
+状态：todo
+依赖：jvm-runtime-snapshot, jvm-task-manifest
 优先级：P0
-背景：JVM 校验、调试与 Gradle refresh 依赖 App 源码目录、JDK、Android SDK 和 Gradle 环境；daemon 与 toolchain 候选已分开，Gradle User Home `jdks/` 也纳入发现，但 Gradle 原生自动发现来源尚未完整复刻，结果会注明静态检查边界。固定安装目录猜测、SDK 版本硬编码和盘符根目录回退已移除；Gradle `.bat` 启动器仍意味着当前链路实际限于 Windows。
-约束：按以下顺序改造环境解析：①App 源码目录仍为主配置；优先从 `JAVA_HOME`、`PATH`、`ANDROID_HOME` / `ANDROID_SDK_ROOT`、App 仓库 `local.properties` 和 Gradle 项目配置读取可验证的权威值，不再依赖固定盘符、`ProgramFiles`、`LOCALAPPDATA` 或特定版本目录作为成功条件；②分别识别启动 Gradle 所需 JDK 与项目编译 toolchain 的要求，按 App 仓库 wrapper / Gradle daemon criteria / toolchain 配置推导并检查，不用一个最低版本常量代替；③Android SDK 按项目实际 `compileSdk` 检查所需平台，安装提示不得另写一套 SDK 版本；④Gradle 用户目录遵循 Gradle 默认值或明确配置，只有经验证确有同卷约束时才应用该约束，不得默认写盘符根目录，且需检查可创建/写入；⑤自动发现不唯一或缺失时再展示可选的高级路径输入/原生选择，不把所有路径强制变成日常必填项；⑥明确支持的操作系统，若保留 Windows-only `.bat`，非 Windows 自检必须明确报不支持；若要支持其他系统则为其提供对应启动器。自检、实际启动与排队任务继续共用同一份已解析 runtime 快照。单条校验、调试和 refresh 启动前自动预检，未通过时阻止启动并把底层原因传到界面。移除个人绝对路径回退；保留 appservice 中承担不可替代测试桥接职责的逻辑。`jvm-runtime-snapshot` 仍独立验收，不以路径一致性代替 JVM 实际快照对拍。
-验收：在 Windows 非标准安装目录、仅靠 `PATH` / `local.properties`、环境变量与项目配置冲突、JDK/SDK 缺失、无效或只读 Gradle 用户目录、跨卷仓库等情况下，发现结果与实际启动一致且能说明采用/拒绝原因；SDK 检查与项目 `compileSdk` 一致。支持范围内各系统的启动器均能执行，范围外系统在启动前明确拒绝。高级路径输入/选择、取消选择后保留原值均符合预期。校验/调试前显示真实可用状态和路径；排队期间配置变化仍使用提交时快照。Gradle 启动失败原因到达界面；完成 appservice 逻辑清单并用调用链说明保留结论。实际 JVM 快照由 `jvm-runtime-snapshot` 验收。
-指针：core/jvm_direct.py，core/jvm_daemon.py，core/jvm_debug.py，backend/api/jvm.py，frontend/src/views/SourcesView.vue，appservice/legado-test.init.gradle，TODO.md（jvm-runtime-snapshot）
+背景：当前单条校验从 `POST /api/jvm/run` 进入 Gradle + `ValidateServiceLauncher`；服务重启后每次都要重新配置/启动 Gradle，导致本应快速反馈的单源校验长时间卡在启动阶段。完整 App 构建环境（包括项目声明的 Android SDK 平台）只应是首次准备、刷新 runtime snapshot 和 Gradle fallback 的前置条件，不能让已有有效 snapshot 的单条执行每次重复走完整环境检查。调试 daemon 的结果不能直接冒充校验结论，两者必须继续使用各自的协议和判定口径。
+约束：新增专用 Validate worker/daemon，复用真实 `ValidateService` 逻辑、现有结果协议和 `jvm_health.store_checks()`；把环境分成两层：准备态负责完整 SDK、Gradle Wrapper、依赖预热和 runtime snapshot 生成，单条执行态只校验 snapshot 仍存在、其中引用的 classpath/Java 可启动且 App 源码签名匹配。单条请求不下载依赖、不隐式编译；snapshot 缺失或失效时返回明确的“先准备/刷新”原因，不能把缺 SDK 伪装成源校验失败。daemon 冷启动、不可用或版本不匹配时要返回明确阶段和原因；只有完整 Gradle 准备态可用时才回退 Gradle，不能把 fallback 的慢路径伪装成常态成功。任务必须使用不可变 manifest，记录实际执行方式 `validate_daemon` 或 `gradle_fallback`；取消只能先进入 `cancel_requested`，待子进程和 JVM 确认退出后再落为 `cancelled`。
+验收：首次准备/刷新阶段能明确指出项目要求的 `compileSdk`、实际 SDK 根目录及缺失平台；准备成功后生成可复用 snapshot。重启后单条校验只验证执行态条件并复用常驻 Validate JVM，不再每次完整启动 Gradle；snapshot 引用的文件消失、源码签名变化或 daemon 不可用时，界面显示可执行原因和下一步。daemon 与 Gradle fallback 对同一源、同一参数逐字段对账，结果、错误原因、落库和前端状态一致。校验请求能显示排队、启动、执行、回读和落库阶段及实际执行方式；取消、超时和 worker 异常退出后不会遗留租约、参数文件或结果文件。
+指针：backend/api/jvm.py，backend/jobs/runner.py，core/jvm_direct.py，core/jvm_daemon.py，appservice/test/io/legado/app/service/ValidateService.kt，lessons §六十五 / §六十八
 
 ## 1 · 排队
 
@@ -36,45 +36,47 @@
 依赖：无
 优先级：P1
 背景：当前 `jvm` lane 已把调试、批量校验和生成后验证收进同一条进程内有序队列，能够避免并发改写 JVM 参数与输出；但严格 FIFO 会让交互调试被长批次挡住，简单地让调试永远插队又会让批量任务长期不运行。
-约束：调试请求优先；批量任务按有限工作单元让出执行权，并设置老化/公平规则，不能依赖 HTTP 连接是否仍存活。优先级只能影响排队顺序，不能绕过同一 JVM/profile 的独占约束。任务状态、取消和原因继续写入 jobs/SSE，不能只存在内存。
-验收：同时提交一个长批量任务、多个调试任务和第二个批量任务；调试任务在当前工作单元结束后优先获得执行权，第二个批量任务最终也能运行；服务端重启或关闭页面不改变已提交任务的状态语义。
+约束：调试请求优先；批量任务按有限工作单元让出执行权，并设置老化/公平规则，不能依赖 HTTP 连接是否仍存活。优先级只能影响排队顺序，不能绕过同一 JVM/profile 的独占约束。生命周期状态固定为 `queued`、`running`、`cancel_requested`、`succeeded`、`failed`、`cancelled`；执行阶段至少区分 `waiting_readiness`、`starting_worker`、`starting_gradle`、`configuring`、`compiling`、`running_validate`、`reading_results`、`saving_results` 和 `finished`。状态、阶段、取消和原因继续写入 jobs/SSE，不能只存在内存。
+验收：同时提交一个长批量任务、多个调试任务和第二个批量任务；调试任务在当前工作单元结束后优先获得执行权，第二个批量任务最终也能运行。前端能看到当前阶段、实际执行方式和最近一段启动日志；服务端重启或关闭页面不改变已提交任务的生命周期语义，取消不会在子进程退出前伪装成已完成。
 指针：backend/jobs/runner.py，core/store.py，lessons §六十八 / §七十四
 
 ### 条目：jvm-batch-chunk · 批量校验按可恢复分块执行
 状态：todo
-依赖：无
+依赖：jvm-scheduler-policy, jvm-task-manifest
 优先级：P1
-背景：批量请求目前以一个 JVM job 持有 lane；即使结果已逐条落盘，长批次仍会长时间占住交互调试，取消或进程退出后也缺少明确的分块边界。
-约束：分块单位必须是带归一化 URL、参数快照和来源的独立记录；每块完成即落盘并可从已有结果跳过，不能把整批结果重新拼成唯一事实。块大小、重试和并发上限由设置/测量决定，不在调用点散落常量；块之间释放调度权。单条失败只影响该条，环境错误不得归因给源。
-验收：一个批次被拆成多个块；中途取消或模拟进程退出后重启，已完成块不重复请求、未完成块可继续；报告能区分批次、块、URL、stage、来源和失败原因。
+背景：批量请求目前以一个 JVM job 持有 lane；即使结果已逐条落盘，长批次仍会长时间占住交互调试，取消或进程退出后也缺少明确的分块边界。该条同时承载批量执行的阶段状态、日志尾部和运行目录隔离，不另建“Gradle 进度”条目。
+约束：分块单位必须是带归一化 URL、参数快照和来源的独立记录，并引用任务 manifest 中冻结的 runtime snapshot；每块完成即落盘并可从已有结果跳过，不能把整批结果重新拼成唯一事实。每个 job/chunk 使用 manifest 规定的独立 args、结果文件和运行目录；块大小、重试和并发上限由设置/测量决定，不在调用点散落常量；块之间释放调度权。单条失败只影响该条，环境错误不得归因给源。
+验收：一个批次被拆成多个块；中途取消或模拟进程退出后重启，已完成块不重复请求、未完成块可继续。每块能报告 queued、starting、running_validate、reading_results、saving_results 和失败原因；启动失败保留日志尾部；报告能区分批次、块、URL、stage、来源和失败原因。
 指针：backend/api/jvm.py，core/jvm_debug.py，core/store.py，lessons §五十三 / §五十四
 
 ### 条目：jvm-request-coalesce · 合并重复的进行中请求
-状态：todo
+状态：blocked
 依赖：jvm-batch-chunk
 优先级：P2
-背景：同一源、同一规则快照和同一 JVM 参数可能由调试抽屉、生成后验证和批量入口重复提交；单纯排队只能延后重复工作，不能减少请求和站点压力。
+背景：同一源、同一规则快照和同一 JVM 参数可能由调试抽屉、生成后验证和批量入口重复提交；单纯排队只能延后重复工作，不能减少请求和站点压力。但它不是当前“重启后单条校验慢”的根因，必须等 worker 和分块边界稳定、且有重复提交数据后再决定是否实现。
 约束：合并键必须包含归一化 URL、规则/源快照、阶段、验证深度、搜索词及本次运行参数；不能只按 URL 合并。只合并仍在运行或可复用的同口径任务，每个调用方仍有自己的 job 观察关系；取消一个观察者不能取消共享执行，除非没有观察者且明确执行取消。
-验收：完全相同的重复提交只产生一次 JVM 执行和一份底层结果；任一调用方都能收到同一结论及来源；任一合并键字段变化都会产生独立执行，旧结果不会静默复用。
+验收：只有在日志证明重复提交达到值得优化的数量后才实施；实施时完全相同的重复提交只产生一次 JVM 执行和一份底层结果，任一调用方都能收到同一结论及来源，任一合并键字段变化都会产生独立执行，旧结果不会静默复用。
+阻塞于：等待 `jvm-task-manifest`、worker/分块路径稳定，并先统计重复提交率；没有数据证明收益前不实现。
 指针：backend/jobs/runner.py，backend/api/jvm.py，core/jvm_debug.py，AGENTS.md #5b，lessons §五十三 / §七十八
 
 ### 条目：jvm-worker-lease · 给跨进程 worker 增加 SQLite 租约
 状态：todo
 依赖：jvm-batch-chunk
 优先级：P1
-背景：当前 lane、`RUN_LOCK` 和执行中的 asyncio task 都是进程内状态；直接增加 API/uvicorn worker 会让不同进程各自认为自己拿到了 JVM，现有 jobs 表也没有 worker owner/generation，无法安全认领和恢复任务。
+背景：当前 lane、`RUN_LOCK` 和执行中的 asyncio task 都是进程内状态；直接增加 API/uvicorn worker 会让不同进程各自认为自己拿到了 JVM，现有 jobs 表也没有 worker owner/generation，无法安全认领和恢复任务。它解决的是跨进程一致性，不与调度策略合并。
 约束：以 SQLite 原子认领为跨进程事实来源，至少记录 owner、generation、heartbeat、attempt 和运行目录；同一 job/块只能有一个有效 owner。认领、续租、完成和失败必须校验 owner/generation，旧 owner 不能覆盖新结果。进程启动、优雅停止和异常退出都要有明确回收/重试规则，不能用一次固定超时把源判坏；运行 manifest 与结果文件必须按 job/块隔离。
 验收：启动两个 worker 并发抢同一 job/块时只有一个成功；杀掉 owner 后任务能按规则恢复且不覆盖已完成结果；旧 owner 延迟回写会被拒绝；重启后 jobs、租约、运行目录和结果状态能逐项对账。
 指针：core/store.py，backend/jobs/runner.py，core/jvm_debug.py，lessons §二十八 / §六十五 / §七十四
 
 ### 条目：jvm-runtime-snapshot · 让 JVM 实际运行环境与 dump 对拍
-状态：todo
+状态：doing
 依赖：无
 优先级：P1
-背景：dump 记录的是 Gradle 任务声明的环境，当前没有证据证明 JVM 实际拿到的环境与它一致。
+背景：Gradle Wrapper 分发包已改为由独立准备命令显式下载并预热官方缓存目录；业务校验/调试链只做就绪检查。runtime snapshot 既是直起 JVM 的执行输入，也是单条快速路径复用的准备产物；真实快照对拍仍需在工具链已准备的环境中完成。
+  dump 记录的是 Gradle 任务声明的环境，当前没有证据证明 JVM 实际拿到的环境与它一致。
   本条吸收原「jvm-dump-parity」：refresh 与产品都使用同一个 test task，但仍需把声明与实际
   运行时逐字段对拍，不能用任务名相同代替。
-约束：snapshot 只进排障，不进入任何判定链。编码统一复用 `ServiceJson`；`ServiceJsonTest`
+约束：运行时 dump 可作为执行输入，但 actual snapshot 的差异报告只进排障，不进入源健康判定链。编码统一复用 `ServiceJson`；`ServiceJsonTest`
   只负责无 Robolectric 的编码器形状测试，实际快照挂在 `DebugService.main` / `ValidateService.main`
   等真实入口。对拍口径必须先定义清楚：路径归一化后比较 `workingDir` ↔ `user.dir`；按项比较
   `classpath` ↔ `java.class.path`；把 `maxHeapSize` 派生的 `-Xmx` 纳入后再比 `jvmArgs` ↔
@@ -86,6 +88,24 @@
 指针：core/jvm_direct.py，appservice/legado-test.init.gradle，appservice/test/io/legado/app/service/ServiceJson.kt，
   appservice/test/io/legado/app/service/ServiceJsonTest.kt，appservice/test/io/legado/app/service/DebugService.kt，
   appservice/test/io/legado/app/service/ValidateService.kt，lessons §六十五
+
+### 条目：jvm-task-manifest · 固定每次任务的输入、环境、产物和执行方式
+状态：todo
+依赖：jvm-runtime-snapshot
+优先级：P1
+背景：当前参数、结果和日志曾依赖固定文件或进程内状态；服务重启、批量并行和 daemon/Gradle fallback 会让“这次任务到底用了什么环境、写了什么文件”难以复查。runtime snapshot 只描述 JVM 实际环境，不能替代任务级输入与产物清单。
+约束：每个 job/chunk 都创建独立运行目录，并写入不可变 `manifest.json`、`runtime-snapshot.json`、`args.properties`、`source.json`、`results.jsonl`、`stdout.log` 和 `stderr.log`；manifest 至少记录归一化 URL、源/规则快照、校验参数、runtime id/fingerprint、执行模式、job/chunk、owner/generation 和各文件路径。SQLite 仍是任务管理事实源，JSON/日志是可复查交付物；提交后不得静默切换 runtime、参数文件或运行目录，重试必须生成新的 attempt 而不是覆盖旧产物。
+验收：单条、批量、调试、refresh 和 Gradle fallback 都能按 job 找到完整 manifest；重启或异常退出后可据 manifest 判断已完成、未完成和失败阶段，已完成结果不被覆盖；同一时间运行的任务不会共享 args、profile、daemon 信息、结果或日志文件；日志和界面能从 job/chunk 追溯到实际执行方式及失败原因。
+指针：backend/jobs/runner.py，core/store.py，core/paths.py，core/jvm_runtime_snapshot.py，lessons §六十五 / §六十八
+
+### 条目：jvm-env-readiness · JVM 环境收尾与跨平台启动器
+状态：todo
+依赖：jvm-runtime-snapshot, jvm-task-manifest
+优先级：P1
+背景：基础路径发现、Android SDK 平台校验和 readiness 接口已经具备，但当前“准备态”与“已有 snapshot 的单条执行态”仍混在一条检查里；此外，Gradle `.bat` 启动器的跨平台边界和静态检查是否覆盖真实启动条件还需要收尾。本条是后置环境治理，不应阻塞有效 snapshot 的单条快速路径。
+约束：①准备态明确显示 App 仓库声明的 `compileSdk`、实际 SDK 根目录和缺失平台，`platform-tools` 目录不能被当作完整 SDK 根目录；②单条执行态只检查 snapshot 引用文件、Java 启动器和源码/runtime 签名，不重复要求 Gradle Wrapper 或 SDK 平台检查；③按 App 仓库 wrapper、Gradle daemon criteria 和 toolchain 配置分别推导启动 Gradle 与项目编译所需的 JDK，不用单一最低版本常量替代；④遵循 Gradle 默认值或明确配置解析 Gradle User Home，检查目录可创建、可写和跨卷场景，不恢复盘符根目录回退；⑤明确支持的操作系统，非 Windows 要么使用对应启动器，要么在启动前明确拒绝；⑥readiness、准备命令和实际启动共用同一份已解析 runtime snapshot；⑦自检不下载依赖、不隐式构建，下载和预热继续由独立准备命令负责。
+验收：在缺少 `android-37`、SDK 根目录仅含 `platform-tools`、非标准 JDK、不同 Gradle User Home、跨卷仓库和非 Windows 环境下，准备态与执行态能分别说明采用或拒绝原因；准备态能完成一次 snapshot 刷新，执行态能复用有效 snapshot 完成单条校验；支持范围外系统在启动前明确拒绝；本条未完成时不阻塞任务 manifest 和已有单条校验路径。
+指针：core/jvm_env.py，core/jvm_direct.py，core/jvm_daemon.py，backend/api/jvm.py，scripts/prepare_gradle.py，core/jvm_runtime_snapshot.py，lessons §六十五
 
 ### 条目：proj-3-drop · 前端摘掉本地投影
 状态：todo
@@ -122,16 +142,16 @@
 状态：open
 依赖：无
 优先级：P1
-背景：当前单后端 + 单 JVM lane 已解决同一进程内的参数、profile 和输出互相覆盖问题；直接增加多个 API/uvicorn 服务会复制进程内锁与调度状态，不能自然获得安全并发。更合适的边界是保留一个 API 入口，先优化任务粒度，再拆两个职责单一的 JVM worker。
-约束：按以下顺序推进：①单后端保持唯一入口，完成调度公平、批量分块和重复请求合并；②以 SQLite job/块租约取代跨进程依赖内存锁；③建立交互调试 worker 和批量校验 worker，各自独占 JVM daemon、浏览器 profile、参数文件、运行根目录和 worker 身份；④最后依据 RSS、延迟、错误率和站点限流实测决定是否增加同类 worker。任何阶段都不直接横向复制 API 服务，也不共享 `args.properties`、daemon info、cookie/profile 或固定输出文件。
-验收：路线的每个阶段都有独立可回退结果；双 worker 能并行消费不同职责的任务，任务可恢复、可对账且不重复执行；调试延迟、批量吞吐和资源成本均有实测依据；与当前单进程基线逐字段对账通过后，才允许切换默认执行路径。
+背景：当前单后端 + 单 JVM lane 已解决同一进程内的参数、profile 和输出互相覆盖问题；直接增加多个 API/uvicorn 服务会复制进程内锁与调度状态，不能自然获得安全并发。更合适的边界是保留一个 API 入口，先把 runtime snapshot 和任务 manifest 固定下来，再修复单条校验冷启动，随后优化批量粒度，最后拆两个职责单一的 JVM worker。
+约束：按以下顺序推进：①完成 `jvm-runtime-snapshot`，把一次性准备产物与 actual snapshot 对拍分开；②`jvm-task-manifest` 固定每次任务的输入、runtime、阶段、执行方式和产物；③`jvm-single-fast-path` 让已有有效 snapshot 的单条校验优先进入 Validate worker/daemon，完整 SDK/Gradle 只用于首次准备、刷新和 fallback；④将 `jvm-env-readiness` 后置为准备态/执行态两层检查及跨平台启动器收尾；⑤完成调度公平和批量分块，阶段状态与运行文件隔离；⑥以 SQLite job/块租约取代跨进程依赖内存锁；⑦建立交互调试 worker 和批量校验 worker，各自独占 JVM daemon、浏览器 profile、参数文件、运行根目录和 worker 身份；⑧只有实测证明重复执行或多 worker 有收益时，才做请求合并或多开 JVM。任何阶段都不直接横向复制 API 服务，也不共享 `args.properties`、daemon info、cookie/profile 或固定输出文件。
+验收：路线的每个阶段都有独立可回退结果；单条校验的 daemon 与 Gradle fallback 逐字段一致；双 worker 能并行消费不同职责的任务，任务可恢复、可对账且不重复执行；调试延迟、批量吞吐、重复率和资源成本均有实测依据；与当前单进程基线逐字段对账通过后，才允许切换默认执行路径。
 子项：
 - jvm-scheduler-policy
 - jvm-batch-chunk
-- jvm-request-coalesce
 - jvm-worker-lease
+- jvm-request-coalesce（重复率达标后再做）
 - jvm-debug-worker
-- s5a-d3
+- jvm-validate-worker
 - perf-jvm
 - jvm-worker-cutover
 指针：backend/jobs/runner.py，core/store.py，core/jvm_debug.py，lessons §二十八 / §四十七 / §六十五 / §六十六 / §六十八
@@ -173,13 +193,13 @@
 验收：一条带 `loginUi` 的源能登录并跑通一次调试。
 指针：lessons §六十三，core/jvm_debug.py
 
-### 条目：s5a-d3 · D3 跑批也走常驻
+### 条目：jvm-validate-worker · 批量校验专用常驻 worker
 状态：todo
 依赖：jvm-worker-lease, jvm-batch-chunk
-优先级：P2
-背景：批量校验 worker 常驻一个专用 JVM，省掉频繁小批次的 Gradle + JVM 拉起；它与交互调试 worker 分开，避免长批量占住交互请求，也避免两个用途共享 profile、cookie、args 或输出。
-约束：**「频繁跑全量会被封 IP」是硬约束**，比任何提速优化都优先（lessons §六十八）。批量 worker 必须拥有独立 JVM、浏览器 profile、参数文件、运行根目录和优雅停止/重启流程；内部并发只能在分块与资源测量后设置，不能把一个常驻 JVM 当成无限并发池。结果必须保留与一次性运行同样的 stage、来源、原因和逐条可恢复性。
-验收：在同一批次、同一参数和同一快照下，对比一次性运行与常驻 worker 的逐字段结果；并验证调试 worker 能在批量 worker 工作时独立接收请求，两个 worker 不读写对方的 profile、args、运行目录或结果文件。
+优先级：P1
+背景：批量校验需要独立于交互调试的常驻 worker，省掉频繁小批次的 Gradle + JVM 拉起；它与交互调试 worker 分开，避免长批量占住交互请求，也避免两个用途共享 profile、cookie、args 或输出。本条承接原 `s5a-d3`，不再单独维护一条重复的“跑批常驻”路线。
+约束：**「频繁跑全量会被封 IP」是硬约束**，比任何提速优化都优先（lessons §六十八）。批量 worker 必须拥有独立 JVM、浏览器 profile、参数文件、运行根目录和优雅停止/重启流程；内部并发只能在分块与资源测量后设置，不能把一个常驻 JVM 当成无限并发池。结果必须保留与一次性运行同样的 stage、来源、原因和逐条可恢复性；未证明恢复、隔离和逐字段一致前，不切默认路径。
+验收：在同一批次、同一参数和同一快照下，对比一次性运行与常驻 worker 的逐字段结果；中途杀掉 worker 后按租约恢复且不重复已完成块；并验证调试 worker 能在批量 worker 工作时独立接收请求，两个 worker 不读写对方的 profile、args、运行目录或结果文件。
 指针：lessons §六十六 / §六十八 / §七十四，core/jvm_debug.py
 
 ### 条目：s5a-a1 · A1 唯一没做完的验收：与设备 WS 逐事件对拍
@@ -216,17 +236,18 @@
 指针：lessons §七十四，appservice/ValidateService.kt
 
 ### 条目：perf-jvm · 多开 JVM（未评估）
-状态：todo
-依赖：无
+状态：blocked
+依赖：jvm-worker-lease, jvm-batch-chunk
 优先级：P2
-背景：worker 拆分后是否增加批量 worker 数量，取决于 JVM 启动成本、RSS、站点限流、失败率和调试延迟；不能从 CPU 核数直接推导。这里评估的是专用 worker 的容量，不是直接增加 API/uvicorn 进程。
-约束：先完成 `jvm-worker-lease`、分块和独立运行目录；按同一快照分片，分别测单 worker 与多 worker 的吞吐、P50/P95 延迟、RSS、错误率和站点请求量。未完成测量前不增加实例；若收益不覆盖内存/限流代价，保持一个批量 worker。
+背景：worker 拆分后是否增加批量 worker 数量，取决于 JVM 启动成本、RSS、站点限流、失败率和调试延迟；不能从 CPU 核数直接推导。这里评估的是专用 worker 的容量，不是直接增加 API/uvicorn 进程；在没有真实容量数据前不做。
+约束：先完成 `jvm-worker-lease`、分块和独立运行目录；按同一快照分片，分别测单 worker 与多 worker 的吞吐、P50/P95 延迟、RSS、错误率和站点请求量。未完成测量前不增加实例；若收益不覆盖内存/限流代价，保持一个批量 worker，允许本条最终关闭而不实施多开。
 验收：给出可复核的单 worker/多 worker 对比和容量结论；只有在结果支持时才调整 worker 数量，并确认每个实例的参数、profile、JVM 和运行目录完全独立。
 指针：core/jvm_debug.py，core/store.py，lessons §四十七 / §六十五 / §六十六
+阻塞于：等待 `jvm-worker-lease`、`jvm-batch-chunk` 完成并取得单 worker 基线；若容量收益不足，直接关闭本条，不实施多开。
 
 ### 条目：jvm-debug-worker · 交互调试专用常驻 worker
 状态：todo
-依赖：jvm-worker-lease, jvm-scheduler-policy
+依赖：jvm-worker-lease, jvm-scheduler-policy, jvm-batch-chunk
 优先级：P1
 背景：交互调试对首个结果延迟敏感，和批量校验的吞吐目标不同；两者共用一个常驻 JVM 会让 profile、cookie、旧类和运行参数互相污染。
 约束：交互 worker 独占 JVM daemon、浏览器 profile、参数文件、运行根目录和 worker 身份；同一 profile 内仍按安全边界串行，不能以常驻为理由放开请求间状态清理。调试任务只由该 worker 消费，取消必须等待实际 Gradle/JVM 线程收尾后再释放租约；worker 停止要确认子进程退出。
@@ -235,11 +256,11 @@
 
 ### 条目：jvm-worker-cutover · 从单进程 lane 切换到双 worker
 状态：todo
-依赖：jvm-debug-worker, s5a-d3, perf-jvm
+依赖：jvm-worker-lease, jvm-debug-worker, jvm-validate-worker
 优先级：P1
 背景：多起服务的推荐边界是两个专用 JVM worker，而不是复制多个 API 服务；API 负责提交、查询和推送任务，worker 负责实际执行。切换前必须证明跨进程认领、隔离和恢复已经成立。
-约束：保留单后端作为唯一 API 入口；先灰度启用 worker 消费，再移除旧的进程内直接执行路径。禁止让两个 worker 共享 `RUN_LOCK` 作为跨进程锁，也禁止共享 `args.properties`、daemon info、cookie/profile 或固定结果文件。切换期间失败必须能定位到 job、owner、generation 和运行目录。
-验收：双 worker 并行运行一批调试与一批校验，任务不会重复执行、互相覆盖或丢失；API 重启不影响 worker 已租约任务的可恢复性；停止任一 worker 后另一 worker 不会接管其未过期任务，按租约规则恢复后才可继续；全部结果与单进程基线逐字段对账。
+约束：保留单后端作为唯一 API 入口；先灰度启用 worker 消费，再移除旧的进程内直接执行路径。禁止让两个 worker 共享 `RUN_LOCK` 作为跨进程锁，也禁止共享 `args.properties`、daemon info、cookie/profile 或固定结果文件。切换期间失败必须能定位到 job、owner、generation、chunk 和运行目录；`perf-jvm` 没有容量收益时不阻塞单批量 worker 的切换。
+验收：双 worker 并行运行一批调试与一批校验，任务不会重复执行、互相覆盖或丢失；API 重启不影响 worker 已租约任务的可恢复性；停止任一 worker 后另一 worker 不会接管其未过期任务，按租约规则恢复后才可继续；全部结果与单进程基线逐字段对账。灰度期间出现差异可回退到旧路径，确认阶段、日志和结果文件完整后才允许移除旧的进程内直接执行路径。
 指针：backend/jobs/runner.py，core/store.py，core/jvm_debug.py，lessons §二十八 / §六十五 / §六十六
 
 ### 条目：proj-3 · 第三期收尾：摘抽屉里最后那块本地投影
@@ -578,37 +599,6 @@
   （AGENTS #8）。
 指针：AGENTS.md #8，core/settings_store.py，tests/test_settings_api.py
 
-### 条目：ten5-move · 把验证搬出生成 job（2026-09-21 决定先不做）
-状态：todo
-依赖：无
-优先级：P2
-背景：界面拿到源之后自动调 `POST /api/rules/jvm-debug`。它的两条主要收益已经成立；
-  剩下的只有「把引擎调用挪出生成 job」这点整洁性，而代价是实打实的：多一次往返、
-  慢的那半从「job 里等」变成「页面里等」、**关页面就白等**。
-约束：**重估的触发条件**：「生成」要被非界面的调用方复用（CLI / 批处理）时再回来。
-验收：触发条件出现时重估一次，给出「搬 / 不搬」的结论与依据。
-指针：lessons §七十七 / §七十八
-
-### 条目：decl-label · 声明式标签（后端给 provider + 深度 + 环境摘要）
-状态：todo
-依赖：无
-优先级：P2
-背景：前端只查表；抽屉 / 生成预览 / 跑批结果条**共用一份映射**。
-约束：**等第三台引擎（真机复检 `S5B-real`）接进来时一起做**。今天只有两种来源、
-  一个推导点，提前做等于拿 2–3 个组件的回归面去防一个还没到来的问题。
-验收：`S5B-real` 接进来后，三种来源的标签由后端一处给出、前端只查表。
-指针：lessons §五十二 / §八十
-
-### 条目：tag-snapshot · 标签是快照，导入即开始过期
-状态：todo
-依赖：无
-优先级：P2
-背景：写进 App 的分组标签是校验瞬间的结论，App 侧无刷新通道。要动它属于大改
-  （反向同步通道）。
-约束：**先记录不排期**。
-验收：给出「要不要做反向同步通道」的结论；做的话要有刷新语义的设计。
-指针：lessons §五十二，AGENTS.md #17
-
 ### 条目：research-type · 调研一：类型判定补齐
 状态：blocked
 依赖：无
@@ -659,114 +649,3 @@
 
 > 已交付的事项只在这里留一行指针——**机制看 lessons，细节看 `git log`**（AGENTS #10）。
 > 这一区只允许 `状态：done`。
-
-### 条目：done-engine-exit · 本地引擎退场（十-1~十-6）
-状态：done
-依赖：无
-优先级：P1
-背景：代理搬成全局两处注入；执行体、`check.*`、前端面板、CLI 五子命令、
-  `data/check_cache` 全部退场。
-约束：不留回退占位。
-验收：见 lessons 对应节。
-指针：lessons §八十六 / §八十七，git commit 9b29ece / 405db1e
-
-### 条目：done-l4-verify · L4 生成验证的收尾验收
-状态：done
-依赖：无
-优先级：P0
-背景：把 L4「观察到的请求」那条链的边界验完（真靶子由浏览器桥扫出来，库里的源
-  选不出来——能写出 `searchUrl` 的源恰恰不需要 L4）。
-约束：受保护站点要先人工预热 profile；快照只覆盖加载期发出的请求，懒加载 / 滚动
-  后才发的抓不到——这是设计边界，不要当缺陷修。
-验收：见 lessons §八十九——观察链路在靶子上通（`GET dogemanga.com/_search` +
-  95KB 响应体、判据齐全）；快照边界做成了**受控可复现演示**；顺带修掉一个真 bug
-  （2 字节的 `CN` 被当成「拿到了页面」→ 生成链落一条 rc=0 的空源，原因被压掉）。
-指针：lessons §八十九，git commit 88c48c6；
-  证据脚本 `data/out/l4_probe.py` / `l4_snapshot_boundary.py`
-
-### 条目：done-s5a · S5-A 调试通道（A1–A4 + D0–D2 + 第三期 matched_html 回填）
-状态：done
-依赖：无
-优先级：P1
-背景：通道 + cookie 注入 + 接进产品 + 直起 / 常驻 daemon + `matched_html` 回填。
-约束：接口能力与协议见 lessons §五十一。
-验收：见 lessons 对应节。
-指针：lessons §五十一 / §五十九 / §六十 / §六十五 / §六十六 / §七十五
-
-### 条目：done-app-engine · 引擎收成一台：健康改由 App 引擎判（B0–B3）
-状态：done
-依赖：无
-优先级：P1
-背景：校验与调试都收成 App 引擎；撤「证书问题」档；B3 调试迁移。
-约束：见 lessons §七十二 / §七十三。
-验收：见 lessons 对应节。
-指针：lessons §七十二 / §七十三，git commit d7d6ceb
-
-### 条目：done-l3-l4 · L3 判据补齐 + 正文规则两个前提 + 拦截页识别 + App gate
-状态：done
-依赖：无
-优先级：P1
-背景：`core/js_hints.py` 把页面引用的脚本纳入判据；引擎交回拦截页时不许当站点分析；
-  判据并上 App 那一句 + `human_gate`；第三种「不是站点」（浏览器错误页）。
-约束：见 lessons §八十一 ~ §八十三。
-验收：见 lessons 对应节。
-指针：lessons §八十一 / §八十二 / §八十三，core/js_hints.py
-
-### 条目：done-l4-observe · L4：观察请求那一半
-状态：done
-依赖：无
-优先级：P1
-背景：桥开 `Network` 域只留 XHR / Fetch，侧车写 `network`；Python 侧
-  `core/net_hunt.py` 挑「像数据的那一条」并把**响应**变成规则。
-约束：条数 / 字节有上界。
-验收：本地后端界面抓到若干条 Fetch、挑出与理由都对。
-指针：lessons §八十四，core/net_hunt.py
-
-### 条目：done-debug-layers · 调试体验：先定层，再写规则（九-1~九-4）
-状态：done
-依赖：无
-优先级：P2
-背景：定层 / 点选 / AI 前置条件 / 对数验收四批全部交付。
-约束：层与动作的枚举只有一份。
-验收：见 lessons 对应节。
-指针：lessons §七十九，frontend/src/utils/layers.js，frontend/src/utils/selector.js
-
-### 条目：done-replay-fixes · 本地回放已修的三条
-状态：done
-依赖：无
-优先级：P2
-背景：`bookUrl` / `chapterUrl` 的列表作用域、`text.` / `children.` 简写的判定半边、
-  `_probe_toc` 接入 `tocUrl`（含 `verify.py` 把 tocUrl 当 URL 字符串的附带 bug）。
-约束：**别再重复查**。
-验收：见 lessons 对应节。
-指针：lessons §二十三 / §四十四
-
-### 条目：done-jvm-service · JVM 校验服务（来源阶梯 + 三段结论）
-状态：done
-依赖：无
-优先级：P2
-背景：来源阶梯（本地回放 < JVM < 真机）、JVM 结论存 meta 不写 checks、三条通道各管
-  一段、每源总预算是软上界。
-约束：见 lessons §四十八 ~ §五十四 / §六十二。
-验收：见 lessons 对应节。
-指针：lessons §四十八 ~ §五十四 / §六十二，README.md
-
-### 条目：done-no-do · 已明确不做（决策记录）
-状态：done
-依赖：无
-优先级：P2
-背景：App 路线方案、逐源调试 WS 批量化、本地补 JS、星级收紧、appservice 拆独立
-  仓库等，都已记了理由。
-约束：那是决策记录，不是待办——别往这里加新条目。
-验收：见 lessons 对应节。
-指针：lessons §二十六
-
-### 条目：done-ua-counts · 会过期的计数与运行口径
-状态：done
-依赖：无
-优先级：P2
-背景：auth / gfw 各有多少条看 `GET /api/sources/stats`；合并源的实测规模、UA 值、
-  `CACHE_VERSION` 的当前值都属历史快照。
-约束：**别在 TODO 里抄一份会过期的计数**（AGENTS #23）——历史可查 git / lessons。
-验收：需要时现查接口或 lessons，不在文档里维护数字。
-指针：lessons §三十一 / §五十三 / §七十二，README.md

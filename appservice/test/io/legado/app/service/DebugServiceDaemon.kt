@@ -55,6 +55,7 @@ object DebugServiceDaemon {
      * 比得出来**（改完 Kotlin 不重启，进程里就还是旧类，而那看起来像「规则没生效」）。
      */
     fun serve(port: Int, idleSec: Long = DEFAULT_IDLE_SEC, sig: String = ""): Int {
+        ServiceJson.writeRuntimeSnapshot("daemon")
         if (port <= 0) {
             System.err.println("[appservice] daemon 缺端口（LEGADO_DAEMON_PORT）")
             return DebugService.BAD_INPUT
