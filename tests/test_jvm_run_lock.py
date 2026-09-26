@@ -40,6 +40,10 @@ class _FakeStore:
         # 生命周期，给空快照即可——真库那套在 test_jvm_run_scope 里用临时库盖着
         return {}
 
+    def get_job(self, job_id):
+        # manifest 信封要读 retry_of；锁的生命周期测试与它无关，给 None 即可
+        return None
+
     def close(self) -> None:
         pass
 

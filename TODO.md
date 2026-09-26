@@ -59,24 +59,6 @@
 验收：启动两个 worker 并发抢同一 job/块时只有一个成功；杀掉 owner 后任务能按规则恢复且不覆盖已完成结果；旧 owner 延迟回写会被拒绝；重启后 jobs、租约、运行目录和结果状态能逐项对账。
 指针：core/store.py，backend/jobs/runner.py，core/jvm_debug.py，lessons §二十八 / §六十五 / §七十四
 
-### 条目：jvm-task-manifest · 固定每次任务的输入、环境、产物和执行方式
-状态：doing
-依赖：jvm-runtime-snapshot
-优先级：P1
-背景：核心已交付（2026-09-26）：单条/批量与调试的运行目录在执行开始落盘 `manifest.json`
-  （信封：job_id/owner_pid/chunk/generation/created_at + 提交冻结的 inputs，含归一化 urls、
-  生效参数、runtime fingerprint、各文件路径，schema 2 带 sha256 防篡改）、`runtime-snapshot.json`
-  副本与 Gradle 全量 `stdout.log`/`stderr.log`；保留策略为成功/取消清理、失败/崩溃保留现场
-  （上限 20 修剪）。剩余三件：① refresh 入口的 manifest（现有 candidate+对拍报告只算半个）；
-  ② attempt 语义——`runner.submit` 已有 `retry_of`，重试要生成新运行目录而不是覆盖旧产物；
-  ③ chunk/owner/generation 目前是占位值，随 `jvm-batch-chunk` / `jvm-worker-lease` 实义化。
-约束：SQLite 仍是任务管理事实源，manifest.json 是崩溃后可逐项对出的复查交付物；提交后不得
-  静默切换 runtime、参数文件或运行目录；失败现场按 `FAILED_RUN_DIR_CAP` 修剪，不无限堆积。
-验收：重启或异常退出后可据 manifest 判断已完成、未完成和失败阶段；同一时间运行的任务不共享
-  args、profile、daemon 信息、结果或日志文件；日志和界面能从 job/chunk 追溯到实际执行方式及
-  失败原因；重试生成新 attempt 且旧产物不被覆盖。
-指针：backend/api/jvm.py，backend/jobs/runner.py，core/jvm_debug.py，core/store.py，lessons §六十五 / §六十八
-
 ### 条目：jvm-env-readiness · JVM 环境收尾与跨平台启动器
 状态：todo
 依赖：jvm-runtime-snapshot, jvm-task-manifest
@@ -646,3 +628,12 @@
 约束：actual 差异报告只进排障，不进入源健康判定链；对拍口径（workingDir 归一、classpath 按项、-Xmx 纳入后比 jvmArgs、systemProperties 逐键）已按原约束落地。
 验收：修复与边界测试看 `git log`（406941c classpath 只钉负载文件；同日 run_direct 注入本次 args 路径，修复直起 0 事件）。
 指针：core/jvm_direct.py，core/jvm_runtime_snapshot.py，appservice/test/io/legado/app/service/ServiceJson.kt，lessons §九十
+
+### 条目：jvm-task-manifest · 固定每次任务的输入、环境、产物和执行方式
+状态：done
+依赖：jvm-runtime-snapshot
+优先级：P1
+背景：2026-09-26 交付：单条/批量与调试的运行目录在执行开始落盘 manifest.json（信封 job/owner/chunk/generation/retry_of + 提交冻结的 inputs，schema 2 带 sha256）与 runtime-snapshot.json 副本，Gradle 全量 stdout/stderr.log 同落；保留策略=成功/取消清理、失败/崩溃保留现场（上限 20 修剪）；refresh 用固定名 refresh-manifest.json 随发布更新、失败时保留旧的继续描述旧 dump。chunk/owner/generation 的字段已就位，取值随 batch-chunk 与 worker-lease 实义化。
+约束：SQLite 仍是任务管理事实源；重试天然生成新运行目录（uuid 命名），retry_of 记录它替代谁，旧产物不被覆盖。
+验收：细节与提交看 `git log`（abda384 与同日 refresh/retry_of 提交）；全量 984 条测试绿。
+指针：backend/api/jvm.py，backend/jobs/runner.py，core/jvm_debug.py，core/jvm_direct.py，lessons §六十五 / §六十八

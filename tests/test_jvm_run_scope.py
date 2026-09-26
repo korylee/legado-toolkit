@@ -712,6 +712,7 @@ class RunDirRetentionTests(_Base):
         envelope = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
         self.assertEqual(envelope["job_id"], "testjob")
         self.assertEqual(envelope["chunk"], "")
+        self.assertEqual(envelope["retry_of"], "")
         self.assertIn("owner_pid", envelope)
         inputs = envelope["inputs"]
         self.assertEqual(len(inputs["urls"]), inputs["source_count"])
@@ -727,6 +728,17 @@ class RunDirRetentionTests(_Base):
         # results.jsonl 反倒不该有
         self.assertTrue((run_dir / "args.properties").exists())
         self.assertFalse((run_dir / "results.jsonl").exists())
+
+    def test_retry_of_is_recorded_in_the_manifest(self) -> None:
+        """重试天然生成新运行目录（uuid 命名），旧产物不会被覆盖；retry_of 记录它替代谁。"""
+        self.no_output = True
+        self.gradle_result = 1
+        with Store(self.db) as st:
+            st.create_job("testjob", "jvm_run", total=3, retry_of="orig-job")
+        self._call()
+        envelope = json.loads(
+            (self._latest_batch_dir() / "manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(envelope["retry_of"], "orig-job")
 
     def test_failed_run_dirs_are_pruned_to_the_cap(self) -> None:
         from core.jvm_debug import FAILED_RUN_DIR_CAP

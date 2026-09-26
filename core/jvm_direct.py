@@ -201,11 +201,44 @@ def refresh(timeout_min: int = 30) -> int:
         actual.replace(final_actual)
         report.replace(final_actual.with_suffix(".comparison.json"))
         candidate.replace(out)
+        _write_refresh_manifest(out, cost, env)
         print("dump 完成：%s（%.1fs）" % (out, cost))
         return 0
     finally:
         for temporary in (candidate, actual, report):
             temporary.unlink(missing_ok=True)
+
+
+def _write_refresh_manifest(dump_file: pathlib.Path, cost: float, env: dict) -> None:
+    """refresh 是准备命令、没有 job 系统：manifest 用固定名，随发布一起更新。
+
+    记录这次准备用了什么输入（启动器、测试类、关键环境）与产出哪三个文件。
+    失败时不写——旧的 manifest 继续如实描述仍发布着的旧 dump。
+    """
+    actual = pathlib.Path(str(dump_file) + ".actual.refresh.refresh.json")
+    manifest = {
+        "schema": 1,
+        "kind": "jvm_refresh",
+        "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "duration_sec": round(cost, 1),
+        "task": ":app:testAppDebugUnitTest",
+        "test": REFRESH_TEST,
+        "launcher": str(LAUNCHER),
+        "cwd": str(AGSVC),
+        "env": {k: env.get(k, "") for k in
+                ("LEGADO_REPO", "JAVA_HOME", "ANDROID_HOME", "GRADLE_USER_HOME")},
+        "artifacts": {
+            "declared_dump": str(dump_file),
+            "actual_snapshot": str(actual),
+            "comparison_report": str(actual.with_suffix(".comparison.json")),
+        },
+    }
+    try:
+        (dump_file.parent / "refresh-manifest.json").write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=1),
+            encoding="utf-8", newline="\n")
+    except OSError as exc:
+        print("refresh manifest 写入失败（不影响发布）：%s" % exc)
 
 
 def load_dump(warn_stale: bool = True) -> Dict[str, Any]:

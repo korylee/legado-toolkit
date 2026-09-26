@@ -139,12 +139,24 @@ def _build_jvm_manifest(*, run_dir: Path, source_file: Path, args_file: Path,
     return manifest
 
 
+def _job_retry_of(job_id: str) -> str:
+    """读任务的 retry_of（jobs 表事实源）；manifest 信封只做记录。"""
+    st = Store()
+    try:
+        row = st.get_job(job_id) or {}
+    finally:
+        st.close()
+    return str(row.get("retry_of") or "")
+
+
 def _write_run_manifest(run_dir: Path, manifest: Dict[str, Any], job_id: str) -> None:
     """把本次任务的输入信封写进运行目录（不可变的复查交付物）。
 
     SQLite 仍是任务管理事实源；这个文件让「重启/异常退出后这次任务用了什么
     输入、写到哪」不用翻库也能逐项对出。``inputs`` 是提交时冻结的 manifest
     （带 sha256）；job/owner/chunk/generation 是执行身份，不属于冻结范围。
+    重试天然生成新的运行目录（uuid 命名），旧产物不会被覆盖；retry_of 记录
+    它替代的是哪一次。
     """
     envelope = {
         "schema": 1,
@@ -152,6 +164,7 @@ def _write_run_manifest(run_dir: Path, manifest: Dict[str, Any], job_id: str) ->
         "owner_pid": os.getpid(),
         "chunk": "",
         "generation": 1,
+        "retry_of": _job_retry_of(job_id),
         "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "inputs": manifest,
     }

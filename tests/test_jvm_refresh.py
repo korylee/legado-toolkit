@@ -94,6 +94,26 @@ class RefreshSnapshotTests(unittest.TestCase):
                                  json.loads(actual.read_text(encoding="utf-8"))), {})
         self._assert_clean()
 
+    def test_success_writes_refresh_manifest(self):
+        self.assertEqual(self._run(), 0)
+        manifest = json.loads(
+            (self.out.parent / "refresh-manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["kind"], "jvm_refresh")
+        self.assertEqual(manifest["test"], jvm_direct.REFRESH_TEST)
+        artifacts = manifest["artifacts"]
+        self.assertEqual(artifacts["declared_dump"], str(self.out))
+        self.assertTrue(artifacts["actual_snapshot"].endswith(
+            ".actual.refresh.refresh.json"))
+        self.assertTrue(artifacts["comparison_report"].endswith(".comparison.json"))
+
+    def test_failed_refresh_preserves_previous_manifest(self):
+        manifest_path = self.out.parent / "refresh-manifest.json"
+        manifest_path.write_text('{"kind": "jvm_refresh", "old": true}',
+                                 encoding="utf-8")
+        self.assertEqual(self._run(code=1), 1)
+        # 失败不写新 manifest：旧的那份仍如实描述着仍发布着的旧 dump
+        self.assertEqual(json.loads(manifest_path.read_text(encoding="utf-8"))["old"], True)
+
 
 if __name__ == "__main__":
     unittest.main()
