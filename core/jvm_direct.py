@@ -238,18 +238,22 @@ def _classpath_entries(classpath: str) -> List[str]:
 
 
 def _missing_classpath_entries(classpath: str) -> List[str]:
-    """找出直起 JVM 必须存在的 classpath 项。
+    """找出直起 JVM 缺失的 classpath **负载文件**（jar/zip）。
 
-    Java 的 classpath 只把末尾的 ``*`` 当目录通配符；这里不展开 jar，
-    只确认目录本身存在，避免把一个大目录的内容复制到 manifest 里。
+    Gradle 组装测试 JVM 的实际 classpath 时本来就会跳过不存在的项（对拍实测
+    2026-09-26：KSP 空变体的输出目录进了 declared 却进不了 actual，且目录时有时无），
+    Java 启动时也会忽略缺失项——按 declared 逐项要求存在，快照会「出生即失效」。
+    真正致命的是 jar/zip 这类负载文件；有内容的输出目录若被清掉，daemon 会在
+    运行期失败并按原因回退 Gradle，不在执行态提前拦。
     """
     missing: List[str] = []
     for entry in _classpath_entries(classpath):
         path = pathlib.Path(entry)
         if entry.endswith("*"):
             path = path.parent
-        if not path.exists():
-            missing.append(entry)
+        if path.exists() or path.suffix.lower() not in {".jar", ".zip"}:
+            continue
+        missing.append(entry)
     return missing
 
 

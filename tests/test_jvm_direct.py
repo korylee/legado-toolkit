@@ -120,6 +120,31 @@ class ExecutionReadinessTests(unittest.TestCase):
             "java_executable", "source_signature",
         })
 
+    def test_missing_classpath_dirs_do_not_block_but_missing_jars_do(self) -> None:
+        """Gradle 本来就会把不存在的项从实际 classpath 里跳过（KSP 空目录实测），
+        所以目录缺失不算失效；jar 是负载文件，缺失必须拦并给可执行原因。"""
+        mocks = dict(
+            dump_path=Path(__file__),
+            dump_is_stale=False,
+            java_exe=__file__,
+        )
+        dir_only = valid_dump(workingDir=str(Path.cwd()),
+                              classpath="D:/no/such/generated/dir;" + __file__)
+        with mock.patch.object(jvm_direct, "dump_path", return_value=mocks["dump_path"]), \
+             mock.patch.object(jvm_direct, "dump_is_stale", return_value=mocks["dump_is_stale"]), \
+             mock.patch.object(jvm_direct, "java_exe", return_value=mocks["java_exe"]):
+            result = jvm_direct.execution_readiness(dir_only)
+        self.assertTrue(result["ok"], result)
+
+        with mock.patch.object(jvm_direct, "dump_path", return_value=mocks["dump_path"]), \
+             mock.patch.object(jvm_direct, "dump_is_stale", return_value=mocks["dump_is_stale"]), \
+             mock.patch.object(jvm_direct, "java_exe", return_value=mocks["java_exe"]):
+            broken = jvm_direct.execution_readiness(valid_dump(
+                workingDir=str(Path.cwd()), classpath="D:/no/such/classes.jar"))
+        self.assertFalse(broken["ok"])
+        check = next(c for c in broken["checks"] if c["id"] == "runtime_classpath")
+        self.assertIn("classes.jar", check.get("detail") or "")
+
 
 if __name__ == "__main__":
     unittest.main()
