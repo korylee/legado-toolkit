@@ -503,12 +503,12 @@ async def jvm_run(body: Optional[JvmRunRequest] = None):
     exec_conf: Dict[str, Any] = {}
     preparation_ready = bool(st_conf.get("ok"))
     allow_gradle_fallback = preparation_ready
-    if not preparation_ready:
-        if not single:
-            _cleanup_run_dir(run_dir)
-            return {"started": False, "readiness": st_conf}
+    if single:
+        # 单条任务无论是否允许 Gradle fallback，都必须在提交时冻结一份
+        # runtime snapshot 的执行态检查；否则「准备态完整」会把已失效的
+        # classpath / Java / 源码快照带进 daemon，直到 daemon 自己失败才暴露。
         exec_conf = execution_readiness()
-        if not exec_conf.get("ok"):
+        if not preparation_ready and not exec_conf.get("ok"):
             _cleanup_run_dir(run_dir)
             return {
                 "started": False,
@@ -516,6 +516,9 @@ async def jvm_run(body: Optional[JvmRunRequest] = None):
                 "readiness": st_conf,
                 "execution_readiness": exec_conf,
             }
+    elif not preparation_ready:
+        _cleanup_run_dir(run_dir)
+        return {"started": False, "readiness": st_conf}
     # 绝对路径的理由同 _export_sources_file：这个路径是给**另一个进程**
     # （CWD = App 仓库根）用的，相对路径会落到 App 仓库里去
     out_path = run_dir / "results.jsonl"
@@ -637,8 +640,7 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
 
                     job_runner.update_phase(job_id, "configuring")
                     dump = jvm_direct.load_dump(warn_stale=False)
-                    if (execution_readiness_snapshot and
-                            not allow_gradle_fallback):
+                    if execution_readiness_snapshot:
                         current_exec = execution_readiness(dump)
                         if not current_exec.get("ok"):
                             raise jvm_validate_daemon.ValidateDaemonError(

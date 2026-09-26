@@ -22,6 +22,7 @@ import json
 import pathlib
 import shutil
 import tempfile
+import threading
 import unittest
 import uuid
 from unittest import mock
@@ -50,6 +51,7 @@ class _Base(unittest.TestCase):
             mock.patch.object(jvm_api, "_AGSVC", self.probe / "appservice"),
             mock.patch.object(jvm_api, "data_dir", lambda: self.probe / "data"),
             mock.patch.object(jvm_api, "readiness", lambda repo, sdk="": {"ok": True, "checks": [], "runtime": {"app_repo": "X:/repo", "java_home": "X:/jdk", "android_sdk": "X:/sdk", "gradle_user_home": "X:/.gradle"}}),
+            mock.patch.object(jvm_api, "execution_readiness", lambda dump=None: {"ok": True, "checks": [], "reason": "", "source_sig": "sig"}),
             mock.patch.object(jvm_api, "_write_meta", lambda rows: "testbatch"),
             mock.patch.object(jvm_api, "_run_gradle", self._fake_gradle),
             mock.patch.object(jvm_api.settings_store, "load",
@@ -157,6 +159,55 @@ class ScopeTests(_Base):
         result = asyncio.run(go())
         self.assertEqual(result["execution_mode"], "validate_daemon")
         self.assertFalse(run_dir.exists())
+
+    async def _cancelled_job(self, payload):
+        task = asyncio.create_task(jvm_api.run_jvm_job(
+            "cancel-job", Store(self.db), payload))
+        started = payload["started"]
+        for _ in range(100):
+            if started.is_set():
+                break
+            await asyncio.sleep(0.01)
+        self.assertTrue(started.is_set(), "Gradle worker 未启动")
+        task.cancel()
+        await asyncio.sleep(0.05)
+        self.assertFalse(task.done(), "取消不应绕过仍在运行的 worker")
+        payload["release"].set()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+
+    def test_cancel_waits_for_worker_and_cleans_run_dir(self) -> None:
+        run_dir = self.probe / "data" / "app_probe" / "runs" / "cancelled"
+        run_dir.mkdir(parents=True)
+        source_file = run_dir / "sources.json"
+        args_file = run_dir / "args.properties"
+        out_path = run_dir / "results.jsonl"
+        source_file.write_text("[]", encoding="utf-8")
+        args_file.write_text("file=%s\nout=%s\n" % (source_file, out_path), encoding="utf-8")
+        manifest = jvm_api._build_jvm_manifest(
+            run_dir=run_dir, source_file=source_file, args_file=args_file,
+            out_path=out_path, single=False, execution_plan="gradle",
+            allow_gradle_fallback=True, runtime={"app_repo": "X:/repo"},
+            readiness={"ok": True}, execution_readiness={},
+            readiness_fingerprint="", readiness_checked_at="", source_count=1)
+        control = {"started": threading.Event(), "release": threading.Event()}
+        payload = {"prep": {"started": True}, "manifest": manifest,
+                   **control}
+
+        def blocking_gradle(*, args_path=None, runtime=None):
+            control["started"].set()
+            control["release"].wait(2)
+            return {"exit": 1, "stdout": "", "stderr": "cancelled"}
+
+        async def go():
+            with mock.patch.object(jvm_api, "_run_gradle", side_effect=blocking_gradle):
+                await self._cancelled_job(payload)
+
+        asyncio.run(go())
+        self.assertFalse(run_dir.exists())
+        from core.jvm_debug import RUN_LOCK
+        self.assertTrue(RUN_LOCK.acquire(blocking=False))
+        RUN_LOCK.release()
 
     def test_submission_captures_hashed_manifest(self) -> None:
         submitted = {}
@@ -478,6 +529,64 @@ class ResultShapeTests(_Base):
         self.assertEqual(result["execution_mode"], "gradle_fallback")
         self.assertIn("端口不可用", result["daemon_fallback_reason"])
         self.assertIn("Gradle", result["execution_note"])
+        self.assertEqual(self.gradle_calls, 1)
+
+    def test_single_checks_execution_readiness_before_submit_and_daemon(self) -> None:
+        events = []
+        executable = {"ok": True, "checks": [], "reason": "", "source_sig": "sig"}
+
+        def check_execution(dump=None):
+            events.append(("execution_readiness", dump))
+            return executable
+
+        def fake_daemon(_dump, args_file):
+            events.append(("daemon", None))
+            args = pathlib.Path(args_file).read_text(encoding="utf-8")
+            out = pathlib.Path(next(line.split("=", 1)[1] for line in args.splitlines()
+                                    if line.startswith("out=")))
+            out.write_text(json.dumps({"url": "https://a.com", "state": "ok"}),
+                           encoding="utf-8")
+            return {"code": 0, "cost_ms": 3, "error": ""}
+
+        with mock.patch.object(jvm_api, "execution_readiness",
+                               side_effect=check_execution) as check, \
+             mock.patch("core.jvm_direct.load_dump", return_value={
+                 "workingDir": "C:/repo", "classpath": "x", "maxHeapSize": "3g",
+                 "environment": {}, "jvmArgs": [], "systemProperties": {},
+                 "javaHomeEnv": "C:/jdk"}), \
+             mock.patch("core.jvm_validate_daemon.run", side_effect=fake_daemon) as daemon:
+            _request, result = self._run_single()
+
+        self.assertEqual(result["execution_mode"], "validate_daemon")
+        self.assertEqual(check.call_count, 2)
+        # 提交点手里还没有 dump，免 dump 是有意的；daemon 前才带真实 dump 复查
+        self.assertIsNone(events[0][1])
+        self.assertEqual(events[1][1]["classpath"], "x")
+        self.assertEqual([event[0] for event in events],
+                         ["execution_readiness", "execution_readiness", "daemon"])
+        daemon.assert_called_once()
+        self.assertEqual(self.gradle_calls, 0)
+
+    def test_queued_snapshot_expiry_skips_daemon_and_falls_back(self) -> None:
+        executable = {"ok": True, "checks": [], "reason": "", "source_sig": "sig"}
+        expired = {"ok": False, "checks": [{"id": "runtime_classpath", "ok": False}],
+                   "reason": "runtime classpath 已失效", "source_sig": "sig"}
+
+        def check_execution(dump=None):
+            return executable if dump is None else expired
+
+        with mock.patch.object(jvm_api, "execution_readiness",
+                               side_effect=check_execution), \
+             mock.patch("core.jvm_direct.load_dump", return_value={
+                 "workingDir": "C:/repo", "classpath": "x", "maxHeapSize": "3g",
+                 "environment": {}, "jvmArgs": [], "systemProperties": {},
+                 "javaHomeEnv": "C:/jdk"}), \
+             mock.patch("core.jvm_validate_daemon.run") as daemon:
+            _request, result = self._run_single()
+
+        self.assertEqual(result["execution_mode"], "gradle_fallback")
+        self.assertIn("runtime classpath 已失效", result["daemon_fallback_reason"])
+        daemon.assert_not_called()
         self.assertEqual(self.gradle_calls, 1)
 
     def test_single_uses_daemon_when_gradle_readiness_is_incomplete(self) -> None:
