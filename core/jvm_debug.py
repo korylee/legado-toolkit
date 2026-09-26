@@ -64,6 +64,60 @@ CODE_TEXT = {
 #: 只有一侧拿，注释里那句「共用」就成了一个读起来像存在的保护（AGENTS #12）。
 RUN_LOCK = threading.Lock()
 
+#: 失败保留的运行目录上限：诊断现场（manifest/日志/半成品结果）只留最近这么多，
+#: 防止「保留失败现场」变成无限堆积。不是用户可调参数，不进 settings（AGENTS #8）。
+FAILED_RUN_DIR_CAP = 20
+
+
+def prune_stale_run_dirs(cap: int = FAILED_RUN_DIR_CAP,
+                         root: Optional[pathlib.Path] = None) -> None:
+    """runs/ 下只留最近 cap 个目录；只动本工具链创建的 batch-/debug- 目录。
+
+    ``root`` 由调用方显式传（后端经 data_dir 解析，测试才能隔离）；缺省才用
+    core.paths 的解析口。
+    """
+    root = pathlib.Path(root) if root else pathlib.Path(data_path("app_probe", "runs"))
+    try:
+        dirs = [p for p in root.iterdir()
+                if p.is_dir() and p.name[:6] in ("batch-", "debug-")]
+    except OSError:
+        return
+    def _mtime(p: pathlib.Path) -> float:
+        try:
+            return p.stat().st_mtime
+        except OSError:
+            return 0.0
+    dirs.sort(key=_mtime, reverse=True)
+    for stale in dirs[cap:]:
+        shutil.rmtree(str(stale), ignore_errors=True)
+
+
+def _write_debug_manifest(run_dir: pathlib.Path, src: Dict[str, Any], key: str,
+                          timeout: int, args_path: pathlib.Path, src_file: str,
+                          ndjson_path: pathlib.Path) -> None:
+    """调试任务也留一份任务信封：这次调试用了哪个源、哪个词、材料写到哪。
+
+    与跑批 manifest 同一立场：SQLite/返回体是事实源，这个文件是**崩溃后仍可
+    逐项对出**的复查交付物。
+    """
+    envelope = {
+        "schema": 1,
+        "kind": "jvm_debug",
+        "owner_pid": os.getpid(),
+        "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "source_url": str(src.get("bookSourceUrl") or ""),
+        "key": key,
+        "timeout": int(timeout),
+        "paths": {"args": str(args_path), "source": str(src_file),
+                  "events": str(ndjson_path)},
+    }
+    try:
+        (run_dir / "manifest.json").write_text(
+            json.dumps(envelope, ensure_ascii=False, indent=1),
+            encoding="utf-8", newline="\n")
+    except OSError:
+        pass
+
 #: 拿不到 `RUN_LOCK` 时的**同一句话**。跑批与调试是同一把锁、同一个原因，
 #: 两处各写一份就会在界面上长得不一样，而用户看不出那其实是同一件事。
 BUSY_REASON = ("另一个 JVM 任务在跑（跑批与调试共用同一个参数文件），"
@@ -435,6 +489,9 @@ def run_jvm_debug(source: Dict[str, Any],
         pathlib.Path(src_file).write_text(json.dumps([src], ensure_ascii=False),
                                           encoding="utf-8", newline="\n")
         _write_args(src_file, key, ndjson, timeout, cookie, proxy, args_path=args_path)
+        if owns_run_dir:
+            _write_debug_manifest(run_dir, src, key, timeout,
+                                  args_path, src_file, ndjson_path)
         if launcher:
             launch = launcher
         elif owns_run_dir:
@@ -444,8 +501,10 @@ def run_jvm_debug(source: Dict[str, Any],
             launch = default_launcher(launch_notes, env_snapshot=env_snapshot)
         _, cost, _so, _se = launch()
     except Exception:
+        # 崩溃现场保留：manifest/半成品材料是「这次为什么炸」的唯一证据，
+        # 清理由 prune_stale_run_dirs 的上限兜底
         if owns_run_dir:
-            shutil.rmtree(str(run_dir), ignore_errors=True)
+            prune_stale_run_dirs()
         raise
     finally:
         # 还原：跑批与调试共用这一个参数文件，别把调试的参数留在里面

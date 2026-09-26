@@ -150,12 +150,16 @@ class ScopeTests(_Base):
         }
 
         async def go():
+            def fake_daemon(_dump, _args):
+                out_path.write_text(json.dumps({"url": "https://a.com", "state": "ok"}),
+                                    encoding="utf-8")
+                return {"code": 0, "cost_ms": 1, "error": ""}
+
             with mock.patch("core.jvm_direct.load_dump", return_value={
                     "workingDir": "C:/repo", "classpath": "x", "maxHeapSize": "3g",
                     "environment": {}, "jvmArgs": [], "systemProperties": {},
                     "javaHomeEnv": "C:/jdk"}), \
-                 mock.patch("core.jvm_validate_daemon.run", side_effect=lambda _dump, _args: {
-                     "code": 0, "cost_ms": 1, "error": ""}), \
+                 mock.patch("core.jvm_validate_daemon.run", side_effect=fake_daemon), \
                  mock.patch.object(jvm_api, "execution_readiness", return_value={"ok": True}), \
                  mock.patch.object(jvm_api, "_read_results", return_value=[]), \
                  mock.patch.object(jvm_api, "_write_meta", return_value="legacy-batch"), \
@@ -195,7 +199,8 @@ class ScopeTests(_Base):
             out_path=out_path, single=False, execution_plan="gradle",
             allow_gradle_fallback=True, runtime={"app_repo": "X:/repo"},
             readiness={"ok": True}, execution_readiness={},
-            readiness_fingerprint="", readiness_checked_at="", source_count=1)
+            readiness_fingerprint="", readiness_checked_at="", source_count=1,
+            urls=["https://a.com"], params={"keyword": "我"})
         control = {"started": threading.Event(), "release": threading.Event()}
         payload = {"prep": {"started": True}, "manifest": manifest,
                    **control}
@@ -230,9 +235,13 @@ class ScopeTests(_Base):
         result = asyncio.run(go())
         manifest = submitted["payload"]["manifest"]
         self.assertEqual(result["job_id"], "manifest-job")
-        self.assertEqual(manifest["schema"], 1)
+        self.assertEqual(manifest["schema"], 2)
         self.assertEqual(manifest["source_count"], 1)
         self.assertEqual(manifest["execution_plan"], "validate_daemon")
+        # 归一化的范围与生效参数也是「提交即冻结」的输入（AGENTS #5：库里归一化
+        # 过的 URL 与导出原文必须在这里统一）
+        self.assertEqual(manifest["urls"], ["https://a.com"])
+        self.assertIn("keyword", manifest["params"])
         self.assertEqual(jvm_api._manifest_error(manifest), "")
 
         tampered = dict(manifest)
@@ -676,6 +685,86 @@ class ExportTests(_Base):
                               .read_text(encoding="utf-8"))
         self.assertEqual(sorted(r["bookSourceUrl"] for r in rows),
                          ["https://A.com/", "https://c.com/"])
+
+
+class RunDirRetentionTests(_Base):
+    """运行目录的保留策略：失败保留现场（上限修剪），成功/取消清理。
+
+    manifest.json / runtime-snapshot.json / results.jsonl 是「重启或异常退出后
+    逐项对出这次用了什么、写到哪」的复查交付物；SQLite 仍是任务事实源。
+    """
+
+    def _latest_batch_dir(self) -> pathlib.Path:
+        runs = self.probe / "data" / "app_probe" / "runs"
+        dirs = sorted(runs.glob("batch-*"), key=lambda p: p.stat().st_mtime)
+        self.assertTrue(dirs, "没有运行目录")
+        return dirs[-1]
+
+    def test_failed_run_keeps_manifest_snapshot_and_results(self) -> None:
+        dump_file = self.probe / "data" / "app_probe" / "test_jvm_env.json"
+        dump_file.parent.mkdir(parents=True, exist_ok=True)
+        dump_file.write_text(json.dumps({"workingDir": "X:/repo"}), encoding="utf-8")
+        self.no_output = True
+        self.gradle_result = 1
+        result = self._call()
+        self.assertFalse(result["ok"])
+        run_dir = self._latest_batch_dir()
+        envelope = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(envelope["job_id"], "testjob")
+        self.assertEqual(envelope["chunk"], "")
+        self.assertIn("owner_pid", envelope)
+        inputs = envelope["inputs"]
+        self.assertEqual(len(inputs["urls"]), inputs["source_count"])
+        self.assertTrue(all("://" in u for u in inputs["urls"]))
+        self.assertIn("keyword", inputs["params"])
+        body = dict(inputs)
+        expected = body.pop("sha256")
+        self.assertEqual(hashlib.sha256(
+            json.dumps(body, ensure_ascii=False, sort_keys=True,
+                       separators=(",", ":")).encode("utf-8")).hexdigest(), expected)
+        self.assertTrue((run_dir / "runtime-snapshot.json").exists())
+        # 这个失败场景是「Gradle 没产出结果文件」——参数文件必须在现场，
+        # results.jsonl 反倒不该有
+        self.assertTrue((run_dir / "args.properties").exists())
+        self.assertFalse((run_dir / "results.jsonl").exists())
+
+    def test_failed_run_dirs_are_pruned_to_the_cap(self) -> None:
+        from core.jvm_debug import FAILED_RUN_DIR_CAP
+        runs = self.probe / "data" / "app_probe" / "runs"
+        runs.mkdir(parents=True, exist_ok=True)
+        for i in range(FAILED_RUN_DIR_CAP + 3):
+            (runs / ("batch-%06d" % i)).mkdir()
+        self.no_output = True
+        self.gradle_result = 1
+        self._call()
+        self.assertLessEqual(len(list(runs.glob("batch-*"))), FAILED_RUN_DIR_CAP)
+        # 保留的必须是最新那个（本次失败现场），而不是任意 cap 个
+        self.assertTrue(self._latest_batch_dir().exists())
+
+
+class GradleLogTests(unittest.TestCase):
+    """真 `_run_gradle`（不走 _Base 的打桩）：全量 stdout/stderr 要落进运行目录。"""
+
+    def test_stdout_stderr_logs_are_written_into_run_dir(self) -> None:
+        root = pathlib.Path(tempfile.mkdtemp(prefix="jvm_gradle_log_"))
+        self.addCleanup(shutil.rmtree, str(root), ignore_errors=True)
+        run_dir = root / "app_probe" / "runs" / "logged"
+        run_dir.mkdir(parents=True)
+        args_path = run_dir / "args.properties"
+        args_path.write_text("file=x\n", encoding="utf-8")
+        proc = mock.Mock(returncode=1, stdout="gradle 全量输出", stderr="boom")
+        with mock.patch.object(jvm_api, "_launcher",
+                               return_value=root / "appservice" / "legado-gradle.bat"), \
+             mock.patch.object(jvm_api, "_AGSVC", root / "appservice"), \
+             mock.patch.object(jvm_api, "data_dir", lambda: root), \
+             mock.patch.object(jvm_api.subprocess, "run", return_value=proc):
+            result = jvm_api._run_gradle(args_path=args_path, runtime={
+                "app_repo": "X:/repo", "java_home": "X:/jdk", "android_sdk": "X:/sdk",
+                "gradle_user_home": "X:/.gradle"})
+        self.assertEqual(result["exit"], 1)
+        self.assertEqual((run_dir / "stdout.log").read_text(encoding="utf-8"),
+                         "gradle 全量输出")
+        self.assertEqual((run_dir / "stderr.log").read_text(encoding="utf-8"), "boom")
 
 
 if __name__ == "__main__":

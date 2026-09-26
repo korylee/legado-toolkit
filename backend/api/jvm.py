@@ -106,14 +106,17 @@ def _build_jvm_manifest(*, run_dir: Path, source_file: Path, args_file: Path,
                         readiness: Dict[str, Any],
                         execution_readiness: Dict[str, Any],
                         readiness_fingerprint: str,
-                        readiness_checked_at: str, source_count: int) -> Dict[str, Any]:
+                        readiness_checked_at: str, source_count: int,
+                        urls: List[str], params: Dict[str, Any]) -> Dict[str, Any]:
     """生成一次提交即固定的 JVM 任务输入快照。
 
     ``payload`` 会落库，但 worker 仍不应依赖多处散落字段重新推导路径和执行计划。
     manifest 的哈希只覆盖实际字段；worker 读到后先验哈希，再消费这份快照。
+    ``urls`` 是归一化后的范围（AGENTS #5），``params`` 是本次生效的校验参数——
+    两者都是「提交即冻结」的输入，落进运行目录的 manifest.json 后不可再改。
     """
     manifest = {
-        "schema": 1,
+        "schema": 2,
         "run_dir": str(run_dir),
         "source_file": str(source_file),
         "args_file": str(args_file),
@@ -127,11 +130,62 @@ def _build_jvm_manifest(*, run_dir: Path, source_file: Path, args_file: Path,
         "execution_readiness": dict(execution_readiness or {}),
         "readiness_fingerprint": str(readiness_fingerprint or ""),
         "readiness_checked_at": str(readiness_checked_at or ""),
+        "urls": [str(u) for u in urls],
+        "params": dict(params or {}),
     }
     encoded = json.dumps(manifest, ensure_ascii=False, sort_keys=True,
                          separators=(",", ":"))
     manifest["sha256"] = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
     return manifest
+
+
+def _write_run_manifest(run_dir: Path, manifest: Dict[str, Any], job_id: str) -> None:
+    """把本次任务的输入信封写进运行目录（不可变的复查交付物）。
+
+    SQLite 仍是任务管理事实源；这个文件让「重启/异常退出后这次任务用了什么
+    输入、写到哪」不用翻库也能逐项对出。``inputs`` 是提交时冻结的 manifest
+    （带 sha256）；job/owner/chunk/generation 是执行身份，不属于冻结范围。
+    """
+    envelope = {
+        "schema": 1,
+        "job_id": job_id,
+        "owner_pid": os.getpid(),
+        "chunk": "",
+        "generation": 1,
+        "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "inputs": manifest,
+    }
+    try:
+        (run_dir / "manifest.json").write_text(
+            json.dumps(envelope, ensure_ascii=False, indent=1),
+            encoding="utf-8", newline="\n")
+    except OSError:
+        pass
+
+
+def _persist_runtime_snapshot(run_dir: Path) -> None:
+    """把本次执行依赖的 runtime dump 复制一份进运行目录。
+
+    缺失不拦：执行态检查会对「没有 dump」给出明确原因，这里只负责留存证据。
+    """
+    src = data_dir() / "app_probe" / "test_jvm_env.json"
+    try:
+        shutil.copyfile(src, run_dir / "runtime-snapshot.json")
+    except OSError:
+        pass
+
+
+def _write_run_logs(args_path: Optional[Path], stdout: Any, stderr: Any) -> None:
+    """Gradle 全量输出落进运行目录；结果体里只留尾部，完整版在这里。"""
+    if args_path is None:
+        return
+    base = Path(args_path).parent
+    try:
+        base.mkdir(parents=True, exist_ok=True)
+        (base / "stdout.log").write_text(str(stdout or ""), encoding="utf-8", newline="\n")
+        (base / "stderr.log").write_text(str(stderr or ""), encoding="utf-8", newline="\n")
+    except OSError:
+        pass
 
 
 def _manifest_error(manifest: Any) -> str:
@@ -141,16 +195,18 @@ def _manifest_error(manifest: Any) -> str:
         "schema", "run_dir", "source_file", "args_file", "out_path",
         "source_count", "single", "execution_plan", "allow_gradle_fallback",
         "runtime", "readiness", "execution_readiness",
-        "readiness_fingerprint", "readiness_checked_at",
+        "readiness_fingerprint", "readiness_checked_at", "urls", "params",
     }
     missing = sorted(required - set(manifest))
-    if missing or manifest.get("schema") != 1:
-        detail = "缺少字段：%s" % ", ".join(missing) if missing else "schema 不是 1"
+    if missing or manifest.get("schema") != 2:
+        detail = "缺少字段：%s" % ", ".join(missing) if missing else "schema 不是 2"
         return "JVM 任务 manifest 结构不受支持：%s" % detail
     if not isinstance(manifest.get("runtime"), dict) or not isinstance(manifest.get("readiness"), dict):
         return "JVM 任务 manifest 结构不受支持：runtime/readiness 不是对象"
     if not isinstance(manifest.get("execution_readiness"), dict):
         return "JVM 任务 manifest 结构不受支持：execution_readiness 不是对象"
+    if not isinstance(manifest.get("urls"), list) or not isinstance(manifest.get("params"), dict):
+        return "JVM 任务 manifest 结构不受支持：urls/params 形状不对"
     if manifest.get("execution_plan") not in ("validate_daemon", "gradle"):
         return "JVM 任务 manifest 结构不受支持：execution_plan 无效"
     if bool(manifest.get("single")) != (manifest.get("execution_plan") == "validate_daemon"):
@@ -315,12 +371,14 @@ def _run_gradle(timeout_min: int = 90, args_path: Optional[Path] = None,
             cwd=str(_AGSVC), env=env, capture_output=True, text=True,
             timeout=timeout_min * 60, errors="replace",
         )
+        _write_run_logs(args_path, proc.stdout, proc.stderr)
         return with_runtime_snapshot({
             "exit": proc.returncode,
             "stdout": _tail_process_output(proc.stdout),
             "stderr": _tail_process_output(proc.stderr),
         })
     except subprocess.TimeoutExpired as exc:
+        _write_run_logs(args_path, exc.stdout, exc.stderr)
         return with_runtime_snapshot({
             "exit": None,
             "stdout": _tail_process_output(exc.stdout),
@@ -575,6 +633,8 @@ async def jvm_run(body: Optional[JvmRunRequest] = None):
         readiness_fingerprint=st_conf.get("fingerprint", ""),
         readiness_checked_at=st_conf.get("checked_at", ""),
         source_count=len(rows),
+        urls=[_normalize_url(str(r.get("bookSourceUrl") or "")) for r in rows],
+        params={k: eff.get(k) for k in JVM_RUN_PARAMS},
     )
     # `total` 进 payload：一次跑批没有逐条进度（一次 Gradle 调用跑一批），但**条数**
     # 要给前端算「N/N」——不给的话状态条永远停在 0
@@ -656,147 +716,167 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
             daemon=True)
         try:
             tail.start()
-            from backend.jobs import runner as job_runner
-
-            execution_mode = "gradle_fallback"
-            execution_note = "批量任务直接使用 Gradle"
-            daemon_failure = ""
-            gradle: Dict[str, Any] = {}
-            daemon_response: Dict[str, Any] = {}
-
-            # 单条校验优先复用常驻 Validate JVM。daemon 只负责执行，结果仍从同一个
-            # results.jsonl 读回；准备态不完整时，daemon 失败不能偷偷再开 Gradle。
-            if single and args_path is not None:
-                try:
-                    from core import jvm_validate_daemon, jvm_direct
-
-                    job_runner.update_phase(job_id, "configuring")
-                    dump = jvm_direct.load_dump(warn_stale=False)
-                    if execution_readiness_snapshot:
-                        current_exec = execution_readiness(dump)
-                        if not current_exec.get("ok"):
-                            raise jvm_validate_daemon.ValidateDaemonError(
-                                current_exec.get("reason") or "单条 JVM 执行态在排队期间失效")
-                    job_runner.update_phase(job_id, "running_validate")
-                    daemon_response = jvm_validate_daemon.run(dump, str(args_path))
-                    daemon_code = daemon_response.get("code")
-                    if daemon_code != 0:
-                        raise jvm_validate_daemon.ValidateDaemonError(
-                            "daemon 返回 code=%s%s" %
-                            (daemon_code,
-                             ("：" + str(daemon_response.get("error"))
-                              if daemon_response.get("error") else "")))
-                    if not out_path.exists():
-                        raise jvm_validate_daemon.ValidateDaemonError(
-                            "daemon 返回成功但没有产出结果文件")
-                    execution_mode = "validate_daemon"
-                    execution_note = "单条校验复用常驻 Validate JVM"
-                except Exception as exc:
-                    daemon_failure = "常驻 Validate JVM 未完成：%s" % exc
-                    try:
-                        out_path.unlink()
-                    except OSError:
-                        pass
-
-                    if not allow_gradle_fallback:
-                        return dict(prep, **{
-                            "ok": False,
-                            "exit": None,
-                            "reason": (daemon_failure + "；完整 Gradle 准备态未通过，"
-                                       "本次不回退 Gradle，避免再次触发冷启动/缺 SDK"),
-                            "execution_mode": "validate_daemon",
-                            "execution_note": "单条执行态失败，未使用 Gradle fallback",
-                            "readiness": readiness_snapshot or {},
-                            "execution_readiness": execution_readiness_snapshot or {},
-                        })
-
-            if execution_mode != "validate_daemon":
-                job_runner.update_phase(job_id, "starting_gradle")
-                gradle = _normalize_gradle_result(
-                    _run_gradle(args_path=args_path, runtime=runtime)
-                    if args_path is not None else _run_gradle(runtime=runtime))
-                code = gradle.get("exit")
-                execution_note = (daemon_failure + "；已使用 Gradle 完成本次校验"
-                                  if daemon_failure else execution_note)
+            # 任务信封 + runtime 快照：执行一开始就落盘。inputs 是提交时冻结的
+            # manifest（带 sha256），信封上的 job/owner/chunk 是执行身份——崩溃后
+            # 凭这个目录就能逐项对出「这次用了什么输入、依赖哪份快照、写到哪」。
+            if run_dir is not None and has_manifest:
+                _write_run_manifest(run_dir, manifest, job_id)
+                _persist_runtime_snapshot(run_dir)
+            result = _execute(tail_stop, tail)
+            # 成功或用户取消：运行目录是过程产物，结论已入库，清掉；失败保留——
+            # manifest/日志/结果文件是「这次为什么失败」的唯一现场，堆积由
+            # prune_stale_run_dirs 的上限兜底。
+            if cancelled.is_set() or result.get("ok"):
+                _cleanup_run_dir(run_dir)
             else:
-                code = daemon_response.get("code")
-
-            snapshot_reason = _runtime_snapshot_failure_reason(gradle)
-            if snapshot_reason:
-                return dict(prep, **{"ok": False, "exit": code,
-                                    "reason": snapshot_reason,
-                                    "execution_mode": execution_mode,
-                                    "execution_note": execution_note,
-                                    "gradle": gradle})
-            if not out_path.exists():
-                return dict(prep, **{"ok": False, "exit": code,
-                                    "reason": (_gradle_failure_reason(gradle)
-                                               if gradle else
-                                               "常驻 Validate JVM 没有产出结果文件"),
-                                    "execution_mode": execution_mode,
-                                    "execution_note": execution_note,
-                                    "gradle": gradle})
-            # 执行结束：先停轮询再读结果。终值以解析出的 rows 为准——轮询数的是物理
-            # 行，有残缺行被 _read_results 跳过时它比 rows 大，不能后写顶掉终值
-            tail_stop.set()
-            tail.join(5)
-            job_runner.update_phase(job_id, "reading_results")
-            rows = _read_results(out_path)
-            job_runner.update_progress(job_id, len(rows))
-            batch = _write_meta(rows)
-            # **上一版结论的快照必须在落库之前读**：跑完再读，每条源都是 old == new，
-            # 「这次变了什么」会永远答「没变」——那正是这个字段要回答的问题（同一处
-            # 理由在 `ops.run_check_job` 里写着，两边必须同规矩）
-            prev_checks = st.checks_map()
-            # 结论同时按 checks 的口径落库（六档 / 星级 / 深度）——列表与筛选读的是
-            # checks，不落这一步的话健康列会在撤掉本地引擎之后断供（TODO §一点九）。
-            # 映射与判据都在 core/jvm_health，**别在这里另写一份**。
-            job_runner.update_phase(job_id, "saving_results")
-            from core import jvm_health
-            n_checks = jvm_health.store_checks(rows, batch=batch, store=st)
-            # items 从**落库后的 checks** 取，而不是自己拿 rows 再算一遍六档/星级：
-            # 前端列表读的就是那张表，这样两边天然一致（形状映射见 check_summary）
-            names = {_normalize_url(str(r.get("url") or "")): str(r.get("name") or "")
-                     for r in rows}
-            fresh = st.checks_map()
-            items = check_items_from_checks(
-                {u: fresh[u] for u in names if u in fresh}, names=names)
-            dist = Counter(r.get("state") for r in rows)
-            result = dict(prep, **{
-                "ok": code == 0, "exit": code, "batch": batch,
-                "count": len(rows), "dist": dict(dist), "checks": n_checks,
-                "execution_mode": execution_mode,
-                "execution_note": execution_note,
-                # 结果体与**本地校验那条同形状**（前端单条校验两条路都读它）：
-                # checked / items / transitions 是回填与摘要要的，cached 这条链
-                # **没有页面缓存**（每次都真抓），报 0 是实话
-                "checked": len(items), "cached": 0, "fetched": len(items),
-                "transitions": summarize_transitions(prev_checks, items),
-                "items": items[:ITEMS_LIMIT],
-            })
-            if code != 0:
-                result["gradle"] = gradle
-            if daemon_failure:
-                result["daemon_fallback_reason"] = daemon_failure
-            snapshot = gradle.get("runtime_snapshot")
-            if (isinstance(snapshot, dict) and
-                    (snapshot.get("error") or snapshot.get("differences"))):
-                result["runtime_snapshot"] = snapshot
+                from core.jvm_debug import prune_stale_run_dirs
+                prune_stale_run_dirs(root=data_dir() / "app_probe" / "runs")
             return result
         finally:
-            # daemon 失败不回退这类早退路径也从这里停轮询；set/join 可重入，
+            # 早退路径（如 daemon 失败不回退）也从这里停轮询；set/join 可重入，
             # 成功路径上已经停过一次
             tail_stop.set()
             tail.join(5)
             RUN_LOCK.release()
-            _cleanup_run_dir(run_dir)
 
+    def _execute(tail_stop: threading.Event, tail: threading.Thread) -> Dict[str, Any]:
+        from backend.jobs import runner as job_runner
+
+        execution_mode = "gradle_fallback"
+        execution_note = "批量任务直接使用 Gradle"
+        daemon_failure = ""
+        gradle: Dict[str, Any] = {}
+        daemon_response: Dict[str, Any] = {}
+
+        # 单条校验优先复用常驻 Validate JVM。daemon 只负责执行，结果仍从同一个
+        # results.jsonl 读回；准备态不完整时，daemon 失败不能偷偷再开 Gradle。
+        if single and args_path is not None:
+            try:
+                from core import jvm_validate_daemon, jvm_direct
+
+                job_runner.update_phase(job_id, "configuring")
+                dump = jvm_direct.load_dump(warn_stale=False)
+                if execution_readiness_snapshot:
+                    current_exec = execution_readiness(dump)
+                    if not current_exec.get("ok"):
+                        raise jvm_validate_daemon.ValidateDaemonError(
+                            current_exec.get("reason") or "单条 JVM 执行态在排队期间失效")
+                job_runner.update_phase(job_id, "running_validate")
+                daemon_response = jvm_validate_daemon.run(dump, str(args_path))
+                daemon_code = daemon_response.get("code")
+                if daemon_code != 0:
+                    raise jvm_validate_daemon.ValidateDaemonError(
+                        "daemon 返回 code=%s%s" %
+                        (daemon_code,
+                         ("：" + str(daemon_response.get("error"))
+                          if daemon_response.get("error") else "")))
+                if not out_path.exists():
+                    raise jvm_validate_daemon.ValidateDaemonError(
+                        "daemon 返回成功但没有产出结果文件")
+                execution_mode = "validate_daemon"
+                execution_note = "单条校验复用常驻 Validate JVM"
+            except Exception as exc:
+                daemon_failure = "常驻 Validate JVM 未完成：%s" % exc
+                try:
+                    out_path.unlink()
+                except OSError:
+                    pass
+
+                if not allow_gradle_fallback:
+                    return dict(prep, **{
+                        "ok": False,
+                        "exit": None,
+                        "reason": (daemon_failure + "；完整 Gradle 准备态未通过，"
+                                   "本次不回退 Gradle，避免再次触发冷启动/缺 SDK"),
+                        "execution_mode": "validate_daemon",
+                        "execution_note": "单条执行态失败，未使用 Gradle fallback",
+                        "readiness": readiness_snapshot or {},
+                        "execution_readiness": execution_readiness_snapshot or {},
+                    })
+
+        if execution_mode != "validate_daemon":
+            job_runner.update_phase(job_id, "starting_gradle")
+            gradle = _normalize_gradle_result(
+                _run_gradle(args_path=args_path, runtime=runtime)
+                if args_path is not None else _run_gradle(runtime=runtime))
+            code = gradle.get("exit")
+            execution_note = (daemon_failure + "；已使用 Gradle 完成本次校验"
+                              if daemon_failure else execution_note)
+        else:
+            code = daemon_response.get("code")
+
+        snapshot_reason = _runtime_snapshot_failure_reason(gradle)
+        if snapshot_reason:
+            return dict(prep, **{"ok": False, "exit": code,
+                                "reason": snapshot_reason,
+                                "execution_mode": execution_mode,
+                                "execution_note": execution_note,
+                                "gradle": gradle})
+        if not out_path.exists():
+            return dict(prep, **{"ok": False, "exit": code,
+                                "reason": (_gradle_failure_reason(gradle)
+                                           if gradle else
+                                           "常驻 Validate JVM 没有产出结果文件"),
+                                "execution_mode": execution_mode,
+                                "execution_note": execution_note,
+                                "gradle": gradle})
+        # 执行结束：先停轮询再读结果。终值以解析出的 rows 为准——轮询数的是物理
+        # 行，有残缺行被 _read_results 跳过时它比 rows 大，不能后写顶掉终值
+        tail_stop.set()
+        tail.join(5)
+        job_runner.update_phase(job_id, "reading_results")
+        rows = _read_results(out_path)
+        job_runner.update_progress(job_id, len(rows))
+        batch = _write_meta(rows)
+        # **上一版结论的快照必须在落库之前读**：跑完再读，每条源都是 old == new，
+        # 「这次变了什么」会永远答「没变」——那正是这个字段要回答的问题（同一处
+        # 理由在 `ops.run_check_job` 里写着，两边必须同规矩）
+        prev_checks = st.checks_map()
+        # 结论同时按 checks 的口径落库（六档 / 星级 / 深度）——列表与筛选读的是
+        # checks，不落这一步的话健康列会在撤掉本地引擎之后断供（TODO §一点九）。
+        # 映射与判据都在 core/jvm_health，**别在这里另写一份**。
+        job_runner.update_phase(job_id, "saving_results")
+        from core import jvm_health
+        n_checks = jvm_health.store_checks(rows, batch=batch, store=st)
+        # items 从**落库后的 checks** 取，而不是自己拿 rows 再算一遍六档/星级：
+        # 前端列表读的就是那张表，这样两边天然一致（形状映射见 check_summary）
+        names = {_normalize_url(str(r.get("url") or "")): str(r.get("name") or "")
+                 for r in rows}
+        fresh = st.checks_map()
+        items = check_items_from_checks(
+            {u: fresh[u] for u in names if u in fresh}, names=names)
+        dist = Counter(r.get("state") for r in rows)
+        result = dict(prep, **{
+            "ok": code == 0, "exit": code, "batch": batch,
+            "count": len(rows), "dist": dict(dist), "checks": n_checks,
+            "execution_mode": execution_mode,
+            "execution_note": execution_note,
+            # 结果体与**本地校验那条同形状**（前端单条校验两条路都读它）：
+            # checked / items / transitions 是回填与摘要要的，cached 这条链
+            # **没有页面缓存**（每次都真抓），报 0 是实话
+            "checked": len(items), "cached": 0, "fetched": len(items),
+            "transitions": summarize_transitions(prev_checks, items),
+            "items": items[:ITEMS_LIMIT],
+        })
+        if code != 0:
+            result["gradle"] = gradle
+        if daemon_failure:
+            result["daemon_fallback_reason"] = daemon_failure
+        snapshot = gradle.get("runtime_snapshot")
+        if (isinstance(snapshot, dict) and
+                (snapshot.get("error") or snapshot.get("differences"))):
+            result["runtime_snapshot"] = snapshot
+        return result
+
+    cancelled = threading.Event()
     work = asyncio.create_task(run_in_threadpool(_work))
     try:
         return await asyncio.shield(work)
     except asyncio.CancelledError:
         # 取消 HTTP 请求不能提前释放 JVM lane；线程里的 Gradle 仍在跑，必须等它
-        # 收尾后再让下一个任务进入。
+        # 收尾后再让下一个任务进入。标记取消：运行目录照常清理（结论没入库，
+        # 现场也没有复查价值——「取消不遗留」是单条快速路径验收钉过的行为）。
+        cancelled.set()
         await asyncio.shield(work)
         raise
 

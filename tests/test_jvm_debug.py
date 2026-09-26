@@ -457,5 +457,68 @@ class EndpointTests(_RunCase):
         self.assertEqual(ctx.exception.status_code, 400)
 
 
+class DebugRunManifestTests(unittest.TestCase):
+    """调试任务自己的运行目录：manifest.json 落盘；成功清理、崩溃保留现场。"""
+
+    def setUp(self) -> None:
+        self.root = pathlib.Path(tempfile.mkdtemp(prefix="jvm_debug_manifest_"))
+        self.runs = self.root / "app_probe" / "runs"
+        self._patches = []
+
+    def tearDown(self) -> None:
+        for name, old in self._patches:
+            setattr(jvm_debug, name, old)
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def _patch(self, name, value):
+        self._patches.append((name, getattr(jvm_debug, name)))
+        setattr(jvm_debug, name, value)
+
+    def _run(self, launcher):
+        self._patch("ARGS", self.root / "args.properties")
+        self._patch("_env_error", lambda: "")
+        self._patch("data_path", lambda *parts: self.root.joinpath(*parts))
+        self._patch("fetch_debug_pages", lambda steps, source, **kw: [])
+        return jvm_debug.run_jvm_debug(fake_source(), key="我", launcher=launcher)
+
+    def _fake_launcher(self, events):
+        def run():
+            # owns_run_dir 模式下参数文件在运行目录里，路径记在 manifest 上——
+            # 从那里读也算顺带验了「manifest 指路可用」
+            manifest_dir = next(self.runs.glob("debug-*"))
+            args = (manifest_dir / "args.properties").read_text(encoding="utf-8")
+            out = pathlib.Path(next(line.split("=", 1)[1] for line in args.splitlines()
+                                    if line.startswith("out=")))
+            out.write_text("\n".join(json.dumps(e, ensure_ascii=False)
+                                     for e in events) + "\n",
+                           encoding="utf-8", newline="\n")
+            pathlib.Path(str(out) + ".meta.json").write_text(
+                json.dumps({"code": 0}), encoding="utf-8")
+            return 0, 1.0, "", ""
+        return run
+
+    def test_success_cleans_run_dir(self) -> None:
+        out = self._run(self._fake_launcher(
+            [json.loads(x) for x in FIXTURE.read_text(encoding="utf-8").splitlines()
+             if x.strip()]))
+        self.assertTrue(out["steps"])
+        self.assertEqual(list(self.runs.glob("debug-*")), [])
+
+    def test_crash_keeps_run_dir_with_manifest(self) -> None:
+        def boom():
+            raise RuntimeError("炸了")
+
+        with self.assertRaises(RuntimeError):
+            self._run(boom)
+        dirs = list(self.runs.glob("debug-*"))
+        self.assertEqual(len(dirs), 1, "崩溃现场被清掉了")
+        envelope = json.loads((dirs[0] / "manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(envelope["kind"], "jvm_debug")
+        self.assertEqual(envelope["source_url"], fake_source()["bookSourceUrl"])
+        self.assertEqual(envelope["key"], "我")
+        for key in ("args", "source", "events"):
+            self.assertIn(key, envelope["paths"])
+
+
 if __name__ == "__main__":
     unittest.main()

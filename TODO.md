@@ -60,13 +60,22 @@
 指针：core/store.py，backend/jobs/runner.py，core/jvm_debug.py，lessons §二十八 / §六十五 / §七十四
 
 ### 条目：jvm-task-manifest · 固定每次任务的输入、环境、产物和执行方式
-状态：todo
+状态：doing
 依赖：jvm-runtime-snapshot
 优先级：P1
-背景：当前参数、结果和日志曾依赖固定文件或进程内状态；服务重启、批量并行和 daemon/Gradle fallback 会让“这次任务到底用了什么环境、写了什么文件”难以复查。runtime snapshot 只描述 JVM 实际环境，不能替代任务级输入与产物清单。
-约束：每个 job/chunk 都创建独立运行目录，并写入不可变 `manifest.json`、`runtime-snapshot.json`、`args.properties`、`source.json`、`results.jsonl`、`stdout.log` 和 `stderr.log`；manifest 至少记录归一化 URL、源/规则快照、校验参数、runtime id/fingerprint、执行模式、job/chunk、owner/generation 和各文件路径。SQLite 仍是任务管理事实源，JSON/日志是可复查交付物；提交后不得静默切换 runtime、参数文件或运行目录，重试必须生成新的 attempt 而不是覆盖旧产物。
-验收：单条、批量、调试、refresh 和 Gradle fallback 都能按 job 找到完整 manifest；重启或异常退出后可据 manifest 判断已完成、未完成和失败阶段，已完成结果不被覆盖；同一时间运行的任务不会共享 args、profile、daemon 信息、结果或日志文件；日志和界面能从 job/chunk 追溯到实际执行方式及失败原因。
-指针：backend/jobs/runner.py，core/store.py，core/paths.py，core/jvm_runtime_snapshot.py，lessons §六十五 / §六十八
+背景：核心已交付（2026-09-26）：单条/批量与调试的运行目录在执行开始落盘 `manifest.json`
+  （信封：job_id/owner_pid/chunk/generation/created_at + 提交冻结的 inputs，含归一化 urls、
+  生效参数、runtime fingerprint、各文件路径，schema 2 带 sha256 防篡改）、`runtime-snapshot.json`
+  副本与 Gradle 全量 `stdout.log`/`stderr.log`；保留策略为成功/取消清理、失败/崩溃保留现场
+  （上限 20 修剪）。剩余三件：① refresh 入口的 manifest（现有 candidate+对拍报告只算半个）；
+  ② attempt 语义——`runner.submit` 已有 `retry_of`，重试要生成新运行目录而不是覆盖旧产物；
+  ③ chunk/owner/generation 目前是占位值，随 `jvm-batch-chunk` / `jvm-worker-lease` 实义化。
+约束：SQLite 仍是任务管理事实源，manifest.json 是崩溃后可逐项对出的复查交付物；提交后不得
+  静默切换 runtime、参数文件或运行目录；失败现场按 `FAILED_RUN_DIR_CAP` 修剪，不无限堆积。
+验收：重启或异常退出后可据 manifest 判断已完成、未完成和失败阶段；同一时间运行的任务不共享
+  args、profile、daemon 信息、结果或日志文件；日志和界面能从 job/chunk 追溯到实际执行方式及
+  失败原因；重试生成新 attempt 且旧产物不被覆盖。
+指针：backend/api/jvm.py，backend/jobs/runner.py，core/jvm_debug.py，core/store.py，lessons §六十五 / §六十八
 
 ### 条目：jvm-env-readiness · JVM 环境收尾与跨平台启动器
 状态：todo
