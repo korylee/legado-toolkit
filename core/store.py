@@ -253,6 +253,9 @@ class Store:
         ("expires_at", "TEXT NOT NULL DEFAULT ''"),
         ("pinned", "INTEGER NOT NULL DEFAULT 0"),
         ("retry_of", "TEXT NOT NULL DEFAULT ''"),
+        # 任务阶段与 status 分开：status 表示生命周期，phase 表示当前执行位置。
+        # 旧库补列后默认 queued，避免历史任务被误报成正在执行。
+        ("phase", "TEXT NOT NULL DEFAULT 'queued'"),
     ]}
 
     #: v_sources 视图每次重建：CREATE VIEW IF NOT EXISTS 不会更新已存在的视图定义
@@ -1455,7 +1458,7 @@ class Store:
             time.localtime(time.time() + JOBS_TTL_DAYS * 86400))
         with self.conn:
             cur = self.conn.execute(
-                "UPDATE jobs SET status = 'failed', result_json = ?, updated_at = ?, expires_at = ?"
+                "UPDATE jobs SET status = 'failed', phase = 'finished', result_json = ?, updated_at = ?, expires_at = ?"
                 " WHERE status IN ('running', 'pending')",
                 (json.dumps({"error": "进程重启，任务没写终态（崩溃或被强杀）"},
                             ensure_ascii=False), now(), expiry))
@@ -1507,7 +1510,7 @@ class Store:
                  expires, ts, ts))
 
     def update_job(self, job_id: str, status=None, progress=None, total=None,
-                   result=None) -> None:
+                   result=None, phase=None) -> None:
         sets, args = ["updated_at = ?"], [now()]
         if status is not None:
             sets.append("status = ?")
@@ -1518,6 +1521,8 @@ class Store:
                     time.localtime(time.time() + JOBS_TTL_DAYS * 86400))
                 sets.append("expires_at = ?")
                 args.append(terminal_expiry)
+                if phase is None:
+                    phase = "finished"
         if progress is not None:
             sets.append("progress = ?")
             args.append(int(progress))
@@ -1527,6 +1532,9 @@ class Store:
         if result is not None:
             sets.append("result_json = ?")
             args.append(json.dumps(result, ensure_ascii=False))
+        if phase is not None:
+            sets.append("phase = ?")
+            args.append(str(phase))
         args.append(job_id)
         with self.conn:
             self.conn.execute("UPDATE jobs SET %s WHERE id = ?" % ", ".join(sets), args)
@@ -1537,7 +1545,7 @@ class Store:
 
     def list_jobs(self, limit: int = 50) -> List[Dict[str, Any]]:
         return [dict(r) for r in self.conn.execute(
-            "SELECT id, kind, status, progress, total, retry_of, expires_at, created_at, updated_at"
+            "SELECT id, kind, status, phase, progress, total, retry_of, expires_at, created_at, updated_at"
             " FROM jobs ORDER BY created_at DESC LIMIT ?", (int(limit),))]
 
     def delete_job(self, job_id: str) -> bool:

@@ -63,6 +63,7 @@ def _job_detail(job: Dict[str, Any]) -> Dict[str, Any]:
         "kind": job.get("kind", ""),
         "retry_of": job.get("retry_of", ""),
         "status": job.get("status", ""),
+        "phase": job.get("phase", "queued"),
         "progress": job.get("progress", 0),
         "total": job.get("total", 0),
         "expires_at": job.get("expires_at", ""),
@@ -176,7 +177,7 @@ async def job_events(job_id: str):
                 if not job:
                     yield frame({"error": "任务不存在"})
                     return
-                cur = (job.get("status"), job.get("progress"))
+                cur = (job.get("status"), job.get("phase"), job.get("progress"))
                 if cur != last:
                     yield frame(job)
                     last = cur

@@ -47,8 +47,21 @@ class JobRetentionTests(unittest.TestCase):
         """新任务必须带上过期时间——没有它 sweep 无从下手。"""
         with Store(self.db) as st:
             st.create_job("j1", "check")
-            row = st.conn.execute("SELECT expires_at FROM jobs WHERE id='j1'").fetchone()
+            row = st.conn.execute(
+                "SELECT expires_at, phase FROM jobs WHERE id='j1'").fetchone()
         self.assertTrue(str(row["expires_at"] or "").strip())
+        self.assertEqual(row["phase"], "queued")
+
+    def test_phase_is_persisted_and_terminal_jobs_finish(self) -> None:
+        """阶段是持久化字段，终态不能留下最后一个执行阶段。"""
+        with Store(self.db) as st:
+            st.create_job("j1", "check")
+            st.update_job("j1", status="running", phase="running_validate")
+            self.assertEqual(st.get_job("j1")["phase"], "running_validate")
+            st.update_job("j1", status="done", result={"ok": True})
+            row = st.get_job("j1")
+        self.assertEqual(row["status"], "done")
+        self.assertEqual(row["phase"], "finished")
 
     def test_expired_jobs_are_swept(self) -> None:
         """过期的清掉，没过期的留着。

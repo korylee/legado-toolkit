@@ -73,15 +73,33 @@ def submit(kind: str, payload: Optional[Dict[str, Any]] = None,
     return job_id
 
 
+def update_phase(job_id: str, phase: str) -> None:
+    """把阶段写入任务表。
+
+    JVM 的真正执行段在工作线程里，不能复用 async handler 持有的 Store 连接；
+    这里短开独立连接，保证阶段在阻塞执行期间也能被 SSE 读到。
+    """
+    st = Store()
+    try:
+        st.update_job(job_id, phase=phase)
+    finally:
+        st.close()
+
+
 async def _run(job_id: str, kind: str, payload: Dict[str, Any],
                lane: Optional[str] = None) -> None:
     st = Store()
     lock = _lane_lock(lane) if lane else None
     acquired = False
     try:
+        if kind == "jvm_run":
+            update_phase(job_id, "waiting_readiness")
         if lock is not None:
             await lock.acquire()
             acquired = True
+        if kind == "jvm_run":
+            update_phase(job_id, "starting_worker" if payload.get("single")
+                         else "starting_gradle")
         st.update_job(job_id, status="running")
         result = await HANDLERS[kind](job_id, st, payload)
         st.update_job(job_id, status="done", result=result or {})
@@ -166,6 +184,14 @@ def cancel(job_id: str) -> bool:
     t = TASKS.get(job_id)
     if not t:
         return False
+    st = Store()
+    try:
+        job = st.get_job(job_id)
+        if not job or job.get("status") in ("done", "failed", "cancelled"):
+            return False
+        st.update_job(job_id, status="cancel_requested", phase="cancel_requested")
+    finally:
+        st.close()
     t.cancel()
     return True
 

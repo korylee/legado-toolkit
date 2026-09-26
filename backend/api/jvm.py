@@ -516,6 +516,8 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
         # This also waits for any non-lane holder instead of failing the submitted job.
         RUN_LOCK.acquire()
         try:
+            from backend.jobs import runner as job_runner
+
             execution_mode = "gradle_fallback"
             execution_note = "批量任务直接使用 Gradle"
             daemon_failure = ""
@@ -528,6 +530,7 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
                 try:
                     from core import jvm_validate_daemon, jvm_direct
 
+                    job_runner.update_phase(job_id, "configuring")
                     dump = jvm_direct.load_dump(warn_stale=False)
                     if (payload.get("execution_readiness") and
                             not payload.get("allow_gradle_fallback", True)):
@@ -535,6 +538,7 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
                         if not current_exec.get("ok"):
                             raise jvm_validate_daemon.ValidateDaemonError(
                                 current_exec.get("reason") or "单条 JVM 执行态在排队期间失效")
+                    job_runner.update_phase(job_id, "running_validate")
                     daemon_response = jvm_validate_daemon.run(dump, str(args_path))
                     daemon_code = daemon_response.get("code")
                     if daemon_code != 0:
@@ -568,6 +572,7 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
                         })
 
             if execution_mode != "validate_daemon":
+                job_runner.update_phase(job_id, "starting_gradle")
                 gradle = _normalize_gradle_result(
                     _run_gradle(args_path=args_path, runtime=payload.get("runtime"))
                     if args_path is not None else _run_gradle(runtime=payload.get("runtime")))
@@ -592,6 +597,7 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
                                     "execution_mode": execution_mode,
                                     "execution_note": execution_note,
                                     "gradle": gradle})
+            job_runner.update_phase(job_id, "reading_results")
             rows = _read_results(out_path)
             batch = _write_meta(rows)
             # **上一版结论的快照必须在落库之前读**：跑完再读，每条源都是 old == new，
@@ -601,6 +607,7 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
             # 结论同时按 checks 的口径落库（六档 / 星级 / 深度）——列表与筛选读的是
             # checks，不落这一步的话健康列会在撤掉本地引擎之后断供（TODO §一点九）。
             # 映射与判据都在 core/jvm_health，**别在这里另写一份**。
+            job_runner.update_phase(job_id, "saving_results")
             from core import jvm_health
             n_checks = jvm_health.store_checks(rows, batch=batch, store=st)
             # items 从**落库后的 checks** 取，而不是自己拿 rows 再算一遍六档/星级：

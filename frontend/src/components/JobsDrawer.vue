@@ -25,14 +25,27 @@ const jobs = ref([]);
 const stops = {};
 
 const statusType = (s) => (s === "done" ? "success" : s === "failed" ? "danger" : "warning");
-const statusLabel = (s) => ({ pending: "排队中", running: "运行中", done: "已完成", failed: "失败", cancelled: "已取消" }[s] || s || "未知");
+const statusLabel = (s) => ({ pending: "排队中", running: "运行中", cancel_requested: "取消中", done: "已完成", failed: "失败", cancelled: "已取消" }[s] || s || "未知");
+const phaseLabel = (p) => ({
+  queued: "排队中",
+  waiting_readiness: "等待环境检查",
+  starting_worker: "启动执行器",
+  starting_gradle: "启动 Gradle",
+  configuring: "配置执行参数",
+  compiling: "编译中",
+  running_validate: "执行校验",
+  reading_results: "读取结果",
+  saving_results: "写入结果",
+  cancel_requested: "正在取消",
+  finished: "已结束",
+}[p] || p || "准备中");
 const terminal = (s) => ["done", "failed", "cancelled"].includes(s);
 const retryLabel = (s) => s === "done" ? "再次运行" : "重试";
 const retryable = (row) => terminal(row.status) && row.kind !== "jvm_run";
 const pct = (row) => (row.total ? Math.round((row.progress / row.total) * 100) : 0);
 // 徽标口径：pending 还没轮到跑、也算「进行中」，与列表里的状态标签保持一致
 const runningCount = computed(
-  () => jobs.value.filter((j) => j.status === "running" || j.status === "pending").length,
+  () => jobs.value.filter((j) => j.status === "running" || j.status === "pending" || j.status === "cancel_requested").length,
 );
 const terminalCount = computed(
   () => jobs.value.filter((j) => ["done", "failed", "cancelled"].includes(j.status)).length,
@@ -225,13 +238,16 @@ defineExpose({ refresh: load });
               <el-tag size="small" :type="statusType(row.status)">{{ statusLabel(row.status) }}</el-tag>
             </template>
           </el-table-column>
-          <el-table-column label="进度" min-width="130">
+              <el-table-column label="进度" min-width="130">
             <template #default="{ row }">
               <el-progress class="row-progress" :percentage="pct(row)" :stroke-width="7"
                            :status="row.status === 'failed' ? 'exception' : undefined" />
               <span class="muted">{{ row.progress }} / {{ row.total }}</span>
             </template>
-          </el-table-column>
+              </el-table-column>
+              <el-table-column label="阶段" min-width="120">
+                <template #default="{ row }">{{ phaseLabel(row.phase) }}</template>
+              </el-table-column>
           <el-table-column prop="updated_at" label="更新时间" width="150" />
           <el-table-column label="操作" width="150" fixed="right" align="center">
             <template #default="{ row }">
@@ -262,6 +278,7 @@ defineExpose({ refresh: load });
           <el-descriptions :column="1" border size="small">
             <el-descriptions-item label="类型">{{ selectedJob.kind }}</el-descriptions-item>
             <el-descriptions-item label="进度">{{ selectedJob.progress }} / {{ selectedJob.total }}</el-descriptions-item>
+            <el-descriptions-item label="阶段">{{ phaseLabel(selectedJob.phase) }}</el-descriptions-item>
             <el-descriptions-item label="创建时间">{{ selectedJob.created_at }}</el-descriptions-item>
             <el-descriptions-item label="更新时间">{{ selectedJob.updated_at }}</el-descriptions-item>
             <el-descriptions-item label="保留至">{{ selectedJob.expires_at || "服务端默认期限" }}</el-descriptions-item>
