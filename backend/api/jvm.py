@@ -23,6 +23,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from collections import Counter
 from pathlib import Path
@@ -402,6 +403,30 @@ def _write_meta(rows: List[Dict[str, Any]]) -> str:
     return batch
 
 
+#: 进度轮询间隔（秒）。测试会把它调小来驱动轮询。
+_PROGRESS_POLL_INTERVAL = 1.0
+
+
+def _tail_progress(job_id: str, out_path: Path, stop: threading.Event,
+                   interval: float, cap: int = 0) -> None:
+    """跑批期间把 results.jsonl 已落盘的完整行数当进度上报。
+
+    Kotlin 侧每写完一条源就 flush（`ValidateService.kt` 的 writer 回调），数 ``\\n``
+    就是「实际完成几条」，不是估的——这与「不编假进度」不冲突，编的是没有依据的数。
+    文件还没出现（JVM 尚未写出第一条）时保持安静，不把 0 反复写库。
+    """
+    while not stop.wait(interval):
+        try:
+            with open(out_path, "rb") as fh:
+                done = fh.read().count(b"\n")
+        except OSError:
+            continue
+        if cap and done > cap:
+            done = cap
+        if done:
+            runner.update_progress(job_id, done)
+
+
 @router.get("/readiness")
 def jvm_readiness():
     conf = settings_store.load().get("jvm", {})
@@ -623,7 +648,14 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
         # The async lane queues JVM jobs; acquire here in the worker thread as well.
         # This also waits for any non-lane holder instead of failing the submitted job.
         RUN_LOCK.acquire()
+        tail_stop = threading.Event()
+        tail = threading.Thread(
+            target=_tail_progress, name="jvm-progress-tail",
+            args=(job_id, out_path, tail_stop, _PROGRESS_POLL_INTERVAL,
+                  int(manifest.get("source_count") or payload.get("total") or 0)),
+            daemon=True)
         try:
+            tail.start()
             from backend.jobs import runner as job_runner
 
             execution_mode = "gradle_fallback"
@@ -704,8 +736,13 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
                                     "execution_mode": execution_mode,
                                     "execution_note": execution_note,
                                     "gradle": gradle})
+            # 执行结束：先停轮询再读结果。终值以解析出的 rows 为准——轮询数的是物理
+            # 行，有残缺行被 _read_results 跳过时它比 rows 大，不能后写顶掉终值
+            tail_stop.set()
+            tail.join(5)
             job_runner.update_phase(job_id, "reading_results")
             rows = _read_results(out_path)
+            job_runner.update_progress(job_id, len(rows))
             batch = _write_meta(rows)
             # **上一版结论的快照必须在落库之前读**：跑完再读，每条源都是 old == new，
             # 「这次变了什么」会永远答「没变」——那正是这个字段要回答的问题（同一处
@@ -747,6 +784,10 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
                 result["runtime_snapshot"] = snapshot
             return result
         finally:
+            # daemon 失败不回退这类早退路径也从这里停轮询；set/join 可重入，
+            # 成功路径上已经停过一次
+            tail_stop.set()
+            tail.join(5)
             RUN_LOCK.release()
             _cleanup_run_dir(run_dir)
 

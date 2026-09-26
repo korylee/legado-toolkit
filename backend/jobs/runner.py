@@ -86,6 +86,15 @@ def update_phase(job_id: str, phase: str) -> None:
         st.close()
 
 
+def update_progress(job_id: str, progress: int) -> None:
+    """把进度写入任务表；短连接的理由同 update_phase。"""
+    st = Store()
+    try:
+        st.update_job(job_id, progress=progress)
+    finally:
+        st.close()
+
+
 async def _run(job_id: str, kind: str, payload: Dict[str, Any],
                lane: Optional[str] = None) -> None:
     st = Store()
