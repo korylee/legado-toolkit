@@ -51,7 +51,8 @@ def compare(dump: dict, actual: dict, runtime: dict | None = None) -> dict[str, 
     for field in ("systemProperties", "environment"):
         expected = dump[field]
         observed = actual[field]
-        ignored = {"LEGADO_TEST_JVM_LAUNCH_MODE"} if field == "environment" else set()
+        # Launch mode and dump output path are capture controls, not runtime inputs.
+        ignored = {"LEGADO_TEST_JVM_LAUNCH_MODE", "LEGADO_TEST_JVM_ENV_OUT"} if field == "environment" else set()
         changed = {k: {"declared": v, "actual": observed.get(k)}
                    for k, v in expected.items() if k not in ignored and observed.get(k) != v}
         if changed:
@@ -64,8 +65,8 @@ def compare(dump: dict, actual: dict, runtime: dict | None = None) -> dict[str, 
     return differences
 
 
-def compare_runtime_snapshot(mode: str, entry: str, path: Path | None = None, runtime: dict | None = None) -> dict:
-    dump_file = dump_path()
+def compare_runtime_snapshot(mode: str, entry: str, path: Path | None = None, runtime: dict | None = None, declared_path: Path | None = None) -> dict:
+    dump_file = declared_path or dump_path()
     actual_file = path or Path(str(dump_file) + f".actual.{mode}.{entry}.json")
     try:
         declared = json.loads(dump_file.read_text(encoding="utf-8"))

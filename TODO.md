@@ -24,7 +24,7 @@
 状态：doing
 依赖：jvm-runtime-snapshot, jvm-task-manifest
 优先级：P0
-背景：当前单条校验从 `POST /api/jvm/run` 进入 Gradle + `ValidateServiceLauncher`；服务重启后每次都要重新配置/启动 Gradle，导致本应快速反馈的单源校验长时间卡在启动阶段。完整 App 构建环境（包括项目声明的 Android SDK 平台）只应是首次准备、刷新 runtime snapshot 和 Gradle fallback 的前置条件，不能让已有有效 snapshot 的单条执行每次重复走完整环境检查。调试 daemon 的结果不能直接冒充校验结论，两者必须继续使用各自的协议和判定口径。
+背景：单条校验已有 Validate daemon 优先路径，快照缺失或失效且准备态可用时仍会回退 Gradle；常驻重启与失败路径尚未完成实测验收。完整 App 构建环境（包括项目声明的 Android SDK 平台）只应是首次准备、刷新 runtime snapshot 和 Gradle fallback 的前置条件，不能让已有有效 snapshot 的单条执行每次重复走完整环境检查。调试 daemon 的结果不能直接冒充校验结论，两者必须继续使用各自的协议和判定口径。
 约束：新增专用 Validate worker/daemon，复用真实 `ValidateService` 逻辑、现有结果协议和 `jvm_health.store_checks()`；把环境分成两层：准备态负责完整 SDK、Gradle Wrapper、依赖预热和 runtime snapshot 生成，单条执行态只校验 snapshot 仍存在、其中引用的 classpath/Java 可启动且 App 源码签名匹配。单条请求不下载依赖、不隐式编译；snapshot 缺失或失效时返回明确的“先准备/刷新”原因，不能把缺 SDK 伪装成源校验失败。daemon 冷启动、不可用或版本不匹配时要返回明确阶段和原因；只有完整 Gradle 准备态可用时才回退 Gradle，不能把 fallback 的慢路径伪装成常态成功。任务必须使用不可变 manifest，记录实际执行方式 `validate_daemon` 或 `gradle_fallback`；取消只能先进入 `cancel_requested`，待子进程和 JVM 确认退出后再落为 `cancelled`。
 验收：首次准备/刷新阶段能明确指出项目要求的 `compileSdk`、实际 SDK 根目录及缺失平台；准备成功后生成可复用 snapshot。重启后单条校验只验证执行态条件并复用常驻 Validate JVM，不再每次完整启动 Gradle；snapshot 引用的文件消失、源码签名变化或 daemon 不可用时，界面显示可执行原因和下一步。daemon 与 Gradle fallback 对同一源、同一参数逐字段对账，结果、错误原因、落库和前端状态一致。校验请求能显示排队、启动、执行、回读和落库阶段及实际执行方式；取消、超时和 worker 异常退出后不会遗留租约、参数文件或结果文件。
 指针：backend/api/jvm.py，backend/jobs/runner.py，core/jvm_direct.py，core/jvm_daemon.py，appservice/test/io/legado/app/service/ValidateService.kt，lessons §六十五 / §六十八

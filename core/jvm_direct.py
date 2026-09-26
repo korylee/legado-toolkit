@@ -145,17 +145,10 @@ def dump_is_stale() -> bool:
 
 
 def refresh(timeout_min: int = 30) -> int:
-    """拉一次 Gradle（带 dump 的环境变量），把测试 JVM 的环境写出来。
-
-    **环境变量是唯一开关**：不设它，`legado-test.init.gradle` 与现在完全一样。
-    """
+    """Build a candidate snapshot and publish it only after a successful JVM capture."""
     out = dump_path()
-    out.parent.mkdir(parents=True, exist_ok=True)
-    if out.exists():
-        out.unlink()
-    env = {**os.environ, "LEGADO_TEST_JVM_ENV_OUT": str(out),
-           "LEGADO_TEST_JVM_LAUNCH_MODE": "refresh"}
     from core.gradle_distribution import GradleDistributionError, distribution_status
+    env = dict(os.environ)
     try:
         wrapper_cache = distribution_status(
             env.get("LEGADO_REPO", ""), env.get("GRADLE_USER_HOME", ""))
@@ -166,28 +159,53 @@ def refresh(timeout_min: int = 30) -> int:
         print("Gradle Wrapper 未准备：%s；请先执行 `uv run python scripts/prepare_gradle.py`"
               % wrapper_cache.get("reason", "缓存中没有分发包"))
         return 1
-    t0 = time.time()
-    p = subprocess.run(
-        ["cmd", "/c", str(LAUNCHER), ":app:testAppDebugUnitTest", "--tests", REFRESH_TEST,
-         "--rerun"],
-        cwd=str(AGSVC), env=env, capture_output=True, text=True, errors="replace",
-        timeout=timeout_min * 60)
-    cost = time.time() - t0
-    if not out.exists():
-        print("dump 失败（退出码 %d，%.1fs）——看 Gradle 输出里 [appservice] 那几行"
-              % (p.returncode, cost))
-        for ln in (p.stdout or "").strip().splitlines()[-8:]:
-            print("  | " + ln)
-        return 1
+
+    import uuid
+    out.parent.mkdir(parents=True, exist_ok=True)
+    candidate = out.with_name(out.name + ".refresh." + uuid.uuid4().hex)
+    actual = pathlib.Path(str(candidate) + ".actual.refresh.refresh.json")
+    report = actual.with_suffix(".comparison.json")
+    env.update({"LEGADO_TEST_JVM_ENV_OUT": str(candidate),
+                "LEGADO_TEST_JVM_LAUNCH_MODE": "refresh"})
     try:
-        load_dump(warn_stale=False)
-    except (OSError, ValueError) as e:
-        print("dump 结构无效：%s" % e)
-        return 1
-    print("dump 完成：%s（%.1fs）" % (out, cost))
-    from core.jvm_runtime_snapshot import compare_runtime_snapshot
-    compare_runtime_snapshot("refresh", "refresh")
-    return 0
+        t0 = time.time()
+        p = subprocess.run(
+            ["cmd", "/c", str(LAUNCHER), ":app:testAppDebugUnitTest", "--tests", REFRESH_TEST,
+             "--rerun"],
+            cwd=str(AGSVC), env=env, capture_output=True, text=True, errors="replace",
+            timeout=timeout_min * 60)
+        cost = time.time() - t0
+        if p.returncode != 0 or not candidate.exists():
+            print("dump 失败（退出码 %d，%.1fs）——看 Gradle 输出里 [appservice] 那几行"
+                  % (p.returncode, cost))
+            for ln in ((p.stdout or "") + "\n" + (p.stderr or "")).strip().splitlines()[-8:]:
+                print("  | " + ln)
+            return 1
+        try:
+            declared = validate_dump(json.loads(candidate.read_text(encoding="utf-8")))
+        except (OSError, ValueError) as exc:
+            print("dump 结构无效：%s" % exc)
+            return 1
+        from core.jvm_runtime_snapshot import compare_runtime_snapshot
+        comparison = compare_runtime_snapshot(
+            "refresh", "refresh", path=actual, declared_path=candidate)
+        if "error" in comparison or not report.is_file():
+            print("JVM 快照或对拍报告采集失败：%s" % comparison.get("error", report))
+            return 1
+        # The capture used a temporary output path; the reusable dump must not
+        # point future direct/daemon runs at that now-deleted control file.
+        if "LEGADO_TEST_JVM_ENV_OUT" in declared["environment"]:
+            declared["environment"]["LEGADO_TEST_JVM_ENV_OUT"] = str(out)
+            candidate.write_bytes(json.dumps(declared, ensure_ascii=False).encode("utf-8"))
+        final_actual = pathlib.Path(str(out) + ".actual.refresh.refresh.json")
+        actual.replace(final_actual)
+        report.replace(final_actual.with_suffix(".comparison.json"))
+        candidate.replace(out)
+        print("dump 完成：%s（%.1fs）" % (out, cost))
+        return 0
+    finally:
+        for temporary in (candidate, actual, report):
+            temporary.unlink(missing_ok=True)
 
 
 def load_dump(warn_stale: bool = True) -> Dict[str, Any]:
