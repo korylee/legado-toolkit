@@ -18,6 +18,10 @@
 
 ## 0 · 现在做
 
+> 2026-09-26 排期（评估结论）：引擎线八步已走完 ①②③，第一波封顶「环境」章节，
+> 第二波补引擎最后的韧性与公平缺口；④ worker 线是触发式的——批量吞吐被封 IP
+> 硬约束压着，等下次真要跑全量再启动。
+
 ---
 
 ## 1 · 排队
@@ -26,7 +30,7 @@
 状态：todo
 依赖：无
 优先级：P1
-背景：当前 `jvm` lane 已把调试、批量校验和生成后验证收进同一条进程内有序队列，能够避免并发改写 JVM 参数与输出；但严格 FIFO 会让交互调试被长批次挡住，简单地让调试永远插队又会让批量任务长期不运行。
+背景：（路线图第二波）当前 `jvm` lane 已把调试、批量校验和生成后验证收进同一条进程内有序队列，能够避免并发改写 JVM 参数与输出；但严格 FIFO 会让交互调试被长批次挡住，简单地让调试永远插队又会让批量任务长期不运行。
 约束：调试请求优先；批量任务按有限工作单元让出执行权，并设置老化/公平规则，不能依赖 HTTP 连接是否仍存活。优先级只能影响排队顺序，不能绕过同一 JVM/profile 的独占约束。生命周期状态固定为 `queued`、`running`、`cancel_requested`、`succeeded`、`failed`、`cancelled`；执行阶段至少区分 `waiting_readiness`、`starting_worker`、`starting_gradle`、`configuring`、`compiling`、`running_validate`、`reading_results`、`saving_results` 和 `finished`。状态、阶段、取消和原因继续写入 jobs/SSE，不能只存在内存。
 验收：同时提交一个长批量任务、多个调试任务和第二个批量任务；调试任务在当前工作单元结束后优先获得执行权，第二个批量任务最终也能运行。前端能看到当前阶段、实际执行方式和最近一段启动日志；服务端重启或关闭页面不改变已提交任务的生命周期语义，取消不会在子进程退出前伪装成已完成。
 指针：backend/jobs/runner.py，core/store.py，lessons §六十八 / §七十四
@@ -35,7 +39,7 @@
 状态：todo
 依赖：jvm-scheduler-policy, jvm-task-manifest
 优先级：P1
-背景：批量请求目前以一个 JVM job 持有 lane；即使结果已逐条落盘，长批次仍会长时间占住交互调试，取消或进程退出后也缺少明确的分块边界。该条同时承载批量执行的阶段状态、日志尾部和运行目录隔离，不另建“Gradle 进度”条目。
+背景：（路线图第二波，与 scheduler-policy 一次设计落地）批量请求目前以一个 JVM job 持有 lane；即使结果已逐条落盘，长批次仍会长时间占住交互调试，取消或进程退出后也缺少明确的分块边界。该条同时承载批量执行的阶段状态、日志尾部和运行目录隔离，不另建“Gradle 进度”条目。
 约束：分块单位必须是带归一化 URL、参数快照和来源的独立记录，并引用任务 manifest 中冻结的 runtime snapshot；每块完成即落盘并可从已有结果跳过，不能把整批结果重新拼成唯一事实。每个 job/chunk 使用 manifest 规定的独立 args、结果文件和运行目录；块大小、重试和并发上限由设置/测量决定，不在调用点散落常量；块之间释放调度权。单条失败只影响该条，环境错误不得归因给源。
 验收：一个批次被拆成多个块；中途取消或模拟进程退出后重启，已完成块不重复请求、未完成块可继续。每块能报告 queued、starting、running_validate、reading_results、saving_results 和失败原因；启动失败保留日志尾部；报告能区分批次、块、URL、stage、来源和失败原因。
 指针：backend/api/jvm.py，core/jvm_debug.py，core/store.py，lessons §五十三 / §五十四
@@ -58,15 +62,6 @@
 约束：以 SQLite 原子认领为跨进程事实来源，至少记录 owner、generation、heartbeat、attempt 和运行目录；同一 job/块只能有一个有效 owner。认领、续租、完成和失败必须校验 owner/generation，旧 owner 不能覆盖新结果。进程启动、优雅停止和异常退出都要有明确回收/重试规则，不能用一次固定超时把源判坏；运行 manifest 与结果文件必须按 job/块隔离。
 验收：启动两个 worker 并发抢同一 job/块时只有一个成功；杀掉 owner 后任务能按规则恢复且不覆盖已完成结果；旧 owner 延迟回写会被拒绝；重启后 jobs、租约、运行目录和结果状态能逐项对账。
 指针：core/store.py，backend/jobs/runner.py，core/jvm_debug.py，lessons §二十八 / §六十五 / §七十四
-
-### 条目：jvm-env-readiness · JVM 环境收尾与跨平台启动器
-状态：todo
-依赖：jvm-runtime-snapshot, jvm-task-manifest
-优先级：P1
-背景：基础路径发现、Android SDK 平台校验和 readiness 接口已经具备，但当前“准备态”与“已有 snapshot 的单条执行态”仍混在一条检查里；此外，Gradle `.bat` 启动器的跨平台边界和静态检查是否覆盖真实启动条件还需要收尾。本条是后置环境治理，不应阻塞有效 snapshot 的单条快速路径。
-约束：①准备态明确显示 App 仓库声明的 `compileSdk`、实际 SDK 根目录和缺失平台，`platform-tools` 目录不能被当作完整 SDK 根目录；②单条执行态只检查 snapshot 引用文件、Java 启动器和源码/runtime 签名，不重复要求 Gradle Wrapper 或 SDK 平台检查；③按 App 仓库 wrapper、Gradle daemon criteria 和 toolchain 配置分别推导启动 Gradle 与项目编译所需的 JDK，不用单一最低版本常量替代；④遵循 Gradle 默认值或明确配置解析 Gradle User Home，检查目录可创建、可写和跨卷场景，不恢复盘符根目录回退；⑤明确支持的操作系统，非 Windows 要么使用对应启动器，要么在启动前明确拒绝；⑥readiness、准备命令和实际启动共用同一份已解析 runtime snapshot；⑦自检不下载依赖、不隐式构建，下载和预热继续由独立准备命令负责。
-验收：在缺少 `android-37`、SDK 根目录仅含 `platform-tools`、非标准 JDK、不同 Gradle User Home、跨卷仓库和非 Windows 环境下，准备态与执行态能分别说明采用或拒绝原因；准备态能完成一次 snapshot 刷新，执行态能复用有效 snapshot 完成单条校验；支持范围外系统在启动前明确拒绝；本条未完成时不阻塞任务 manifest 和已有单条校验路径。
-指针：core/jvm_env.py，core/jvm_direct.py，core/jvm_daemon.py，backend/api/jvm.py，scripts/prepare_gradle.py，core/jvm_runtime_snapshot.py，lessons §六十五
 
 ### 条目：proj-3-drop · 前端摘掉本地投影
 状态：todo
@@ -376,7 +371,7 @@
 状态：todo
 依赖：无
 优先级：P1
-背景：这一条不是「语法回放不了」，是「**取数**拿不到」——正文本身就是 `params`
+背景：（单独排：等真靶子在手）这一条不是「语法回放不了」，是「**取数**拿不到」——正文本身就是 `params`
   加密 + `xhr_mode`，图片地址只在解密后的 JS 对象里；漫画鱼章节页就是该形态，静态 HTML
   没有图片，运行时图片还会变成 `blob:` URL。
 约束：**别把 `content_ok=None` 当成源有问题**；别为了「让本地能验」把 webView
@@ -437,20 +432,6 @@
 ---
 
 ## 3 · 待决策
-
-### 条目：jvm-runtime-tmp · 明确 java.io.tmpdir 的归属
-状态：blocked
-依赖：jvm-runtime-snapshot
-优先级：P2
-阻塞于：先完成 JVM 实际运行时快照，确认 tmpdir 的真实来源与落盘位置
-背景：当前 dump 没有 `java.io.tmpdir`；它可能由 JVM 按平台规则推导，也可能在未来被显式注入。
-  在快照完成前，不能把「统一运行目录」表述成已经覆盖临时目录。
-约束：根据一次真实快照二选一：① 在 dump / 注入点显式设置到 `data/` 下目录，并保持单一
-  事实来源；② 明确记录 tmpdir 是平台继承值、不属于 dump 推导范围。不要同时保留两套来源，
-  也不要把快照内容接入判定链。
-验收：能用一次实际运行证明临时文件落点，并在一处明确写出 tmpdir 的来源；若选择显式注入，
-  同时验证直起、常驻与 Gradle 的落点一致。
-指针：core/jvm_direct.py，appservice/legado-test.init.gradle，appservice/test/io/legado/app/service/BrowserSession.kt
 
 ### 条目：ai-verify · 十-7 AI 提议验收换真引擎
 状态：blocked
@@ -628,6 +609,24 @@
 约束：actual 差异报告只进排障，不进入源健康判定链；对拍口径（workingDir 归一、classpath 按项、-Xmx 纳入后比 jvmArgs、systemProperties 逐键）已按原约束落地。
 验收：修复与边界测试看 `git log`（406941c classpath 只钉负载文件；同日 run_direct 注入本次 args 路径，修复直起 0 事件）。
 指针：core/jvm_direct.py，core/jvm_runtime_snapshot.py，appservice/test/io/legado/app/service/ServiceJson.kt，lessons §九十
+
+### 条目：jvm-env-readiness · JVM 环境收尾与跨平台启动器
+状态：done
+依赖：jvm-runtime-snapshot, jvm-task-manifest
+优先级：P1
+背景：2026-09-26 交付：SDK 发现跳过不完整的候选根（platform-tools-only 不再冒充「缺平台」，诚实报因并继续试下一候选，Android Studio 默认目录列为兜底候选）；refresh 与 prepare_gradle 改用 readiness 解析出的同一份 runtime（不再要求手工传 LEGADO_REPO/ANDROID_HOME 等）；准备态/执行态两层检查、多路 JDK 推导、Gradle User Home 可写检查、非 Windows 明确拒绝此前已具备。跨卷与非 Windows 主机由代码路径与单测覆盖，真非 Windows 硬件未实测。
+约束：自检不下载依赖、不隐式构建；准备态与执行态各自只检查自己该检查的。
+验收：细节与提交看 `git log`（同日 env-readiness 提交：SDK 候选过滤 + Studio 兜底 + refresh 共用 runtime，含边界测试）。
+指针：core/jvm_env.py，core/jvm_direct.py，scripts/prepare_gradle.py，lessons §六十五
+
+### 条目：jvm-runtime-tmp · 明确 java.io.tmpdir 的归属
+状态：done
+依赖：jvm-runtime-snapshot
+优先级：P2
+背景：2026-09-26 一次实测定案（约束二选一取②）：tmpdir 是平台继承值、不属于 dump 推导范围——同一个 dump 解析出的 java.exe 以 -XshowSettings 实测 java.io.tmpdir=%LOCALAPPDATA%\Temp（直起/常驻的落点）；Gradle 测试 worker 由 Gradle 自己注入 -Dorg.gradle.internal.worker.tmpdir（对拍报告的 actual jvmArgs 可见）；dump 的 systemProperties 不含该键。结论落一处：core/jvm_direct.java_env 的注释。
+约束：不显式注入、不把快照内容接入判定链（避免两套来源）。
+验收：实测命令与三个事实见本条背景与上述注释；无需进一步动作。
+指针：core/jvm_direct.py
 
 ### 条目：jvm-task-manifest · 固定每次任务的输入、环境、产物和执行方式
 状态：done

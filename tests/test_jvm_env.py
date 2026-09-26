@@ -215,7 +215,48 @@ class EnvironmentDiscoveryTests(unittest.TestCase):
                 patch("core.jvm_env.shutil.which", return_value=None):
             result = jvm_env._find_android_sdk(str(repo))
         self.assertFalse(result.ok)
-        self.assertIn("未发现 Android SDK 根目录", result.hint)
+        self.assertIn("未发现可用的 Android SDK 根目录", result.hint)
+
+    def test_platform_tools_only_directory_is_reported_as_partial(self) -> None:
+        """PATH 上的 adb 可能来自 platform-tools 分发包：它不是 SDK 根，要明说。"""
+        repo = self._repo()
+        partial = self.root / "platform-tools-dist"
+        (partial / "platform-tools").mkdir(parents=True)
+        (partial / "platform-tools" / "adb.exe").write_text("", encoding="utf-8")
+        with patch.dict(os.environ, {}, clear=True), \
+                patch("core.jvm_env.shutil.which", return_value=str(
+                    partial / "platform-tools" / "adb.exe")), \
+                patch("core.jvm_env.os.name", "nt"):
+            result = jvm_env._find_android_sdk(str(repo))
+        self.assertFalse(result.ok)
+        self.assertIn("不是完整 SDK 根", result.detail)
+        self.assertIn("platform-tools 分发包", result.hint)
+
+    def test_partial_root_does_not_shadow_a_complete_later_candidate(self) -> None:
+        """前面的候选只是 platform-tools 分发包时，后面的完整根必须还能被选中。"""
+        repo = self._repo()
+        partial = self.root / "another-dist"
+        (partial / "platform-tools").mkdir(parents=True)
+        complete = self._sdk("real-sdk")
+        with patch.dict(os.environ, {"ANDROID_HOME": str(partial),
+                                     "ANDROID_SDK_ROOT": str(complete)}, clear=False):
+            result = jvm_env._find_android_sdk(str(repo))
+        self.assertTrue(result.ok, result.hint)
+        self.assertEqual(Path(result.found), complete)
+
+    def test_android_studio_default_directory_is_a_fallback_candidate(self) -> None:
+        repo = self._repo()
+        sdk_dir = self.root / "Android" / "Sdk"
+        platform = sdk_dir / "platforms" / "android-37"
+        platform.mkdir(parents=True)
+        (platform / "android.jar").write_text("", encoding="utf-8")
+        (platform / "source.properties").write_text(
+            "AndroidVersion.ApiLevel=37\n", encoding="utf-8")
+        with patch.dict(os.environ, {"LOCALAPPDATA": str(self.root)}, clear=True), \
+                patch("core.jvm_env.shutil.which", return_value=None):
+            result = jvm_env._find_android_sdk(str(repo))
+        self.assertTrue(result.ok, result.hint)
+        self.assertEqual(Path(result.found), sdk_dir)
 
     def test_invalid_platform_is_not_accepted_by_directory_name(self) -> None:
         repo = self._repo()

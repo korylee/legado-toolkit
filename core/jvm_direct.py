@@ -145,13 +145,29 @@ def dump_is_stale() -> bool:
 
 
 def refresh(timeout_min: int = 30) -> int:
-    """Build a candidate snapshot and publish it only after a successful JVM capture."""
+    """Build a candidate snapshot and publish it only after a successful JVM capture.
+
+    约束⑥：准备命令与 readiness/实际启动共用同一份已解析 runtime——不读
+    LEGADO_REPO 之类的原始环境变量（实测 2026-09-26：手工漏传 ANDROID_HOME
+    时启动器直接报「run the JVM environment self-test first」）。
+    """
     out = dump_path()
+    from core import jvm_env, settings_store
     from core.gradle_distribution import GradleDistributionError, distribution_status
-    env = dict(os.environ)
+    conf = settings_store.load().get("jvm", {})
+    st_conf = jvm_env.readiness(conf.get("app_repo", ""), conf.get("android_sdk_dir", ""))
+    if not st_conf.get("ok"):
+        bad = next((c for c in (st_conf.get("checks") or []) if not c.get("ok")), {})
+        print("JVM 环境自检未通过：%s——%s" % (
+            bad.get("name") or "准备态", bad.get("hint") or "先完成 JVM 环境检查"))
+        return 1
     try:
-        wrapper_cache = distribution_status(
-            env.get("LEGADO_REPO", ""), env.get("GRADLE_USER_HOME", ""))
+        env = jvm_env.process_environment(st_conf)
+    except (KeyError, TypeError, ValueError) as exc:
+        print("JVM 环境自检结果不完整：%s" % exc)
+        return 1
+    try:
+        wrapper_cache = distribution_status(env["LEGADO_REPO"], env["GRADLE_USER_HOME"])
     except (GradleDistributionError, OSError) as exc:
         print("Gradle Wrapper 自检失败：%s" % exc)
         return 1
@@ -437,6 +453,9 @@ def java_env(dump: Dict[str, Any]) -> Dict[str, str]:
     validate_dump(dump)
     # dump 记录的是 Gradle 测试 JVM 的完整环境；不能再合并当前调用方环境，
     # 否则缺失或漂移的变量会让直起和 Gradle 跑出不同结论。
+    # java.io.tmpdir 不在 dump 里是有意的（实测 2026-09-26）：直起/常驻继承
+    # 平台默认（%LOCALAPPDATA%\Temp），Gradle worker 由 Gradle 自己注入
+    # worker.tmpdir——别把它当 dump 漏项补进来，否则出现两套 tmpdir 来源。
     return dict(dump["environment"])
 
 

@@ -424,10 +424,15 @@ def _find_android_sdk(app_repo: str, configured_sdk_dir: str = "") -> Check:
         if env_root:
             candidates.append((Path(env_root).expanduser(), "ANDROID_SDK_ROOT"))
         candidates.extend(_sdk_roots_from_path())
+        # Android Studio 的默认安装位作最后兜底：单一路径探测，不算扫盘
+        studio_default = (Path(os.environ.get("LOCALAPPDATA", "")) / "Android" / "Sdk"
+                          if os.name == "nt" else Path.home() / "Android" / "Sdk")
+        candidates.append((studio_default, "Android Studio 默认目录"))
     if env_home and env_root and os.path.normcase(env_home) != os.path.normcase(env_root):
         tried.append({"path": env_root, "result": "与 ANDROID_HOME 不一致；按候选顺序检查"})
     seen = set()
     existing_root = False
+    partial_root = False
     invalid_reason = ""
     for c, source in candidates:
         c = c.expanduser()
@@ -435,10 +440,19 @@ def _find_android_sdk(app_repo: str, configured_sdk_dir: str = "") -> Check:
         if key in seen:
             continue
         seen.add(key)
-        if c.is_dir():
-            existing_root = True
-        platform = c / "platforms"
-        matched, reason = _android_platform(platform, required_platform)
+        if not c.is_dir():
+            tried.append({"path": str(c), "result": source + "；目录不存在"})
+            continue
+        existing_root = True
+        platforms_dir = c / "platforms"
+        if not platforms_dir.is_dir():
+            # 约束①：platform-tools 之类的分发包不是完整 SDK 根——说明原因并
+            # 换下一个候选，而不是冒充「缺平台」
+            partial_root = True
+            tried.append({"path": str(c), "result": source
+                          + "；不是完整 SDK 根（缺少 platforms/，多半只是 platform-tools 分发包）"})
+            continue
+        matched, reason = _android_platform(platforms_dir, required_platform)
         if matched is not None:
             tried.append({"path": str(c), "result": source + "；包含所需 " + required_platform})
             return Check("Android SDK", True, found=str(c),
@@ -447,16 +461,15 @@ def _find_android_sdk(app_repo: str, configured_sdk_dir: str = "") -> Check:
                          metadata={"source": source, "platform": matched.name})
         invalid_reason = reason or invalid_reason
         tried.append({"path": str(c), "result": source + "；" + reason})
-    if not candidates:
-        return Check("Android SDK", False,
-                     detail="没有可验证的 SDK 根目录候选",
-                     hint="未发现 Android SDK 根目录；请配置项目 local.properties、环境变量，或选择 SDK 目录",
-                     items=tried)
-    if existing_root:
-        detail = invalid_reason or ("已找到 SDK 根目录，但缺少项目要求的平台 " + required_platform)
-        return Check("Android SDK", False, detail=detail,
-                     hint=("已找到 SDK 根目录，但缺少项目要求的平台 " + required_platform
+    if invalid_reason:
+        return Check("Android SDK", False, detail=invalid_reason,
+                     hint=("已找到完整 SDK 根目录，但缺少项目要求的平台 " + required_platform
                            + "；请安装对应平台后重新检查"), items=tried)
+    if partial_root:
+        return Check("Android SDK", False,
+                     detail="发现的候选目录不是完整 SDK 根（缺少 platforms/ 目录）",
+                     hint=("PATH 上的 adb 多半来自 platform-tools 分发包；"
+                           "请在设置 → JVM 校验里选择完整的 SDK 根目录"), items=tried)
     return Check("Android SDK", False,
                  detail="候选 SDK 根目录不存在或不可读",
                  hint="未发现可用的 Android SDK 根目录；请配置 local.properties、环境变量，或选择 SDK 目录",

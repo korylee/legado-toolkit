@@ -38,15 +38,34 @@ def _config_distribution_url() -> str:
             configured.get("gradle.distribution.url", "")).strip()
 
 
+def _resolved_runtime_paths() -> Dict[str, str]:
+    """约束⑥：准备命令与 readiness 共用同一份已解析路径（设置优先，env 兜底）。
+
+    解析不了（没配置/自检未过）就返回空 dict，让 argparse 的 env/默认值接手。
+    """
+    try:
+        from core import jvm_env, settings_store
+        conf = settings_store.load().get("jvm", {})
+        runtime = (jvm_env.readiness(conf.get("app_repo", ""),
+                                     conf.get("android_sdk_dir", "")).get("runtime") or {})
+        return {"app_repo": str(runtime.get("app_repo") or ""),
+                "gradle_user_home": str(runtime.get("gradle_user_home") or "")}
+    except Exception:
+        return {}
+
+
 def main() -> int:
+    resolved = _resolved_runtime_paths()
     parser = argparse.ArgumentParser(
         description="准备 Gradle Wrapper 分发包；此命令会联网，校验/调试不会自动执行它")
-    parser.add_argument("--app-repo", default=os.environ.get("LEGADO_REPO", ""),
-                        help="legado-with-MD3 仓库根目录（默认读取 LEGADO_REPO）")
+    parser.add_argument("--app-repo",
+                        default=os.environ.get("LEGADO_REPO", "") or resolved.get("app_repo", ""),
+                        help="legado-with-MD3 仓库根目录（默认 LEGADO_REPO > 设置里的自检结果）")
     parser.add_argument(
         "--gradle-user-home",
-        default=os.environ.get("GRADLE_USER_HOME", str(pathlib.Path.home() / ".gradle")),
-        help="Gradle User Home（默认读取 GRADLE_USER_HOME，未设置时使用 Gradle 默认目录）")
+        default=(os.environ.get("GRADLE_USER_HOME", "") or resolved.get("gradle_user_home", "")
+                 or str(pathlib.Path.home() / ".gradle")),
+        help="Gradle User Home（默认 GRADLE_USER_HOME > 设置自检结果 > Gradle 默认目录）")
     parser.add_argument(
         "--distribution-url", default=_config_distribution_url(),
         help="分发 ZIP 的完整地址；也可配置 LEGADO_GRADLE_DISTRIBUTION_URL 或 data/jvm.properties")

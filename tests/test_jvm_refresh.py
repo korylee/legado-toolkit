@@ -40,8 +40,14 @@ class RefreshSnapshotTests(unittest.TestCase):
                     json.dumps(self.actual), encoding="utf-8")
             return SimpleNamespace(returncode=code, stdout="output", stderr="error")
 
+        runtime = {"app_repo": "X:/repo", "java_home": "X:/jdk",
+                   "android_sdk": "X:/sdk", "gradle_user_home": "X:/.gradle"}
         with patch("core.gradle_distribution.distribution_status",
                    return_value={"status": "ready"}), \
+             patch("core.jvm_env.readiness",
+                   return_value={"ok": True, "runtime": runtime}), \
+             patch("core.settings_store.load",
+                   lambda: {"jvm": {"app_repo": "X:/repo", "android_sdk_dir": ""}}), \
              patch.object(jvm_direct.subprocess, "run", side_effect=fake_gradle):
             return jvm_direct.refresh()
 
@@ -49,8 +55,14 @@ class RefreshSnapshotTests(unittest.TestCase):
         self.assertEqual(list(self.out.parent.glob(self.out.name + ".refresh.*")), [])
 
     def test_unprepared_wrapper_preserves_previous_snapshot(self):
+        runtime = {"app_repo": "X:/repo", "java_home": "X:/jdk",
+                   "android_sdk": "X:/sdk", "gradle_user_home": "X:/.gradle"}
         with patch("core.gradle_distribution.distribution_status",
-                   return_value={"status": "missing", "reason": "not prepared"}):
+                   return_value={"status": "missing", "reason": "not prepared"}), \
+             patch("core.jvm_env.readiness",
+                   return_value={"ok": True, "runtime": runtime}), \
+             patch("core.settings_store.load",
+                   lambda: {"jvm": {"app_repo": "X:/repo", "android_sdk_dir": ""}}):
             self.assertEqual(jvm_direct.refresh(), 1)
         self.assertEqual(self.out.read_bytes(), b"previous valid snapshot")
         self._assert_clean()
