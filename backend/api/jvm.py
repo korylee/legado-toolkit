@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -96,6 +97,74 @@ def _cleanup_run_dir(run_dir: Optional[Path]) -> None:
     if target.parent != root or target == root:
         return
     shutil.rmtree(target, ignore_errors=True)
+
+
+def _build_jvm_manifest(*, run_dir: Path, source_file: Path, args_file: Path,
+                        out_path: Path, single: bool, execution_plan: str,
+                        allow_gradle_fallback: bool, runtime: Dict[str, Any],
+                        readiness: Dict[str, Any],
+                        execution_readiness: Dict[str, Any],
+                        readiness_fingerprint: str,
+                        readiness_checked_at: str, source_count: int) -> Dict[str, Any]:
+    """生成一次提交即固定的 JVM 任务输入快照。
+
+    ``payload`` 会落库，但 worker 仍不应依赖多处散落字段重新推导路径和执行计划。
+    manifest 的哈希只覆盖实际字段；worker 读到后先验哈希，再消费这份快照。
+    """
+    manifest = {
+        "schema": 1,
+        "run_dir": str(run_dir),
+        "source_file": str(source_file),
+        "args_file": str(args_file),
+        "out_path": str(out_path),
+        "source_count": int(source_count),
+        "single": bool(single),
+        "execution_plan": str(execution_plan),
+        "allow_gradle_fallback": bool(allow_gradle_fallback),
+        "runtime": dict(runtime or {}),
+        "readiness": dict(readiness or {}),
+        "execution_readiness": dict(execution_readiness or {}),
+        "readiness_fingerprint": str(readiness_fingerprint or ""),
+        "readiness_checked_at": str(readiness_checked_at or ""),
+    }
+    encoded = json.dumps(manifest, ensure_ascii=False, sort_keys=True,
+                         separators=(",", ":"))
+    manifest["sha256"] = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+    return manifest
+
+
+def _manifest_error(manifest: Any) -> str:
+    if not isinstance(manifest, dict):
+        return "JVM 任务缺少不可变 manifest"
+    required = {
+        "schema", "run_dir", "source_file", "args_file", "out_path",
+        "source_count", "single", "execution_plan", "allow_gradle_fallback",
+        "runtime", "readiness", "execution_readiness",
+        "readiness_fingerprint", "readiness_checked_at",
+    }
+    missing = sorted(required - set(manifest))
+    if missing or manifest.get("schema") != 1:
+        detail = "缺少字段：%s" % ", ".join(missing) if missing else "schema 不是 1"
+        return "JVM 任务 manifest 结构不受支持：%s" % detail
+    if not isinstance(manifest.get("runtime"), dict) or not isinstance(manifest.get("readiness"), dict):
+        return "JVM 任务 manifest 结构不受支持：runtime/readiness 不是对象"
+    if not isinstance(manifest.get("execution_readiness"), dict):
+        return "JVM 任务 manifest 结构不受支持：execution_readiness 不是对象"
+    if manifest.get("execution_plan") not in ("validate_daemon", "gradle"):
+        return "JVM 任务 manifest 结构不受支持：execution_plan 无效"
+    if bool(manifest.get("single")) != (manifest.get("execution_plan") == "validate_daemon"):
+        return "JVM 任务 manifest 结构不受支持：执行计划与 single 不一致"
+    expected = str(manifest.get("sha256") or "")
+    if not expected:
+        return "JVM 任务 manifest 缺少 sha256"
+    body = dict(manifest)
+    body.pop("sha256", None)
+    encoded = json.dumps(body, ensure_ascii=False, sort_keys=True,
+                         separators=(",", ":"))
+    actual = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+    if actual != expected:
+        return "JVM 任务 manifest 校验失败：提交后的执行输入被修改"
+    return ""
 
 
 def _write_args(keyword: str, timeout: int, concurrency: int, limit: int,
@@ -467,11 +536,24 @@ async def jvm_run(body: Optional[JvmRunRequest] = None):
         "execution_plan": "validate_daemon" if single else "gradle",
         "preparation_ready": preparation_ready,
     }
+    execution_plan = "validate_daemon" if single else "gradle"
+    manifest = _build_jvm_manifest(
+        run_dir=run_dir, source_file=src_file, args_file=args_path,
+        out_path=out_path, single=single, execution_plan=execution_plan,
+        allow_gradle_fallback=allow_gradle_fallback,
+        runtime=dict(st_conf.get("runtime") or {}),
+        readiness=st_conf,
+        execution_readiness=exec_conf,
+        readiness_fingerprint=st_conf.get("fingerprint", ""),
+        readiness_checked_at=st_conf.get("checked_at", ""),
+        source_count=len(rows),
+    )
     # `total` 进 payload：一次跑批没有逐条进度（一次 Gradle 调用跑一批），但**条数**
     # 要给前端算「N/N」——不给的话状态条永远停在 0
     job_id = runner.submit(
         "jvm_run",
-         {"prep": prep, "total": len(rows), "run_dir": str(run_dir),
+         {"prep": prep, "total": len(rows), "manifest": manifest,
+          "run_dir": str(run_dir),
           "source_file": str(src_file), "args_file": str(args_path),
           "out_path": str(out_path), "runtime": dict(st_conf.get("runtime") or {}),
           "single": single,
@@ -500,16 +582,39 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
     """
     from core.jvm_debug import RUN_LOCK
 
-    # 新任务从提交时生成的目录取输入/输出；旧的直接调用测试仍允许不带目录。
-    run_dir_value = str(payload.get("run_dir") or "").strip()
+    # 新任务只从提交时生成的 manifest 取输入/输出；旧的直接调用测试仍允许不带 manifest。
+    manifest_value = payload.get("manifest")
+    manifest_reason = _manifest_error(manifest_value) if manifest_value is not None else ""
+    has_manifest = isinstance(manifest_value, dict)
+    manifest = manifest_value if has_manifest else {}
+    run_dir_value = str(manifest.get("run_dir") if has_manifest
+                        else payload.get("run_dir") or "").strip()
     run_dir = Path(run_dir_value) if run_dir_value else None
     if run_dir is None:
         out_path = data_dir() / "app_probe" / "jvm_results.jsonl"
         args_path = None
     else:
-        out_path = Path(str(payload.get("out_path") or run_dir / "results.jsonl"))
-        args_path = Path(str(payload.get("args_file") or run_dir / "args.properties"))
+        out_path = Path(str(manifest.get("out_path") if has_manifest
+                            else payload.get("out_path") or run_dir / "results.jsonl"))
+        args_path = Path(str(manifest.get("args_file") if has_manifest
+                            else payload.get("args_file") or run_dir / "args.properties"))
     prep = dict(payload.get("prep") or {})
+    if manifest_reason:
+        _cleanup_run_dir(run_dir)
+        return dict(prep, **{"ok": False, "reason": manifest_reason,
+                             "execution_mode": "unknown"})
+
+    single = bool(manifest.get("single") if has_manifest else payload.get("single"))
+    allow_gradle_fallback = bool(
+        manifest.get("allow_gradle_fallback") if has_manifest
+        else payload.get("allow_gradle_fallback", True))
+    runtime = (dict(manifest.get("runtime") or {}) if has_manifest
+               else payload.get("runtime"))
+    execution_readiness_snapshot = (
+        manifest.get("execution_readiness") if has_manifest
+        else payload.get("execution_readiness"))
+    readiness_snapshot = (manifest.get("readiness") if has_manifest
+                          else payload.get("readiness"))
 
     def _work() -> Dict[str, Any]:
         # The async lane queues JVM jobs; acquire here in the worker thread as well.
@@ -526,14 +631,14 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
 
             # 单条校验优先复用常驻 Validate JVM。daemon 只负责执行，结果仍从同一个
             # results.jsonl 读回；准备态不完整时，daemon 失败不能偷偷再开 Gradle。
-            if payload.get("single") and args_path is not None:
+            if single and args_path is not None:
                 try:
                     from core import jvm_validate_daemon, jvm_direct
 
                     job_runner.update_phase(job_id, "configuring")
                     dump = jvm_direct.load_dump(warn_stale=False)
-                    if (payload.get("execution_readiness") and
-                            not payload.get("allow_gradle_fallback", True)):
+                    if (execution_readiness_snapshot and
+                            not allow_gradle_fallback):
                         current_exec = execution_readiness(dump)
                         if not current_exec.get("ok"):
                             raise jvm_validate_daemon.ValidateDaemonError(
@@ -559,7 +664,7 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
                     except OSError:
                         pass
 
-                    if not payload.get("allow_gradle_fallback", True):
+                    if not allow_gradle_fallback:
                         return dict(prep, **{
                             "ok": False,
                             "exit": None,
@@ -567,15 +672,15 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
                                        "本次不回退 Gradle，避免再次触发冷启动/缺 SDK"),
                             "execution_mode": "validate_daemon",
                             "execution_note": "单条执行态失败，未使用 Gradle fallback",
-                            "readiness": payload.get("readiness") or {},
-                            "execution_readiness": payload.get("execution_readiness") or {},
+                            "readiness": readiness_snapshot or {},
+                            "execution_readiness": execution_readiness_snapshot or {},
                         })
 
             if execution_mode != "validate_daemon":
                 job_runner.update_phase(job_id, "starting_gradle")
                 gradle = _normalize_gradle_result(
-                    _run_gradle(args_path=args_path, runtime=payload.get("runtime"))
-                    if args_path is not None else _run_gradle(runtime=payload.get("runtime")))
+                    _run_gradle(args_path=args_path, runtime=runtime)
+                    if args_path is not None else _run_gradle(runtime=runtime))
                 code = gradle.get("exit")
                 execution_note = (daemon_failure + "；已使用 Gradle 完成本次校验"
                                   if daemon_failure else execution_note)

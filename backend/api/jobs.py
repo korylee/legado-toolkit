@@ -30,9 +30,15 @@ def _job_detail(job: Dict[str, Any]) -> Dict[str, Any]:
             parse_error = "任务结果不是有效 JSON"
 
     summary = None
+    execution_mode = ""
+    execution_note = ""
+    daemon_fallback_reason = ""
     error = parse_error
     if isinstance(parsed, dict):
         error = str(parsed.get("error") or "")
+        execution_mode = str(parsed.get("execution_mode") or "")
+        execution_note = str(parsed.get("execution_note") or "")
+        daemon_fallback_reason = str(parsed.get("daemon_fallback_reason") or "")
         if isinstance(parsed.get("checked"), (int, float)):
             transitions = parsed.get("transitions") or {}
             if not isinstance(transitions, dict):
@@ -70,6 +76,9 @@ def _job_detail(job: Dict[str, Any]) -> Dict[str, Any]:
         "created_at": job.get("created_at", ""),
         "updated_at": job.get("updated_at", ""),
         "summary": summary,
+        "execution_mode": execution_mode,
+        "execution_note": execution_note,
+        "daemon_fallback_reason": daemon_fallback_reason,
         "error": error,
         "result": parsed if summary is None else None,
     }

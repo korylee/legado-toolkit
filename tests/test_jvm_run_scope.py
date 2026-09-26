@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import pathlib
 import shutil
@@ -119,6 +120,77 @@ class _Base(unittest.TestCase):
 
 
 class ScopeTests(_Base):
+    def test_legacy_payload_without_manifest_keeps_its_run_paths(self) -> None:
+        run_dir = self.probe / "data" / "app_probe" / "runs" / "legacy"
+        run_dir.mkdir(parents=True)
+        source_file = run_dir / "sources.json"
+        args_file = run_dir / "args.properties"
+        out_path = run_dir / "results.jsonl"
+        source_file.write_text("[]", encoding="utf-8")
+        args_file.write_text("file=%s\nout=%s\n" % (source_file, out_path), encoding="utf-8")
+
+        payload = {
+            "prep": {"started": True},
+            "run_dir": str(run_dir),
+            "source_file": str(source_file),
+            "args_file": str(args_file),
+            "out_path": str(out_path),
+            "single": True,
+            "allow_gradle_fallback": False,
+            "execution_readiness": {"ok": True},
+            "readiness": {"ok": False},
+        }
+
+        async def go():
+            with mock.patch("core.jvm_direct.load_dump", return_value={
+                    "workingDir": "C:/repo", "classpath": "x", "maxHeapSize": "3g",
+                    "environment": {}, "jvmArgs": [], "systemProperties": {},
+                    "javaHomeEnv": "C:/jdk"}), \
+                 mock.patch("core.jvm_validate_daemon.run", side_effect=lambda _dump, _args: {
+                     "code": 0, "cost_ms": 1, "error": ""}), \
+                 mock.patch.object(jvm_api, "execution_readiness", return_value={"ok": True}), \
+                 mock.patch.object(jvm_api, "_read_results", return_value=[]), \
+                 mock.patch.object(jvm_api, "_write_meta", return_value="legacy-batch"), \
+                 mock.patch("core.jvm_health.store_checks", return_value=0):
+                return await jvm_api.run_jvm_job("legacy-job", Store(self.db), payload)
+
+        result = asyncio.run(go())
+        self.assertEqual(result["execution_mode"], "validate_daemon")
+        self.assertFalse(run_dir.exists())
+
+    def test_submission_captures_hashed_manifest(self) -> None:
+        submitted = {}
+
+        def capture_submit(kind, payload, lane=None):
+            submitted["payload"] = payload
+            return "manifest-job"
+
+        async def go():
+            with mock.patch.object(jvm_api, "Store", lambda *a, **kw: Store(self.db)), \
+                 mock.patch.object(jvm_api.runner, "submit", side_effect=capture_submit):
+                return await jvm_api.jvm_run(JvmRunRequest(urls=["https://a.com"]))
+
+        result = asyncio.run(go())
+        manifest = submitted["payload"]["manifest"]
+        self.assertEqual(result["job_id"], "manifest-job")
+        self.assertEqual(manifest["schema"], 1)
+        self.assertEqual(manifest["source_count"], 1)
+        self.assertEqual(manifest["execution_plan"], "validate_daemon")
+        self.assertEqual(jvm_api._manifest_error(manifest), "")
+
+        tampered = dict(manifest)
+        tampered["out_path"] = tampered["out_path"] + ".changed"
+        self.assertIn("校验失败", jvm_api._manifest_error(tampered))
+
+        malformed = dict(manifest)
+        malformed.pop("args_file")
+        body = dict(malformed)
+        body.pop("sha256", None)
+        malformed["sha256"] = hashlib.sha256(
+            json.dumps(body, ensure_ascii=False, sort_keys=True,
+                       separators=(",", ":")).encode("utf-8")).hexdigest()
+        self.assertIn("结构不受支持", jvm_api._manifest_error(malformed))
+
     def test_queued_job_uses_runtime_snapshot_captured_at_submission(self) -> None:
         submitted = {}
         original = {

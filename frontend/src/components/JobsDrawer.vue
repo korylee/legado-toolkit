@@ -39,6 +39,11 @@ const phaseLabel = (p) => ({
   cancel_requested: "正在取消",
   finished: "已结束",
 }[p] || p || "准备中");
+const executionModeLabel = (m) => ({
+  validate_daemon: "常驻 Validate JVM",
+  gradle_fallback: "Gradle fallback",
+  unknown: "未确定",
+}[m] || m || "未确定");
 const terminal = (s) => ["done", "failed", "cancelled"].includes(s);
 const retryLabel = (s) => s === "done" ? "再次运行" : "重试";
 const retryable = (row) => terminal(row.status) && row.kind !== "jvm_run";
@@ -282,6 +287,15 @@ defineExpose({ refresh: load });
             <el-descriptions-item label="创建时间">{{ selectedJob.created_at }}</el-descriptions-item>
             <el-descriptions-item label="更新时间">{{ selectedJob.updated_at }}</el-descriptions-item>
             <el-descriptions-item label="保留至">{{ selectedJob.expires_at || "服务端默认期限" }}</el-descriptions-item>
+            <el-descriptions-item v-if="selectedDetail && selectedDetail.execution_mode" label="执行方式">
+              {{ executionModeLabel(selectedDetail.execution_mode) }}
+            </el-descriptions-item>
+            <el-descriptions-item v-if="selectedDetail && selectedDetail.execution_note" label="执行说明">
+              {{ selectedDetail.execution_note }}
+            </el-descriptions-item>
+            <el-descriptions-item v-if="selectedDetail && selectedDetail.daemon_fallback_reason" label="回退原因">
+              {{ selectedDetail.daemon_fallback_reason }}
+            </el-descriptions-item>
             <el-descriptions-item v-if="selectedJob.retry_of" label="来源任务">{{ selectedJob.retry_of }}</el-descriptions-item>
           </el-descriptions>
 

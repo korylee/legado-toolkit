@@ -27,12 +27,16 @@ class JobDetailShapeTests(unittest.TestCase):
                 "changed": {"dead": 2},
                 "changed_items": [{"url": "https://a.example", "from": "ok", "to": "dead"}],
             },
+            "execution_mode": "validate_daemon",
+            "execution_note": "单条校验复用常驻 Validate JVM",
             "items": [{"url": "https://a.example"}],
         }))
         self.assertEqual(detail["id"], "j1")
         self.assertEqual(detail["summary"]["checked"], 2)
         self.assertEqual(detail["summary"]["changed_total"], 2)
         self.assertEqual(len(detail["summary"]["changed_items"]), 1)
+        self.assertEqual(detail["execution_mode"], "validate_daemon")
+        self.assertIn("常驻 Validate JVM", detail["execution_note"])
         self.assertIsNone(detail["result"])
 
     def test_other_job_keeps_structured_result(self):
