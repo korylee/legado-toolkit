@@ -14,6 +14,8 @@ import {
 import { useMobile } from "../composables/useMobile";
 // 步骤名 → 中文的**唯一**一份（调试抽屉共用），别再在本组件里写第二份
 import { STEP_LABELS } from "../utils/steps";
+// 生成后验证的新鲜度判定（strengthen-src）：分步过期判据的唯一一份
+import { snapshotRuleGroups, staleVerifySteps as computeStaleSteps } from "../utils/verifyFreshness";
 import RuleDebugDrawer from "./RuleDebugDrawer.vue";
 
 const props = defineProps({
@@ -198,6 +200,29 @@ const quickVerifyFrom = computed(() => {
 //: 验证没跑成时的那句话（引擎不可用 / 零事件 / 另一个任务在跑）。
 //: **不能吞**：源已经生成了，用户要知道「这份验证不是通过，是没跑」
 const quickVerifyError = computed(() => String((quickVerify.value || {}).error || ""));
+
+//: strengthen-src：生成后验证是「生成时那一版规则」的结论——改完规则要重验才作数。
+//: 快照与分步过期判据都在 utils/verifyFreshness（唯一一份，有 node 测试钉着）；
+//: 没改的步骤结论继续可用（分步粒度，比右列整份作废的 testStale 更细）。
+const verifyRuleSnapshot = ref(null);   // {ruleSearch: json, ...} 验证时刻的规则
+const refreshedSteps = ref(new Set());  // 点过「重新调试本步」、拿到新结论的步骤
+
+function captureVerifyRuleSnapshot() {
+  verifyRuleSnapshot.value = snapshotRuleGroups(form.value);
+}
+
+const staleVerifySteps = computed(
+  () => computeStaleSteps(verifyRuleSnapshot.value, form.value,
+                          [...refreshedSteps.value]));
+
+function rerunStaleStep(stepName) {
+  // 抽屉里马上会出现这一步的新结论（成功或失败都如实显示），
+  // 验证条上的过期标记随之撤下
+  const next = new Set(refreshedSteps.value);
+  next.add(stepName);
+  refreshedSteps.value = next;
+  return rerunFromStep(stepName);
+}
 let quickStop = null;
 
 // App IP 输入后立刻回写 localStorage（存 trim 后的值）。清空则删掉键——
@@ -537,6 +562,8 @@ async function applyGenerated(result) {
   userTags.value = parsed.user;
   quickVerify.value = result.verify || null;
   generationError.value = "";
+  captureVerifyRuleSnapshot();        // 验证是「这一版规则」的结论，快照定格
+  refreshedSteps.value = new Set();
   // 自动生成得到的是草稿。把生成时的 JVM 验证直接作为调试工作台的首屏证据，
   // 不再让用户回到右侧再点一次；没有可用步骤时才补跑一次本机调试。
   testResult.value = result.verify && Array.isArray(result.verify.steps)
@@ -1046,6 +1073,13 @@ async function doSave(s) {
               <div v-for="s in quickVerify.steps" :key="s.name" class="quick-step">
                 <el-tag size="small" :type="tagTypeOf(s)">{{ s.name }}</el-tag>
                 <span class="muted">{{ s.detail }}</span>
+                <!-- strengthen-src：规则改了，这一步的结论就是旧规则的——过期要说，
+                     下一步动作（重新调试本步）要给，别让人拿旧结论当现状保存 -->
+                <template v-if="staleVerifySteps.has(s.name)">
+                  <el-tag size="small" type="warning">规则已改 · 结论过期</el-tag>
+                  <el-button size="small" link type="primary"
+                             @click="rerunStaleStep(s.name)">重新调试本步</el-button>
+                </template>
               </div>
               <p v-if="quickVerify.steps && quickVerify.steps.length"
                  class="muted" style="margin: 6px 0 0">

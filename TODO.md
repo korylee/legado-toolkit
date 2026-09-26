@@ -540,17 +540,6 @@
   步骤和 URL。
 指针：lessons §四十六 / §七十八，frontend/src/components/RuleDebugDrawer.vue
 
-### 条目：strengthen-src · 给生成后的验证标出处
-状态：todo
-依赖：无
-优先级：P1
-背景：它是**生成时那一版规则**的结果，**改完规则要重验才作数**。今天这块 UI 没说，
-  属于静默过期。
-约束：验证结果必须标明本机引擎 / App 实测、生成时规则快照和当前规则是否一致；规则回填
-  后只让对应步骤过期，不能把整份结果继续显示成当前结论。与抽屉「重新调试本步」同一条纪律。
-验收：生成结果条上标明出处；改搜索、目录或正文任一规则后，对应验证结论显示过期并提供
-  「重新调试本步」；未改动的步骤仍保留可用结论。
-指针：lessons §七十八，frontend/src/components/SourceEditDialog.vue，frontend/src/components/RuleDebugDrawer.vue
 
 ### 条目：ux-debug-config · 调试入口降噪与状态记忆
 状态：todo
@@ -764,6 +753,16 @@
 约束：分块引用冻结的 runtime snapshot；重试不覆盖旧产物（uuid 目录 + DONE 文件即状态）；单条不分块，取消语义不变（单条不遗留、批量保留现场供恢复）。
 验收：单元测试钉住分块调用数/失败中止/重试恢复 + 全量 994 条绿；真实两块验收见上。
 指针：backend/api/jvm.py，backend/jobs/runner.py，core/settings_store.py，backend/api/jobs.py，lessons §五十三 / §五十四
+
+### 条目：strengthen-src · 给生成后的验证标出处
+状态：done
+依赖：无
+优先级：P1
+背景：2026-09-27 交付：出处标签此前已有（quickVerifyFrom 三态）；本次补齐分步新鲜度——各规则组在验证时刻定格快照（utils/verifyFreshness），改哪组规则只让映射到的步骤过期（ruleSearch 波及 search+bookUrl，同页求值），未改动步骤结论保留可用；过期步骤带「重新调试本步」入口（复用抽屉 rerunFromStep 的真引擎通道），重验后标记撤下。分步判据有 node 测试 5 条钉着（经 test_frontend_utils 自动收编）。
+约束：过期判据唯一一份在 utils/verifyFreshness；与抽屉「重新调试本步」同一条纪律，不新造通道。
+验收：node 断言 5 条倒着写会复活旧误导；细节与提交看 `git log`（同日 strengthen-src 提交）。
+指针：frontend/src/utils/verifyFreshness.js，frontend/src/components/SourceEditDialog.vue，lessons §七十八
+
 
 ### 条目：jvm-env-readiness · JVM 环境收尾与跨平台启动器
 状态：done
