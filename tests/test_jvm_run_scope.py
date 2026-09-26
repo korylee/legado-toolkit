@@ -29,6 +29,7 @@ from unittest import mock
 
 from backend.api import jvm as jvm_api
 from backend.schemas import JvmRunRequest
+from core import jvm_direct
 from core.loader import _normalize_url
 from core.store import Store
 
@@ -52,6 +53,11 @@ class _Base(unittest.TestCase):
             mock.patch.object(jvm_api, "data_dir", lambda: self.probe / "data"),
             mock.patch.object(jvm_api, "readiness", lambda repo, sdk="": {"ok": True, "checks": [], "runtime": {"app_repo": "X:/repo", "java_home": "X:/jdk", "android_sdk": "X:/sdk", "gradle_user_home": "X:/.gradle"}}),
             mock.patch.object(jvm_api, "execution_readiness", lambda dump=None: {"ok": True, "checks": [], "reason": "", "source_sig": "sig"}),
+            # 隔离真机状态：机器上可能有真实 runtime snapshot（准备态的产物），
+            # 不隔离的话单条任务会走上真 daemon——这批测试原本依赖
+            # 「data/ 里没有 dump」这个巧合，snapshot 一存在就整批变红。
+            mock.patch.object(jvm_direct, "dump_path",
+                              lambda: self.probe / "data" / "app_probe" / "test_jvm_env.json"),
             mock.patch.object(jvm_api, "_write_meta", lambda rows: "testbatch"),
             mock.patch.object(jvm_api, "_run_gradle", self._fake_gradle),
             mock.patch.object(jvm_api.settings_store, "load",
