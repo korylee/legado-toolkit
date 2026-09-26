@@ -100,6 +100,16 @@ def list_jobs(st=Depends(get_store)):
     return st.list_jobs()
 
 
+@router.get("/lane")
+def lane_status():
+    """JVM lane 的排队现状：谁持着 JVM、排队的都有谁（kind/已等秒/有效优先级）。
+
+    回答「我的调试/跑批为什么还没开始」；不塞进任务列表响应，是为了不动
+    前端已消费的列表形状。必须注册在 /{job_id} 之前。
+    """
+    return {"jvm": runner.lane_snapshot("jvm")}
+
+
 @router.get("/kinds")
 def job_kinds():
     # 必须注册在 /{job_id} 之前，否则 kinds 会被当成 job_id 捕获

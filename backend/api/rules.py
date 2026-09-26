@@ -48,9 +48,10 @@ async def jvm_debug(body: JvmDebugRequest):
     jvm_conf = settings_store.load().get("jvm", {})
     readiness_result = readiness(
         jvm_conf.get("app_repo", ""), jvm_conf.get("android_sdk_dir", ""))
-    # JVM 与批量校验共用一条有序 lane。常驻 daemon 本身也只能串行处理请求；
-    # 后来的调试请求排队，而不是拿不到 `RUN_LOCK` 后直接返回 busy。
-    async with runner.acquire_lane("jvm"):
+    # JVM 与批量校验共用一条 lane。常驻 daemon 本身也只能串行处理请求；后来的
+    # 调试请求按**优先级**排队（debug 档先于批量档）等待，而不是拿不到
+    # `RUN_LOCK` 后直接返回 busy。
+    async with runner.acquire_lane("jvm", kind="debug"):
         work = asyncio.create_task(asyncio.to_thread(
             run_jvm_debug, dict(body.source or {}), body.key or "我",
             int(body.timeout or 60), body.cookie or "", cache, resolve_proxy(),

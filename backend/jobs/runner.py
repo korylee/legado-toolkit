@@ -29,24 +29,120 @@ HANDLERS: Dict[str, Callable[..., Awaitable[Dict[str, Any]]]] = {}
 
 #: 进程内的有序执行 lane。每个事件循环各有一份，避免测试用多个
 #: ``asyncio.run`` 时复用已绑定到旧 loop 的 asyncio.Lock。
-_LANES: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, Dict[str, asyncio.Lock]]" = weakref.WeakKeyDictionary()
+_LANES: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, Dict[str, _Lane]]" = weakref.WeakKeyDictionary()
+
+#: lane 等待者的基础优先级：数值小者先获得许可。调试是交互请求（0）；
+#: 批量校验与生成后验证同档（10）——它们都由用户显式提交、非交互敏感。
+LANE_PRIORITY = {"debug": 0, "batch": 10, "unknown": 10}
+
+#: 批量老化：等待超过 _AGING_DELAY 秒后每 _AGING_STEP 秒优先级 -1，下限
+#: _AGING_FLOOR（仍高于调试的 0——调试在 unit 边界总是优先，但第二个批量
+#: 任务最终也能跑，不会被持续的调试流饿死）。
+_AGING_DELAY = 120.0
+_AGING_STEP = 60.0
+_AGING_FLOOR = 2
 
 
-def _lane_lock(name: str) -> asyncio.Lock:
+class _Waiter:
+    __slots__ = ("kind", "since", "granted", "event")
+
+    def __init__(self, kind: str, since: float) -> None:
+        self.kind = kind
+        self.since = since
+        self.granted = False
+        self.event = asyncio.Event()
+
+
+class _Lane:
+    """单资源 lane：许可按等待者的**有效优先级**发放，而不是先到先得。
+
+    有效优先级 = 基础优先级 − 老化折扣（批量等得越久越接近调试档）。许可
+    只在 unit 边界（release / 取消转交）重新裁定——unit 内部不可抢占，那是
+    chunk（块间让位）的职责，不是调度器的。
+    """
+
+    def __init__(self) -> None:
+        self._held: Optional[_Waiter] = None
+        self._waiters: list[_Waiter] = []
+
+    def _effective_priority(self, w: _Waiter, now: float) -> float:
+        base = LANE_PRIORITY.get(w.kind, LANE_PRIORITY["unknown"])
+        if base <= LANE_PRIORITY["debug"]:
+            return base                # 调试档不老化：交互优先是恒定的
+        waited = now - w.since
+        if waited > _AGING_DELAY:
+            return max(base - int((waited - _AGING_DELAY) // _AGING_STEP), _AGING_FLOOR)
+        return base
+
+    def _winner(self) -> Optional[_Waiter]:
+        if not self._waiters:
+            return None
+        now = asyncio.get_running_loop().time()
+        return min(self._waiters,
+                   key=lambda w: (self._effective_priority(w, now), w.since))
+
+    def _grant(self) -> None:
+        nxt = self._winner()
+        if nxt is not None:
+            nxt.granted = True
+            nxt.event.set()
+
+    async def acquire(self, kind: str, job_id: Optional[str] = None) -> None:
+        w = _Waiter(kind, asyncio.get_running_loop().time())
+        self._waiters.append(w)
+        try:
+            while True:
+                if self._held is None and not w.granted:
+                    self._grant()
+                if w.granted:
+                    self._waiters.remove(w)
+                    self._held = w
+                    return
+                await w.event.wait()
+        except asyncio.CancelledError:
+            if w in self._waiters:
+                self._waiters.remove(w)
+            if w.granted:
+                # 许可发给了被取消的等待者：立刻转交下一个赢家，别把 lane 带死
+                self._held = None
+                self._grant()
+            raise
+
+    def release(self) -> None:
+        self._held = None
+        self._grant()
+
+    def snapshot(self) -> Dict[str, Any]:
+        """排队现状（可观测）：持有者与各等待者的 kind/已等秒数/有效优先级。"""
+        now = asyncio.get_running_loop().time()
+        waiting = sorted(
+            ({"kind": w.kind, "waiting_seconds": round(now - w.since, 1),
+              "priority": self._effective_priority(w, now)}
+             for w in self._waiters),
+            key=lambda item: item["priority"])
+        return {"held": self._held.kind if self._held else None,
+                "waiting": waiting}
+
+
+def _lane(name: str) -> _Lane:
     loop = asyncio.get_running_loop()
-    lanes = _LANES.setdefault(loop, {})
-    return lanes.setdefault(name, asyncio.Lock())
+    return _LANES.setdefault(loop, {}).setdefault(name, _Lane())
+
+
+def lane_snapshot(name: str) -> Dict[str, Any]:
+    return _lane(name).snapshot()
 
 
 @asynccontextmanager
-async def acquire_lane(name: str):
-    """按提交顺序串行执行一个共享资源 lane。"""
-    lock = _lane_lock(name)
-    await lock.acquire()
+async def acquire_lane(name: str, kind: str = "batch",
+                       job_id: Optional[str] = None):
+    """按有效优先级串行执行一个共享资源 lane。"""
+    lane = _lane(name)
+    await lane.acquire(kind, job_id)
     try:
         yield
     finally:
-        lock.release()
+        lane.release()
 
 
 def register(kind: str):
@@ -98,13 +194,13 @@ def update_progress(job_id: str, progress: int) -> None:
 async def _run(job_id: str, kind: str, payload: Dict[str, Any],
                lane: Optional[str] = None) -> None:
     st = Store()
-    lock = _lane_lock(lane) if lane else None
+    lane_obj = _lane(lane) if lane else None
     acquired = False
     try:
         if kind == "jvm_run":
             update_phase(job_id, "waiting_readiness")
-        if lock is not None:
-            await lock.acquire()
+        if lane_obj is not None:
+            await lane_obj.acquire("batch", job_id)
             acquired = True
         if kind == "jvm_run":
             manifest = payload.get("manifest") or {}
@@ -124,7 +220,7 @@ async def _run(job_id: str, kind: str, payload: Dict[str, Any],
                               "trace": traceback.format_exc()[-2000:]})
     finally:
         if acquired:
-            lock.release()
+            lane_obj.release()
         st.close()
         TASKS.pop(job_id, None)
 
