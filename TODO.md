@@ -59,27 +59,6 @@
 验收：启动两个 worker 并发抢同一 job/块时只有一个成功；杀掉 owner 后任务能按规则恢复且不覆盖已完成结果；旧 owner 延迟回写会被拒绝；重启后 jobs、租约、运行目录和结果状态能逐项对账。
 指针：core/store.py，backend/jobs/runner.py，core/jvm_debug.py，lessons §二十八 / §六十五 / §七十四
 
-### 条目：jvm-runtime-snapshot · 让 JVM 实际运行环境与 dump 对拍
-状态：doing
-依赖：无
-优先级：P1
-背景：Gradle Wrapper 分发包已改为由独立准备命令显式下载并预热官方缓存目录；业务校验/调试链只做就绪检查。runtime snapshot 既是直起 JVM 的执行输入，也是单条快速路径复用的准备产物；真实快照对拍仍需在工具链已准备的环境中完成。
-  dump 记录的是 Gradle 任务声明的环境，当前没有证据证明 JVM 实际拿到的环境与它一致。
-  本条吸收原「jvm-dump-parity」：refresh 与产品都使用同一个 test task，但仍需把声明与实际
-  运行时逐字段对拍，不能用任务名相同代替。
-约束：运行时 dump 可作为执行输入，但 actual snapshot 的差异报告只进排障，不进入源健康判定链。编码统一复用 `ServiceJson`；`ServiceJsonTest`
-  只负责无 Robolectric 的编码器形状测试，实际快照挂在 `DebugService.main` / `ValidateService.main`
-  等真实入口。对拍口径必须先定义清楚：路径归一化后比较 `workingDir` ↔ `user.dir`；按项比较
-  `classpath` ↔ `java.class.path`；把 `maxHeapSize` 派生的 `-Xmx` 纳入后再比 `jvmArgs` ↔
-  `getInputArguments()`；dump 声明的 `systemProperties` 与 JVM 对应键比对，不能把显式属性表
-  冒充完整 `System.getProperties()`。不同入口的 snapshot 不得互相覆盖。
-验收：refresh、直起、常驻各留一份可追溯 snapshot；完成一次真实对拍，workingDir / classpath /
-  jvmArgs / systemProperties / environment 每个差异逐条归因。差异若会导致今天的静默继承或
-  参数漂移，直接修正并补对应的边界测试。
-指针：core/jvm_direct.py，appservice/legado-test.init.gradle，appservice/test/io/legado/app/service/ServiceJson.kt，
-  appservice/test/io/legado/app/service/ServiceJsonTest.kt，appservice/test/io/legado/app/service/DebugService.kt，
-  appservice/test/io/legado/app/service/ValidateService.kt，lessons §六十五
-
 ### 条目：jvm-task-manifest · 固定每次任务的输入、环境、产物和执行方式
 状态：todo
 依赖：jvm-runtime-snapshot
@@ -649,3 +628,12 @@
 约束：执行态检查只钉 classpath 负载文件（jar/zip），目录缺失交由 daemon 运行期失败回退；接线测试须把 dump_path 隔离出真机状态，否则真实 snapshot 一存在就整批变红。
 验收：细节与提交看 `git log`（fb472ee / 0572eb8 / 406941c / 9b1c0b0，更早的 groundwork 8d152a0 / 2d3fd68 / 8074ada / a99835e）。
 指针：backend/api/jvm.py，core/jvm_direct.py，core/jvm_validate_daemon.py，lessons §六十五 / §六十八
+
+### 条目：jvm-runtime-snapshot · 让 JVM 实际运行环境与 dump 对拍
+状态：done
+依赖：无
+优先级：P1
+背景：2026-09-26 完成真实对拍：refresh / gradle / validate_daemon / direct 四份 snapshot 齐全（按 mode+entry 后缀各留一份，互不覆盖），全部差异逐条归因为三类口径性差异 + 一处直起静默继承（已修），见 lessons §九十。
+约束：actual 差异报告只进排障，不进入源健康判定链；对拍口径（workingDir 归一、classpath 按项、-Xmx 纳入后比 jvmArgs、systemProperties 逐键）已按原约束落地。
+验收：修复与边界测试看 `git log`（406941c classpath 只钉负载文件；同日 run_direct 注入本次 args 路径，修复直起 0 事件）。
+指针：core/jvm_direct.py，core/jvm_runtime_snapshot.py，appservice/test/io/legado/app/service/ServiceJson.kt，lessons §九十

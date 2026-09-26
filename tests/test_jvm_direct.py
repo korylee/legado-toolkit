@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from core import jvm_daemon, jvm_direct
+from core import jvm_daemon, jvm_debug, jvm_direct
 
 
 def valid_dump(**overrides):
@@ -91,6 +91,32 @@ class BoundaryTests(unittest.TestCase):
                     with self.assertRaises(jvm_direct.DumpSchemaError):
                         jvm_daemon.ensure(dump)
                 start.assert_not_called()
+
+
+class DirectLaunchEnvTests(unittest.TestCase):
+    """直起的环境注入：args 是逐次任务的输入，不能沿用 dump 冻结的旧路径。"""
+
+    FROZEN = {"JAVA_HOME": "D:/jdk",
+              "LEGADO_APPSERVICE_ARGS": "D:/gone/batch-run/args.properties"}
+
+    def _run_and_capture_env(self, dump, **kwargs):
+        with mock.patch.object(jvm_direct.subprocess, "run") as run, \
+             mock.patch.object(jvm_direct, "java_exe",
+                               return_value="D:/jdk/bin/java.exe"):
+            jvm_direct.run_direct(dump, **kwargs)
+        return run.call_args.kwargs["env"]
+
+    def test_explicit_args_path_overrides_frozen_one(self) -> None:
+        env = self._run_and_capture_env(
+            valid_dump(environment=dict(self.FROZEN)),
+            args_path="D:/now/args.properties")
+        self.assertEqual(env["LEGADO_APPSERVICE_ARGS"], "D:/now/args.properties")
+
+    def test_default_args_path_is_canonical_file_not_frozen_one(self) -> None:
+        env = self._run_and_capture_env(valid_dump(environment=dict(self.FROZEN)))
+        self.assertEqual(env["LEGADO_APPSERVICE_ARGS"], str(jvm_debug.ARGS))
+        self.assertNotEqual(env["LEGADO_APPSERVICE_ARGS"],
+                            self.FROZEN["LEGADO_APPSERVICE_ARGS"])
 
 
 class ExecutionReadinessTests(unittest.TestCase):

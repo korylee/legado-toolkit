@@ -408,7 +408,7 @@ def java_env(dump: Dict[str, Any]) -> Dict[str, str]:
 
 
 def run_direct(dump: Dict[str, Any], main_class: str = LAUNCHER_CLASS, timeout: int = 300,
-               use_argfile: bool = True) -> Tuple[int, float, str, str]:
+               use_argfile: bool = True, args_path: Optional[str] = None) -> Tuple[int, float, str, str]:
     """直起一次，返回 `(退出码, 墙钟秒, stdout, stderr)`（签名同 `_run_launcher`）。"""
     validate_dump(dump)
     cmd = java_command(dump, main_class, use_argfile=use_argfile)
@@ -416,6 +416,11 @@ def run_direct(dump: Dict[str, Any], main_class: str = LAUNCHER_CLASS, timeout: 
     env = java_env(dump)
     env["LEGADO_TEST_JVM_ENV_OUT"] = str(dump_path())
     env["LEGADO_TEST_JVM_LAUNCH_MODE"] = "direct"
+    # args 是**逐次任务的输入**，dump 冻结的是上一次 Gradle 运行的路径（其目录用完
+    # 即清，实测 2026-09-26：沿用冻结值让直起 JVM 读不到参数、整条调试链 0 事件）。
+    # daemon 不受影响——它的 args 由客户端读了走协议传，进程内从不读这个文件。
+    from core.jvm_debug import ARGS
+    env["LEGADO_APPSERVICE_ARGS"] = str(args_path or ARGS)
     p = subprocess.run(cmd, cwd=dump["workingDir"], env=env,
                        capture_output=True, text=True, errors="replace", timeout=timeout)
     return p.returncode, time.time() - t0, (p.stdout or ""), (p.stderr or "")

@@ -455,3 +455,18 @@ lessons，结构约束由 `tests/test_todo_structure.py` 守。改结构前建�
 当前生成分支并把原因带到用户眼前，不要降级产出空源。
 
 → L4 的两个边界都是材料闸门：靶子选择不能自证，响应解包不能静默跳过。
+
+## 九十、快照对拍差异先归三类，落不进去的才是真漂移
+
+对拍（`core/jvm_runtime_snapshot.compare`）比的是「Gradle 任务声明」与「真实 JVM 自述」，两侧
+语义不同，有差异 ≠ 有漂移。实测（2026-09-26，refresh / gradle / validate_daemon / direct 四份
+报告）差异只来自三类：① **不存在的 classpath 项**——Gradle 组装实际 classpath 时会跳过不存在
+项（KSP 空变体目录时有时无），执行态检查只钉 jar/zip；② **worker 注入项**——Gradle test
+worker 自带 `-Dheadless` / `-ea` / 编码区域 / `worker.tmpdir` / `gradle-worker.jar`，declared
+里没有是正常的，反过来 declared 的 `-Xmx` / `--add-opens` 没出现在 actual 里才是漂移；
+③ **逐次任务的输入**——`LEGADO_APPSERVICE_ARGS` 指向每次运行的参数文件（目录用完即清），冻结在
+dump 环境里就是静默继承：直起 JVM 沿用冻结值读不到参数、整条调试链 0 事件（同日实测，修复后
+恢复 77 事件），`run_direct` 必须显式注入本次路径；daemon 不受影响，它的 args 由客户端读了走
+协议传，进程内从不读这个文件。
+
+→ dump 冻结的是「可复用的运行时描述」，逐次任务的输入必须走显式通道；读对拍报告先分三类，第四类差异才值得动手。
