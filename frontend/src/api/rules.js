@@ -27,8 +27,13 @@ export const appDebug = (source, key, host, port, push = false, cache = "auto") 
 // `scripts/jvm_login.py` 在那个 profile 里登一次，之后自动带上。
 //
 // cache 与连 App 那条同一个含义：只管**我们补抓的那几页**。
-export const jvmDebug = (source, key, timeout = 60, cookie = "", cache = "auto") =>
-  api.post("/rules/jvm-debug", { source, key, timeout, cookie, cache });
+//
+// timeout **不传**（null）就吃设置里的 debug.timeout——默认值只有后端一份
+// （AGENTS #8）；前端曾经写死 60，与桥的渲染上限同值、互相掐死。
+export const jvmDebug = (source, key, timeout = null, cookie = "", cache = "auto") =>
+  api.post("/rules/jvm-debug", timeout == null
+    ? { source, key, cookie, cache }
+    : { source, key, timeout, cookie, cache });
 
 // 调试前预检：把「静默无响应」拆成 unreachable / missing / ready 三种状态。
 export const appPreflight = (source, host, port) =>

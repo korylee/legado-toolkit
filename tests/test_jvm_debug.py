@@ -542,6 +542,25 @@ class EndpointTests(_RunCase):
             self._call(timeout=0)
         self.assertEqual(ctx.exception.status_code, 400)
 
+    def test_timeout_defaults_from_settings(self) -> None:
+        """不传 timeout → 吃设置里的 debug.timeout（AGENTS #8：默认值只有
+        settings_store 一份；前端曾写死 60，与桥的渲染上限同值互相掐死）。"""
+        from core import settings_store
+        fake = {"network": {"proxy": ""},
+                "jvm": {"app_repo": "", "android_sdk_dir": ""},
+                "debug": {"timeout": 120}}
+        with mock.patch.object(settings_store, "load", return_value=fake),              mock.patch("core.jvm_env.readiness",
+                        return_value={"ok": True, "checks": []}):
+            self._call()
+        self.assertEqual(self.seen["timeout"], 120)
+
+    def test_timeout_out_of_range_is_400_not_clamped(self) -> None:
+        """显式传值越界要 400 说清区间——静默夹的话用户不知道设的数没生效。"""
+        with self.assertRaises(HTTPException) as ctx:
+            self._call(timeout=500)
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertIn("300", str(ctx.exception.detail))
+
 
 class DebugRunManifestTests(unittest.TestCase):
     """调试任务自己的运行目录：manifest.json 落盘；成功清理、崩溃保留现场。"""

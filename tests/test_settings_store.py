@@ -46,6 +46,18 @@ class SettingsStoreTests(unittest.TestCase):
         self.assertEqual(S.load()["network"], S.DEFAULTS["network"])
         self.assertEqual(S.load()["jvm"], S.DEFAULTS["jvm"])
 
+    def test_debug_timeout_default_and_clamp(self) -> None:
+        """调试预算（jvm-debug-budget）：默认值只在 DEFAULTS，越界 clamp 到区间。
+
+        90 这个数的意义是**大于桥的渲染上限 60s**——同值时渲染永远先被整链
+        掐死，webView 段没有合法完成的空间。"""
+        self.assertEqual(S.load()["debug"]["timeout"], S.DEFAULTS["debug"]["timeout"])
+        self.assertEqual(S.DEFAULTS["debug"]["timeout"], 90)
+        self.assertGreater(S.DEFAULTS["debug"]["timeout"], 60)
+        self.assertEqual(S.coerce("debug", "timeout", 1000), S.LIMITS["debug_timeout"][1])
+        self.assertEqual(S.coerce("debug", "timeout", 1), S.LIMITS["debug_timeout"][0])
+        self.assertEqual(S.coerce("debug", "timeout", "abc"), S.DEFAULTS["debug"]["timeout"])
+
     def test_broken_json_falls_back_to_defaults_without_raising(self) -> None:
         """设置坏了不该让功能起不来——降级方向只能是「用默认」。"""
         self._write_raw("{ 这不是 json")

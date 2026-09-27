@@ -39,8 +39,15 @@ async def jvm_debug(body: JvmDebugRequest):
     if cache not in CACHE_MODES:
         raise HTTPException(400, "未知的缓存策略：%s（只能是 %s）"
                                  % (cache, " / ".join(CACHE_MODES)))
-    if int(body.timeout or 0) <= 0:
+    if int(body.timeout or 0) <= 0 and body.timeout is not None:
         raise HTTPException(400, "timeout 必须是正数")
+    # 预算口径：**不传就吃设置里的 debug.timeout**（AGENTS #8：默认值只在
+    # settings_store 一处；写死 60 曾与桥的渲染上限同值、互相掐死，教训见该键注释）。
+    # 显式传值越界直接 400，不静默夹——夹了用户就不知道自己设的数没生效
+    timeout = body.timeout if body.timeout is not None else settings_store.debug_timeout()
+    lo, hi = settings_store.LIMITS["debug_timeout"]
+    if not lo <= int(timeout) <= hi:
+        raise HTTPException(400, "调试预算须在 %d～%d 秒（收到 %s）" % (lo, hi, timeout))
     # 代理：走**全局设置**（`network.proxy`）——它同时用于这次调试与我们的补抓。
     # 界面上配了代理却只走一半（我们走、App 不走）是查不出来的不一致：两边都「正常」，
     # 只有用户能看出网络出口不一样（十-3）
@@ -54,7 +61,7 @@ async def jvm_debug(body: JvmDebugRequest):
     async with runner.acquire_lane("jvm", kind="debug"):
         work = asyncio.create_task(asyncio.to_thread(
             run_jvm_debug, dict(body.source or {}), body.key or "我",
-            int(body.timeout or 60), body.cookie or "", cache, resolve_proxy(),
+            int(timeout), body.cookie or "", cache, resolve_proxy(),
             readiness_result=readiness_result,
         ))
         try:
@@ -78,6 +85,7 @@ async def app_debug(body: AppDebugRequest):
     """
     from core.app_debug import run_app_debug
     from core.fetch import CACHE_MODES
+    from core import settings_store
 
     source = dict(body.source or {})
     tag = str(source.get("bookSourceUrl", "") or "").strip()
@@ -106,9 +114,11 @@ async def app_debug(body: AppDebugRequest):
         # run_app_debug 是同步阻塞的（标准库 socket 收发），必须让出事件循环。
         # 连不上/超时它自己会返回带 error 的结果体（不抛），
         # 这里兜的是脏端口之类的入参异常——同样给 400，不给 500。
+        # 预算与本机引擎同源（settings_store.debug_timeout）：两条通道的
+        # 「等多久」不一样而没人知道，是查不出来的不一致（AGENTS #8）
         return await asyncio.to_thread(
             run_app_debug, host, tag, body.key or "我",
-            body.port or None, 60, source, cache=cache,
+            body.port or None, settings_store.debug_timeout(), source, cache=cache,
         )
     except Exception as e:
         raise HTTPException(400, "连 App 调试失败: %s: %s" % (type(e).__name__, e))

@@ -100,6 +100,13 @@ DEFAULTS: Dict[str, Dict[str, Any]] = {
         #: 块完成即入库（取消/崩溃后可恢复）。默认 25 实测可调。
         "chunk_size": 25,
     },
+    "debug": {
+        #: 单次调试的整链墙钟预算（秒）。**必须大于桥的渲染预算**：App 的
+        #: BackstageWebView 渲染上限固定 60s（App 侧的值，我们不改），整链预算同值时
+        #: 渲染永远先被整链掐死，webView 段就没有合法完成的空间（jvm-debug-budget）。
+        #: 90 = 渲染吃满 60s 后仍留得出排队与收尾；上界压着「白等」的代价。
+        "timeout": 90,
+    },
 }
 
 #: 各键的合法区间。**「clamp 到多少」的唯一定义处**——前端表单的上下界由
@@ -109,6 +116,7 @@ LIMITS: Dict[str, tuple] = {
     "jvm_concurrency": (1, 32),
     "jvm_limit": (0, 100000),
     "jvm_chunk_size": (5, 200),
+    "debug_timeout": (30, 300),
     # 枚举型（与 probe_depth 同形）：前端据此渲染下拉，不在 JS 里再写一份
     "jvm_depth": JVM_DEPTHS,
 }
@@ -271,6 +279,8 @@ _SPECS: Dict[tuple, Any] = {
     ("jvm", "depth"): lambda v: (str(v).strip().lower()
                                  if str(v).strip().lower() in JVM_DEPTHS
                                  else DEFAULTS["jvm"]["depth"]),
+    ("debug", "timeout"): lambda v: _to_int(
+        v, DEFAULTS["debug"]["timeout"], *LIMITS["debug_timeout"]),
 }
 
 
@@ -370,6 +380,17 @@ def resolve_proxy() -> str:
     「跑批走了代理、调试没走」——两边都「正常」，只有用户能看出网络出口不一样。
     """
     return str(load()["network"]["proxy"] or "")
+
+
+def debug_timeout() -> int:
+    """单次调试的整链墙钟预算（秒，``debug.timeout``）。
+
+    **唯一入口**：本机引擎与连 App 两条调试路都读它（口径同 ``resolve_proxy``：
+    分散读会让两条通道的预算不一样而没人知道）。前端**不传参**就吃这个值；
+    显式传值由路由按 ``LIMITS["debug_timeout"]`` 拒收，不静默夹。CLI 的 argparse
+    默认值是独立的另一条链路（AGENTS #8），不从这里统一。
+    """
+    return int(load().get("debug", {}).get("timeout") or DEFAULTS["debug"]["timeout"])
 
 
 def resolve_check(override: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:

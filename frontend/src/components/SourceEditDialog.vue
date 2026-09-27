@@ -5,6 +5,7 @@ import { ElMessage, ElMessageBox } from "element-plus";
 import { api, subscribeJob } from "../api/client";
 import { getDetail, listTags, saveSource, sourceExists } from "../api/sources";
 import { appDebug, appPreflight, jvmDebug } from "../api/rules";
+import { getSettings } from "../api/settings";
 import { jvmReadiness } from "../api/jvm.js";
 import { jobFailReason } from "../utils/jobs";
 import {
@@ -48,6 +49,9 @@ const loading = ref(false);
 const appHost = ref(readAppHost());  // App 的 IP（连 App 调试用）
 const appDebugging = ref(false);
 const jvmEnv = ref(null);
+// 调试预算口径（debug.timeout）：默认值只在后端 settings_store（AGENTS #8），
+// 这里只读来显示；请求不传 timeout，由后端取同一份
+const debugBudget = ref(null);
 const jvmEnvLoading = ref(false);
 const jvmEnvTitle = computed(() => {
   if (jvmEnvLoading.value) return "正在检查本机引擎环境…";
@@ -697,6 +701,12 @@ async function quickGenerate() {
 // 所以卡片与调试抽屉零改动。
 async function loadJvmEnvironment() {
   jvmEnvLoading.value = true;
+  // 预算口径与通道无关（连 App 那条也吃同一个值），打开弹框时一并拉来显示；
+  // 拉不到就不显示，请求侧后端自会取同一份
+  getSettings().then((s) => {
+    debugBudget.value = (s.values.debug || {}).timeout
+      ?? s.defaults?.debug?.timeout ?? null;
+  }).catch(() => {});
   try {
     jvmEnv.value = await jvmReadiness();
   } catch (e) {
@@ -729,7 +739,7 @@ async function debugRun(keyOverride = "", rerunStep = "") {
     // 返回值与连 App 那条同形状，只是 source 是 "jvm"
     appDebugging.value = true;
     try {
-      const r = await jvmDebug(form.value, key, 60, "", appCacheMode.value);
+      const r = await jvmDebug(form.value, key, null, "", appCacheMode.value);
       testResult.value = r && r.error ? { error: r.error } : r;
     } catch (e) {
       testResult.value = { error: String(e.message) };
@@ -1387,6 +1397,11 @@ async function doSave(s) {
               {{ debugChannel === "jvm" ? "开始调试" : "连 App 调试" }}
             </el-button>
           </div>
+          <!-- 预算口径摆出来（同跑批弹框：代价由事实说）。值来自后端设置，
+               请求本身不传 timeout，两条通道吃同一份 -->
+          <p v-if="debugBudget" class="muted" style="margin: 6px 0 0">
+            调试预算 {{ debugBudget }} 秒；webView 渲染最长 60 秒
+          </p>
           <!-- 预检结果就地显示。以前只有一个「连」按钮：连不上或缺源都要干等
                60 秒超时，而且两者表现完全一样，没法对症下药。「检测中」得留一格：
                预检现在是失焦触发的，不给在途状态就成了「点完什么也没发生」 -->

@@ -81,6 +81,16 @@ class PatchSemanticsTests(SettingsApiTestCase):
             self.assertIn(key, got)
         self.assertIn("jvm", got["values"])
 
+    def test_debug_timeout_is_exposed_and_patchable(self):
+        """调试预算下发给界面（GET values/defaults/limits），PATCH 走同一把 clamp
+        （AGENTS #8：默认值与区间只有 settings_store 一份）。"""
+        got = _payload(S.load())
+        self.assertIn("debug", got["values"])
+        self.assertIn("debug_timeout", got["limits"])
+        patch_settings(SettingsPatch(debug={"timeout": 1000}))
+        self.assertEqual(_payload(S.load())["values"]["debug"]["timeout"],
+                         S.LIMITS["debug_timeout"][1])
+
 
 class ProxyValidationTests(SettingsApiTestCase):
     """代理只认 http://（十-3）：上游拿正则匹配，https 会让它抛异常——留着比丢掉更糟。"""

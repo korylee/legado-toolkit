@@ -155,8 +155,10 @@ class JvmDebugRequest(BaseModel):
 
     source: Dict[str, Any]
     key: str = "我"
-    #: 整次调试的墙钟上限（秒）。比跑批宽：调试一条含正文段的链要渲染页面
-    timeout: int = 60
+    #: 整次调试的墙钟预算（秒）。**不给就吃设置里的 ``debug.timeout``**（默认值只在
+    #: `core/settings_store`，前端不再写死 60——它曾与桥的渲染上限同为 60 而互相
+    #: 掐死）；显式给要落在 ``LIMITS["debug_timeout"]`` 区间内，越界 400 不静默夹
+    timeout: Optional[int] = None
     #: 手工注入的一条 cookie（可选）。不给就按源 URL 从浏览器 profile 读——
     #: 登录墙的源要先在同一个 profile 里登录一次（`scripts/jvm_login.py`）
     cookie: str = ""
@@ -299,11 +301,18 @@ class NetworkSettingsPatch(BaseModel):
     proxy: Optional[str] = None
 
 
+class DebugSettingsPatch(BaseModel):
+    """调试设置（core.settings_store.DEFAULTS["debug"]）。收敛交给 coerce。"""
+
+    timeout: Optional[int] = None
+
+
 class SettingsPatch(BaseModel):
     """按 section 分组，与 settings_store 的文件结构一一对应（不做映射层）。"""
 
     network: Optional[NetworkSettingsPatch] = None
     jvm: Optional[JvmSettingsPatch] = None
+    debug: Optional[DebugSettingsPatch] = None
 
 
 class JobCreate(BaseModel):
