@@ -98,6 +98,8 @@
   组件里不再有调试状态的第二写者；提示逻辑有可跑断言。
 指针：frontend/src/components/SourceEditDialog.vue，frontend/src/components/RuleDebugDrawer.vue，frontend/src/composables/useMobile.js
 
+## 2 · 按需
+
 ### 条目：jvm-worker-roadmap · JVM 调试与校验的推荐拆分路线
 状态：open
 依赖：无
@@ -699,16 +701,17 @@
   直达，弹框的查看证据/生成流程改为**会话交接源快照后跳路由**。真浏览器实测：
   按 URL 拉源、全链 63 事件、定层/步骤/规则编辑/候选/证据全渲染，等待态与预算
   在途可见。
-约束：轻量编辑起步——规则编辑只写会话源快照，「应用并重跑」= 写快照 + 触发
-  run；保存沿用加载时拆分的标签。**第四期收尾（未完）**：旧壳删除后改掉指
-  RuleDebugDrawer.vue / SourceEditDialog.vue 的 TODO 与 lessons 指针
-  （strengthen-src / strengthen-hint / unknown-outlet / fe-drawer-tests / proj-3）；
-  三栏布局（规则编辑独立右栏）与草稿/应用层删除在工作台实测后另议。
+约束：右栏**轻量编辑起步**——只编当前步骤那条规则、直接写 session.source，
+  「应用并重跑」= 写快照 + 触发 run；完整 rules 表单留弹框。入口状态（key/channel）
+  进 URL query，刷新可恢复；键盘流：Enter 重跑、Esc 取消。旧 drawer 留一个提交
+  周期灰度对照，确认无功能缺口再删。**第四期收尾同批做**：删草稿/应用层；改掉指
+  RuleDebugDrawer.vue / SourceEditDialog.vue 的 TODO 与 lessons 指针（strengthen-src /
+  strengthen-hint / unknown-outlet / fe-drawer-tests / proj-3）；新文案过
+  tools/check_copy.py；清掉为 dialog/teleport 写的不带 scoped 样式（AGENTS #15）；
+  枚举继续从 `/api/settings` 取（AGENTS #7 / #8）。
 验收：列表页到调试 ≤ 一次点击（实测）；改规则→重跑→对比在工作台内闭环（实测）；
   全量 1008 + node 47 绿、构建过、文案机检无新增。看 git log（36af8dc）。
 指针：frontend/src/views/DebugWorkbenchView.vue，frontend/src/components/DebugWorkbench.vue，frontend/src/router/index.js
-
-## 2 · 按需
 
 ### 条目：jvm-dump-gate · 常驻选路的 dump 对拍把模块目录当成仓库根
 状态：done
