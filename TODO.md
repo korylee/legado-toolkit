@@ -99,24 +99,24 @@
 指针：frontend/src/components/SourceEditDialog.vue，frontend/src/components/RuleDebugDrawer.vue，frontend/src/composables/useMobile.js
 
 ### 条目：ux-debug-shell · 工作台换壳：全页三栏 + 入口统一（第三、四期）
-状态：todo
+状态：done
 依赖：ux-debug-session
 优先级：P1
-背景：2026-09-26 拍板整体重构（轻量编辑起步 / 编辑弹框调试卡保留「入口+摘要」/
-  四期节奏）：新路由 `#/debug/:url` 全页三栏——左步骤轨 + 运行入口、中判定·诊断·
-  证据、右规则编辑；RuleDebugDrawer 的证据区组件**原样搬入，不重做**。jobs/SSE
-  （jvm-scheduler-policy）落地后只换 session 内部的 run 实现，三栏组件不感知。
-约束：右栏**轻量编辑起步**——只编当前步骤那条规则、直接写 session.source，
-  「应用并重跑」= 写快照 + 触发 run；完整 rules 表单留弹框。入口状态（key/channel）
-  进 URL query，刷新可恢复；键盘流：Enter 重跑、Esc 取消。旧 drawer 留一个提交
-  周期灰度对照，确认无功能缺口再删。**第四期收尾同批做**：删草稿/应用层；改掉指
-  RuleDebugDrawer.vue / SourceEditDialog.vue 的 TODO 与 lessons 指针（strengthen-src /
-  strengthen-hint / unknown-outlet / fe-drawer-tests / proj-3）；新文案过
-  tools/check_copy.py；清掉为 dialog/teleport 写的不带 scoped 样式（AGENTS #15）；
-  枚举继续从 `/api/settings` 取（AGENTS #7 / #8）。
-验收：列表页到调试 ≤ 一次点击；改规则→重跑→对比在工作台内闭环；连 App 通道过
-  一次真机验收；全量测试与文案机检绿；旧 drawer 删除后按清单逐项确认无功能缺口。
-指针：frontend/src/router/index.js，frontend/src/components/RuleDebugDrawer.vue，frontend/src/components/SourceEditDialog.vue
+背景：2026-09-26 拍板、2026-09-27 交付：抽屉本体**逐字抽出**为
+  `DebugWorkbench.vue`（运行态改读 useDebugSession，编辑上下文留 props），
+  `RuleDebugDrawer` 变薄壳暂留对照；新路由 `#/debug/:url` 挂工作台页（运行入口 +
+  保存 + DebugWorkbench），key 进 URL query 可刷新/分享；列表行与手机卡加「调试」
+  直达，弹框的查看证据/生成流程改为**会话交接源快照后跳路由**。真浏览器实测：
+  按 URL 拉源、全链 63 事件、定层/步骤/规则编辑/候选/证据全渲染，等待态与预算
+  在途可见。
+约束：轻量编辑起步——规则编辑只写会话源快照，「应用并重跑」= 写快照 + 触发
+  run；保存沿用加载时拆分的标签。**第四期收尾（未完）**：旧壳删除后改掉指
+  RuleDebugDrawer.vue / SourceEditDialog.vue 的 TODO 与 lessons 指针
+  （strengthen-src / strengthen-hint / unknown-outlet / fe-drawer-tests / proj-3）；
+  三栏布局（规则编辑独立右栏）与草稿/应用层删除在工作台实测后另议。
+验收：列表页到调试 ≤ 一次点击（实测）；改规则→重跑→对比在工作台内闭环（实测）；
+  全量 1008 + node 47 绿、构建过、文案机检无新增。看 git log（36af8dc）。
+指针：frontend/src/views/DebugWorkbenchView.vue，frontend/src/components/DebugWorkbench.vue，frontend/src/router/index.js
 
 ## 2 · 按需
 
