@@ -126,6 +126,13 @@ _ENTRY_RE = re.compile(r"^⇒开始(?:搜索关键字|访(?:问)?(搜索|发现|
 #: 统计行前缀（``◇目录总数:108``）
 _STAT_MARK = "◇"
 
+#: 空 content 规则短路的判定文案（`build_steps` 用）。收成常量：测试逐字断言，
+#: 别两处各写一份字符串
+EMPTY_CONTENT_REASON = ("正文规则为空：App 拿章节链接当正文，没验证任何取值，"
+                        "补上规则再重新调试本步")
+#: webView 渲染失败段的可执行下一步（只指向动作，不解释机制）
+RENDER_FAIL_TODO = "先试最新章节；不行就跑 scripts/jvm_login.py 人工过一次验证"
+
 #: 错误行信号词。**只在事件文本行首匹配**，理由：
 #:   - 正文全文也是一条事件，里面出现「失败」二字完全可能（小说情节），
 #:     行首匹配不会命中它——正文那条以 ``└`` 开头
@@ -671,6 +678,18 @@ def build_steps(events: Sequence[Any], matched: Optional[Dict[str, Dict[str, str
             # reason 只取前 200 字符：完整的错误行仍在 values 里，
             # 但失败原因要能一眼看完，不能是一条 2000 字的 Java 栈
             j = Q.Judgement(Q.VERDICT_FAIL, error[:200], Q.SHAPE_TEXT, notes, evidence)
+            if "webview_render_failed" in error:
+                # 渲染失败只留一段 Java 栈 = 用户只知道「坏了」却不知道下一步
+                # （与生成链 strengthen-hint 同一纪律：只指向动作，不解释机制）
+                j = Q.Judgement(j.verdict, j.reason, j.shape,
+                                notes + [RENDER_FAIL_TODO], j.evidence)
+        elif any(_EMPTY_CONTENT_RE.match(v) for v in values):
+            # **空 content 规则的短路不许判 pass**：App 会直接拿章节链接当正文
+            # （上游 WebBook.getContentAwait），事件里照样有「︽正文页解析完成」——
+            # 原判据下这是一次 0.1 秒的「通过」，但整页没抓、什么都没验。
+            # unknown + 说清原因与下一步（AGENTS #4：原因要一路走到用户眼前）
+            j = Q.Judgement(Q.VERDICT_UNKNOWN, EMPTY_CONTENT_REASON,
+                            Q.SHAPE_TEXT, notes, evidence)
         elif done:
             j = Q.Judgement(Q.VERDICT_PASS, "", Q.SHAPE_TEXT, notes, evidence)
         else:

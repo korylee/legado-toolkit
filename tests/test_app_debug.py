@@ -18,6 +18,7 @@ from unittest.mock import patch
 
 from core import quality as Q
 from core.app_debug import (
+    EMPTY_CONTENT_REASON, RENDER_FAIL_TODO,
     engine_pages,
     MAX_MATCHED_CHARS, MAX_PAGES, PAGE_IDS, build_steps, collect_debug_events,
     fetch_debug_pages, matched_map, run_app_debug,
@@ -871,6 +872,61 @@ class EnginePagesTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# -------------------------------------------------- 分段判定的诚实性（TODO debug-false-pass）
+
+class VerdictHonestyTests(unittest.TestCase):
+    """分段判定不许撒谎（AGENTS #4：原因要一路走到用户眼前）。
+
+    两种「结论不可信」的形态，判据都在 ``build_steps`` 一层：
+    - 空 content 规则的短路：App 打一行「⇒正文规则为空」就直接返回，事件里照样有
+      「︽正文页解析完成」——原判据下是一次 0.1 秒的假 pass（实测：管理库记录的
+      content 规则丢失后，调试正文段「通过」但整页没抓）。
+    - webView 渲染失败：只有一段 Java 栈，用户读完只知道「坏了」，不知道下一步。
+    """
+
+    def test_empty_content_rule_is_unknown_not_pass(self):
+        steps = build_steps(EMPTY_CONTENT_SAMPLE)
+        content = step_of(steps, "content")
+        self.assertEqual(content["verdict"], "unknown", "短路返回不许落成 pass")
+        self.assertNotEqual(content["verdict"], "pass")
+        self.assertEqual(content["reason"], EMPTY_CONTENT_REASON)
+        # 原因必须走 detail（卡片小字与抽屉第一眼都读它），不能只躺在 values 里
+        self.assertIn("正文规则为空", content["detail"])
+        # 别的段不受影响：目录段照常 pass
+        self.assertEqual(step_of(steps, "toc")["verdict"], "pass")
+
+    def test_empty_content_marker_without_done_still_gets_the_reason(self):
+        """连「解析完成」都没有的段：同样给具体原因，不落在笼统的 unknown 文案上。"""
+        sample = [s for s in EMPTY_CONTENT_SAMPLE if "︽正文页解析完成" not in s]
+        content = step_of(build_steps(sample), "content")
+        self.assertEqual(content["verdict"], "unknown")
+        self.assertEqual(content["reason"], EMPTY_CONTENT_REASON)
+
+    def test_render_failure_carries_an_actionable_note(self):
+        error = ("[00:03.700] java.lang.IllegalStateException: webview_render_failed: "
+                 "render_timeout: 60000ms 内没有 load 事件")
+        steps = build_steps([
+            "[00:00.000]⇒开始访正文页:https://a.com/c1.html",
+            "[00:00.100]︾开始解析正文页",
+            error,
+        ])
+        content = step_of(steps, "content")
+        self.assertEqual(content["verdict"], "fail")
+        self.assertTrue(content["has_notes"], "渲染失败必须带下一步")
+        self.assertIn(RENDER_FAIL_TODO, content["notes"])
+
+    def test_ordinary_errors_do_not_get_the_render_note(self):
+        """普通网络错误不加渲染附注——附注钉在 webview_render_failed 上，别挂宽。"""
+        steps = build_steps([
+            "[00:00.000]⇒开始访正文页:https://a.com/c1.html",
+            "[00:00.100]︾开始解析正文页",
+            "[00:01.000] java.net.SocketException: Connection reset",
+        ])
+        content = step_of(steps, "content")
+        self.assertEqual(content["verdict"], "fail")
+        self.assertFalse(content["has_notes"])
 
 
 # -------------------------------------------------- 正文规则为空的补抓
