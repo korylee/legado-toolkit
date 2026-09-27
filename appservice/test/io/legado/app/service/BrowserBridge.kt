@@ -305,8 +305,16 @@ object BrowserBridge {
             // 而抓包本身很便宜（只留 XHR / Fetch、条数与字节都有上界）。
             send(ws, 3, "Network.enable", null, tapQueue, timeoutMs)
             val params = JSONObject().put("url", url)
-            ws.send(JSONObject().put("id", 2).put("method", "Page.navigate")
-                .put("params", params).toString())
+            // **读导航应答，被拒绝就立刻说**：CDP 对相对地址/无效地址的 navigate 会回
+            // 命令级 `error`（如「Cannot navigate to invalid URL」）。原实现发完不读、
+            // 只等 load 事件——那种导航的事件永远不来，等满渲染预算才说 render_timeout
+            // （实测 2026-09-26：`--` 重跑的相对地址 + webView 白等 60s、75.5s 才 fail）。
+            // 判据纯函数化钉在 WebViewNavigationTest；加载期失败（DNS / 连接拒绝）不在这
+            // 一层管——Chromium 会渲染错误页并照常发 load 事件，由「不是站点」的判据处置。
+            val nav = sendForResult(ws, 2, "Page.navigate", params, tapQueue, timeoutMs)
+            navigationFailure(nav)?.let {
+                return Result(false, reason = "navigation_failed: $it")
+            }
             val loaded = awaitEvent(tapQueue, setOf("Page.loadEventFired", "Page.domContentEventFired"),
                                     timeoutMs)
             if (!loaded) {
@@ -700,8 +708,23 @@ object BrowserBridge {
         return null
     }
 
-    private fun send(ws: WebSocket, id: Int, method: String, params: JSONObject?,
-                     inbox: LinkedBlockingQueue<String>, timeoutMs: Long): Boolean {
+    /**
+     * 从 `Page.navigate` 的应答里取**失败原因**；返回 null = 导航被受理、可以等 load 事件。
+     *
+     * 只判**命令级错误**（CDP 应答里的 `error`）。加载期失败（DNS / 连接拒绝）不算：
+     * Chromium 会自己渲染错误页并照常发 load 事件，那种交回错误页 DOM、由「不是站点」
+     * 的判据处置（实测 2026-09-22：错误页 317KB 照样取回）。**别把 result.errorText
+     * 也判进来**——ERR_ABORTED 那类会误杀「马上被 JS 重定向」的正常页。
+     */
+    internal fun navigationFailure(navResponse: JSONObject?): String? {
+        if (navResponse == null) return "Page.navigate 无响应"
+        val error = navResponse.optJSONObject("error") ?: return null
+        return error.optString("message").ifBlank { "被 CDP 拒绝" }
+    }
+
+    /** 发一条命令并按 id 等它的**应答对象**；超时/无应答返回 null。其余消息照旧留在队列里。 */
+    private fun sendForResult(ws: WebSocket, id: Int, method: String, params: JSONObject?,
+                              inbox: LinkedBlockingQueue<String>, timeoutMs: Long): JSONObject? {
         val obj = JSONObject().put("id", id).put("method", method)
         if (params != null) obj.put("params", params)
         ws.send(obj.toString())
@@ -709,9 +732,14 @@ object BrowserBridge {
         while (System.currentTimeMillis() < deadline) {
             val msg = inbox.poll(200, TimeUnit.MILLISECONDS) ?: continue
             val o = runCatching { JSONObject(msg) }.getOrNull() ?: continue
-            if (o.optInt("id", -1) == id) return !o.has("error")
+            if (o.optInt("id", -1) == id) return o
         }
-        return false
+        return null
+    }
+
+    private fun send(ws: WebSocket, id: Int, method: String, params: JSONObject?,
+                     inbox: LinkedBlockingQueue<String>, timeoutMs: Long): Boolean {
+        return sendForResult(ws, id, method, params, inbox, timeoutMs)?.has("error") == false
     }
 
     private fun awaitEvent(inbox: LinkedBlockingQueue<String>, names: Set<String>,

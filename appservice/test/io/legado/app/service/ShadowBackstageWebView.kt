@@ -79,6 +79,13 @@ class ShadowBackstageWebView {
         const val JS_RETRY_TIMES = 30
         const val JS_RETRY_INTERVAL_MS = 1000L
 
+        /**
+         * 相对地址按源 URL（`tag`）补全，语义就是 App 自己的 `NetworkUtils.getAbsoluteURL`
+         * （别再写一份拼接）；tag 拿不到就原样返回——那种地址会被桥立刻报导航失败。
+         */
+        internal fun resolveAgainstTag(url: String, tag: String?): String =
+            io.legado.app.utils.NetworkUtils.getAbsoluteURL(tag, url)
+
         fun reset() {
             calls.set(0); lastUrl.set(""); lastJsLen.set(0); lastIsRule.set(false)
             rendered.set(0); lastRenderMs.set(0L); lastReason.set("")
@@ -142,9 +149,16 @@ class ShadowBackstageWebView {
             lastReason.set("browser_unavailable")
             throw IllegalStateException("browser_unavailable: $why")
         }
+        // **相对地址在导航前补全**：App 路径里 `AnalyzeUrl` 会用 baseUrl 解析，但 `--`
+        // 重跑那类 baseUrl 为空、相对地址原样进桥——CDP 拒绝相对地址的 navigate，桥
+        // 只等 load 事件就白等满渲染预算（实测 2026-09-26：75.5s 才 fail）。`tag` 就是
+        // 源 URL，在这里补全是**一个咽喉**：重跑、正文翻页、目录分段的所有相对地址
+        // 都被覆盖。判据钉在 WebViewNavigationTest；桥侧「导航失败立刻报」是第二道防线。
+        val tag = ReflectionHelpers.getField<String?>(real, "tag").orEmpty()
+        val urlAbs = resolveAgainstTag(url, tag)
         val t0 = System.currentTimeMillis()
         val r = BrowserBridge.renderSerial(
-            session, url, timeoutMs,
+            session, urlAbs, timeoutMs,
             js = js.takeIf { it.isNotBlank() },
             jsRetryTimes = JS_RETRY_TIMES,
             jsRetryIntervalMs = JS_RETRY_INTERVAL_MS)
@@ -165,8 +179,7 @@ class ShadowBackstageWebView {
         // 浏览器（JVM 里 WebView 是桩）。不收回来的话，后续 HTTP 请求（目录/正文段）
         // 仍然匿名——登录墙的源就会被读成「源取不到」。
         // 取 cookie 用**落地地址**（登录页常是另一台主机），存的键仍按上游用 `tag`（源 URL）。
-        val tag = ReflectionHelpers.getField<String?>(real, "tag").orEmpty()
-        val inj = SourceCookies.injectFromProfile(session, tag, r.url.ifBlank { url })
+        val inj = SourceCookies.injectFromProfile(session, tag, r.url.ifBlank { urlAbs })
         lastCookieLen.set(inj.len)
         lastCookieNote.set(inj.note)
         // url 用**落地地址**：App 的 buildStrResponse 也是拿 WebView 跳转后的地址
