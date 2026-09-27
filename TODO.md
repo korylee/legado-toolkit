@@ -21,25 +21,10 @@
 > 2026-09-26 排期（评估结论）：引擎线八步已走完 ①②③，第一波封顶「环境」章节，
 > 第二波补引擎最后的韧性与公平缺口；④ worker 线是触发式的——批量吞吐被封 IP
 > 硬约束压着，等下次真要跑全量再启动。
-> 同日插入调试体验两条 P0（均为当日实测的现行缺陷，见各条背景）；预算分层与
-> 前端循环、等待的跟进条目排在 §1。工作台重构同日已拍板（轻量编辑起步 /
+> 同日插入调试体验两条 P0（均为当日实测的现行缺陷，见各条背景；`jvm-dump-gate`
+> 已当日交付、移「已完成」）；预算分层与前端循环、等待的跟进条目排在 §1。工作台重构同日已拍板（轻量编辑起步 /
 > 编辑弹框调试卡保留「入口+摘要」/ 四期节奏），拆为 ux-debug-session 与
 > ux-debug-shell 两条，依赖链钉了先后。
-
-### 条目：jvm-dump-gate · 常驻选路的 dump 对拍把模块目录当成仓库根
-状态：todo
-依赖：无
-优先级：P0
-背景：2026-09-26 同机四次调试全部打出「运行环境与当前自检不同：workingDir」并回落
-  Gradle——每次多付约 13 秒启动。dump 的 `workingDir` 是测试 JVM 的**模块目录**
-  （`…legado-with-MD3\app`），`LEGADO_REPO` 来自 settings 的 `app_repo`（**仓库根**），
-  `core.jvm_debug._runtime_dump_mismatch` 直接比字符串、永远不等；而 runtime-snapshot
-  那条对拍链的 workingDir 已按归一口径落地（lessons §九十）——同一份事实两套口径。
-约束：归一判据与 runtime-snapshot 那条**共用一处实现**，别各写一份；归一后仍要能判出
-  「dump 是另一个 App 仓库的」，不能放宽成永远相等。
-验收：`app_repo` 填仓库根时调试走上常驻、回落附注消失；`app_repo` 指向别的仓库仍回落
-  且写明原因；选路闸门与 runtime-snapshot 对拍对同一份 dump 结论一致。
-指针：core/jvm_debug.py，core/jvm_runtime_snapshot.py，lessons §九十
 
 ### 条目：jvm-webview-nav · webView 段的相对地址静默等满渲染预算
 状态：todo
@@ -717,6 +702,22 @@
 
 > 已交付的事项只在这里留一行指针——**机制看 lessons，细节看 `git log`**（AGENTS #10）。
 > 这一区只允许 `状态：done`。
+
+### 条目：jvm-dump-gate · 常驻选路的 dump 对拍把模块目录当成仓库根
+状态：done
+依赖：jvm-runtime-snapshot
+优先级：P0
+背景：2026-09-26 交付：`_runtime_dump_mismatch` 的 workingDir 一项改判**同仓库关系**
+  （相等或子目录、os.sep 切边界），判据 `dir_inside_repo` 落在 `jvm_runtime_snapshot`
+  与对拍链共用一处；异仓库仍回落且附注写明「不同仓库」。实测同机调试从「每次回落
+  Gradle +13 秒」变为常驻复用 2.6 秒、回落附注消失。
+约束：归一判据与 runtime-snapshot 对拍**共用一份**（norm_path / dir_inside_repo），
+  别各写一份；放宽不得放过「dump 是另一个 App 仓库」与 `D:\foo` vs `D:\foobar`
+  前缀陷阱。
+验收：7 条新测试（真实形态模块目录 vs 仓库根 / 异仓库 / 前缀陷阱 / 缺字段 /
+  常驻保住 / 异仓库回落），两处变异（恒 False / 去 os.sep 边界）全红；全量 1000 条绿。
+  修复与测试看 git log（5268307）。
+指针：core/jvm_debug.py，core/jvm_runtime_snapshot.py，lessons §九十
 
 ### 条目：jvm-single-fast-path · 单条校验脱离 Gradle 冷启动
 状态：done
