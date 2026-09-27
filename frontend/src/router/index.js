@@ -9,6 +9,8 @@ const routes = [
     redirect: "/sources",
     children: [
       { path: "sources", name: "sources", component: () => import("../views/SourcesView.vue") },
+      // 调试工作台（ux-debug-shell）：url 可选——编辑弹框跳转时源已在会话里
+      { path: "debug/:url?", name: "debug", component: () => import("../views/DebugWorkbenchView.vue") },
     ],
   },
   // 任务/诊断两个页面已并入书源页，旧书签（#/jobs、#/dashboard）兜底回书源页，

@@ -1,5 +1,6 @@
 <script setup>
 import { ref, reactive, computed, nextTick, watch, onMounted, onUnmounted } from "vue";
+import { useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { Search, Plus, Upload, Download, Delete, Filter, Refresh, Monitor, MagicStick,
          Operation, Close } from "@element-plus/icons-vue";
@@ -27,6 +28,7 @@ import JobsDrawer from "../components/JobsDrawer.vue";
 import CheckJvmForm from "../components/CheckJvmForm.vue";
 
 const isMobile = useMobile();
+const router = useRouter();
 const loading = ref(false);
 const rows = ref([]);
 const total = ref(0);
@@ -660,6 +662,10 @@ async function onTagsChanged() {
 
 function openNew() { dlgUrl.value = ""; dlgVisible.value = true; }
 function openEdit(row) { dlgUrl.value = row.source_url; dlgVisible.value = true; }
+// 调试直达（ux-debug-shell）：不进编辑弹框，工作台自己按 URL 拉源
+function openDebugRoute(row) {
+  router.push({ name: "debug", params: { url: encodeURIComponent(row.source_url) } });
+}
 async function onSaved() {
   dlgVisible.value = false;
   await load();
@@ -871,7 +877,7 @@ onUnmounted(() => {
         <SourceCard v-for="row in rows" :key="row.source_url" :row="row"
                     :selected="isSelected(row)" :checking="isRowChecking(row.source_url)"
                     @toggle="toggleCard" @check="checkOne"
-                    @edit="openEdit" @remove="removeOne" />
+                    @edit="openEdit" @remove="removeOne" @debug="openDebugRoute" />
         <el-empty v-if="!loading && !rows.length" description="没有匹配的书源" :image-size="80" />
       </div>
 
@@ -881,6 +887,8 @@ onUnmounted(() => {
         <el-table-column prop="name" label="名称" min-width="170" show-overflow-tooltip>
           <template #default="{ row }">
             <a href="#" @click.prevent="openEdit(row)">{{ row.name || "（无名）" }}</a>
+            <el-button size="small" link type="primary"
+                       @click.stop="openDebugRoute(row)">调试</el-button>
           </template>
         </el-table-column>
         <el-table-column label="类型" width="88" align="center">

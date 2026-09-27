@@ -19,7 +19,7 @@ const props = defineProps({
   checking: { type: Boolean, default: false },
 });
 //: 四个动作都把 row 带回去，由父组件收口；卡片自己不碰请求、不碰状态
-const emit = defineEmits(["toggle", "check", "edit", "remove"]);
+const emit = defineEmits(["toggle", "check", "edit", "remove", "debug"]);
 
 //: 整张卡可点 = 勾选（拇指友好），复选框是同一件事的显式入口
 const toggle = () => emit("toggle", props.row);
@@ -69,6 +69,7 @@ const toggle = () => emit("toggle", props.row);
       <!-- 编辑用笔，不用漏斗：漏斗是列表页那个「筛选」按钮的图标，
            同一个图标指两件事比换个图标糟得多 -->
       <el-button link :icon="EditPen" aria-label="编辑" @click.stop="emit('edit', row)" />
+      <el-button link aria-label="调试" @click.stop="emit('debug', row)">调试</el-button>
       <!-- 与表格操作栏同一组动作：卡片是移动端的等价物，少一个就会
            「手机上没有删除入口、只能先勾选再走批量条」 -->
       <el-button link type="danger" :icon="Delete" aria-label="移入回收站"

@@ -17,6 +17,22 @@ import { jvmReadiness } from "../api/jvm.js";
 import { getSettings } from "../api/settings";
 import { nextCompareState } from "../utils/debugCompare";
 
+// 目标与缓存档：UI 配置的唯一一份（弹框与工作台页共用）。hint 只回答「这格
+// 填什么」；详情/目录/正文留空会退回搜索入口，placeholder 写「可留空」就够
+export const DEBUG_TARGETS = [
+  { value: "search", label: "搜索", hint: "关键词，如 我的" },
+  { value: "explore", label: "发现", hint: "留空则用配置里的 exploreUrl" },
+  { value: "info", label: "详情", hint: "详情页 URL，可留空" },
+  { value: "toc", label: "目录", hint: "目录页 URL，可留空" },
+  { value: "content", label: "正文", hint: "正文页 URL，可留空" },
+];
+// 三个值对应 core.fetch 的 CACHE_*，后端按同一份枚举校验
+export const DEBUG_CACHE_MODES = [
+  { value: "auto", label: "用缓存" },
+  { value: "only", label: "只读缓存" },
+  { value: "refresh", label: "忽略缓存" },
+];
+
 // ---------------------------------------------------------------- 结果与对比
 
 const result = ref(null);
@@ -25,6 +41,15 @@ const compare = ref({ prev: null, history: [] });
 watch(result, (cur, old) => {
   compare.value = nextCompareState(compare.value, old, cur);
 });
+
+// 会话源（工作台的编辑载体）：列表页经 getDetail 填充、编辑弹框在跳工作台前
+// 填**表单快照**（深拷贝——工作台里的规则编辑不穿透弹框）。不落库，保存走
+// 各自的 saveSource
+const source = ref(null);
+
+function setSource(s) {
+  source.value = s ? JSON.parse(JSON.stringify(s)) : null;
+}
 
 // ---------------------------------------------------------------- 运行在途
 
@@ -214,7 +239,7 @@ async function startRun({ source, key, confirmPush: askPush }) {
 export function useDebugSession() {
   return {
     // 状态
-    result, compare, running, elapsed, budget,
+    source, setSource, result, compare, running, elapsed, budget,
     channel, target, query, cacheMode, host, saveHost,
     env, envLoading, envTitle,
     preflightState, checking, pushed,

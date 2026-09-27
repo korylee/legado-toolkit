@@ -1,6 +1,7 @@
 <script setup>
 // 新建 / 编辑书源：对话框形态。跳独立页面会丢掉列表的筛选和分页状态。
 import { ref, computed, watch, nextTick } from "vue";
+import { useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { api, subscribeJob } from "../api/client";
 import { getDetail, listTags, saveSource, sourceExists } from "../api/sources";
@@ -14,11 +15,10 @@ import { useMobile } from "../composables/useMobile";
 // 步骤名 → 中文的**唯一**一份（调试抽屉共用），别再在本组件里写第二份
 import { STEP_LABELS } from "../utils/steps";
 // 调试会话 + key 拼装（ux-debug-session 第二期）
-import { useDebugSession } from "../composables/useDebugSession";
+import { useDebugSession, DEBUG_TARGETS, DEBUG_CACHE_MODES } from "../composables/useDebugSession";
 import { debugKeyOf, rerunKey } from "../utils/debugKeys";
 // 生成后验证的新鲜度判定（strengthen-src）：分步过期判据的唯一一份
 import { snapshotRuleGroups, staleVerifySteps as computeStaleSteps } from "../utils/verifyFreshness";
-import RuleDebugDrawer from "./RuleDebugDrawer.vue";
 
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
@@ -51,6 +51,7 @@ const {
   preflightState: appPreflightState, checking: appChecking, pushed,
   startRun, cancelRun: cancelDebugRun, loadEnvironment, runPreflight,
 } = useDebugSession();
+const router = useRouter();
 
 //: 页面缓存策略（每次调试选，不落 localStorage）。
 //
@@ -59,11 +60,6 @@ const {
 // 三个值对应 core.fetch 的 CACHE_*，后端按同一份枚举校验。**卡片上不解释
 // 这三档的差别**：抽屉里每一页都标着「页面抓取于 X / 来自缓存」，那才是它该在
 // 的地方——同一件事只写一处（AGENTS #10）。
-const DEBUG_CACHE_MODES = [
-  { value: "auto", label: "用缓存" },
-  { value: "only", label: "只读缓存" },
-  { value: "refresh", label: "忽略缓存" },
-];
 // 调试目标 → App 的 key 形态。分派依据是 Legado 的 `Debug.kt:236-279`
 // （那个 when 才是真正的规则），交互照 App 调试界面的 chip 行
 // （`BookSourceDebugScreen.kt:174-182`：一排 ToggleChip 选目标 + 一个输入框）。
@@ -76,13 +72,6 @@ const DEBUG_CACHE_MODES = [
 //: debugKey），「可留空」写进各自 placeholder 就够；留空之后跑什么不复述——
 //: 三格是同一个答案。例外是「发现」：留空落回配置里的 `exploreUrl` 而不是
 //: 搜索，说不到一起，所以由它自己写
-const DEBUG_TARGETS = [
-  { value: "search", label: "搜索", hint: "关键词，如 我的" },
-  { value: "explore", label: "发现", hint: "留空则用配置里的 exploreUrl" },
-  { value: "info", label: "详情", hint: "详情页 URL，可留空" },
-  { value: "toc", label: "目录", hint: "目录页 URL，可留空" },
-  { value: "content", label: "正文", hint: "正文页 URL，可留空" },
-];
 const currentTarget = computed(
   () => DEBUG_TARGETS.find((t) => t.value === debugTarget.value) || DEBUG_TARGETS[0],
 );
@@ -122,8 +111,6 @@ const hideExplore = computed({
 
 const testStale = ref(false);      // 规则已改动，结果过期
 
-const debugVisible = ref(false);   // 调试抽屉
-const debugStep = ref("");         // 抽屉打开时定位到哪一步
 const generationError = ref("");   // 自动生成失败原因，随调试材料一起展示
 const systemTags = ref([]);
 const manualStatus = ref("");
@@ -443,10 +430,8 @@ watch(() => [props.modelValue, props.sourceUrl], async ([show, url]) => {
   if (!show) return;
   testResult.value = null;
   generationError.value = "";
-  // 关弹窗时抽屉会被 destroy-on-close 卸载，但 debugVisible 会留在 true，
   // 下次打开就会自己弹出来；而且挂载时 modelValue 已是 true，
   // 抽屉里那个没有 immediate 的 watch 不触发，:initial-step 会被忽略
-  debugVisible.value = false;
   appPreflightState.value = null;   // 预检结果是上一次会话的，别带到这次
   pushed.value = "";
   // 同理：本组件在 SourcesView 里是常驻挂载、从不卸载的，isDuplicate 会跨
@@ -513,12 +498,12 @@ async function applyGenerated(result) {
   debugChannel.value = "jvm";
   debugTarget.value = "search";
   debugQuery.value = String(result.keyword || "").trim();
-  debugStep.value = "search";
   activeTab.value = "rules";
   activeRuleTab.value = "search";
   syncRawFromForm();
   expandTestFailures(result.verify || null);
-  debugVisible.value = true;
+  setSource(form.value);
+  router.push({ name: "debug", params: { url: encodeURIComponent(form.value.bookSourceUrl || "") } });
   ElMessage.success("已生成候选源，已打开调试工作台；确认规则后再保存");
   await nextTick();
   if (!testResult.value) await debugRun();
@@ -548,12 +533,15 @@ async function openDebugForGenerationFailure(reason) {
   testResult.value = null;
   testStale.value = false;
   debugChannel.value = "jvm";
+  // 打开抽屉的旧路径已换成工作台路由（见 openDebug）
   debugTarget.value = "search";
   debugQuery.value = keywordFromSearchUrl(url);
-  debugStep.value = "search";
   activeTab.value = "rules";
   activeRuleTab.value = "search";
-  debugVisible.value = true;
+  if (url) {
+    setSource(form.value);
+    router.push({ name: "debug", params: { url: encodeURIComponent(url) } });
+  }
   await nextTick();
   if (url) await debugRun();
 }
@@ -722,8 +710,11 @@ function onApplyRule({ field, rule }) {
 }
 
 function openDebug(step) {
-  debugStep.value = step || "";
-  debugVisible.value = true;
+  // 会话接管（ux-debug-shell）：把当前表单快照进会话（深拷贝，工作台里的
+  // 编辑不穿透弹框），跳工作台路由。失败与成功同路——那里有诊断区
+  setSource(form.value);
+  const url = encodeURIComponent(form.value.bookSourceUrl || "");
+  router.push({ name: "debug", params: { url }, query: step ? { step } : {} });
 }
 
 // 抽屉请求跳到某个页签。两种形态：
@@ -731,15 +722,6 @@ function openDebug(step) {
 //   - 对象 {tab, ruleTab}：失败步骤跳转，可以一路定位到规则子页签
 // **这里绝不做任何写入**：改类型是写操作，必须走用户明确确认的保存流程，
 // 此处只负责把人送过去。
-function onDebugGoto(target) {
-  debugVisible.value = false;
-  if (!target || typeof target === "string") {
-    activeTab.value = target || "basic";
-    return;
-  }
-  if (target.tab) activeTab.value = target.tab;
-  if (target.ruleTab) activeRuleTab.value = target.ruleTab;
-}
 
 //: 抽屉的「用本页重放」要按步骤取当前表单里的规则——所以改完规则不用保存、
 //: 不用重跑链路，直接重放就能看判定变没变
@@ -1308,19 +1290,7 @@ async function doSave(s) {
       <el-button type="primary" @click="save">保存</el-button>
     </template>
 
-    <!-- 抽屉常驻挂载，靠 v-model 控制显隐。**不要改成 v-if**：抽屉里的 watch 没有
-         immediate，initialStep 只在 modelValue 由 false → true 时生效，用 v-if 会让
-         首帧落到 steps[0] 而忽略 :initial-step -->
-    <RuleDebugDrawer v-model="debugVisible" :result="testResult"
-                     :prev-result="compareState.prev"
-                     :initial-step="debugStep" :rules="ruleByStep"
-                     :entry-error="generationError"
-                     :source-type="Number(form.bookSourceType) || 0"
-                     :enabled-cookie-jar="!!form.enabledCookieJar"
-                     :source="form"
-                     :rerunning="appDebugging"
-                     @goto="onDebugGoto" @apply-rule="onApplyRule"
-                     @rerun-from="rerunFromStep" />
+
   </el-dialog>
 </template>
 
