@@ -98,28 +98,6 @@
   组件里不再有调试状态的第二写者；提示逻辑有可跑断言。
 指针：frontend/src/components/SourceEditDialog.vue，frontend/src/components/RuleDebugDrawer.vue，frontend/src/composables/useMobile.js
 
-### 条目：ux-debug-shell · 工作台换壳：全页三栏 + 入口统一（第三、四期）
-状态：done
-依赖：ux-debug-session
-优先级：P1
-背景：2026-09-26 拍板、2026-09-27 交付：抽屉本体**逐字抽出**为
-  `DebugWorkbench.vue`（运行态改读 useDebugSession，编辑上下文留 props），
-  `RuleDebugDrawer` 变薄壳暂留对照；新路由 `#/debug/:url` 挂工作台页（运行入口 +
-  保存 + DebugWorkbench），key 进 URL query 可刷新/分享；列表行与手机卡加「调试」
-  直达，弹框的查看证据/生成流程改为**会话交接源快照后跳路由**。真浏览器实测：
-  按 URL 拉源、全链 63 事件、定层/步骤/规则编辑/候选/证据全渲染，等待态与预算
-  在途可见。
-约束：轻量编辑起步——规则编辑只写会话源快照，「应用并重跑」= 写快照 + 触发
-  run；保存沿用加载时拆分的标签。**第四期收尾（未完）**：旧壳删除后改掉指
-  RuleDebugDrawer.vue / SourceEditDialog.vue 的 TODO 与 lessons 指针
-  （strengthen-src / strengthen-hint / unknown-outlet / fe-drawer-tests / proj-3）；
-  三栏布局（规则编辑独立右栏）与草稿/应用层删除在工作台实测后另议。
-验收：列表页到调试 ≤ 一次点击（实测）；改规则→重跑→对比在工作台内闭环（实测）；
-  全量 1008 + node 47 绿、构建过、文案机检无新增。看 git log（36af8dc）。
-指针：frontend/src/views/DebugWorkbenchView.vue，frontend/src/components/DebugWorkbench.vue，frontend/src/router/index.js
-
-## 2 · 按需
-
 ### 条目：jvm-worker-roadmap · JVM 调试与校验的推荐拆分路线
 状态：open
 依赖：无
@@ -709,6 +687,28 @@
   无应答→失败 / 相对补全 / 绝对直通 / 空 tag 原样 / 锚点形态）；两处变异（判据恒
   null / 解析撤掉）各一次 Gradle 跑红；Python 全量 1000 条绿。看 git log（18b79ab）。
 指针：appservice/test/io/legado/app/service/BrowserBridge.kt，appservice/test/io/legado/app/service/ShadowBackstageWebView.kt，appservice/test/io/legado/app/service/WebViewNavigationTest.kt
+
+### 条目：ux-debug-shell · 工作台换壳：全页三栏 + 入口统一（第三、四期）
+状态：done
+依赖：ux-debug-session
+优先级：P1
+背景：2026-09-26 拍板、2026-09-27 交付：抽屉本体**逐字抽出**为
+  `DebugWorkbench.vue`（运行态改读 useDebugSession，编辑上下文留 props），
+  `RuleDebugDrawer` 变薄壳暂留对照；新路由 `#/debug/:url` 挂工作台页（运行入口 +
+  保存 + DebugWorkbench），key 进 URL query 可刷新/分享；列表行与手机卡加「调试」
+  直达，弹框的查看证据/生成流程改为**会话交接源快照后跳路由**。真浏览器实测：
+  按 URL 拉源、全链 63 事件、定层/步骤/规则编辑/候选/证据全渲染，等待态与预算
+  在途可见。
+约束：轻量编辑起步——规则编辑只写会话源快照，「应用并重跑」= 写快照 + 触发
+  run；保存沿用加载时拆分的标签。**第四期收尾（未完）**：旧壳删除后改掉指
+  RuleDebugDrawer.vue / SourceEditDialog.vue 的 TODO 与 lessons 指针
+  （strengthen-src / strengthen-hint / unknown-outlet / fe-drawer-tests / proj-3）；
+  三栏布局（规则编辑独立右栏）与草稿/应用层删除在工作台实测后另议。
+验收：列表页到调试 ≤ 一次点击（实测）；改规则→重跑→对比在工作台内闭环（实测）；
+  全量 1008 + node 47 绿、构建过、文案机检无新增。看 git log（36af8dc）。
+指针：frontend/src/views/DebugWorkbenchView.vue，frontend/src/components/DebugWorkbench.vue，frontend/src/router/index.js
+
+## 2 · 按需
 
 ### 条目：jvm-dump-gate · 常驻选路的 dump 对拍把模块目录当成仓库根
 状态：done
