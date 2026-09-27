@@ -79,69 +79,6 @@
     （`core/rules/replayer.py:55-66`），缺的是逐词契约测试与 App 侧末段回填分支
     （`DebugService.kt:519-526,536-541`）。
 
-### 条目：debug-false-pass · 空 content 规则的假 pass 与段失败的下一步
-状态：todo
-依赖：无
-优先级：P1
-背景：content 规则为空时 App 短路（`WebBook.getContentAwait` 直接返回章节链接、不抓
-  页面），`build_steps` 按事件判 pass。2026-09-26 实测：库里口袋漫画的记录（09-23
-  更新后 content 规则已丢）调试正文段 0.1 秒「通过」，整页没抓、侧车
-  `engine_html_urls=0`——看着一切正常。同族：渲染失败只留一段 Java 异常文本，没有
-  下一步。
-约束：空规则的段显式标「没验（规则为空）」，不许落成 pass——判据在 `build_steps`
-  一层做，不动上游；段失败按原因给可执行下一步（与 strengthen-hint 同一纪律：只指向
-  动作，如「先试最新章节」「在浏览器 profile 里人工过一次」）；原因要一路走到用户
-  眼前（AGENTS #4）。
-验收：空 content 规则的该段显示「没验」而非通过；渲染超时/失败的段带下一步动作；
-  两者都有断言钉住（改行为回退断言会红）。
-指针：core/app_debug.py，appservice/test/io/legado/app/service/ShadowBackstageWebView.kt，lessons §八十
-
-### 条目：jvm-debug-budget · 调试的墙钟预算分层
-状态：todo
-依赖：无
-优先级：P1
-背景：整链超时与桥的渲染超时同为 60 秒（前端写死传 60），webView 段的渲染预算永远先
-  被整链掐死；流跑完之后还有命中回填（30 秒预算）与补抓页面，都在用户感知的「一次
-  调试」之外——2026-09-26 实测单段正文重跑总墙钟 75.5 秒，其中渲染 60、拉起 13。
-约束：渲染预算从剩余整链预算里取（或 webView 段自动上调整链超时），两者不得同值
-  互掐；调试超时的默认值与上下界按 AGENTS #8 收进 `core/settings_store`，前端不再
-  写死；预算口径摆到调试入口（同跑批弹框：代价由事实说）；补抓的记账口径在
-  site-req-opt ④，本条不重复。
-验收：webView 源调试不再因「渲染预算=整链预算」提前判超时；开跑前能看到预算口径；
-  默认值只在 settings_store 一处。
-指针：core/jvm_debug.py，core/settings_store.py，appservice/test/io/legado/app/service/BrowserBridge.kt，frontend/src/components/SourceEditDialog.vue
-
-### 条目：ux-debug-wait · 调试等待态可见可取消
-状态：todo
-依赖：无
-优先级：P1
-背景：调试是一次普通 fetch（无超时、无取消、无进度），等待期只有按钮转圈；事件流
-  明明逐行 flush 落盘（DebugService 逐行写 NDJSON），Python 却只在进程结束后一次性
-  读。2026-09-26 实测最坏组合（回落 Gradle + 渲染等满预算）用户要盯转圈约两分钟。
-约束：小步不依赖 jobs 化：等待区显示已等待秒数与预算口径；前端加 AbortController
-  让用户能松手（后端取消另立口径，本条不装完成）。完整版（排队可见、阶段状态、
-  服务端取消、NDJSON tail 成实时段事件）与 jvm-scheduler-policy 合流，别做两套。
-验收：调试进行中能看到已等待时长与当前阶段（至少有墙钟秒数）；点取消后界面立即
-  恢复可操作，不再锁到超时。
-指针：frontend/src/components/SourceEditDialog.vue，frontend/src/api/client.js，core/jvm_debug.py，backend/jobs/runner.py
-
-### 条目：ux-debug-loop · 重跑不清场，上一份结果可对比
-状态：todo
-依赖：无
-优先级：P1
-背景：重跑第一行就 `testResult.value = null`：上一次的步骤、命中的 DOM、抽屉子页签
-  全部清零，重跑完成前抽屉空转——「改一点 → 跑 → 和上次比」的最后一环只能靠记忆。
-  另外成功自动开抽屉、失败只留在卡片上，而失败恰恰最需要抽屉的诊断区。
-约束：结果容器一次定型为「最近 K 次运行」（K 小、内存友好：历史只留步骤摘要与
-  结论，完整 HTML 只留最近一份）——先做两份再改数组是二次改形状；对比取最后两份，
-  逐段标注「与上次相同 / 变了 / 新失败」，**对比键是（段名, URL）**：URL 变了标
-  「换了目标」，不与「值变了」混。失败与成功同样自动进抽屉；默认子页签随 verdict
-  走（失败→诊断，成功→提取值），事件流与源码按需展开。过期判定与 strengthen-src
-  是同一份事实（改了哪段规则哪段过期），别做两套。
-验收：重跑完成后上次结论仍可见且有差异标记（换了 URL 的段单独可辨）；失败步骤
-  直达诊断区；改规则→重跑→对比不丢中间状态；有断言钉住「重跑不清空结果」。
-指针：frontend/src/components/SourceEditDialog.vue，frontend/src/components/RuleDebugDrawer.vue
-
 ### 条目：ux-debug-session · 调试状态收拢为 useDebugSession（第二期）
 状态：todo
 依赖：ux-debug-loop, ux-debug-wait
@@ -683,6 +620,75 @@
 
 > 已交付的事项只在这里留一行指针——**机制看 lessons，细节看 `git log`**（AGENTS #10）。
 > 这一区只允许 `状态：done`。
+
+### 条目：debug-false-pass · 空 content 规则的假 pass 与段失败的下一步
+状态：done
+依赖：无
+优先级：P1
+背景：2026-09-26 交付：`build_steps` 对「⇒正文规则为空」的短路段判
+  **unknown** 并给可执行原因（原判据下它跟着「︽正文页解析完成」落成 0.1 秒假
+  pass，实测：管理库 content 规则丢失后调试正文段「通过」而整页没抓）；
+  `webview_render_failed` 的失败段带下一步附注（先试最新章节 / jvm_login.py）。
+  端到端：空规则正文段由 pass 变 unknown。看 git log（1ab4a19）。
+约束：空规则的段显式标「没验（规则为空）」，不许落成 pass——判据在 `build_steps`
+  一层做，不动上游；段失败按原因给可执行下一步（与 strengthen-hint 同一纪律：只指向
+  动作，如「先试最新章节」「在浏览器 profile 里人工过一次」）；原因要一路走到用户
+  眼前（AGENTS #4）。
+验收：空 content 规则的该段显示「没验」而非通过；渲染超时/失败的段带下一步动作；
+  两者都有断言钉住（改行为回退断言会红）。
+指针：core/app_debug.py，appservice/test/io/legado/app/service/ShadowBackstageWebView.kt，lessons §八十
+
+### 条目：jvm-debug-budget · 调试的墙钟预算分层
+状态：done
+依赖：无
+优先级：P1
+背景：2026-09-26 交付：整链预算收进 `settings_store`（`debug.timeout`，
+  默认 90 > 桥的渲染上限 60、区间 30–300，注释写明为何不得同值）；`/rules/jvm-debug`
+  不传参吃设置、显式越界 400 不静默夹；`/app-debug` 同源同值；前端不再写死 60，
+  预算口径摆在调试入口（同跑批弹框：代价由事实说）。全量 1008 绿。看 git log（06d1fc1）。
+  **有意不做**：渲染预算按剩余整链预算动态取需要改 App 侧字段，实测渲染 0.9s 后
+  收益存疑，留给真出现「合法渲染吃满 60s」的靶子再议。
+约束：渲染预算从剩余整链预算里取（或 webView 段自动上调整链超时），两者不得同值
+  互掐；调试超时的默认值与上下界按 AGENTS #8 收进 `core/settings_store`，前端不再
+  写死；预算口径摆到调试入口（同跑批弹框：代价由事实说）；补抓的记账口径在
+  site-req-opt ④，本条不重复。
+验收：webView 源调试不再因「渲染预算=整链预算」提前判超时；开跑前能看到预算口径；
+  默认值只在 settings_store 一处。
+指针：core/jvm_debug.py，core/settings_store.py，appservice/test/io/legado/app/service/BrowserBridge.kt，frontend/src/components/SourceEditDialog.vue
+
+### 条目：ux-debug-wait · 调试等待态可见可取消
+状态：done
+依赖：无
+优先级：P1
+背景：2026-09-26 交付：等待区显示已等待秒数与预算；AbortController「取消
+  等待」如实命名——只断前端的等，后端 lane 那次仍跑完（两条调试通道共用）。
+  完整版（排队可见、阶段状态、服务端取消）仍归 jvm-scheduler-policy。看 git log
+  （210e3e3）。
+约束：小步不依赖 jobs 化：等待区显示已等待秒数与预算口径；前端加 AbortController
+  让用户能松手（后端取消另立口径，本条不装完成）。完整版（排队可见、阶段状态、
+  服务端取消、NDJSON tail 成实时段事件）与 jvm-scheduler-policy 合流，别做两套。
+验收：调试进行中能看到已等待时长与当前阶段（至少有墙钟秒数）；点取消后界面立即
+  恢复可操作，不再锁到超时。
+指针：frontend/src/components/SourceEditDialog.vue，frontend/src/api/client.js，core/jvm_debug.py，backend/jobs/runner.py
+
+### 条目：ux-debug-loop · 重跑不清场，上一份结果可对比
+状态：done
+依赖：无
+优先级：P1
+背景：2026-09-26 交付：重跑不清场——重跑期间旧结果照常显示（按钮在途
+  禁用），新结果到来后旧份精简为对比基线；页签逐段标「相同 / 变了 / 新失败 /
+  换了目标 / 新出现」+ 汇总行，**对比键（段名, URL）**；失败与成功同样自动进
+  抽屉，失败时滚到诊断区。判据在 `utils/debugCompare.js`（node 测试 42 条绿），
+  历史容器一次定型最近 K=5 次。看 git log（210e3e3）。
+约束：结果容器一次定型为「最近 K 次运行」（K 小、内存友好：历史只留步骤摘要与
+  结论，完整 HTML 只留最近一份）——先做两份再改数组是二次改形状；对比取最后两份，
+  逐段标注「与上次相同 / 变了 / 新失败」，**对比键是（段名, URL）**：URL 变了标
+  「换了目标」，不与「值变了」混。失败与成功同样自动进抽屉；默认子页签随 verdict
+  走（失败→诊断，成功→提取值），事件流与源码按需展开。过期判定与 strengthen-src
+  是同一份事实（改了哪段规则哪段过期），别做两套。
+验收：重跑完成后上次结论仍可见且有差异标记（换了 URL 的段单独可辨）；失败步骤
+  直达诊断区；改规则→重跑→对比不丢中间状态；有断言钉住「重跑不清空结果」。
+指针：frontend/src/components/SourceEditDialog.vue，frontend/src/components/RuleDebugDrawer.vue
 
 ### 条目：jvm-webview-nav · webView 段的相对地址静默等满渲染预算
 状态：done
