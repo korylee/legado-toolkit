@@ -1063,10 +1063,6 @@ function copyPage() {
              在 App 结果下没有意义。只有本地回放的 values 才是真正取到的值 -->
         <el-tab-pane v-if="events.length" name="events">
           <template #label>调试事件 ({{ events.length }})</template>
-          <p class="muted" style="margin: 6px 0">
-            App 推来的原始事件流，行首的 <span class="mono">[mm:ss.SSS]</span>
-            是 App 自己记的相对耗时。
-          </p>
           <div v-for="(e, i) in events" :key="i" class="debug-event">{{ e.text }}</div>
         </el-tab-pane>
 
@@ -1079,9 +1075,6 @@ function copyPage() {
             <span>标签占比 {{ formatRatio(current.evidence.tag_ratio) }}</span>
             <span v-if="current.evidence.noise_hit">噪声命中「{{ current.evidence.noise_hit }}」</span>
           </div>
-          <p class="muted" style="margin: 6px 0">
-            这里是规则<b>实际取到的值</b>。正文规则通常只有 1 条、就是全文。
-          </p>
           <div v-for="(v, i) in (current ? current.values : [])" :key="i" class="debug-value">
             <div class="debug-value-idx">
               #{{ i + 1 }}（{{ v.length }} 字符）
@@ -1099,9 +1092,6 @@ function copyPage() {
         </el-tab-pane>
 
         <el-tab-pane label="命中源码" name="matched">
-          <p class="muted" style="margin: 6px 0">
-            当前规则<b>选中了哪块 DOM</b>。改规则时看这里，比在整页里猜快得多。
-          </p>
           <p v-if="matchedFrom" class="muted" style="margin: 6px 0">
             <el-tag size="small" :type="matchedFromType">{{ matchedFrom }}</el-tag>
             <span v-if="matchedFrom === '本地调试'" style="margin-left: 6px">

@@ -5,8 +5,6 @@ import { ElMessage, ElMessageBox } from "element-plus";
 import { api, subscribeJob } from "../api/client";
 import { getDetail, listTags, saveSource, sourceExists } from "../api/sources";
 import { appDebug, appPreflight, jvmDebug } from "../api/rules";
-import { getSettings } from "../api/settings";
-import { jvmReadiness } from "../api/jvm.js";
 import { jobFailReason } from "../utils/jobs";
 import {
   canonicalTag, ensureTagMeta, isQualityTag, isStatusTag,
@@ -15,8 +13,9 @@ import {
 import { useMobile } from "../composables/useMobile";
 // 步骤名 → 中文的**唯一**一份（调试抽屉共用），别再在本组件里写第二份
 import { STEP_LABELS } from "../utils/steps";
-// 重跑不清场的对比状态（ux-debug-loop）：基线滚动判据在 utils/debugCompare
-import { nextCompareState } from "../utils/debugCompare";
+// 调试会话 + key 拼装（ux-debug-session 第二期）
+import { useDebugSession } from "../composables/useDebugSession";
+import { debugKeyOf, rerunKey } from "../utils/debugKeys";
 // 生成后验证的新鲜度判定（strengthen-src）：分步过期判据的唯一一份
 import { snapshotRuleGroups, staleVerifySteps as computeStaleSteps } from "../utils/verifyFreshness";
 import RuleDebugDrawer from "./RuleDebugDrawer.vue";
@@ -39,44 +38,19 @@ const visible = computed({
 const isDuplicate = ref(false);
 // isNew 有两个真值来源：真正的新建（无 sourceUrl），以及从编辑态切过来的「另存」。
 const isNew = computed(() => isDuplicate.value || !props.sourceUrl);
-// App 的 IP 存 localStorage：它基本不变，每次打开弹窗重填一遍没有意义。
-// 键名带 legado 前缀，避免同域下与别的应用串味。
-const APP_HOST_STORAGE_KEY = "legado.appHost";
-// 读回上次填过的 IP。隐私模式等 localStorage 不可用的场景静默降级成空值
-function readAppHost() {
-  try { return localStorage.getItem(APP_HOST_STORAGE_KEY) || ""; } catch (e) { return ""; }
-}
-
 const loading = ref(false);
-const appHost = ref(readAppHost());  // App 的 IP（连 App 调试用）
-const appDebugging = ref(false);
-// 等待态（ux-debug-wait 小步）：秒表 + 可松手。AbortController 只断**前端的等**，
-// 后端那一次调试仍会跑完（lane/锁的设计如此），所以按钮叫「取消等待」不叫「取消」
-const runElapsed = ref(0);
-let runTicker = 0;
-let runAbort = null;
-const CANCEL_WAIT_NOTE = "已取消等待；后端那一次调试仍会跑完，只是不再等它";
-
-function abortNote(e) {
-  return e && e.name === "AbortError" ? CANCEL_WAIT_NOTE : String(e.message);
-}
-
-function cancelDebugRun() {
-  if (runAbort) runAbort.abort();
-}
-const jvmEnv = ref(null);
-// 调试预算口径（debug.timeout）：默认值只在后端 settings_store（AGENTS #8），
-// 这里只读来显示；请求不传 timeout，由后端取同一份
-const debugBudget = ref(null);
-const compareState = ref({ prev: null, history: [] });
-const jvmEnvLoading = ref(false);
-const jvmEnvTitle = computed(() => {
-  if (jvmEnvLoading.value) return "正在检查本机引擎环境…";
-  return jvmEnv.value?.ok ? "本机引擎可用" : "本机引擎不可用";
-});
-//: 调试通道：**默认本机引擎**（App 的源码跑在本机，不填 IP、不推送）。连 App 那条
-//: 留着——登录态、网络出口、WebView 都在手机上，那是它不可替代的地方
-const debugChannel = ref("jvm");
+// 调试会话状态（ux-debug-session）：**每份调试状态只有一个写者**（composables/
+// useDebugSession），这里按旧名解构，模板与既有逻辑零改动。变量名保持原样的
+// 代价是「本机引擎 jvmEnv」这类命名没有随通道改名——留给换壳期一并修
+const {
+  result: testResult, compare: compareState, running: appDebugging,
+  elapsed: runElapsed, budget: debugBudget,
+  channel: debugChannel, target: debugTarget, query: debugQuery,
+  cacheMode: appCacheMode, host: appHost,
+  env: jvmEnv, envLoading: jvmEnvLoading, envTitle: jvmEnvTitle,
+  preflightState: appPreflightState, checking: appChecking, pushed,
+  startRun, cancelRun: cancelDebugRun, loadEnvironment, runPreflight,
+} = useDebugSession();
 
 //: 页面缓存策略（每次调试选，不落 localStorage）。
 //
@@ -90,10 +64,6 @@ const DEBUG_CACHE_MODES = [
   { value: "only", label: "只读缓存" },
   { value: "refresh", label: "忽略缓存" },
 ];
-const appCacheMode = ref("auto");
-// 预检结果：null=还没测过 / {state: ready|missing|unreachable, error}
-const appPreflightState = ref(null);
-const appChecking = ref(false);
 // 调试目标 → App 的 key 形态。分派依据是 Legado 的 `Debug.kt:236-279`
 // （那个 when 才是真正的规则），交互照 App 调试界面的 chip 行
 // （`BookSourceDebugScreen.kt:174-182`：一排 ToggleChip 选目标 + 一个输入框）。
@@ -113,8 +83,6 @@ const DEBUG_TARGETS = [
   { value: "toc", label: "目录", hint: "目录页 URL，可留空" },
   { value: "content", label: "正文", hint: "正文页 URL，可留空" },
 ];
-const debugTarget = ref("search");
-const debugQuery = ref("");
 const currentTarget = computed(
   () => DEBUG_TARGETS.find((t) => t.value === debugTarget.value) || DEBUG_TARGETS[0],
 );
@@ -129,48 +97,10 @@ const debugHint = computed(() => {
   return currentTarget.value.hint;
 });
 
-/** 目标 + 输入 → App 认的 key。前缀构造照抄 App 的 `ViewModel:91-97`。 */
-function buildDebugKey() {
-  const q = debugQuery.value.trim();
-  switch (debugTarget.value) {
-    // **发现页 URL 直接从配置取**——`exploreUrl` 就是它，库里 2659/3861 条源都有。
-    // 让用户再抄一遍是重复劳动，而且抄错了就是一次静默失败（App 对认不出
-    // 的目标是**无响应**，最难排查）。留空时才回落到输入框
-    case "explore": {
-      const url = q || String(form.value.exploreUrl || "").trim();
-      return url ? `发现::${url}` : "";
-    }
-    // 幂等去前缀：用户手抄 URL 时常把 ++ / -- 一起带上，不去重就会拼成 ++++。
-    // 只去**一次**（等价 Kotlin 的 removePrefix），写成 /^\++/ 会把真想要的
-    // `+++url` 也一起吃掉、改成别的意思。
-    case "toc": return q ? `++${q.replace(/^\+\+/, "")}` : "";
-    case "content": return q ? `--${q.replace(/^--/, "")}` : "";
-    case "info": return q;              // 详情页就是裸 URL，App 靠 isAbsUrl 认它
-    // 搜索：空则用默认关键词。**详情/目录/正文留空时也落到这里**——见下
-    default: return q || "我";
-  }
-}
-
-/**
- * 交给 App 的调试 key。
- *
- * 与 `buildDebugKey` 的区别只有一处：**「详情/目录/正文」留空时不报错，而是退回
- * 搜索入口**。
- *
- * 依据是 App 自己的行为（`Debug.kt:279-297` 的 exploreDebug / searchDebug）：
- * 拿到入口后它会**自动沿规则链往下跑**（取第一本书 → 详情 → 目录 → 正文），
- * 用户从来不需要手填下游 URL。我们原来要求手填三者之一，等于把引擎该算出来的
- * 东西交给用户——而 App 里根本没有这一步。
- *
- * 退回搜索之后，调试抽屉照样会把每一步摊开，所以「想看某一步」的信息一点不丢。
- * 真的想**从中间切入**（手里已经有一本书的 URL）时，填上它即可，两条路都在。
- */
+// key 拼装在 utils/debugKeys（纯函数、有测试）：五类形态 + 手抄前缀幂等 +
+// 「详情/目录/正文留空退回搜索入口」（App 自己会沿链往下跑）。
 function debugKey() {
-  const q = debugQuery.value.trim();
-  if (!q && ["info", "toc", "content"].includes(debugTarget.value)) {
-    return "我";        // 搜索入口，App 会自己往下串
-  }
-  return buildDebugKey();
+  return debugKeyOf(debugTarget.value, debugQuery.value, form.value.exploreUrl);
 }
 //: 这个源**有没有发现配置**。判断口径与 `tabDot("discover")` 一致。
 const hasExploreConfig = computed(
@@ -190,12 +120,8 @@ const hideExplore = computed({
   set: (v) => { form.value.enabledExplore = !v; },
 });
 
-const testResult = ref(null);
 const testStale = ref(false);      // 规则已改动，结果过期
-// 新结果到来时滚动对比基线（ux-debug-loop）：错误体不覆盖基线，判据在 utils
-watch(testResult, (cur, old) => {
-  compareState.value = nextCompareState(compareState.value, old, cur);
-});
+
 const debugVisible = ref(false);   // 调试抽屉
 const debugStep = ref("");         // 抽屉打开时定位到哪一步
 const generationError = ref("");   // 自动生成失败原因，随调试材料一起展示
@@ -250,17 +176,7 @@ function rerunStaleStep(stepName) {
 }
 let quickStop = null;
 
-// App IP 输入后立刻回写 localStorage（存 trim 后的值）。清空则删掉键——
-// 下次打开就是干净的空值，点「连 App 调试」会正常给出「请先填 App 的 IP」。
-watch(appHost, (value) => {
-  const host = String(value || "").trim();
-  try {
-    if (host) localStorage.setItem(APP_HOST_STORAGE_KEY, host);
-    else localStorage.removeItem(APP_HOST_STORAGE_KEY);
-  } catch (e) {
-    // 写不进去不影响本次调试，只是下次要重填
-  }
-});
+
 
 const activeTab = ref("quick");
 const activeRuleTab = ref("search");
@@ -720,21 +636,8 @@ async function quickGenerate() {
 // 跑不了 JS 规则的源更是只有 App 那边验得了（Rhino / cookie / webView 全在 App 里）。
 // 结果**直接塞进 testResult**——App 调试返回的形状与离线回放一致，
 // 所以卡片与调试抽屉零改动。
-async function loadJvmEnvironment() {
-  jvmEnvLoading.value = true;
-  // 预算口径与通道无关（连 App 那条也吃同一个值），打开弹框时一并拉来显示；
-  // 拉不到就不显示，请求侧后端自会取同一份
-  getSettings().then((s) => {
-    debugBudget.value = (s.values.debug || {}).timeout
-      ?? s.defaults?.debug?.timeout ?? null;
-  }).catch(() => {});
-  try {
-    jvmEnv.value = await jvmReadiness();
-  } catch (e) {
-    jvmEnv.value = { ok: false, checks: [{ name: "环境就绪接口", hint: "环境检查失败：" + e }] };
-  } finally {
-    jvmEnvLoading.value = false;
-  }
+function loadJvmEnvironment() {
+  return loadEnvironment();
 }
 
 async function debugRun(keyOverride = "", rerunStep = "") {
@@ -757,102 +660,27 @@ async function debugRun(keyOverride = "", rerunStep = "") {
         ? `${first.name}：${first.hint || "环境自检未通过"}`
         : "正在检查本机引擎环境，请稍候");
     }
-    // 本机引擎：**不填 IP、不推送**；调试前已自动自检，它跑的就是 App 的源码。
-    // 返回值与连 App 那条同形状，只是 source 是 "jvm"
-    appDebugging.value = true;
-    runElapsed.value = 0;
-    runAbort = new AbortController();
-    runTicker = window.setInterval(() => { runElapsed.value += 1; }, 1000);
-    try {
-      const r = await jvmDebug(form.value, key, null, "", appCacheMode.value,
-                              runAbort.signal);
-      testResult.value = r && r.error ? { error: r.error } : r;
-    } catch (e) {
-      testResult.value = { error: abortNote(e) };
-    } finally {
-      window.clearInterval(runTicker);
-      runAbort = null;
-      appDebugging.value = false;
-    }
-    expandTestFailures(testResult.value);
-    // 失败与成功同样进抽屉：失败恰恰最需要诊断区（ux-debug-loop）
-    if (testResult.value) openDebug(rerunStep);
-    return;
+  } else if (!appHost.value.trim()) {
+    return ElMessage.warning("请先填 App 的 IP（App 通知栏里有）");
   }
-  const host = appHost.value.trim();
-  if (!host) return ElMessage.warning("请先填 App 的 IP（App 通知栏里有）");
-  appDebugging.value = true;
-  runElapsed.value = 0;
-  runAbort = new AbortController();
-  runTicker = window.setInterval(() => { runElapsed.value += 1; }, 1000);
-  pushed.value = "";
-  try {
-    // **先预检**。调试 WS 对 App 库里查不到的 tag 什么都不做，只能干等到超时；
-    // 而且它跑的始终是 **App 里那份规则**，所以「App 里是旧版本」这种情况会
-    // 悄悄答非所问——预检一并判掉
-    const pf = await runPreflight(host);
-    if (pf.state === "unreachable") {
-      testResult.value = { error: pf.error };
-      return;
-    }
-    // 没有 / 是旧版本 → 得先把当前表单推过去，否则调试跑的是 App 那份而不是你在
-    // 改的这份。但推送会写 App 的数据，**必须问过用户**（见 confirmPush）
-    const needPush = pf.state !== "ready";
-    if (needPush && !(await confirmPush(pf.state))) {
-      return;   // 取消：不推也不调试，预检结果留在卡片上
-    }
-    // 传 form.value（当前编辑中的源）：它的 bookSourceUrl 来自详情接口，是
-    // 导入原文——后端要拿它当 tag，规范化过的 URL 会让 App 静默无响应
-    const r = await appDebug(form.value, key, host, 0, needPush,
-                            appCacheMode.value, runAbort?.signal);
-    // 连不上时后端返回的是 {source:"app", error:"..."}，不是 HTTP 错误；
-    // 这里翻成卡片认得的形状（卡片读 testResult.error）
-    testResult.value = r && r.error ? { error: r.error } : r;
-    if (!testResult.value.error) {
-      pushed.value = needPush ? pf.state : "";
-      appPreflightState.value = { state: "ready", error: "", detail: "" };
-    }
-  } catch (e) {
-    testResult.value = { error: abortNote(e) };
-  } finally {
-    window.clearInterval(runTicker);
-    runAbort = null;
-    appDebugging.value = false;
-  }
-  expandTestFailures(testResult.value);
-  // 成功与失败都自动摊开证据——失败恰恰最需要抽屉的诊断区（ux-debug-loop）。
+  // 运行交给会话（startRun 是两条通道唯一的入口）：秒表、取消、预检、推送确认、
+  // 结果落位、对比基线滚动都在那里；这里只管入口校验与跑完的界面反应
+  const r = await startRun({ source: form.value, key, confirmPush });
+  expandTestFailures(r);
+  // 失败与成功同样进抽屉：失败恰恰最需要诊断区（ux-debug-loop）。
   // rerunStep：「从此步重跑」要直接定位到重跑的那一步
-  if (testResult.value) openDebug(rerunStep);
+  if (r) openDebug(rerunStep);
 }
 
-//: 步骤名 → 分段重跑的 key 构造。形态与 App `Debug.startDebug` 的 when 链
-//: 一一对应：绝对URL → 详情起步（详情→目录→正文）/ `++` → 目录起步 /
-//: `--` → 只跑正文；搜索/发现本来就是链头，重跑即整链。
-const STEP_KEY_BUILDERS = {
-  search: () => debugKey(),
-  explore: (url) => `发现::${url}`,
-  bookUrl: (url) => url,
-  toc: (url) => `++${url}`,
-  content: (url) => `--${url}`,
-};
-
-//: 抽屉里的「从此步重跑」：拿上轮结果里这一步的 URL 拼分段 key，整链重跑的
-//: 摩擦（搜索→详情→目录全重来）就砍掉了。URL 用**原文**：它是 App 自己请求过的
-//: 地址，传回去 App 端 AnalyzeUrl 能吃（含 ,{...} 选项形态）；库内那种
-//: 规范化（AGENTS #5）是给关联键用的，这里做了反而改坏 App 的目标。
 function rerunFromStep(stepName) {
-  const build = STEP_KEY_BUILDERS[stepName];
-  if (!build) return;
   const step = ((testResult.value || {}).steps || [])
     .find((s) => s.name === stepName) || {};
-  // 幂等去前缀（同 buildDebugKey 的手抄兜底）：step.url 不该带前缀，防一手
-  const url = String(step.url || "").trim().replace(/^(\+\+|--)/, "");
-  const key = stepName === "search" ? build() : (url ? build(url) : "");
-  if (!key) {
-    return ElMessage.warning(
-      "上一轮结果里没有这一步的链接。先跑一次完整调试，再重试这一步");
+  const key = stepName === "search" ? debugKey() : rerunKey(stepName, step.url);
+  if (key) {
+    return debugRun(key, stepName);
   }
-  return debugRun(key, stepName);
+  return ElMessage.warning(
+    "上一轮结果里没有这一步的链接。先跑一次完整调试，再重试这一步");
 }
 
 //: 预检状态 → 卡片上的短标签与颜色
@@ -868,75 +696,18 @@ const preflightText = computed(
 const preflightType = computed(
   () => PREFLIGHT_TYPE[(appPreflightState.value || {}).state] || "info");
 
-//: 本次调试前做了什么推送："" | "missing"（新建）| "stale"（覆盖旧规则）
-const pushed = ref("");
-
-//: 在途的预检请求。输入框失焦和「连 App 调试」会来问同一个问题——点按钮时
-//: 输入框必然先失焦——合成一次：它们是同一个问题，没必要问 App 两遍，
-//: 并发还会让「检测中…」在第一个先回来时提前熄灭
-let preflightPending = null;
-
-// 只读预检：连不连得上、App 里有没有这个源、是不是旧版本。
-// 结果照常写进 appPreflightState（卡片和调试流程都读它），不弹 toast——
-// 标签就在输入框下一行，每次失焦弹一次太吵；动作的提示留给「连 App 调试」。
-async function runPreflight(host) {
-  if (!preflightPending) {
-    preflightPending = (async () => {
-      appChecking.value = true;
-      try {
-        // 用 form.value：它的 bookSourceUrl 是导入原文，App 那边按精确字符串匹配；
-        // 整份传过去才能和 App 里那份比对规则（见 core/app_debug.py:preflight）
-        appPreflightState.value = await appPreflight(form.value, host, 0);
-      } catch (e) {
-        appPreflightState.value = { state: "unreachable", error: String(e.message) };
-      } finally {
-        appChecking.value = false;
-        preflightPending = null;
-      }
-      // 原始异常只记 console，不往界面上摆（那是开发者视角）。但也不能丢——
-      // 「连不上」必须留得下痕迹
-      const s = appPreflightState.value;
-      if (s.detail) console.warn("[app-debug] 预检失败:", s.detail);
-    })();
-  }
-  await preflightPending;
-  return appPreflightState.value;
-}
-
 // IP 输入框的失焦 / Enter：只读预检，就地更新卡片上那个 tag。
-//
-// 它以前是「测试连接」按钮，撤掉的理由：这段预检「连 App 调试」本来就会跑
-// （见 debugRun），两者结果落在同一个 tag 上——一个动作没必要占两个入口。
-// 挪到输入框上反而更顺：填完 IP 松手就有反馈，还省下一行按钮。
+// 清空 IP 就把 tag 一并清掉：留着上一轮的「已连接」等于说假话。
+// 新建 / 另存时域名还没填，后端会直接判 unreachable（core/app_debug.py:286）。
+// 那不是「连不上」，不该摆到卡片上——静默跳过，等域名填了再说
 async function appPreflightRun() {
-  const host = appHost.value.trim();
-  // 清空 IP 就把 tag 一并清掉：留着上一轮的「已连接」等于说假话
-  if (!host) {
+  const h = appHost.value.trim();
+  if (!h) {
     appPreflightState.value = null;
     return;
   }
-  // 新建 / 另存时域名还没填，后端会直接判 unreachable（core/app_debug.py:286）。
-  // 那不是「连不上」，不该摆到卡片上——静默跳过，等域名填了再说
   if (!String(form.value.bookSourceUrl || "").trim()) return;
-  await runPreflight(host);
-}
-
-//: 推送前确认，返回用户是否同意。
-//:
-//: 「调试」和「往 App 里写数据」是两件事——把后者做成前者的隐式副作用，用户点的
-//: 是调试、App 里的源却被改了。少了这一步，「连 App 调试」就变成一个有写副作用的
-//: 按钮，而这在界面上完全看不出来。
-//:
-//: stale 那档尤其要说清楚：它不只是确认，更是把「你现在调试的是 App 那份，不是你
-//: 正在改的」摆到用户面前——不知道这件事的话，他会拿着一份答非所问的结果去改规则。
-function confirmPush(state) {
-  const text = state === "missing"
-    ? "App 里没有这个源。要先推送到 App 再调试吗？"
-    : "App 里是旧版本。直接调试会跑 App 里那份规则，不是你正在改的。"
-      + "要先推过去覆盖它再调试吗？";
-  return ElMessageBox.confirm(text, "推送并调试", {
-    confirmButtonText: "推送并调试", cancelButtonText: "取消", type: "warning",
-  }).then(() => true).catch(() => false);
+  await runPreflight(form.value, h);
 }
 
 //: 调试抽屉里点「用这条」→ 写进表单对应字段。
