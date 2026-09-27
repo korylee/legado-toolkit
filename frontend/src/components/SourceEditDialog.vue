@@ -15,6 +15,8 @@ import {
 import { useMobile } from "../composables/useMobile";
 // 步骤名 → 中文的**唯一**一份（调试抽屉共用），别再在本组件里写第二份
 import { STEP_LABELS } from "../utils/steps";
+// 重跑不清场的对比状态（ux-debug-loop）：基线滚动判据在 utils/debugCompare
+import { nextCompareState } from "../utils/debugCompare";
 // 生成后验证的新鲜度判定（strengthen-src）：分步过期判据的唯一一份
 import { snapshotRuleGroups, staleVerifySteps as computeStaleSteps } from "../utils/verifyFreshness";
 import RuleDebugDrawer from "./RuleDebugDrawer.vue";
@@ -48,10 +50,25 @@ function readAppHost() {
 const loading = ref(false);
 const appHost = ref(readAppHost());  // App 的 IP（连 App 调试用）
 const appDebugging = ref(false);
+// 等待态（ux-debug-wait 小步）：秒表 + 可松手。AbortController 只断**前端的等**，
+// 后端那一次调试仍会跑完（lane/锁的设计如此），所以按钮叫「取消等待」不叫「取消」
+const runElapsed = ref(0);
+let runTicker = 0;
+let runAbort = null;
+const CANCEL_WAIT_NOTE = "已取消等待；后端那一次调试仍会跑完，只是不再等它";
+
+function abortNote(e) {
+  return e && e.name === "AbortError" ? CANCEL_WAIT_NOTE : String(e.message);
+}
+
+function cancelDebugRun() {
+  if (runAbort) runAbort.abort();
+}
 const jvmEnv = ref(null);
 // 调试预算口径（debug.timeout）：默认值只在后端 settings_store（AGENTS #8），
 // 这里只读来显示；请求不传 timeout，由后端取同一份
 const debugBudget = ref(null);
+const compareState = ref({ prev: null, history: [] });
 const jvmEnvLoading = ref(false);
 const jvmEnvTitle = computed(() => {
   if (jvmEnvLoading.value) return "正在检查本机引擎环境…";
@@ -175,6 +192,10 @@ const hideExplore = computed({
 
 const testResult = ref(null);
 const testStale = ref(false);      // 规则已改动，结果过期
+// 新结果到来时滚动对比基线（ux-debug-loop）：错误体不覆盖基线，判据在 utils
+watch(testResult, (cur, old) => {
+  compareState.value = nextCompareState(compareState.value, old, cur);
+});
 const debugVisible = ref(false);   // 调试抽屉
 const debugStep = ref("");         // 抽屉打开时定位到哪一步
 const generationError = ref("");   // 自动生成失败原因，随调试材料一起展示
@@ -726,7 +747,8 @@ async function debugRun(keyOverride = "", rerunStep = "") {
   if (!key) {
     return ElMessage.warning("这个源没配 exploreUrl，请先填发现页 URL");
   }
-  testResult.value = null;
+  // **不清掉上一份结果**（ux-debug-loop）：重跑期间抽屉照常显示它（按钮在途禁用），
+  // 新结果到来时由上面的 watch 滚动对比基线
   testStale.value = false;
   if (debugChannel.value === "jvm") {
     if (jvmEnvLoading.value || !jvmEnv.value?.ok) {
@@ -738,21 +760,31 @@ async function debugRun(keyOverride = "", rerunStep = "") {
     // 本机引擎：**不填 IP、不推送**；调试前已自动自检，它跑的就是 App 的源码。
     // 返回值与连 App 那条同形状，只是 source 是 "jvm"
     appDebugging.value = true;
+    runElapsed.value = 0;
+    runAbort = new AbortController();
+    runTicker = window.setInterval(() => { runElapsed.value += 1; }, 1000);
     try {
-      const r = await jvmDebug(form.value, key, null, "", appCacheMode.value);
+      const r = await jvmDebug(form.value, key, null, "", appCacheMode.value,
+                              runAbort.signal);
       testResult.value = r && r.error ? { error: r.error } : r;
     } catch (e) {
-      testResult.value = { error: String(e.message) };
+      testResult.value = { error: abortNote(e) };
     } finally {
+      window.clearInterval(runTicker);
+      runAbort = null;
       appDebugging.value = false;
     }
     expandTestFailures(testResult.value);
-    if (testResult.value && !testResult.value.error) openDebug(rerunStep);
+    // 失败与成功同样进抽屉：失败恰恰最需要诊断区（ux-debug-loop）
+    if (testResult.value) openDebug(rerunStep);
     return;
   }
   const host = appHost.value.trim();
   if (!host) return ElMessage.warning("请先填 App 的 IP（App 通知栏里有）");
   appDebugging.value = true;
+  runElapsed.value = 0;
+  runAbort = new AbortController();
+  runTicker = window.setInterval(() => { runElapsed.value += 1; }, 1000);
   pushed.value = "";
   try {
     // **先预检**。调试 WS 对 App 库里查不到的 tag 什么都不做，只能干等到超时；
@@ -771,7 +803,8 @@ async function debugRun(keyOverride = "", rerunStep = "") {
     }
     // 传 form.value（当前编辑中的源）：它的 bookSourceUrl 来自详情接口，是
     // 导入原文——后端要拿它当 tag，规范化过的 URL 会让 App 静默无响应
-    const r = await appDebug(form.value, key, host, 0, needPush, appCacheMode.value);
+    const r = await appDebug(form.value, key, host, 0, needPush,
+                            appCacheMode.value, runAbort?.signal);
     // 连不上时后端返回的是 {source:"app", error:"..."}，不是 HTTP 错误；
     // 这里翻成卡片认得的形状（卡片读 testResult.error）
     testResult.value = r && r.error ? { error: r.error } : r;
@@ -780,14 +813,16 @@ async function debugRun(keyOverride = "", rerunStep = "") {
       appPreflightState.value = { state: "ready", error: "", detail: "" };
     }
   } catch (e) {
-    testResult.value = { error: String(e.message) };
+    testResult.value = { error: abortNote(e) };
   } finally {
+    window.clearInterval(runTicker);
+    runAbort = null;
     appDebugging.value = false;
   }
   expandTestFailures(testResult.value);
-  // 成功了才自动摊开证据；失败时卡片上那段错误信息本身就是要看的东西。
+  // 成功与失败都自动摊开证据——失败恰恰最需要抽屉的诊断区（ux-debug-loop）。
   // rerunStep：「从此步重跑」要直接定位到重跑的那一步
-  if (testResult.value && !testResult.value.error) openDebug(rerunStep);
+  if (testResult.value) openDebug(rerunStep);
 }
 
 //: 步骤名 → 分段重跑的 key 构造。形态与 App `Debug.startDebug` 的 when 链
@@ -1399,7 +1434,11 @@ async function doSave(s) {
           </div>
           <!-- 预算口径摆出来（同跑批弹框：代价由事实说）。值来自后端设置，
                请求本身不传 timeout，两条通道吃同一份 -->
-          <p v-if="debugBudget" class="muted" style="margin: 6px 0 0">
+          <p v-if="appDebugging" class="muted" style="margin: 6px 0 0">
+            已等待 {{ runElapsed }} 秒<template v-if="debugBudget"> / 预算 {{ debugBudget }} 秒</template>
+            <el-button size="small" link type="danger" @click="cancelDebugRun">取消等待</el-button>
+          </p>
+          <p v-else-if="debugBudget" class="muted" style="margin: 6px 0 0">
             调试预算 {{ debugBudget }} 秒；webView 渲染最长 60 秒
           </p>
           <!-- 预检结果就地显示。以前只有一个「连」按钮：连不上或缺源都要干等
@@ -1502,6 +1541,7 @@ async function doSave(s) {
          immediate，initialStep 只在 modelValue 由 false → true 时生效，用 v-if 会让
          首帧落到 steps[0] 而忽略 :initial-step -->
     <RuleDebugDrawer v-model="debugVisible" :result="testResult"
+                     :prev-result="compareState.prev"
                      :initial-step="debugStep" :rules="ruleByStep"
                      :entry-error="generationError"
                      :source-type="Number(form.bookSourceType) || 0"

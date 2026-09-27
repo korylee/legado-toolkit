@@ -23,6 +23,7 @@ import { replayStep, suggestRule } from "../api/rules";
 import { getLLMStatus } from "../api/llm";
 // 步骤名 → 中文的**唯一**一份（编辑弹窗共用），别再在本组件里写第二份
 import { STEP_LABELS } from "../utils/steps";
+import { compareRuns, statusLabel } from "../utils/debugCompare";
 // 第 1 层「在页面上找目标」：候选规则从补抓的 HTML 里算出来（纯函数，不发请求）
 import { FIELD_OF_STEP, findCandidates, parseDoc } from "../utils/ruleCandidates";
 // 源码的显示层（折行缩进 + 实体展开，纯函数）：好看的和能抄的是两份东西，见 htmlView
@@ -50,6 +51,9 @@ const props = defineProps({
   rerunning: { type: Boolean, default: false },
   //: 自动生成失败时保留的上游原因；调试材料是补救路径，不得覆盖这条原因。
   entryError: { type: String, default: "" },
+  //: 上一份调试结果的摘要（ux-debug-loop）：重跑不清场，逐段标注「与上次相比」。
+  //: 对比键是（段名, URL），判据在 utils/debugCompare（纯函数，有 node 测试）
+  prevResult: { type: Object, default: null },
 });
 const emit = defineEmits(["update:modelValue", "goto", "rerunFrom", "applyRule"]);
 
@@ -93,6 +97,34 @@ const events = computed(() => (props.result && props.result.events) || []);
 //: 各自只在对应的结果下出现，选错会是一片空白）
 const defaultSubTab = computed(
   () => (isEngineResult.value && events.value.length ? "events" : "values"));
+
+// ---------------------------------------------------------------- 与上次相比（ux-debug-loop）
+const diffRows = computed(() => (props.prevResult ? compareRuns(props.prevResult, props.result) : []));
+const diffBy = computed(() => Object.fromEntries(diffRows.value.map((d) => [d.name, d])));
+const diffSummary = computed(() => {
+  if (!props.prevResult || !diffRows.value.length) return "";
+  const changed = diffRows.value.filter((d) => d.status !== "same")
+    .map((d) => `${STEP_LABELS[d.name] || d.name} ${statusLabel(d.status)}`);
+  return changed.length
+    ? "与上次相比：" + changed.join(" · ") + "；其余相同"
+    : "与上次相比：全部相同";
+});
+function diffOf(name) {
+  return diffBy.value[name];
+}
+function diffTagType(status) {
+  return { regressed: "danger", changed: "warning", moved: "info", new: "success" }[status] || "info";
+}
+//: 失败步骤「直达诊断区」：诊断块常驻抽屉上部，但可能在折叠线以下——
+//: 选中失败段时把它滚进视野（成功时不打扰，默认停在页签区）
+const diagnosisBox = ref(null);
+watch([() => props.modelValue, activeStep], () => {
+  if (!props.modelValue) return;
+  if ((current.value || {}).verdict === "fail") {
+    nextTick(() => diagnosisBox.value && diagnosisBox.value.scrollIntoView(
+      { behavior: "smooth", block: "start" }));
+  }
+});
 
 const replaying = ref(false);
 const replayResult = ref(null);
@@ -841,8 +873,14 @@ function copyPage() {
         <span v-for="s in steps" :key="s.name" class="debug-step-tab"
               :class="{ active: !!current && s.name === current.name }" @click="selectStep(s.name)">
           <i class="dot" :class="dotClass(s)"></i>{{ STEP_LABELS[s.name] || s.name }}
+          <el-tag v-if="diffOf(s.name) && diffOf(s.name).status !== 'same'"
+                  size="small" :type="diffTagType(diffOf(s.name).status)"
+                  class="diff-tag">{{ statusLabel(diffOf(s.name).status) }}</el-tag>
         </span>
       </div>
+
+      <!-- 与上次相比（ux-debug-loop）：重跑不清场，差异摆在一眼能看见的地方 -->
+      <p v-if="diffSummary" class="muted" style="margin: 6px 0 0">{{ diffSummary }}</p>
 
       <div v-if="current" class="debug-head">
         <el-tag size="small" :type="tagType(current)">{{ verdictText(current) }}</el-tag>
@@ -900,7 +938,7 @@ function copyPage() {
 
       <!-- 诊断（第 0 层）：**取不到有好几种成因，动作完全不同**，混成一句「失败」
            用户只能瞎试。这里先说清是哪一种、下一步该改什么 -->
-      <div v-if="diagnosis.length" class="diagnosis">
+      <div v-if="diagnosis.length" ref="diagnosisBox" class="diagnosis">
         <div v-for="(d, i) in diagnosis" :key="i" class="diag-line">
           <el-tag size="small" :type="d.level === 'warn' ? 'warning' : 'info'">
             {{ d.level === "warn" ? "问题" : "提示" }}
@@ -1325,5 +1363,14 @@ function copyPage() {
   background: var(--el-fill-color-lighter);
   font-size: 13px;
   line-height: 1.6;
+}
+</style>
+
+<!-- 抽屉 teleport 到 body，内部结构的样式只能写在这里（AGENTS #15）。
+     .diff-tag 跟着「与上次相比」的标记走，小到不挤占页签 -->
+<style>
+.debug-step-tab .diff-tag {
+  margin-left: 4px;
+  transform: scale(0.85);
 }
 </style>

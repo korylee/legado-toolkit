@@ -22,7 +22,7 @@ async function request(path, options = {}) {
 
 export const api = {
   get: (p) => request(p),
-  post: (p, body) => request(p, { method: "POST", body: JSON.stringify(body ?? {}) }),
+  post: (p, body, opts = {}) => request(p, { ...opts, method: "POST", body: JSON.stringify(body ?? {}) }),
   patch: (p, body) => request(p, { method: "PATCH", body: JSON.stringify(body ?? {}) }),
   del: (p) => request(p, { method: "DELETE" }),
 };

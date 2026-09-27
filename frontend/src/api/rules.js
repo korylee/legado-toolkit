@@ -16,8 +16,8 @@ import { api } from "./client";
 // cache 是**页面缓存**策略，只管我们补抓的那几页（跑链本身还得联网，是 App 在跑）：
 //   "auto"（默认）命中就用，缺失就抓 · "only" 一页都不补抓 · "refresh" 忽略缓存重抓。
 // 取值就是后端 core.fetch 的那三个常量（后端按同一份枚举校验，对不上给 400）。
-export const appDebug = (source, key, host, port, push = false, cache = "auto") =>
-  api.post("/rules/app-debug", { source, key, host, port, push, cache });
+export const appDebug = (source, key, host, port, push = false, cache = "auto", signal = null) =>
+  api.post("/rules/app-debug", { source, key, host, port, push, cache }, signal ? { signal } : {});
 
 // 本机引擎调试（S5-A4）：**App 的真引擎跑在本机**（Robolectric 里跑 App 源码），
 // 不填 IP、不推送、不用预检——本机什么都有。返回体与 /rules/app-debug **同形状**
@@ -30,10 +30,13 @@ export const appDebug = (source, key, host, port, push = false, cache = "auto") 
 //
 // timeout **不传**（null）就吃设置里的 debug.timeout——默认值只有后端一份
 // （AGENTS #8）；前端曾经写死 60，与桥的渲染上限同值、互相掐死。
-export const jvmDebug = (source, key, timeout = null, cookie = "", cache = "auto") =>
-  api.post("/rules/jvm-debug", timeout == null
-    ? { source, key, cookie, cache }
-    : { source, key, timeout, cookie, cache });
+export const jvmDebug = (source, key, timeout = null, cookie = "", cache = "auto",
+                         signal = null) =>
+  api.post("/rules/jvm-debug",
+           timeout == null
+             ? { source, key, cookie, cache }
+             : { source, key, timeout, cookie, cache },
+           signal ? { signal } : {});
 
 // 调试前预检：把「静默无响应」拆成 unreachable / missing / ready 三种状态。
 export const appPreflight = (source, host, port) =>
