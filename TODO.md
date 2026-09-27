@@ -80,7 +80,7 @@
     （`DebugService.kt:519-526,536-541`）。
 
 ### 条目：ux-debug-session · 调试状态收拢为 useDebugSession（第二期）
-状态：todo
+状态：doing
 依赖：ux-debug-loop, ux-debug-wait
 优先级：P1
 背景：调试状态散在两个组件（弹框 `testResult`/`appDebugging`/`debugTarget`/`debugQuery`，
