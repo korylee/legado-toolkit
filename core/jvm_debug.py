@@ -206,8 +206,16 @@ def _env_error(readiness_result: Optional[Dict[str, Any]] = None) -> Tuple[str, 
 
 
 def _runtime_dump_mismatch(dump: Dict[str, Any], env_snapshot: Dict[str, str]) -> str:
-    """返回 dump 与当前预检路径的首个差异；不一致时不能复用直起/常驻环境。"""
-    checks = [
+    """返回 dump 与当前预检路径的首个差异；不一致时不能复用直起/常驻环境。
+
+    workingDir 一项判的是**同仓库关系**而不是相等：dump 的工作目录是 Gradle 测试
+    worker 的**模块目录**（`<repo>\\app`），`LEGADO_REPO` 是**仓库根**——两级天然不等
+    （实测 2026-09-26：字符串比对每次都判差异，常驻永远被跳过，每次调试多付一次
+    Gradle 启动）。归一判据与对拍链共用 `jvm_runtime_snapshot` 那份，别各写一份。
+    """
+    from core.jvm_runtime_snapshot import dir_inside_repo, norm_path
+
+    for name, actual, expected in (
         ("workingDir", dump.get("workingDir"), env_snapshot.get("LEGADO_REPO")),
         ("JAVA_HOME", (dump.get("environment") or {}).get("JAVA_HOME")
          or dump.get("javaHomeEnv"), env_snapshot.get("JAVA_HOME")),
@@ -215,11 +223,14 @@ def _runtime_dump_mismatch(dump: Dict[str, Any], env_snapshot: Dict[str, str]) -
          env_snapshot.get("ANDROID_HOME")),
         ("GRADLE_USER_HOME", (dump.get("environment") or {}).get("GRADLE_USER_HOME"),
          env_snapshot.get("GRADLE_USER_HOME")),
-    ]
-    for name, actual, expected in checks:
-        if not actual or not expected or os.path.normcase(os.path.normpath(str(actual))) != \
-                os.path.normcase(os.path.normpath(str(expected))):
+    ):
+        if not actual or not expected:
             return "%s（dump=%s；本次自检=%s）" % (name, actual or "缺失", expected or "缺失")
+        if name == "workingDir":
+            if not dir_inside_repo(actual, expected):
+                return "%s（dump=%s；本次自检=%s）不同仓库" % (name, actual, expected)
+        elif norm_path(actual) != norm_path(expected):
+            return "%s（dump=%s；本次自检=%s）" % (name, actual, expected)
     return ""
 
 

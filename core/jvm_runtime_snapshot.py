@@ -14,10 +14,24 @@ READINESS_ENVIRONMENT = {
 }
 
 
-def _norm_path(value: object) -> str:
+def norm_path(value: object) -> str:
     if value is None:
         return ""
     return os.path.normcase(os.path.normpath(str(value)))
+
+
+def dir_inside_repo(child: object, repo_root: object) -> bool:
+    """`child`（dump 的 workingDir = 测试 JVM 的**模块目录**）是否属于 `repo_root`（**仓库根**）。
+
+    两级天然不等（实测 2026-09-26：dump.workingDir=`…\\app` 而 LEGADO_REPO=`…`，
+    字符串比对永远不等，选路闸门据此把每次调试都推回 Gradle）——判「同一仓库」只能是
+    相等或 child 是 repo_root 的子目录；边界按 os.sep 切，防 `D:\\foo` 匹配 `D:\\foobar`。
+    选路闸门（core/jvm_debug._runtime_dump_mismatch）与对拍链共用这一处判据。
+    """
+    c, r = norm_path(child), norm_path(repo_root)
+    if not c or not r:
+        return False
+    return c == r or c.startswith(r + os.sep)
 
 
 def compare_readiness_environment(runtime: dict, actual_environment: dict) -> dict[str, object]:
@@ -30,7 +44,7 @@ def compare_readiness_environment(runtime: dict, actual_environment: dict) -> di
             continue
         for environment_key in environment_keys:
             actual = actual_environment.get(environment_key)
-            if _norm_path(declared) != _norm_path(actual):
+            if norm_path(declared) != norm_path(actual):
                 differences[environment_key] = {"declared": declared, "actual": actual}
     return differences
 
@@ -38,11 +52,11 @@ def compare_readiness_environment(runtime: dict, actual_environment: dict) -> di
 def compare(dump: dict, actual: dict, runtime: dict | None = None) -> dict[str, object]:
     differences = {}
     declared_dir, actual_dir = dump["workingDir"], actual["workingDir"]
-    if _norm_path(declared_dir) != _norm_path(actual_dir):
+    if norm_path(declared_dir) != norm_path(actual_dir):
         differences["workingDir"] = {"declared": declared_dir, "actual": actual_dir}
     sep = os.pathsep
-    expected_cp = [_norm_path(x) for x in dump["classpath"].split(sep)]
-    actual_cp = [_norm_path(x) for x in actual["classpath"].split(sep)]
+    expected_cp = [norm_path(x) for x in dump["classpath"].split(sep)]
+    actual_cp = [norm_path(x) for x in actual["classpath"].split(sep)]
     if expected_cp != actual_cp:
         differences["classpath"] = {"declared": expected_cp, "actual": actual_cp}
     expected_args = ["-Xmx" + dump["maxHeapSize"], *dump["jvmArgs"]]

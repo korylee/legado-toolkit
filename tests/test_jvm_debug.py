@@ -390,6 +390,92 @@ class RuntimeDumpConsistencyTests(unittest.TestCase):
         dump["environment"]["ANDROID_HOME"] = "X:/sdk"
         self.assertEqual(jvm_debug._runtime_dump_mismatch(dump, runtime), "")
 
+    @staticmethod
+    def _dump_with_workdir(working_dir: str) -> dict:
+        return {
+            "workingDir": working_dir,
+            "javaHomeEnv": "X:/jdk",
+            "environment": {
+                "JAVA_HOME": "X:/jdk",
+                "ANDROID_HOME": "X:/sdk",
+                "GRADLE_USER_HOME": "X:/.gradle",
+            },
+        }
+
+    def test_module_workingdir_matches_repo_root(self) -> None:
+        """**真实形态**：dump.workingDir 是 Gradle 测试 worker 的**模块目录**
+        （`<repo>/app`），`LEGADO_REPO` 是**仓库根**——同一仓库必须判一致。
+
+        2026-09-26 实测：旧判据按字符串比，四个字段里只有 workingDir 每次都不等，
+        同机四次调试全部打出「运行环境与当前自检不同：workingDir」回落 Gradle，
+        每次多付约 13 秒启动（常驻快路径一直是死的）。"""
+        dump = self._dump_with_workdir("D:/repo/legado-with-MD3/app")
+        runtime = {
+            "LEGADO_REPO": "D:/repo/legado-with-MD3",
+            "JAVA_HOME": "X:/jdk",
+            "ANDROID_HOME": "X:/sdk",
+            "GRADLE_USER_HOME": "X:/.gradle",
+        }
+        self.assertEqual(jvm_debug._runtime_dump_mismatch(dump, runtime), "")
+
+    def test_other_repo_still_mismatches(self) -> None:
+        """放宽成「子目录即一致」不能放过真漂移：dump 是**另一个仓库**的就必须回落。"""
+        dump = self._dump_with_workdir("E:/other/repo/app")
+        runtime = {
+            "LEGADO_REPO": "D:/repo/legado-with-MD3",
+            "JAVA_HOME": "X:/jdk",
+            "ANDROID_HOME": "X:/sdk",
+            "GRADLE_USER_HOME": "X:/.gradle",
+        }
+        self.assertIn("workingDir", jvm_debug._runtime_dump_mismatch(dump, runtime))
+        self.assertIn("不同仓库", jvm_debug._runtime_dump_mismatch(dump, runtime))
+
+    def test_prefix_trap_is_not_a_match(self) -> None:
+        """同仓库关系按 os.sep 切边界：`D:/foo` 不是 `D:/foobar` 的仓库。"""
+        dump = self._dump_with_workdir("D:/foobar/app")
+        runtime = {
+            "LEGADO_REPO": "D:/foo",
+            "JAVA_HOME": "X:/jdk",
+            "ANDROID_HOME": "X:/sdk",
+            "GRADLE_USER_HOME": "X:/.gradle",
+        }
+        self.assertIn("workingDir", jvm_debug._runtime_dump_mismatch(dump, runtime))
+
+    def test_missing_workingdir_still_mismatches(self) -> None:
+        runtime = {
+            "LEGADO_REPO": "D:/repo",
+            "JAVA_HOME": "X:/jdk",
+            "ANDROID_HOME": "X:/sdk",
+            "GRADLE_USER_HOME": "X:/.gradle",
+        }
+        self.assertIn("workingDir", jvm_debug._runtime_dump_mismatch(
+            self._dump_with_workdir(""), runtime))
+        self.assertIn("workingDir", jvm_debug._runtime_dump_mismatch(
+            self._dump_with_workdir("D:/repo/app"), {"JAVA_HOME": "X:/jdk"}))
+
+    def test_repo_root_env_keeps_the_daemon(self) -> None:
+        """验收（条目 jvm-dump-gate）：app_repo 填**仓库根**时不再回落——
+        `default_launcher` 拿到模块目录的 dump + 仓库根的自检，应直接给常驻、零附注。"""
+        dump = self._dump_with_workdir("D:/repo/legado-with-MD3/app")
+        env = {"LEGADO_REPO": "D:/repo/legado-with-MD3", "JAVA_HOME": "X:/jdk",
+               "ANDROID_HOME": "X:/sdk", "GRADLE_USER_HOME": "X:/.gradle"}
+        notes: list = []
+        with mock.patch.object(jvm_direct, "dump_is_stale", lambda: False), \
+             mock.patch.object(jvm_direct, "load_dump", lambda warn_stale=True: dump):
+            got = jvm_debug.default_launcher(notes, env_snapshot=env)
+        self.assertIsNot(got, jvm_debug._run_launcher, "同仓库就该走上常驻")
+        self.assertEqual(notes, [])
+
+    def test_foreign_repo_env_falls_back_with_reason(self) -> None:
+        dump = self._dump_with_workdir("E:/other/repo/app")
+        env = {"LEGADO_REPO": "D:/repo/legado-with-MD3", "JAVA_HOME": "X:/jdk",
+               "ANDROID_HOME": "X:/sdk", "GRADLE_USER_HOME": "X:/.gradle"}
+        notes: list = []
+        with mock.patch.object(jvm_direct, "dump_is_stale", lambda: False), \
+             mock.patch.object(jvm_direct, "load_dump", lambda warn_stale=True: dump):
+            jvm_debug.default_launcher(notes, env_snapshot=env)
+        self.assertTrue(any("不同仓库" in n for n in notes), notes)
+
 
 class GradleDumpRefreshTests(unittest.TestCase):
     def test_gradle_run_refreshes_the_dump(self) -> None:
