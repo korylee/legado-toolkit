@@ -21,30 +21,11 @@
 > 2026-09-26 排期（评估结论）：引擎线八步已走完 ①②③，第一波封顶「环境」章节，
 > 第二波补引擎最后的韧性与公平缺口；④ worker 线是触发式的——批量吞吐被封 IP
 > 硬约束压着，等下次真要跑全量再启动。
-> 同日插入调试体验两条 P0（均为当日实测的现行缺陷，见各条背景；`jvm-dump-gate`
-> 已当日交付、移「已完成」）；预算分层与前端循环、等待的跟进条目排在 §1。工作台重构同日已拍板（轻量编辑起步 /
+> 同日插入调试体验两条 P0（均为当日实测的现行缺陷；**均已当日交付**，见「已完成」：
+> `jvm-dump-gate` 常驻复用 2.6s、`jvm-webview-nav` 正文重跑 75.5s fail → 2.8s pass）；
+> 预算分层与前端循环、等待的跟进条目排在 §1。工作台重构同日已拍板（轻量编辑起步 /
 > 编辑弹框调试卡保留「入口+摘要」/ 四期节奏），拆为 ux-debug-session 与
 > ux-debug-shell 两条，依赖链钉了先后。
-
-### 条目：jvm-webview-nav · webView 段的相对地址静默等满渲染预算
-状态：todo
-依赖：无
-优先级：P0
-背景：2026-09-26 实测（口袋漫画，正文重跑 key `--/manhua/…/73.html` 带 webView 选项）：
-  墙钟 75.5 秒后 content fail，侧车 `render_timeout: 60000ms 内没有 load 事件`，整页
-  HTML 与命中源码全空。链条：抽屉拼 key 用的段 url 是**相对路径** → 上游 `Debug` 的
-  `--` 分支不设 `book.tocUrl` → `getAbsoluteURL` 空 base 原样返回 → shadow 桥把相对地址
-  交给 CDP `Page.navigate`（CDP 要绝对 URL，导航失败）→ 桥不读 navigate 响应、只等
-  load/domContent 事件，等满渲染预算。全链调试 tocUrl 是全的，所以卡的正是
-  「目录好了之后单独重跑正文」这个最常用的动作。
-约束：① `BrowserBridge` 要读 `Page.navigate` 的响应，失败立即带原因返回，不等事件；
-  ② 相对地址在**我们这一侧**补全（`core.jvm_debug` 拼 key 或 `DebugService` 按
-  `bookSourceUrl` 补，桥导航前兜底解析也可），CLI 与界面两条入口同时被护住。不动上游
-  `Debug.kt` 的分派语义；本条只管「别把预算花在必然失败的导航上」，webView 取数能力
-  是另一条（webview-content）。
-验收：同一 key 重跑正文段秒级返回——地址补全则渲染照常，补不了则立即 fail 且原因
-  指明地址形态；不再出现「60 秒零事件等满」的形态。
-指针：appservice/test/io/legado/app/service/BrowserBridge.kt，appservice/test/io/legado/app/service/ShadowBackstageWebView.kt，core/jvm_debug.py，Debug.kt
 
 ---
 
@@ -702,6 +683,26 @@
 
 > 已交付的事项只在这里留一行指针——**机制看 lessons，细节看 `git log`**（AGENTS #10）。
 > 这一区只允许 `状态：done`。
+
+### 条目：jvm-webview-nav · webView 段的相对地址静默等满渲染预算
+状态：done
+依赖：无
+优先级：P0
+背景：2026-09-26 交付，两道防线都在我们自己的层：① `BrowserBridge` 的 navigate 改走
+  `sendForResult` 并用 `navigationFailure` 判应答——CDP 命令级错误（相对/无效地址的
+  「Cannot navigate to invalid URL」）立即 `navigation_failed` 带原因返回；加载期失败
+  有意不管（Chromium 渲染错误页并照常发 load 事件，由「不是站点」的判据处置）。
+  ② `ShadowBackstageWebView.resolveAgainstTag` 在导航前按 `tag`（源 URL）补全相对
+  地址——一个咽喉覆盖重跑 / 正文翻页 / 目录分段，判据复用 App 自己的
+  `NetworkUtils.getAbsoluteURL`。实测同 key：75.5s fail → 链内 6.5s pass、常驻复用
+  2.8s（渲染本体 0.9s，引擎带回渲染后整页）。
+约束：只判**命令级 error**，不把 `result.errorText` 判进来（ERR_ABORTED 会误杀马上
+  被 JS 重定向的正常页）；不动上游 `Debug.kt` 的分派语义；webView 取数能力是另一条
+  （webview-content）。
+验收：8 条 Kotlin 测试（WebViewNavigationTest：CDP error→原因 / 受理→null /
+  无应答→失败 / 相对补全 / 绝对直通 / 空 tag 原样 / 锚点形态）；两处变异（判据恒
+  null / 解析撤掉）各一次 Gradle 跑红；Python 全量 1000 条绿。看 git log（18b79ab）。
+指针：appservice/test/io/legado/app/service/BrowserBridge.kt，appservice/test/io/legado/app/service/ShadowBackstageWebView.kt，appservice/test/io/legado/app/service/WebViewNavigationTest.kt
 
 ### 条目：jvm-dump-gate · 常驻选路的 dump 对拍把模块目录当成仓库根
 状态：done
