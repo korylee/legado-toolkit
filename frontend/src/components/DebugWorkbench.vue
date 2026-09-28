@@ -859,6 +859,8 @@ function copyPage() {
     <el-alert v-if="entryError" type="warning" :closable="false" show-icon
               style="margin-bottom: 10px"
               :title="'自动生成未完成：' + entryError" />
+    <el-alert v-if="result && result.error" type="error" :closable="false" show-icon
+              style="margin-bottom: 10px" :title="String(result.error)" />
     <el-empty v-if="!steps.length" description="没有调试结果；可先检查上面的原因或重新调试" :image-size="80" />
 
     <template v-else>

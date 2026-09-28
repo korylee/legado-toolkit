@@ -19,7 +19,7 @@ const {
   channel, target, query, cacheMode, host,
   env, envLoading, envTitle,
   preflightState, checking, pushed,
-  startRun, cancelRun, loadEnvironment,
+  startRun, cancelRun, confirmPush, loadEnvironment,
 } = useDebugSession();
 
 const loading = ref(false);
@@ -83,7 +83,7 @@ async function debugRun() {
   if (!key) {
     return ElMessage.warning("这个源没配 exploreUrl，请先填发现页 URL");
   }
-  const r = await startRun({ source: source.value, key });
+  const r = await startRun({ source: source.value, key, confirmPush });
   // key 进 URL：刷新可恢复、问题场景可直接分享
   router.replace({ query: { key, step: target.value, url: query.value || undefined } });
   return r;
@@ -100,7 +100,7 @@ function rerunFromStep(stepName) {
       "上一轮结果里没有这一步的链接。先跑一次完整调试，再重试这一步");
   }
   router.replace({ query: { key, step: stepName, url: step.url || undefined } });
-  return startRun({ source: source.value, key });
+  return startRun({ source: source.value, key, confirmPush });
 }
 
 function onApplyRule({ field, rule }) {

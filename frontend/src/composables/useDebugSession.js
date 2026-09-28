@@ -59,8 +59,13 @@ let ticker = 0;
 let abort = null;
 const CANCEL_WAIT_NOTE = "已取消等待；后端那一次调试仍会跑完，只是不再等它";
 
+function errorMessage(e) {
+  if (e && e.message) return String(e.message);
+  return String(e || "未知错误");
+}
+
 function abortNote(e) {
-  return e && e.name === "AbortError" ? CANCEL_WAIT_NOTE : String(e.message);
+  return e && e.name === "AbortError" ? CANCEL_WAIT_NOTE : errorMessage(e);
 }
 
 function cancelRun() {
@@ -71,7 +76,9 @@ function beginWait() {
   running.value = true;
   elapsed.value = 0;
   abort = new AbortController();
-  ticker = window.setInterval(() => { elapsed.value += 1; }, 1000);
+  ticker = window.setInterval(() => {
+    elapsed.value += 1;
+  }, 1000);
 }
 
 function endWait() {
@@ -93,12 +100,18 @@ const cacheMode = ref("auto");
 // 键名带 legado 前缀，避免同域下与别的应用串味。隐私模式等 localStorage
 // 不可用的场景静默降级成空值
 const APP_HOST_STORAGE_KEY = "legado.appHost";
-const host = ref((() => {
-  try { return localStorage.getItem(APP_HOST_STORAGE_KEY) || ""; } catch (e) { return ""; }
-})());
+const host = ref(
+  (() => {
+    try {
+      return localStorage.getItem(APP_HOST_STORAGE_KEY) || "";
+    } catch (e) {
+      return "";
+    }
+  })(),
+);
+// 持久化统一由下面的 watch 完成；这里保留动作名，调用方只改会话状态。
 function saveHost(v) {
   host.value = v;
-  try { localStorage.setItem(APP_HOST_STORAGE_KEY, v); } catch (e) { /* 同上 */ }
 }
 
 // ---------------------------------------------------------------- 环境（本机引擎）
@@ -113,19 +126,36 @@ const envTitle = computed(() => {
 // 这里读来显示；请求不传 timeout，由后端取同一份
 const budget = ref(null);
 
-async function loadEnvironment() {
+let environmentPending = null;
+
+function loadEnvironment() {
+  if (environmentPending) return environmentPending;
   envLoading.value = true;
-  getSettings().then((s) => {
-    budget.value = (s.values.debug || {}).timeout
-      ?? s.defaults?.debug?.timeout ?? null;
-  }).catch(() => {});
-  try {
-    env.value = await jvmReadiness();
-  } catch (e) {
-    env.value = { ok: false, checks: [{ name: "环境就绪接口", hint: "环境检查失败：" + e }] };
-  } finally {
-    envLoading.value = false;
-  }
+  const pending = (async () => {
+    const settingsPending = getSettings()
+      .then((s) => {
+        budget.value =
+          (s.values.debug || {}).timeout ?? s.defaults?.debug?.timeout ?? null;
+      })
+      .catch(() => {});
+    try {
+      env.value = await jvmReadiness();
+    } catch (e) {
+      env.value = {
+        ok: false,
+        checks: [{ name: "环境就绪接口", hint: "环境检查失败：" + errorMessage(e) }],
+      };
+    } finally {
+      await settingsPending;
+      envLoading.value = false;
+    }
+    return env.value;
+  })();
+  const shared = pending.finally(() => {
+    if (environmentPending === shared) environmentPending = null;
+  });
+  environmentPending = shared;
+  return shared;
 }
 
 // ---------------------------------------------------------------- 连 App
@@ -142,21 +172,24 @@ let preflightPending = null;
 
 // 只读预检：连不连得上、App 里有没有这个源、是不是旧版本。结果写进
 // preflightState（卡片与调试流程都读它），不弹 toast——标签就在输入框旁
-async function runPreflight(source, host_) {
+async function runPreflight(runSource, host_) {
   if (!preflightPending) {
     preflightPending = (async () => {
       checking.value = true;
       try {
         // 用源对象：它的 bookSourceUrl 是导入原文，App 按精确字符串匹配；
         // 整份传过去才能和 App 里那份比对规则（core/app_debug.py:preflight）
-        preflightState.value = await appPreflight(source, host_, 0);
+        preflightState.value = await appPreflight(runSource, host_, 0);
       } catch (e) {
-        preflightState.value = { state: "unreachable", error: String(e.message) };
+        preflightState.value = {
+          state: "unreachable",
+          error: errorMessage(e),
+        };
       } finally {
         checking.value = false;
         preflightPending = null;
       }
-      const s = preflightState.value;
+      const s = preflightState.value || {};
       if (s.detail) console.warn("[app-debug] 预检失败:", s.detail);
     })();
   }
@@ -168,13 +201,18 @@ async function runPreflight(source, host_) {
 // 副作用，用户点的是调试、App 里的源却被改了。stale 那档更是把「你调试的是
 // App 那份，不是你正在改的」摆到用户面前
 async function confirmPush(state) {
-  const text = state === "missing"
-    ? "App 里没有这个源。要先推送到 App 再调试吗？"
-    : "App 里是旧版本。直接调试会跑 App 里那份规则，不是你正在改的。"
-      + "要先推过去覆盖它再调试吗？";
+  const text =
+    state === "missing"
+      ? "App 里没有这个源。要先推送到 App 再调试吗？"
+      : "App 里是旧版本。直接调试会跑 App 里那份规则，不是你正在改的。" +
+        "要先推过去覆盖它再调试吗？";
   return ElMessageBox.confirm(text, "推送并调试", {
-    confirmButtonText: "推送并调试", cancelButtonText: "取消", type: "warning",
-  }).then(() => true).catch(() => false);
+    confirmButtonText: "推送并调试",
+    cancelButtonText: "取消",
+    type: "warning",
+  })
+    .then(() => true)
+    .catch(() => false);
 }
 
 // App IP 持久化就在会话内做：存 trim 后的值，清空删键——下次打开是干净的
@@ -184,8 +222,17 @@ watch(host, (value) => {
   try {
     if (h) localStorage.setItem(APP_HOST_STORAGE_KEY, h);
     else localStorage.removeItem(APP_HOST_STORAGE_KEY);
-  } catch (e) { /* 同上 */ }
+  } catch (e) {
+    /* 同上 */
+  }
 });
+
+// 结果落位只在这里统一：保留后端错误体里的 detail / 原始字段，不能把用户可见原因
+// 削成只有一行 error；null 也要给出明确原因，不能让界面伪装成「尚未调试」。
+function storeResult(value) {
+  result.value = value == null ? { error: "调试没有返回结果" } : value;
+  return result.value;
+}
 
 // ---------------------------------------------------------------- 一次运行
 
@@ -199,38 +246,48 @@ watch(host, (value) => {
  *                                 不给就视为拒绝——推送必须过用户
  * @returns {Object} 结果体（含 error 时调用方自行呈现）
  */
-async function startRun({ source, key, confirmPush: askPush }) {
+async function startRun({ source: runSource, key, confirmPush: askPush }) {
   beginWait();
   pushed.value = "";
   try {
     if (channel.value === "jvm") {
-      const r = await jvmDebug(source, key, null, "", cacheMode.value,
-                               abort ? abort.signal : null);
-      result.value = r && r.error ? { error: r.error } : r;
-      return result.value;
+      const r = await jvmDebug(
+        runSource,
+        key,
+        null,
+        "",
+        cacheMode.value,
+        abort ? abort.signal : null,
+      );
+      return storeResult(r);
     }
     // 连 App：先预检——调试 WS 对 App 库里查不到的 tag 静默无响应，而且它跑的
     // 始终是 **App 里那份规则**，预检把「是旧版本」一并判掉
-    const pf = await runPreflight(source, host.value.trim());
+    const pf = await runPreflight(runSource, host.value.trim());
     if (pf.state === "unreachable") {
-      result.value = { error: pf.error };
-      return result.value;
+      return storeResult({ error: pf.error || "连不上 App", detail: pf.detail || "" });
     }
     const needPush = pf.state !== "ready";
     if (needPush && !(askPush ? await askPush(pf.state) : false)) {
-      return result.value;   // 取消：不推也不调试，预检结果留在卡片上
+      return result.value; // 取消：不推也不调试，预检结果留在卡片上
     }
-    const r = await appDebug(source, key, host.value.trim(), 0, needPush,
-                             cacheMode.value, abort ? abort.signal : null);
-    result.value = r && r.error ? { error: r.error } : r;
-    if (!result.value.error) {
+    const r = await appDebug(
+      runSource,
+      key,
+      host.value.trim(),
+      0,
+      needPush,
+      cacheMode.value,
+      abort ? abort.signal : null,
+    );
+    const stored = storeResult(r);
+    if (!stored.error) {
       pushed.value = needPush ? pf.state : "";
       preflightState.value = { state: "ready", error: "", detail: "" };
     }
-    return result.value;
+    return stored;
   } catch (e) {
-    result.value = { error: abortNote(e) };
-    return result.value;
+    return storeResult({ error: abortNote(e), detail: e && e.detail ? e.detail : "" });
   } finally {
     endWait();
   }
@@ -239,11 +296,31 @@ async function startRun({ source, key, confirmPush: askPush }) {
 export function useDebugSession() {
   return {
     // 状态
-    source, setSource, result, compare, running, elapsed, budget,
-    channel, target, query, cacheMode, host, saveHost,
-    env, envLoading, envTitle,
-    preflightState, checking, pushed,
+    source,
+    setSource,
+    result,
+    compare,
+    running,
+    elapsed,
+    budget,
+    channel,
+    target,
+    query,
+    cacheMode,
+    host,
+    saveHost,
+    env,
+    envLoading,
+    envTitle,
+    preflightState,
+    checking,
+    pushed,
     // 动作
-    startRun, cancelRun, abortNote, loadEnvironment, runPreflight,
+    startRun,
+    cancelRun,
+    abortNote,
+    confirmPush,
+    loadEnvironment,
+    runPreflight,
   };
 }
