@@ -45,6 +45,8 @@ const hasExploreConfig = computed(() =>
   !!(String((source.value || {}).exploreUrl || "").trim()));
 const currentTarget = computed(
   () => DEBUG_TARGETS.find((t) => t.value === target.value) || DEBUG_TARGETS[0]);
+const initialStep = computed(() => String(route.query.step || ""));
+
 const debugHint = computed(() => {
   if (target.value === "explore" && !hasExploreConfig.value) {
     return "这个源没配 exploreUrl，请填一个发现页 URL";
@@ -58,6 +60,7 @@ onMounted(async () => {
   const urlParam = decodeURIComponent(route.params.url || "");
   const handoff = source.value
     && String(source.value.bookSourceUrl || "") === urlParam;
+  if (route.query.key) query.value = String(route.query.key);
   if (handoff || !urlParam) return;
   loading.value = true;
   try {
@@ -67,7 +70,6 @@ onMounted(async () => {
     const parsed = splitSystemUser(d.source.bookSourceGroup || "");
     userTags.value = parsed.user;
     sysLocked.value = !!d.system_tags_locked;
-    if (route.query.key) query.value = String(route.query.key);
   } catch (e) {
     ElMessage.error("加载源失败：" + e.message);
   } finally {
@@ -83,7 +85,7 @@ async function debugRun() {
   }
   const r = await startRun({ source: source.value, key });
   // key 进 URL：刷新可恢复、问题场景可直接分享
-  router.replace({ query: { key } });
+  router.replace({ query: { key, step: target.value, url: query.value || undefined } });
   return r;
 }
 
@@ -97,6 +99,7 @@ function rerunFromStep(stepName) {
     return ElMessage.warning(
       "上一轮结果里没有这一步的链接。先跑一次完整调试，再重试这一步");
   }
+  router.replace({ query: { key, step: stepName, url: step.url || undefined } });
   return startRun({ source: source.value, key });
 }
 
@@ -173,7 +176,7 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
                 placeholder="App 的 IP，如 192.168.1.5" style="max-width: 260px" />
     </div>
 
-    <DebugWorkbench class="wb-body" :rules="ruleByStep"
+    <DebugWorkbench class="wb-body" :initial-step="initialStep" :rules="ruleByStep"
                     :source-type="Number((source || {}).bookSourceType) || 0"
                     :source="source || {}"
                     @apply-rule="onApplyRule" @rerun-from="rerunFromStep"

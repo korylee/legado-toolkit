@@ -34,6 +34,7 @@ import { FIELD_OF_STEP, findCandidates, parseDoc } from "../utils/ruleCandidates
 import { formatHtml } from "../utils/htmlView";
 // 定层（九-1）：先定层再写规则——判据与证据行都在纯函数里，这里只负责把「这一步要什么」传进去
 import { classifyLayer } from "../utils/layers";
+import { debugOutletFor } from "../utils/debugOutlets";
 // 点选（九-2a）：元素 → 候选选择器 + 实测三个数。**只是提议**，验收仍走真引擎
 import { previewCss, selectorCandidates } from "../utils/selector";
 
@@ -56,7 +57,7 @@ const props = defineProps({
 
 // 结果、在途、对比基线直接读**会话**（第二期收尾）：本组件不再经 props 接收
 // 运行态——弹框与工作台页面挂它，看到的是同一份
-const { result, compare, running } = useDebugSession();
+const { result, compare, running, channel: debugChannel } = useDebugSession();
 const rerunning = running;
 const prevResult = computed(() => compare.value.prev);
 const emit = defineEmits(["update:modelValue", "goto", "rerunFrom", "applyRule"]);
@@ -110,6 +111,17 @@ const diffSummary = computed(() => {
 });
 function diffOf(name) {
   return diffBy.value[name];
+}
+//: 只有「本机无法判定」才给真机出口。明确 fail 仍指向规则证据，不能把所有 L2+
+//: 失败都归因给环境；判据集中在纯函数里，避免模板继续长出第二套分类。
+const debugOutlet = computed(() => debugOutletFor({
+  channel: debugChannel.value,
+  verdict: (current.value || {}).verdict,
+  layer: (layer.value || {}).layer,
+}));
+function switchToApp() {
+  debugChannel.value = "app";
+  emit("rerunFrom", (current.value || {}).name);
 }
 function diffTagType(status) {
   return { regressed: "danger", changed: "warning", moved: "info", new: "success" }[status] || "info";
@@ -900,8 +912,9 @@ function copyPage() {
                        @click="emit('rerunFrom', current.name)">重新调试本步</el-button>
           </span>
         </el-tooltip>
-        <!-- 失败就直接把人送到对应的规则页签，省掉自己翻页签找字段 -->
-        <el-button v-if="current.verdict === 'fail'" size="small" type="primary" plain
+        <!-- 失败 / 没结论（多半是规则为空或没页面）都把人送到规则编辑，省得瞎猜 -->
+        <el-button v-if="current.verdict === 'fail' || current.verdict === 'unknown'"
+                   size="small" type="primary" plain
                    @click="gotoRuleField(current)">去改规则</el-button>
       </div>
 
@@ -939,13 +952,22 @@ function copyPage() {
 
       <!-- 诊断（第 0 层）：**取不到有好几种成因，动作完全不同**，混成一句「失败」
            用户只能瞎试。这里先说清是哪一种、下一步该改什么 -->
-      <div v-if="diagnosis.length" ref="diagnosisBox" class="diagnosis">
+      <div v-if="diagnosis.length || debugOutlet" ref="diagnosisBox" class="diagnosis">
         <div v-for="(d, i) in diagnosis" :key="i" class="diag-line">
           <el-tag size="small" :type="d.level === 'warn' ? 'warning' : 'info'">
             {{ d.level === "warn" ? "问题" : "提示" }}
           </el-tag>
           <span class="why">{{ d.why }}</span>
           <span class="muted todo">{{ d.todo }}</span>
+        </div>
+        <!-- unknown-outlet：动态页本机引擎取不到数据时，出口是现成的连 App 通道
+             （真机 WebView 与网络出口），不新造第三条验证路径 -->
+        <div v-if="debugOutlet" class="diag-line">
+          <el-tag size="small" type="warning">提示</el-tag>
+          <span class="why">{{ debugOutlet.reason }}</span>
+          <el-button size="small" type="primary" plain @click="switchToApp">
+            {{ debugOutlet.label }}
+          </el-button>
         </div>
       </div>
 
