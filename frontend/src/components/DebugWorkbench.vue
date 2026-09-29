@@ -22,7 +22,7 @@
 import { ref, computed, watch, nextTick, onMounted } from "vue";
 import { ElMessage } from "element-plus";
 
-import { replayStep, ruleCandidates, suggestRule } from "../api/rules";
+import { replayStep, ruleCandidates, suggestRule, verifyCandidate } from "../api/rules";
 import { getLLMStatus } from "../api/llm";
 // 步骤名 → 中文的**唯一**一份（编辑弹窗共用），别再在本组件里写第二份
 import { FIELD_OF_STEP, STEP_LABELS } from "../utils/steps";
@@ -43,9 +43,6 @@ import { buildEvidenceSummary } from "../utils/debugEvidence";
 
 const props = defineProps({
   initialStep: { type: String, default: "" },
-  //: 当前表单里每一步的规则（steps[].name → 规则字符串），用于「重放本步」
-  rules: { type: Object, default: () => ({}) },
-  sourceType: { type: Number, default: 0 },
   //: 源有没有声明 cookie jar。登录墙判定要用它：那一档「200 + 登录词」以它为前提
   //: （「请登录」在正常页面的导航栏里太常见）
   enabledCookieJar: { type: Boolean, default: false },
@@ -64,6 +61,19 @@ const { result, compare, running, channel: debugChannel } = useDebugSession();
 const rerunning = running;
 const prevResult = computed(() => compare.value.prev);
 const emit = defineEmits(["update:modelValue", "goto", "rerunFrom", "applyRule"]);
+
+//: 规则四段与源类型都从 **source 自己**派生，宿主只传 source 一份（AGENTS #13：
+//: 算得出的不传）——历史上它们是两个独立 props，靠宿主记得传齐；工作台路由那次
+//: 迁移 `enabledCookieJar` 就漏传过。再要加派生输入，从这里出，别加 props。
+const sourceType = computed(() => Number((props.source || {}).bookSourceType) || 0);
+const rules = computed(() => {
+  const s = props.source || {};
+  const rs = s.ruleSearch || {};
+  const rt = s.ruleToc || {};
+  const rc = s.ruleContent || {};
+  return { search: rs.bookList || "", bookUrl: rs.bookUrl || "",
+           toc: rt.chapterList || "", content: rc.content || "" };
+});
 
 // explore 是发现链路的产出步（key 带 `发现::` 时后端才产出它）
 //: 每次渲染的字符数。整页 HTML 可能 100 万字符，全量进 DOM 会卡
@@ -287,6 +297,8 @@ function selectStep(name) {
   searchKey.value = "";
   activeHit.value = 0;
   replayResult.value = null;   // 上一步的重放结论不适用于当前这步
+  candidateResults.value = {};
+  candidateVerifying.value = "";
 }
 
 //: 当前步骤的规则。编辑先落在抽屉草稿里，用户点“应用”后才回填父表单；
@@ -295,10 +307,10 @@ const draftRule = ref("");
 const currentRule = computed(() => draftRule.value);
 const ruleDirty = computed(() => {
   const name = (current.value || {}).name || "";
-  return draftRule.value !== String((props.rules || {})[name] || "");
+  return draftRule.value !== String((rules.value || {})[name] || "");
 });
-watch([current, () => props.rules], ([step, rules]) => {
-  draftRule.value = (rules || {})[(step || {}).name] || "";
+watch([current, rules], ([step, ruleMap]) => {
+  draftRule.value = (ruleMap || {})[(step || {}).name] || "";
 }, { immediate: true, deep: true });
 
 function applyDraftRule(replay = false) {
@@ -332,7 +344,7 @@ function verifyCurrentRule(rule = draftRule.value) {
 }
 
 function resetDraftRule() {
-  draftRule.value = (props.rules || {})[(current.value || {}).name] || "";
+  draftRule.value = (rules.value || {})[(current.value || {}).name] || "";
 }
 //: 重放要同时满足：这一步对应一个页面的 HTML、这一步有规则可回放、
 //: 且这一步确实是一条规则步骤（explore 的规则结构不同，不给重放）
@@ -435,7 +447,7 @@ const want = computed(() => {
   const w = STEP_WANT[name];
   if (!w) return null;
   // 漫画 / 听书的正文是图片或音频，要的东西不一样，判据也得跟着变
-  if (name === "content" && [1, 2, 3].includes(Number(props.sourceType))) {
+  if (name === "content" && [1, 2, 3].includes(sourceType.value)) {
     return { kind: "media", label: "正文图片/音频" };
   }
   return w;
@@ -524,12 +536,74 @@ function useCandidate(c) {
   return true;
 }
 
-function applyCandidateAndRerun(c) {
-  if (!c || !canRerun.value || rerunning.value) return;
-  if (useCandidate(c)) emit("rerunFrom", (current.value || {}).name);
+const candidateVerifying = ref("");
+const candidateResults = ref({});
+
+function candidateKey(c, i = 0) {
+  return String((c && c.rule) || "") + "#" + i;
 }
 
-// —— 点选：在渲染出来的页面上直接选（九-2a）——
+function candidatePresentation(c, i = 0) {
+  const result = candidateResults.value[candidateKey(c, i)] || c || {};
+  const status = result.status || (result.verified ? "verified" :
+    (result.rule_error ? "needs_engine" : "rejected"));
+  if (status === "verified") {
+    return { label: "可直接使用", type: "success", action: "apply", actionLabel: "应用" };
+  }
+  if (status === "rejected") {
+    return { label: "不可用", type: "danger", action: "details", actionLabel: "查看原因" };
+  }
+  return { label: "需要实测", type: "warning", action: "verify", actionLabel: "验证并应用" };
+}
+
+function candidateTarget(step) {
+  return ({ search: "search", explore: "explore", bookUrl: "info",
+    toc: "toc", content: "content" })[step] || "";
+}
+
+function candidateQuery(step) {
+  const s = current.value || {};
+  // 搜索段没有 URL 时使用现有调试链的默认关键词；其他段必须使用实测页面地址。
+  return String(s.url || s.query || (step === "search" ? "我" : "")).trim();
+}
+
+async function verifyAndApplyCandidate(c, i = 0) {
+  if (!c) return;
+  const key = candidateKey(c, i);
+  const shown = candidatePresentation(c, i);
+  if (shown.action === "apply") return useCandidate(c);
+  if (shown.action === "details") {
+    ElMessage.warning(c.note || c.engine?.reason || "这条候选未通过验证");
+    return;
+  }
+  const field = aiField.value;
+  const target = candidateTarget((current.value || {}).name || "");
+  const query = candidateQuery((current.value || {}).name || "");
+  if (!field || !target || !query || candidateVerifying.value) return;
+  candidateVerifying.value = key;
+  try {
+    const result = await verifyCandidate(props.source || {}, field, c.rule, target, query);
+    candidateResults.value = Object.assign({}, candidateResults.value, { [key]: result });
+    if (result.status === "verified") {
+      useCandidate(c);
+      ElMessage.success("真实引擎已验证，候选已应用");
+    } else {
+      ElMessage.warning(result.engine?.reason || result.engine?.detail || "真实引擎未通过");
+    }
+  } catch (e) {
+    ElMessage.error("候选验证失败：" + e.message);
+  } finally {
+    candidateVerifying.value = "";
+  }
+}
+
+function applyCandidateAndRerun(c) {
+  if (!c || rerunning.value) return;
+  if (!useCandidate(c)) return;
+  if (canRerun.value) emit("rerunFrom", (current.value || {}).name);
+}
+
+// —— 点选：
 //
 // 渲染的是**我们补抓的** HTML（`pages[].html`）。页面自带的脚本**不执行**（iframe 只给
 // `allow-same-origin`），点选与高亮由**父页面**注入——同源能拿到它的 document。
@@ -695,11 +769,9 @@ function usePicked(c) {
   useCandidate({ rule: c.legado || c.css });
 }
 
-// —— 第 2 层：**AI 提议 + 回放验证** ——
-// 与第 1 层的分工：第 1 层是确定性扫描（页面上的候选结构、零模型成本），但它
-// 覆盖不了「**页面上没有目标节点**」——那种情况模型能给 `@js:` 调接口的路子，
-// 而那条我们本地验不了。所以这里每条候选**都由后端用回放器验过**，验不了的单
-// 独标出「只能连 App 试」，不许和「已验证」混在一起。
+// —— 第 2 层：**AI 提议 + 分层验证** ——
+// 第 1 层是确定性扫描；AI 只在用户点击后提议。候选先由后端本地初筛，
+// 本地无法判断的候选由「验证并应用」调用真实 JVM 引擎，不能把两种结论混在一起。
 const aiLoading = ref(false);
 const aiRes = ref(null);
 
@@ -766,7 +838,7 @@ function suggestBody(step) {
     want_label: (want.value && want.value.label) || "",
     field: aiField.value,
     focus: focusRule.value,
-    source_type: props.sourceType,
+    source_type: sourceType.value,
     app_values: appValues.value,
     candidates: candidates.value.map((c) => c.rule),
     enabled_cookie_jar: !!props.enabledCookieJar,
@@ -799,6 +871,8 @@ async function askAI() {
   if (!canSuggest.value) return;
   aiLoading.value = true;
   aiRes.value = null;
+  candidateResults.value = {};
+  candidateVerifying.value = "";
   const step = (current.value || {}).name || "";
   try {
     aiRes.value = await suggestRule(suggestBody(step));
@@ -860,7 +934,7 @@ const diagnosis = computed(() => {
 
   if (!currentRule.value.trim()) {
     push("warn", "这条源没配「" + label + "」规则",
-         s.name === "content" && Number(props.sourceType) === 0
+         s.name === "content" && sourceType.value === 0
            ? (currentPage.value
                ? "正文页已按章节链接抓回来。直接在下面看整页源码或选候选规则，"
                  + "改完点「重新调试本步」只验这一步"
@@ -891,7 +965,7 @@ async function doReplay() {
   try {
     replayResult.value = await replayStep(
       currentPage.value.html, currentRule.value,
-      current.value.name, props.sourceType);
+      current.value.name, sourceType.value);
   } catch (e) {
     ElMessage.error("调试失败：" + e.message);
     replayResult.value = null;
@@ -1203,16 +1277,21 @@ function copyPage() {
         </p>
         <div v-for="(c, i) in (aiRes ? aiRes.candidates : [])" :key="i" class="cand">
           <span class="mono rule">{{ c.rule }}</span>
-          <el-tag size="small" :type="c.verified ? 'success' : 'warning'">
-            {{ c.verified ? "本地验过 " + c.count + " 条"
-                          : (c.rule_error ? "本地验不了" : "取不到值") }}
+          <el-tag size="small" :type="candidatePresentation(c, i).type">
+            {{ candidatePresentation(c, i).label }}
           </el-tag>
           <span class="muted samples">
-            {{ c.verified ? (c.samples || []).join("  |  ") : (c.note || "（无样本）") }}
+            {{ c.status === "verified" || c.verified
+              ? (c.samples || []).join("  |  ")
+              : (c.note || c.why || "需要真实引擎确认") }}
           </span>
           <span class="grow" />
           <el-button size="small" type="primary" plain
-                     @click="useCandidate(c)">应用</el-button>
+                     :loading="candidateVerifying === candidateKey(c, i)"
+                     :disabled="!!candidateVerifying"
+                     @click="verifyAndApplyCandidate(c, i)">
+            {{ candidatePresentation(c, i).actionLabel }}
+          </el-button>
         </div>
       </div>
 

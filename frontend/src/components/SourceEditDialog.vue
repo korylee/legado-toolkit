@@ -4,7 +4,7 @@ import { ref, computed, watch, nextTick } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { api, subscribeJob } from "../api/client";
-import { getDetail, listTags, saveSource, sourceExists } from "../api/sources";
+import { getDetail, saveSource, sourceExists } from "../api/sources";
 import { jobFailReason } from "../utils/jobs";
 import {
   canonicalTag, ensureTagMeta, isQualityTag, isStatusTag,
@@ -115,7 +115,6 @@ const manualStatus = ref("");
 // 那样用户以为只是选了个状态，实际是把校验结果锁死了
 const statusLocked = ref(false);
 const userTags = ref([]);
-const userTagOptions = ref([]);
 const quickUrl = ref("");
 const quickDetailUrl = ref("");
 const quickDiscover = ref(false);
@@ -423,16 +422,6 @@ function expandTestFailures(res) {
   activeRuleTab.value = target[0];
 }
 
-async function loadTagOptions() {
-  try {
-    const tags = await listTags();
-    userTagOptions.value = tags.filter((t) => t.kind === "user");
-  } catch (e) {
-    userTagOptions.value = [];
-    ElMessage.warning("标签列表加载失败，请确认后端已重启");
-  }
-}
-
 watch(() => props.modelValue, (show) => {
   if (!show && quickStop) {
     quickStop();
@@ -467,7 +456,6 @@ watch(() => [props.modelValue, props.sourceUrl], async ([show, url]) => {
   // 「关闭 → 再打开」残留。不复位的话下次打开编辑弹窗会直接是「另存」状态
   // （域名框解禁、标题错成「另存为新源」、跳过查重），而用户以为自己只是在编辑。
   isDuplicate.value = false;
-  loadTagOptions();
   void loadJvmEnvironment();
   activeTab.value = url ? "basic" : "quick";
   activeRuleTab.value = "search";
@@ -937,8 +925,8 @@ async function doSave(s) {
             <template #label>
               <span class="tab-label">基本信息<i class="dot" :class="tabDot('basic')"></i></span>
             </template>
-            <SourceFields v-model:source="form" v-model:user-tags="userTags" :user-tag-options="userTagOptions"
-                          :is-new="isNew" :url-editable="isNew"
+            <SourceFields v-model:source="form" v-model:user-tags="userTags"
+                          :is-new="isNew"
                           >
                <template #editor-fields>
                  <el-form-item label="启用"><el-switch v-model="form.enabled" /></el-form-item>

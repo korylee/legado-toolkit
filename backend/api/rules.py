@@ -216,6 +216,9 @@ async def verify_candidate_rule(body: CandidateVerifyRequest):
     状态，让前端显示原因而不是把它当成规则失败。
     """
     from core import settings_store
+    from core.fetch import CACHE_MODES
+    from core.jvm_debug import run_jvm_debug
+    from core.jvm_env import readiness
     from core.repair.suggest import verify_candidate
 
     timeout = (body.timeout if body.timeout is not None
@@ -225,15 +228,30 @@ async def verify_candidate_rule(body: CandidateVerifyRequest):
         raise HTTPException(400, "调试预算须在 %d～%d 秒（收到 %s）" %
                             (lo, hi, timeout))
 
+    cache = str(body.cache or "")
+    if cache not in CACHE_MODES:
+        raise HTTPException(400, "未知的缓存策略：%s（只能是 %s）" %
+                            (cache, " / ".join(CACHE_MODES)))
+
     source = dict(body.source or {})
     if not str(source.get("bookSourceUrl", "") or "").strip():
         raise HTTPException(400, "缺少 bookSourceUrl")
+
+    jvm_conf = settings_store.load().get("jvm", {})
+    readiness_result = readiness(
+        jvm_conf.get("app_repo", ""), jvm_conf.get("android_sdk_dir", ""))
+    proxy = settings_store.resolve_proxy()
+
+    def run_candidate(src, key, run_timeout):
+        return run_jvm_debug(src, key=key, timeout=run_timeout,
+                              cookie=body.cookie or "", cache=cache, proxy=proxy,
+                              readiness_result=readiness_result)
 
     async with runner.acquire_lane("jvm", kind="debug"):
         try:
             return await asyncio.to_thread(
                 verify_candidate, source, body.field, body.rule,
-                body.target, body.query, int(timeout))
+                body.target, body.query, int(timeout), run_candidate)
         except ValueError as exc:
             raise HTTPException(400, str(exc))
         except Exception as exc:

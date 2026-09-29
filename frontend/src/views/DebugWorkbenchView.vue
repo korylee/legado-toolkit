@@ -29,12 +29,6 @@ const sysLocked = ref(false);
 
 const name = computed(() => (source.value || {}).bookSourceName || "（无名）");
 const url = computed(() => (source.value || {}).bookSourceUrl || "");
-const ruleByStep = computed(() => {
-  const rs = (source.value || {}).ruleSearch || {};
-  const rt = (source.value || {}).ruleToc || {};
-  const rc = (source.value || {}).ruleContent || {};
-  return { search: rs.bookList || "", bookUrl: rs.bookUrl || "", toc: rt.chapterList || "", content: rc.content || "" };
-});
 const hasExploreConfig = computed(() => !!String((source.value || {}).exploreUrl || "").trim());
 const currentTarget = computed(() => DEBUG_TARGETS.find((t) => t.value === target.value) || DEBUG_TARGETS[0]);
 const initialStep = computed(() => String(route.query.step || ""));
@@ -202,7 +196,8 @@ onMounted(() => {
       <p v-if="channel === 'app' && preflightState" class="wb-preflight muted">App 预检：{{ preflightState.state || '未知' }}</p>
     </section>
 
-    <DebugWorkbench class="wb-body" :initial-step="initialStep" :rules="ruleByStep" :source-type="Number((source || {}).bookSourceType) || 0" :source="source || {}" @apply-rule="onApplyRule" @rerun-from="rerunFromStep" @goto="gotoEditor" />
+    <!-- 规则四段与源类型由工作台从 source 自己派生，这里只传 source 一份 -->
+    <DebugWorkbench class="wb-body" :initial-step="initialStep" :source="source || {}" @apply-rule="onApplyRule" @rerun-from="rerunFromStep" @goto="gotoEditor" />
     <el-drawer v-model="settingsOpen" title="源设置" size="min(520px, 92vw)" append-to-body>
       <SourceFields v-if="source" :source="source" v-model:user-tags="userTags" @update:source="applySourceUpdate" />
       <el-empty v-else description="源尚未加载" :image-size="60" />       <el-button v-if="source" class="raw-entry" size="small" link type="info" @click="rawOpen = !rawOpen">

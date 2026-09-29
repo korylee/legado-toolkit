@@ -3,16 +3,20 @@ import { ref, computed, watch, onMounted, onUnmounted } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { api, subscribeJob } from "../api/client";
 import { describeChanges, healthLabel } from "../utils/health";
+import { useJobs } from "../composables/useJobs";
 
 // 「任务」抽屉：替代已删掉的「任务」页。
 // 打开时拉一次历史（GET /api/jobs），再对还没跑完的任务挂 SSE 实时进度。
 // 原「任务」页那个「跑 ping 冒烟」按钮是调试用的，按需求不再搬运。
+// 「有几条在跑」不住在这里——它在 useJobs（统计条徽标与这份列表同源），
+// 每次列表或 SSE 变化顺手 upsert 即可。
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
   //: 打开时自动选中哪一条任务（结果条上的「查看」用）。空串 = 不选中
   focusJobId: { type: String, default: "" },
 });
-const emit = defineEmits(["update:modelValue", "running-change"]);
+const emit = defineEmits(["update:modelValue"]);
+const { runningCount, upsertJob, removeJob } = useJobs();
 
 const visible = computed({
   get: () => props.modelValue,
@@ -48,20 +52,14 @@ const terminal = (s) => ["done", "failed", "cancelled"].includes(s);
 const retryLabel = (s) => s === "done" ? "再次运行" : "重试";
 const retryable = (row) => terminal(row.status) && row.kind !== "jvm_run";
 const pct = (row) => (row.total ? Math.round((row.progress / row.total) * 100) : 0);
-// 徽标口径：pending 还没轮到跑、也算「进行中」，与列表里的状态标签保持一致
-const runningCount = computed(
-  () => jobs.value.filter((j) => j.status === "running" || j.status === "pending" || j.status === "cancel_requested").length,
-);
 const terminalCount = computed(
   () => jobs.value.filter((j) => ["done", "failed", "cancelled"].includes(j.status)).length,
 );
 
-// 把进行中的任务数抛给父组件，供统计条上的「任务」按钮画徽标
-watch(runningCount, (n) => emit("running-change", n), { immediate: true });
-
 // SSE 推的是整份 job 记录，字段与 list_jobs 同形，直接合并回对应的行
 function mergeJob(data) {
   if (!data || data.error) return;        // 任务不存在时后端推的是 {"error": ...}
+  upsertJob(data);                        // 先同步徽标：任务可能还不在列表里（见下）
   const idx = jobs.value.findIndex((j) => j.id === data.id);
   if (idx < 0) return;
   const next = jobs.value.slice();
@@ -154,6 +152,7 @@ async function deleteJob(row) {
       type: "warning", confirmButtonText: "删除", cancelButtonText: "返回",
     });
     await api.del("/jobs/" + row.id);
+    removeJob(row.id);
     delete details.value[row.id];
     if (activeJobId.value === row.id) activeJobId.value = "";
     jobs.value = jobs.value.filter((j) => j.id !== row.id);
@@ -185,6 +184,7 @@ async function load() {
   try {
     const list = await api.get("/jobs");
     jobs.value = list;
+    list.forEach(upsertJob);               // 徽标以这份列表为准（挂载/打开时同步）
     // 只订阅没跑完的：已完成的任务一订阅就会立刻推终态，会误报「任务完成」提示
     list.forEach((j) => {
       if (j.status === "running" || j.status === "pending") watchJob(j.id);

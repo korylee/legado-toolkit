@@ -15,6 +15,7 @@ import { HEALTH_OPTIONS, describeChanges, engineLabel, healthLabel } from "../ut
 import { depthClass, depthText, hasAnyTag, healthCell, jvmStateLabel, jvmSteps,
          lockedStatus, tagCellsOf, triToInt, typeLabel, urlKey } from "../utils/sourceRow";
 import { useMobile } from "../composables/useMobile";
+import { useJobs } from "../composables/useJobs";
 import SourceEditDialog from "../components/SourceEditDialog.vue";
 import SourceFilterForm from "../components/SourceFilterForm.vue";
 import SourceCard from "../components/SourceCard.vue";
@@ -231,15 +232,18 @@ async function runJvmBatch() {
     // 跑了 3 条，是设置页时代最难发现的一处截断
     jvmRunScope.value = (scope === "selected" ? "勾选的" : scope === "filtered" ? "当前筛选的" : "全部在用源")
       + "（" + (r.count || 0) + " 条）";
+    upsertJob({ id: r.job_id, status: "pending" });   // 徽标立刻反映：不等第一帧 SSE
     // 跑批是分钟级的：**提交任务 + 订阅**（与本地校验同一条链路）。原来是一个挂到
     // 跑完的长请求——关掉页面/刷新就白等；结论照落库，但界面不知道它跑完了
     if (stopJvm) stopJvm();
     stopJvm = subscribeJob(
       r.job_id,
-      // 跑批没有逐条进度（一次 Gradle 调用跑一批），**不编假进度**：只报状态
-      () => {},
+      // 跑批没有逐条进度（一次 Gradle 调用跑一批），**不编假进度**：只报状态。
+      // 帧仍然 upsert 进 useJobs——徽标不依赖它显示进度，只认「在不在跑」
+      (data) => upsertJob(data),
       async (data) => {
         jvmRunning.value = false;
+        upsertJob(data);   // 终态（或 unknown）都把它从「在跑」里摘掉
         let res = {};
         try { res = JSON.parse((data && data.result_json) || "{}"); } catch (e) { /* 非 JSON 就当空 */ }
         if (data.status === "done") {
@@ -266,8 +270,10 @@ async function runJvmBatch() {
 // 统计条（替代已删掉的「诊断」页）与「任务」抽屉
 const stats = ref(null);
 const jobsVisible = ref(false);
-const jobBadge = ref(0);
 const jobsRef = ref(null);
+//: 进行中的任务数（统计条「任务」按钮的徽标）。任务都是本页提交的，
+//: 提交成功 / SSE 帧时 upsert 进 useJobs；徽标与任务抽屉读同一份。
+const { runningCount: jobRunning, upsertJob } = useJobs();
 //: 结果条上点「查看」时，要让抽屉直接展开哪一条任务
 const focusJobId = ref("");
 
@@ -576,6 +582,7 @@ async function checkSources(urls = []) {
       jobId = r.job_id;
     }
     checkJobId.value = jobId;
+    upsertJob({ id: jobId, status: "pending" });   // 徽标立刻反映：不等第一帧 SSE
     // **不弹「已提交」的 toast**：上面那条状态条已经在说「正在校验 N 条」了，
     // 再来一条浮层只是噪音——而且它挡在统计条旁边，反而盖住了真正的进度
     if (stopCheck) stopCheck();
@@ -585,11 +592,13 @@ async function checkSources(urls = []) {
       // 的（checker.run 的 on_progress），所以状态条上那个计数是跑动中的，不是跳变的
       (data) => {
         if (!data) return;
+        upsertJob(data);
         if (data.total) checkTotal.value = data.total;
         if (typeof data.progress === "number") checkProgress.value = data.progress;
       },
       async (data) => {
         resetCheckState();
+        upsertJob(data);   // 终态（或 unknown）都把它从「在跑」里摘掉
         if (data.status === "done") {
           const summary = parseCheckResult(data.result_json);
           // 就地回填优先：整表重拉会让滚动位置跳、正在看的行移位。
@@ -618,11 +627,11 @@ async function checkSources(urls = []) {
           ElMessage.error("校验任务失败：" + (jobFailReason(data.result_json)
                                             || data.status || "unknown"));
         }
-        // 任务收尾后让抽屉那份列表/徽标跟上
+        // 任务收尾后让开着的那份抽屉列表跟上（徽标已在上面 upsert 过）
         jobsRef.value?.refresh();
       },
     );
-    // 新任务立刻反映到「任务」按钮的徽标上
+    // 新任务补进开着的那份抽屉列表；徽标已在提交时 upsert 过
     jobsRef.value?.refresh();
   } catch (e) {
     resetCheckState();
@@ -712,7 +721,7 @@ onUnmounted(() => {
         <span class="muted">{{ checkStatusText }}</span>
         <el-button link size="small" type="warning" @click="cancelCheck">取消</el-button>
       </template>
-      <el-badge :value="jobBadge" :hidden="!jobBadge" type="primary">
+      <el-badge :value="jobRunning" :hidden="!jobRunning" type="primary">
         <el-button size="small" :icon="Monitor" @click="jobsVisible = true">任务</el-button>
       </el-badge>
     </div>
@@ -1014,8 +1023,7 @@ onUnmounted(() => {
     <ExportDrawer v-model="exportVisible" :selected="selected"
                   :filter="query" :filtered-total="total" />
     <ImportDialog v-model="importVisible" @imported="load" />
-    <JobsDrawer ref="jobsRef" v-model="jobsVisible" :focus-job-id="focusJobId"
-                @running-change="jobBadge = $event" />
+    <JobsDrawer ref="jobsRef" v-model="jobsVisible" :focus-job-id="focusJobId" />
 
     <!-- 批量校验的确认弹框：**一台引擎**（在 JVM 里跑「阅读」App 的真源码）。
          **跑哪些由入口决定**——点开它的那一刻就定了（勾选的 / 当前筛选的 / 全量），

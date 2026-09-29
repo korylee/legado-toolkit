@@ -8,8 +8,6 @@ import DebugWorkbench from "./DebugWorkbench.vue";
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
   initialStep: { type: String, default: "" },
-  rules: { type: Object, default: () => ({}) },
-  sourceType: { type: Number, default: 0 },
   enabledCookieJar: { type: Boolean, default: false },
   source: { type: Object, default: null },
   entryError: { type: String, default: "" },
@@ -26,8 +24,8 @@ const visible = computed({
     <template #header>
       <span>调试</span>
     </template>
-    <DebugWorkbench :initial-step="initialStep" :rules="rules"
-                    :source-type="sourceType" :enabled-cookie-jar="enabledCookieJar"
+    <DebugWorkbench :initial-step="initialStep"
+                    :enabled-cookie-jar="enabledCookieJar"
                     :source="source" :entry-error="entryError"
                     @goto="(v) => emit('goto', v)"
                     @apply-rule="(v) => emit('applyRule', v)"
