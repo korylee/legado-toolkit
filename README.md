@@ -70,6 +70,10 @@ uv run python -m backend
 - 后端：`http://127.0.0.1:8787`
 - API 文档：`http://127.0.0.1:8787/docs`
 
+**同一时刻只允许一个后端实例**：启动时会持有进程锁（`data/locks/backend.lock`），
+重复启动（含 `uvicorn --workers` 多进程）会被拒绝并指出已运行实例的 pid；把那个
+进程结束掉即可正常启动。持锁实例被强制结束后锁立即释放，无需等待。
+
 也可以使用传统 venv：
 
 ```powershell

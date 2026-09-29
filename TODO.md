@@ -18,12 +18,31 @@
 
 ## 0 · 现在做
 
-> 当前排期：引擎与调试执行链的基础设施已完成；后续调试体验以“入口降噪 → 工作台闭环 → 证据前置 → 编辑能力合入 → DOM 意图化生成”为主线。worker 线按租约、专用 worker、灰度切换推进；批量吞吐和请求合并只在有实测收益时启动。
+> 当前排期：引擎与调试执行链的基础设施已完成；后续调试体验以“入口降噪 → 工作台闭环 → 证据前置 → 编辑能力合入 → DOM 意图化生成”为主线。worker 线收口：哨兵锁已交付，批量校验拉起接常驻 daemon（jvm-batch-daemon）一条；专用 worker 与切换条目已删——隔离前提早被双 daemon 消化（lessons §六十五 / §六十六）。
 > P0 的 unknown 出口与可执行提示已交付，当前前端待办集中在新调试页的视觉层级、编辑闭环和证据可信度。
 
 ---
 
 ## 1 · 排队
+
+### 条目：jvm-batch-daemon · 批量校验的拉起方式接常驻 daemon
+状态：todo
+依赖：无
+优先级：P1
+背景：批量每个块独立拉起一次 Gradle+JVM（`_chunk_work` → `_run_gradle`），冷启动
+  是块数 × 纯等待；而 validate daemon 已经常驻、已经会跑批次形状的 args——单条快
+  路径就把 `_write_args` 的产物发给它（`jvm_validate_daemon.run`），与批次 args
+  同形状同 Kotlin 入口，差别只是 sources 文件条数。原「独立批量 worker 进程」的
+  常驻价值由此拿走，独立 Python worker 与切换工程不再需要（条目已删）。
+约束：**「频繁跑全量会被封 IP」是硬约束**（toolchain §四）：daemon 路径只省启动，
+  不改并发与请求量。`_chunk_work` 换成单条路径同形的「daemon 优先、
+  `ValidateDaemonError` 回落 Gradle 并保留原因」（AGENTS #4：回落要露出，不能装成
+  源失败）；灰度开关进 `settings_store`（AGENTS #8），默认 off，实测达标才改默认；
+  块级 DONE 恢复天然兼容（daemon 死 → 该块回落/重试，不重复已完成块）。
+验收：同一批次同一参数下 daemon 路径与 Gradle 路径结果逐字段一致；单条与批次共用
+  daemon 的争用实测（记录单条等待时长）——冲突常态化再给批次开第二个 daemon 实例
+  （客户端按命名实例参数化，即原多开容量问题的归宿）；长块 RSS 与中途死掉恢复实测。
+指针：backend/api/jvm.py，core/jvm_validate_daemon.py，lessons §六十五 / §六十六
 
 ### 条目：jvm-request-coalesce · 合并重复的进行中请求
 状态：blocked
@@ -34,15 +53,6 @@
 验收：只有在日志证明重复提交达到值得优化的数量后才实施；实施时完全相同的重复提交只产生一次 JVM 执行和一份底层结果，任一调用方都能收到同一结论及来源，任一合并键字段变化都会产生独立执行，旧结果不会静默复用。
 阻塞于：先统计重复提交率；没有数据证明收益前不实现。
 指针：backend/jobs/runner.py，backend/api/jvm.py，core/jvm_debug.py，AGENTS.md #5b，lessons §五十三 / §七十八
-
-### 条目：jvm-worker-lease · 给跨进程 worker 增加 SQLite 租约
-状态：todo
-依赖：无
-优先级：P1
-背景：当前 lane、`RUN_LOCK` 和执行中的 asyncio task 都是进程内状态；直接增加 API/uvicorn worker 会让不同进程各自认为自己拿到了 JVM，现有 jobs 表也没有 worker owner/generation，无法安全认领和恢复任务。它解决的是跨进程一致性，不与调度策略合并。
-约束：以 SQLite 原子认领为跨进程事实来源，至少记录 owner、generation、heartbeat、attempt 和运行目录；同一 job/块只能有一个有效 owner。认领、续租、完成和失败必须校验 owner/generation，旧 owner 不能覆盖新结果。进程启动、优雅停止和异常退出都要有明确回收/重试规则，不能用一次固定超时把源判坏；运行 manifest 与结果文件必须按 job/块隔离。
-验收：启动两个 worker 并发抢同一 job/块时只有一个成功；杀掉 owner 后任务能按规则恢复且不覆盖已完成结果；旧 owner 延迟回写会被拒绝；重启后 jobs、租约、运行目录和结果状态能逐项对账。
-指针：core/store.py，backend/jobs/runner.py，core/jvm_debug.py，lessons §二十八 / §六十五 / §七十四
 
 ### 条目：proj-3-drop · 前端摘掉本地投影
 状态：todo
@@ -58,24 +68,6 @@
 指针：lessons §七十三 / §七十五，frontend/src/components/RuleDebugDrawer.vue
 
 ## 2 · 按需
-
-### 条目：jvm-worker-roadmap · JVM 调试与校验的推荐拆分路线
-状态：open
-依赖：无
-优先级：P1
-背景：当前单后端 + 单 JVM lane 已解决同一进程内的参数、profile 和输出互相覆盖问题；直接增加多个 API/uvicorn 服务会复制进程内锁与调度状态，不能自然获得安全并发。更合适的边界是保留一个 API 入口，先把 runtime snapshot 和任务 manifest 固定下来，再修复单条校验冷启动，随后优化批量粒度，最后拆两个职责单一的 JVM worker。
-约束：runtime snapshot、task manifest、single fast path、环境收尾、调度公平和批量分块已完成；后续只按 ① SQLite job/块租约取代跨进程内存锁；②建立交互调试 worker 和批量校验 worker，各自独占 JVM daemon、浏览器 profile、参数文件、运行根目录和 worker 身份；③灰度切换并逐字段对账；④只有实测证明重复执行或多 worker 有收益时，才做请求合并或多开 JVM。任何阶段都不直接横向复制 API 服务，也不共享 `args.properties`、daemon info、cookie/profile 或固定输出文件。
-验收：路线的每个阶段都有独立可回退结果；单条校验的 daemon 与 Gradle fallback 逐字段一致；双 worker 能并行消费不同职责的任务，任务可恢复、可对账且不重复执行；调试延迟、批量吞吐、重复率和资源成本均有实测依据；与当前单进程基线逐字段对账通过后，才允许切换默认执行路径。
-子项：
-- jvm-scheduler-policy
-- jvm-batch-chunk
-- jvm-worker-lease
-- jvm-request-coalesce（重复率达标后再做）
-- jvm-debug-worker
-- jvm-validate-worker
-- perf-jvm
-- jvm-worker-cutover
-指针：backend/jobs/runner.py，core/store.py，core/jvm_debug.py，lessons §二十八 / §四十七 / §六十五 / §六十六 / §六十八
 
 ### 条目：site-req-opt · 站点请求那一段的优化（都未评估）
 状态：todo
@@ -98,15 +90,6 @@
 约束：不代用户登录（lessons §六十三 的纪律）。
 验收：一条带 `loginUi` 的源能登录并跑通一次调试。
 指针：lessons §六十三，core/jvm_debug.py
-
-### 条目：jvm-validate-worker · 批量校验专用常驻 worker
-状态：todo
-依赖：jvm-worker-lease
-优先级：P1
-背景：批量校验需要独立于交互调试的常驻 worker，省掉频繁小批次的 Gradle + JVM 拉起；它与交互调试 worker 分开，避免长批量占住交互请求，也避免两个用途共享 profile、cookie、args 或输出。本条承接原 `s5a-d3`，不再单独维护一条重复的“跑批常驻”路线。
-约束：**「频繁跑全量会被封 IP」是硬约束**，比任何提速优化都优先（skills/legado-source-toolchain §四）。批量 worker 必须拥有独立 JVM、浏览器 profile、参数文件、运行根目录和优雅停止/重启流程；内部并发只能在分块与资源测量后设置，不能把一个常驻 JVM 当成无限并发池。结果必须保留与一次性运行同样的 stage、来源、原因和逐条可恢复性；未证明恢复、隔离和逐字段一致前，不切默认路径。
-验收：在同一批次、同一参数和同一快照下，对比一次性运行与常驻 worker 的逐字段结果；中途杀掉 worker 后按租约恢复且不重复已完成块；并验证调试 worker 能在批量 worker 工作时独立接收请求，两个 worker 不读写对方的 profile、args、运行目录或结果文件。
-指针：lessons §六十六 / §六十八 / §七十四，core/jvm_debug.py
 
 ### 条目：s5a-a1 · A1 唯一没做完的验收：与设备 WS 逐事件对拍
 状态：todo
@@ -140,34 +123,6 @@
 约束：受「频繁跑全量会被封 IP」这条硬约束，等下次真要跑量时顺带量（skills/legado-source-toolchain §四）。
 验收：给出上调前后的一档实测对比（时长与失败率）。
 指针：lessons §七十四，appservice/ValidateService.kt
-
-### 条目：perf-jvm · 多开 JVM（未评估）
-状态：blocked
-依赖：jvm-worker-lease
-优先级：P2
-背景：worker 拆分后是否增加批量 worker 数量，取决于 JVM 启动成本、RSS、站点限流、失败率和调试延迟；不能从 CPU 核数直接推导。这里评估的是专用 worker 的容量，不是直接增加 API/uvicorn 进程；在没有真实容量数据前不做。
-约束：先完成 `jvm-worker-lease`、分块和独立运行目录；按同一快照分片，分别测单 worker 与多 worker 的吞吐、P50/P95 延迟、RSS、错误率和站点请求量。未完成测量前不增加实例；若收益不覆盖内存/限流代价，保持一个批量 worker，允许本条最终关闭而不实施多开。
-验收：给出可复核的单 worker/多 worker 对比和容量结论；只有在结果支持时才调整 worker 数量，并确认每个实例的参数、profile、JVM 和运行目录完全独立。
-指针：core/jvm_debug.py，core/store.py，lessons §四十七 / §六十五 / §六十六
-阻塞于：等待 `jvm-worker-lease` 完成并取得单 worker 基线；若容量收益不足，直接关闭本条，不实施多开。
-
-### 条目：jvm-debug-worker · 交互调试专用常驻 worker
-状态：todo
-依赖：jvm-worker-lease
-优先级：P1
-背景：交互调试对首个结果延迟敏感，和批量校验的吞吐目标不同；两者共用一个常驻 JVM 会让 profile、cookie、旧类和运行参数互相污染。
-约束：交互 worker 独占 JVM daemon、浏览器 profile、参数文件、运行根目录和 worker 身份；同一 profile 内仍按安全边界串行，不能以常驻为理由放开请求间状态清理。调试任务只由该 worker 消费，取消必须等待实际 Gradle/JVM 线程收尾后再释放租约；worker 停止要确认子进程退出。
-验收：交互调试冷启动与常驻两条路径的结果逐字段一致；批量 worker 运行时调试请求仍能按调度策略及时开始；重启/取消/异常退出后没有孤儿 JVM、残留租约或跨任务 cookie/输出污染。
-指针：core/jvm_debug.py，core/jvm_daemon.py，backend/jobs/runner.py，lessons §六十 / §六十五 / §六十六 / §七十四
-
-### 条目：jvm-worker-cutover · 从单进程 lane 切换到双 worker
-状态：todo
-依赖：jvm-worker-lease, jvm-debug-worker, jvm-validate-worker
-优先级：P1
-背景：多起服务的推荐边界是两个专用 JVM worker，而不是复制多个 API 服务；API 负责提交、查询和推送任务，worker 负责实际执行。切换前必须证明跨进程认领、隔离和恢复已经成立。
-约束：保留单后端作为唯一 API 入口；先灰度启用 worker 消费，再移除旧的进程内直接执行路径。禁止让两个 worker 共享 `RUN_LOCK` 作为跨进程锁，也禁止共享 `args.properties`、daemon info、cookie/profile 或固定结果文件。切换期间失败必须能定位到 job、owner、generation、chunk 和运行目录；`perf-jvm` 没有容量收益时不阻塞单批量 worker 的切换。
-验收：双 worker 并行运行一批调试与一批校验，任务不会重复执行、互相覆盖或丢失；API 重启不影响 worker 已租约任务的可恢复性；停止任一 worker 后另一 worker 不会接管其未过期任务，按租约规则恢复后才可继续；全部结果与单进程基线逐字段对账。灰度期间出现差异可回退到旧路径，确认阶段、日志和结果文件完整后才允许移除旧的进程内直接执行路径。
-指针：backend/jobs/runner.py，core/store.py，core/jvm_debug.py，lessons §二十八 / §六十五 / §六十六
 
 ### 条目：proj-3 · 第三期收尾：摘抽屉里最后那块本地投影
 状态：open
@@ -673,3 +628,20 @@
   旧产物不被覆盖。
 验收：细节看 git log（abda384）。
 指针：backend/jobs/runner.py，core/jvm_debug.py，lessons §六十五 / §六十八
+
+### 条目：jvm-worker-lease · 后端单实例哨兵锁：跨进程判死交给内核
+状态：done
+依赖：无
+优先级：P1
+背景：2026-09-29 交付（c126879）：lifespan 最先持 `data/locks/backend.lock`
+  （core/plocks.py，msvcrt/fcntl 字节区间锁），第二实例拒绝启动并指到占用者
+  pid/时间；持有者信息写在 `.owner.json` sidecar（锁文件本体 0 字节——区域锁
+  会挡普通读者，实测缓冲 read 即撞 EACCES）。选型否掉 SQLite 心跳租约：心跳 +
+  TTL 是拿超时猜进程死活（lessons §二十八禁的），休眠/假死会被误接管；而拆分
+  后的两个 worker 职责不相交，「同任务双 owner」按构造不可能——将来若真要
+  N 同类 worker，把 try-lock 对象从 worker 换成 job 即成完整租约。
+约束：锁句柄不可被子进程继承（PEP 446 默认即满足）；测试不碰真实 `data/`
+  （锁路径显式传 / `LEGADO_DATA_DIR` 重定向）。
+验收：子进程 `os._exit` 模拟真实死亡后锁立即可再持有；实机双实例拒绝 +
+  杀树重启通过；变异记录见 tests/test_plocks.py 尾注。
+指针：core/plocks.py，backend/app.py，lessons §二十八 / §七十四
