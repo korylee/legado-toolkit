@@ -191,7 +191,7 @@ class DirtySourceTypeMigrationTests(unittest.TestCase):
 
 
 class HealthTierMigrationTests(unittest.TestCase):
-    """健康档位收成六档：checks 表里的旧值一次性映射进新词表。
+    """健康档位收拢：checks 表里的旧值一次性映射进新词表。
 
     2026-09 档位重设计把 timeout / error / no_search / skipped 并入 pending。
     这是一次**纯子集合并**——底层观测（status_code / error / steps）没动，

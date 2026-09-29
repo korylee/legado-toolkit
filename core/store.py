@@ -849,7 +849,7 @@ class Store:
         return True
 
     def migrate_health_tiers_once(self) -> bool:
-        """Once-off：健康档位收成六档——映射 checks 里的旧值，并刷新组名里的旧词。
+        """Once-off：健康档位收拢——映射 checks 里的旧值，并刷新组名里的旧词。
 
         2026-09 档位重设计（判据「下一步动作相同才合并」，见 lessons）：timeout /
         error / no_search / skipped 并入 pending（待验证）。这是一次**纯子集合并**

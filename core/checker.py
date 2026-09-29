@@ -89,7 +89,7 @@ from core.constants import DEFAULT_UA
 # `[-1]` / `[0]` / `[1,3]` / `[!0]`）。它们此前被判成「解析为空」＝**源失效**，
 # 现在一律 unknown（无法离线回放）；同批还修了取值类末段语义（对齐 getResultLast）
 # 与 tocUrl 进探针。判定变了，旧缓存里的 toc/content 结论作废。
-# 13：健康档位收成六档——timeout / error / no_search / skipped 并入 pending
+# 13：健康档位收拢——timeout / error / no_search / skipped 并入 pending
 # （「待验证」），判据是下一步动作相同；AUTH / GFW 的标签改名「需登录 / 需翻墙」。
 # 结论词表变了：旧缓存里的 health 是旧词表的产物，必须整体作废（checks 表的
 # 历史值由 Store.migrate_health_tiers_once 一次性映射——纯子集合并、观测不变；
@@ -199,7 +199,7 @@ def is_inconclusive(health: str) -> bool:
     """这个结论是「我们没测出来」吗（待验证档：超时、异常、从未校验…）。
 
     **名字说的是这件事本身，不是它的成因**：早先叫 `is_transient`（瞬时网络
-    错误），但档位收成六档后这一档的含义就是「没有结论」——它既包含瞬时抖动，
+    错误），但档位收拢后这一档的含义就是「没有结论」——它既包含瞬时抖动，
     也包含「压根没跑过」。留着旧名会让人以为它在判「瞬时性」，从而照它加条件。
 
     它只用来决定"能不能复用"，不再用来决定"要不要写"。

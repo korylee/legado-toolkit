@@ -861,13 +861,13 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
         # 「这次变了什么」会永远答「没变」——那正是这个字段要回答的问题（同一处
         # 理由在 `ops.run_check_job` 里写着，两边必须同规矩）
         prev_checks = st.checks_map()
-        # 结论同时按 checks 的口径落库（六档 / 星级 / 深度）——列表与筛选读的是
-        # checks，不落这一步的话健康列会在撤掉本地引擎之后断供（TODO §一点九）。
+        # 结论同时按 checks 的口径落库（五档 / 星级 / 深度）——列表与筛选读的是
+        # checks，不落这一步的话健康列会在撤掉本地引擎之后断供。
         # 映射与判据都在 core/jvm_health，**别在这里另写一份**。
         job_runner.update_phase(job_id, "saving_results")
         from core import jvm_health
         n_checks = jvm_health.store_checks(rows, batch=batch, store=st)
-        # items 从**落库后的 checks** 取，而不是自己拿 rows 再算一遍六档/星级：
+        # items 从**落库后的 checks** 取，而不是自己拿 rows 再算一遍五档/星级：
         # 前端列表读的就是那张表，这样两边天然一致（形状映射见 check_summary）
         names = {_normalize_url(str(r.get("url") or "")): str(r.get("name") or "")
                  for r in rows}

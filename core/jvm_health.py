@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
-"""本机引擎（App 真源码）的结论 → `checks` 那份口径：失败分因、六档、星级。
+"""本机引擎（App 真源码）的结论 → `checks` 那份口径：失败分因、五档、星级。
 
 **为什么要有这一层**：App 引擎回的是 `state` + 异常原文（`reason` / `root` /
-`root_stack`），而列表要的是六档健康、星级、「验到哪一步」。这一层只做映射——
+`root_stack`），而列表要的是五档健康、星级、「验到哪一步」。这一层只做映射——
 判据全部**复用本地那套**（`evaluate_stars` 的阶梯、`err_desc` 的措辞、
 `dns_verdict_text` 的三句判词），不另写第二份（AGENTS #10）。
 
@@ -123,7 +123,7 @@ def _run_probe(probe, host: str) -> Tuple[str, str]:
 
 def health_for(row: Dict[str, Any], *, host: str = "",
                probe=None) -> Tuple[str, str]:
-    """结论行 → ``(六档, 给用户看的原因)``。
+    """结论行 → ``(五档, 给用户看的原因)``。
 
     `host` 只在归因为 dns 时用来跑交叉验证（空则维持「待复查」）。
     """
@@ -244,7 +244,7 @@ def checks_rows(rows: List[Dict[str, Any]], *, batch: str, checked_at: str = "",
 
 def store_checks(rows: List[Dict[str, Any]], *, batch: str,
                  store=None, probe=None) -> int:
-    """把一批 App 结论按 checks 口径落库（含六档 / 星级 / 深度）+ 重建组名。
+    """把一批 App 结论按 checks 口径落库（含五档 / 星级 / 深度）+ 重建组名。
 
     **两条路共用这一份**：产品（``POST /api/jvm/run``）与 CLI
     （``scripts/jvm_readback.py``）——各写一份必然漂，而这个端点的两次 500 都是

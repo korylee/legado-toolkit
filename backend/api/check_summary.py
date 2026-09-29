@@ -45,9 +45,9 @@ def check_items_from_checks(checks: Dict[str, Dict[str, Any]],
                             names: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
     """本机引擎那条：`Store.checks_map()` 的行 → items。
 
-    引擎结论**已经按 checks 口径落库**（六档 / 星级 / 深度，`core/jvm_health`），
+    引擎结论**已经按 checks 口径落库**（五档 / 星级 / 深度，`core/jvm_health`），
     这里只做键名映射（`quality_stars` → `stars`，见 `ITEM_KEYS`）——**不再算一遍**
-    六档与星级：那是 `jvm_health` 的事，两份实现必然漂。
+    五档与星级：那是 `jvm_health` 的事，两份实现必然漂。
 
     ``names``：`{url: 源名}`。checks 行里不存名字，而「变成 X」的明细要显示它。
     """
