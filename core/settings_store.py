@@ -97,6 +97,10 @@ DEFAULTS: Dict[str, Dict[str, Any]] = {
         #: 批量分块大小：每块一次 JVM 占用，块间交还 lane（调试可插队）、
         #: 块完成即入库（取消/崩溃后可恢复）。默认 25 实测可调。
         "chunk_size": 25,
+        #: 批量块执行优先走常驻 validate daemon（省每块一次 Gradle+JVM 冷启动），
+        #: daemon 探测不过/执行失败回落 Gradle。**灰度开关，默认 off**：与 Gradle
+        #: 路径逐字段对拍、争用与 RSS 实测达标后才改默认（jvm-batch-daemon）。
+        "batch_via_daemon": False,
     },
     "debug": {
         #: 单次调试的整链墙钟预算（秒）。**必须大于桥的渲染预算**：App 的
@@ -274,6 +278,8 @@ _SPECS: Dict[tuple, Any] = {
         v, DEFAULTS["jvm"]["limit"], *LIMITS["jvm_limit"]),
     ("jvm", "chunk_size"): lambda v: _to_int(
         v, DEFAULTS["jvm"]["chunk_size"], *LIMITS["jvm_chunk_size"]),
+    ("jvm", "batch_via_daemon"): lambda v: _to_bool(
+        v, DEFAULTS["jvm"]["batch_via_daemon"]),
     ("jvm", "depth"): lambda v: (str(v).strip().lower()
                                  if str(v).strip().lower() in JVM_DEPTHS
                                  else DEFAULTS["jvm"]["depth"]),
@@ -389,6 +395,17 @@ def debug_timeout() -> int:
     默认值是独立的另一条链路（AGENTS #8），不从这里统一。
     """
     return int(load().get("debug", {}).get("timeout") or DEFAULTS["debug"]["timeout"])
+
+
+def batch_via_daemon() -> bool:
+    """批量块执行是否优先走常驻 validate daemon（``jvm.batch_via_daemon``）。
+
+    **唯一入口**（``backend/api/jvm.py`` 的 ``_chunk_work`` 调它）：探测不过或执行
+    失败一律回落 Gradle 并保留原因——回落是**说出来的降级**，不是静默替换。
+    默认 off（灰度，jvm-batch-daemon），实测达标才改 DEFAULTS。
+    """
+    return bool(load().get("jvm", {}).get("batch_via_daemon")
+                or DEFAULTS["jvm"]["batch_via_daemon"])
 
 
 def resolve_check(override: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:

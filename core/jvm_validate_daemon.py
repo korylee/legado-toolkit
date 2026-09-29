@@ -257,10 +257,37 @@ def ensure(dump: Dict[str, Any], idle_sec: int = DEFAULT_IDLE_SEC,
     return start(dump, idle_sec=idle_sec, boot_timeout=boot_timeout)
 
 
-def run(dump: Dict[str, Any], args_file: str, timeout_slack: int = 30) -> Dict[str, Any]:
+def probe(dump: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """只读探测：daemon 活着且版本匹配才返回 info；其余一律 None。
+
+    与 ``ensure`` 的差别是**绝不杀进程、绝不重启**：ping 不通可能只是 daemon
+    正忙于别人的请求（daemon 串行，忙时 ping 排队到超时），探测方不持有互斥，
+    杀掉会伤及在跑的 op。调用方（批量块）拿 None 就回落 Gradle——daemon 的
+    死活由持有互斥的单条路径（ensure）或下一批任务顺带恢复。
+    """
+    info = _read_info()
+    port = int(info.get("port") or 0)
+    if not port:
+        return None
+    got = ping(port, timeout=1.0)
+    if got and got.get("sig") == source_sig(dump):
+        return info
+    return None
+
+
+def run(dump: Dict[str, Any], args_file: str, timeout_slack: int = 30,
+        socket_timeout: Optional[int] = None) -> Dict[str, Any]:
+    """向 daemon 发一次执行请求并等应答。
+
+    ``socket_timeout``：等待**应答**的秒数。不给就沿用单条口径（每源 timeout +
+    slack）；批量块的执行时长是块内源数 × 每源预算，必须由调用方按块规模给足
+    （Kotlin 侧对 op 时长没有上限，这个客户端超时是唯一的护栏——超时会抛
+    ``ValidateDaemonError``，调用方回落 Gradle，不是源失败）。
+    """
     cfg = params_from_args(args_file)
     info = ensure(dump)
-    response = request(cfg, int(info["port"]), int(cfg["timeout"]) + timeout_slack)
+    wait = int(socket_timeout) if socket_timeout else int(cfg["timeout"]) + timeout_slack
+    response = request(cfg, int(info["port"]), wait)
     response["port"] = info["port"]
     return response
 
