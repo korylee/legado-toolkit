@@ -18,14 +18,8 @@
 
 ## 0 · 现在做
 
-> 2026-09-26 排期（评估结论）：引擎线八步已走完 ①②③，第一波封顶「环境」章节，
-> 第二波补引擎最后的韧性与公平缺口；④ worker 线是触发式的——批量吞吐被封 IP
-> 硬约束压着，等下次真要跑全量再启动。
-> 同日插入调试体验两条 P0（均为当日实测的现行缺陷；**均已当日交付**，见「已完成」：
-> `jvm-dump-gate` 常驻复用 2.6s、`jvm-webview-nav` 正文重跑 75.5s fail → 2.8s pass）；
-> 预算分层与前端循环、等待的跟进条目排在 §1。工作台重构同日已拍板（轻量编辑起步 /
-> 编辑弹框调试卡保留「入口+摘要」/ 四期节奏），拆为 ux-debug-session 与
-> ux-debug-shell 两条，依赖链钉了先后。
+> 当前排期：引擎与调试执行链的基础设施已完成；后续调试体验以“入口降噪 → 工作台闭环 → 证据前置 → 编辑能力合入 → DOM 意图化生成”为主线。worker 线按租约、专用 worker、灰度切换推进；批量吞吐和请求合并只在有实测收益时启动。
+> P0 的 unknown 出口与可执行提示已交付，当前前端待办集中在新调试页的视觉层级、编辑闭环和证据可信度。
 
 ---
 
@@ -33,17 +27,17 @@
 
 ### 条目：jvm-request-coalesce · 合并重复的进行中请求
 状态：blocked
-依赖：jvm-batch-chunk
+依赖：无
 优先级：P2
 背景：同一源、同一规则快照和同一 JVM 参数可能由调试抽屉、生成后验证和批量入口重复提交；单纯排队只能延后重复工作，不能减少请求和站点压力。但它不是当前“重启后单条校验慢”的根因，必须等 worker 和分块边界稳定、且有重复提交数据后再决定是否实现。
 约束：合并键必须包含归一化 URL、规则/源快照、阶段、验证深度、搜索词及本次运行参数；不能只按 URL 合并。只合并仍在运行或可复用的同口径任务，每个调用方仍有自己的 job 观察关系；取消一个观察者不能取消共享执行，除非没有观察者且明确执行取消。
 验收：只有在日志证明重复提交达到值得优化的数量后才实施；实施时完全相同的重复提交只产生一次 JVM 执行和一份底层结果，任一调用方都能收到同一结论及来源，任一合并键字段变化都会产生独立执行，旧结果不会静默复用。
-阻塞于：等待 `jvm-task-manifest`、worker/分块路径稳定，并先统计重复提交率；没有数据证明收益前不实现。
+阻塞于：先统计重复提交率；没有数据证明收益前不实现。
 指针：backend/jobs/runner.py，backend/api/jvm.py，core/jvm_debug.py，AGENTS.md #5b，lessons §五十三 / §七十八
 
 ### 条目：jvm-worker-lease · 给跨进程 worker 增加 SQLite 租约
 状态：todo
-依赖：jvm-batch-chunk
+依赖：无
 优先级：P1
 背景：当前 lane、`RUN_LOCK` 和执行中的 asyncio task 都是进程内状态；直接增加 API/uvicorn worker 会让不同进程各自认为自己拿到了 JVM，现有 jobs 表也没有 worker owner/generation，无法安全认领和恢复任务。它解决的是跨进程一致性，不与调度策略合并。
 约束：以 SQLite 原子认领为跨进程事实来源，至少记录 owner、generation、heartbeat、attempt 和运行目录；同一 job/块只能有一个有效 owner。认领、续租、完成和失败必须校验 owner/generation，旧 owner 不能覆盖新结果。进程启动、优雅停止和异常退出都要有明确回收/重试规则，不能用一次固定超时把源判坏；运行 manifest 与结果文件必须按 job/块隔离。
@@ -54,49 +48,14 @@
 状态：todo
 依赖：proj-3-bookurl, proj-3-attr
 优先级：P1
-背景：`replayResult` / `canReplay` / `doReplay` / `/replay-step` 那条链现在是
-  「引擎没覆盖的段」的退路。摘之前先定详情段与末段两处怎么办，否则那两段的
-  「命中源码」会空掉。
-约束：先满足下面三处前置，否则摘了会静默丢功能。**A、B 两处待用户就「改契约
-  vs 维持投影」拍板后另开任务**；本条只等那两件。
+背景：`replayResult` / `canReplay` / `doReplay` / `/replay-step` 那条链是
+  「引擎没覆盖的段」的退路；摘之前先定详情段（proj-3-bookurl）与末段属性名
+  （proj-3-attr）两处，否则那两段的「命中源码」会空掉。
+约束：等那两条拍板落地才动手；「每种空值有可执行的一句话」前置已落地。
+  摘的位置与依据在 `frontend/src/components/RuleDebugDrawer.vue` 的
+  `matchedFrom` / `matchedHint` 旁。
 验收：摘掉后抽屉里每个段的「命中源码」仍能取到值，或明确显示「本段取不到」。
-指针：lessons §七十三 / §七十五，frontend/src/utils/layers.js
-  前置三处（都落地才能摘；依据与来源行号在
-  `frontend/src/components/RuleDebugDrawer.vue` 的 `matchedFrom` / `matchedHint` 旁）：
-  - **C · 每种空值有可执行的一句话**：已落地。
-    App 通道空 / 本机引擎空 / 没有页面 / 规则不支持（后两者是既有原因，
-    优先级不变）各有一句。摘投影不依赖它，但它是
-    TODO 原定验收那半「明确显示本段取不到」的落地。
-  - **A · 契约带取值页上下文**：待拍板。详情段的命中证据属**搜索页**的
-    `bookList` 节点作用域（`tests/test_legado_rules.py:479-510`），而现有键是
-    `(段自己的 url, 段名)`（`core/app_debug.py:634-652`）——表达不了。
-    选一条：把记录扩成 `{page_url, step, container_selector}`，或让 search 页同时输出
-    bookUrl 命中（App 侧 `DebugService.kt` 需新增按列表节点求 bookUrl 的分支，并定义同页
-    多条书取哪一个节点）。跨 Kotlin / Python / 测试 / 前端协议，需逐词/形状测试。
-  - **B · 属性末段有明确模型**：待拍板。五动作词表恰好五词
-    （`text` / `textNodes` / `ownText` / `html` / `all`，大小写归一），`title` / `style` / `label`
-    归属性名判定（AGENTS #21）。现状已是此语义
-    （`core/rules/replayer.py:55-66`），缺的是逐词契约测试与 App 侧末段回填分支
-    （`DebugService.kt:519-526,536-541`）。
-
-### 条目：ux-debug-session · 调试状态收拢为 useDebugSession（第二期）
-状态：doing
-依赖：ux-debug-loop, ux-debug-wait
-优先级：P1
-背景：调试状态散在两个组件（弹框 `testResult`/`appDebugging`/`debugTarget`/`debugQuery`，
-  抽屉 `draftRule`/`preselRes`/`subTab`），靠 props/emit 对接——草稿/应用两层与
-  `rerunning` 跨组件传递都是这个分裂的产物。2026-09-26 拍板整体重构走四期：**先收
-  状态、再换壳**——不抽状态，三栏布局只会把 props/emit 地狱放大。
-约束：模块级单例 composable（同 `useMobile` 先例，不引 pinia）；每键一个写者：
-  `source`（会话源**深拷贝**快照 + 指纹比对过期，不落库）、`result`/`prevResult`、
-  `run`（已等待/预算/取消）、`entry`（关键词/目标 + 上次值记忆）、`channel`（jvm /
-  连 App，含预检三态与推送确认）；列表页、编辑弹框、快速生成失败三个入口填充
-  **同一个 session.source**。**第一刀是补测试**：抽屉提示逻辑先抽 utils 纯函数钉住
-  （fe-drawer-tests 那笔账），再动组件；连 App 通道在这一期就必须可用（预检/推送/
-  真机验收的固定流程不能断）。
-验收：弹框与抽屉改为消费 session，行为零变化（现有断言全绿 + 变异抽查）；两个
-  组件里不再有调试状态的第二写者；提示逻辑有可跑断言。
-指针：frontend/src/components/SourceEditDialog.vue，frontend/src/components/RuleDebugDrawer.vue，frontend/src/composables/useMobile.js
+指针：lessons §七十三 / §七十五，frontend/src/components/RuleDebugDrawer.vue
 
 ## 2 · 按需
 
@@ -105,7 +64,7 @@
 依赖：无
 优先级：P1
 背景：当前单后端 + 单 JVM lane 已解决同一进程内的参数、profile 和输出互相覆盖问题；直接增加多个 API/uvicorn 服务会复制进程内锁与调度状态，不能自然获得安全并发。更合适的边界是保留一个 API 入口，先把 runtime snapshot 和任务 manifest 固定下来，再修复单条校验冷启动，随后优化批量粒度，最后拆两个职责单一的 JVM worker。
-约束：按以下顺序推进：①完成 `jvm-runtime-snapshot`，把一次性准备产物与 actual snapshot 对拍分开；②`jvm-task-manifest` 固定每次任务的输入、runtime、阶段、执行方式和产物；③`jvm-single-fast-path` 让已有有效 snapshot 的单条校验优先进入 Validate worker/daemon，完整 SDK/Gradle 只用于首次准备、刷新和 fallback；④将 `jvm-env-readiness` 后置为准备态/执行态两层检查及跨平台启动器收尾；⑤完成调度公平和批量分块，阶段状态与运行文件隔离；⑥以 SQLite job/块租约取代跨进程依赖内存锁；⑦建立交互调试 worker 和批量校验 worker，各自独占 JVM daemon、浏览器 profile、参数文件、运行根目录和 worker 身份；⑧只有实测证明重复执行或多 worker 有收益时，才做请求合并或多开 JVM。任何阶段都不直接横向复制 API 服务，也不共享 `args.properties`、daemon info、cookie/profile 或固定输出文件。
+约束：runtime snapshot、task manifest、single fast path、环境收尾、调度公平和批量分块已完成；后续只按 ① SQLite job/块租约取代跨进程内存锁；②建立交互调试 worker 和批量校验 worker，各自独占 JVM daemon、浏览器 profile、参数文件、运行根目录和 worker 身份；③灰度切换并逐字段对账；④只有实测证明重复执行或多 worker 有收益时，才做请求合并或多开 JVM。任何阶段都不直接横向复制 API 服务，也不共享 `args.properties`、daemon info、cookie/profile 或固定输出文件。
 验收：路线的每个阶段都有独立可回退结果；单条校验的 daemon 与 Gradle fallback 逐字段一致；双 worker 能并行消费不同职责的任务，任务可恢复、可对账且不重复执行；调试延迟、批量吞吐、重复率和资源成本均有实测依据；与当前单进程基线逐字段对账通过后，才允许切换默认执行路径。
 子项：
 - jvm-scheduler-policy
@@ -117,21 +76,6 @@
 - perf-jvm
 - jvm-worker-cutover
 指针：backend/jobs/runner.py，core/store.py，core/jvm_debug.py，lessons §二十八 / §四十七 / §六十五 / §六十六 / §六十八
-
-### 条目：fe-drawer-tests · 抽屉的提示规则没有自动化覆盖
-状态：todo
-依赖：无
-优先级：P2
-背景：`frontend/src/utils/*.test.js` 只覆盖 `htmlView` / `layers` /
-  `selector`，`RuleDebugDrawer.vue` 一行断言都没有。而它那两处提示（命中源码的来源与空值口径）
-  正是读者判断“这结果该不该信”的依据。实测代价：一处误删 `v-if`
-  （把局部投影的说明渲染给 App 实测）已经靠读 diff 才捕到，自验全绿。
-约束：提示逻辑在 `.vue` 里，而现有 node 套件跑的是 `utils/*.js`
-  纯函数——要么把判定抽成 `utils/` 里的纯函数再钉（同 `layers.js` 那条路），
-  要么引入组件测试。别为了过测把提示文案搬到别处又不钉。
-验收：命中源码的来源选择与空值口径各有一条可跑的断言；且修改该逻辑而回退断言时
-  套件会变红。
-指针：frontend/src/components/RuleDebugDrawer.vue，frontend/src/utils/layers.js
 
 ### 条目：site-req-opt · 站点请求那一段的优化（都未评估）
 状态：todo
@@ -157,10 +101,10 @@
 
 ### 条目：jvm-validate-worker · 批量校验专用常驻 worker
 状态：todo
-依赖：jvm-worker-lease, jvm-batch-chunk
+依赖：jvm-worker-lease
 优先级：P1
 背景：批量校验需要独立于交互调试的常驻 worker，省掉频繁小批次的 Gradle + JVM 拉起；它与交互调试 worker 分开，避免长批量占住交互请求，也避免两个用途共享 profile、cookie、args 或输出。本条承接原 `s5a-d3`，不再单独维护一条重复的“跑批常驻”路线。
-约束：**「频繁跑全量会被封 IP」是硬约束**，比任何提速优化都优先（lessons §六十八）。批量 worker 必须拥有独立 JVM、浏览器 profile、参数文件、运行根目录和优雅停止/重启流程；内部并发只能在分块与资源测量后设置，不能把一个常驻 JVM 当成无限并发池。结果必须保留与一次性运行同样的 stage、来源、原因和逐条可恢复性；未证明恢复、隔离和逐字段一致前，不切默认路径。
+约束：**「频繁跑全量会被封 IP」是硬约束**，比任何提速优化都优先（skills/legado-source-toolchain §四）。批量 worker 必须拥有独立 JVM、浏览器 profile、参数文件、运行根目录和优雅停止/重启流程；内部并发只能在分块与资源测量后设置，不能把一个常驻 JVM 当成无限并发池。结果必须保留与一次性运行同样的 stage、来源、原因和逐条可恢复性；未证明恢复、隔离和逐字段一致前，不切默认路径。
 验收：在同一批次、同一参数和同一快照下，对比一次性运行与常驻 worker 的逐字段结果；中途杀掉 worker 后按租约恢复且不重复已完成块；并验证调试 worker 能在批量 worker 工作时独立接收请求，两个 worker 不读写对方的 profile、args、运行目录或结果文件。
 指针：lessons §六十六 / §六十八 / §七十四，core/jvm_debug.py
 
@@ -171,7 +115,7 @@
 背景：结构同构已由契约测试保证；逐事件对拍需要手机开着 Web 服务，等设备在场时补。
 约束：对拍要逐事件，不接受「结构同构」代替。
 验收：设备在场时跑一次逐事件对拍，差异逐条有归因。
-指针：lessons §五十一 / §六十四，tests/test_jvm_debug_contract.py
+指针：lessons §五十一，tests/test_jvm_debug_contract.py
 
 ### 条目：S5B-real · S5-B 真机复检通道（设备在场才做）
 状态：todo
@@ -193,23 +137,23 @@
 优先级：P2
 背景：`ValidateService.validateBatch` 已是 `Semaphore(concurrency)`；上调一档实测
   再决定值不值。
-约束：受「频繁跑全量会被封 IP」这条硬约束，等下次真要跑量时顺带量（lessons §六十八）。
+约束：受「频繁跑全量会被封 IP」这条硬约束，等下次真要跑量时顺带量（skills/legado-source-toolchain §四）。
 验收：给出上调前后的一档实测对比（时长与失败率）。
 指针：lessons §七十四，appservice/ValidateService.kt
 
 ### 条目：perf-jvm · 多开 JVM（未评估）
 状态：blocked
-依赖：jvm-worker-lease, jvm-batch-chunk
+依赖：jvm-worker-lease
 优先级：P2
 背景：worker 拆分后是否增加批量 worker 数量，取决于 JVM 启动成本、RSS、站点限流、失败率和调试延迟；不能从 CPU 核数直接推导。这里评估的是专用 worker 的容量，不是直接增加 API/uvicorn 进程；在没有真实容量数据前不做。
 约束：先完成 `jvm-worker-lease`、分块和独立运行目录；按同一快照分片，分别测单 worker 与多 worker 的吞吐、P50/P95 延迟、RSS、错误率和站点请求量。未完成测量前不增加实例；若收益不覆盖内存/限流代价，保持一个批量 worker，允许本条最终关闭而不实施多开。
 验收：给出可复核的单 worker/多 worker 对比和容量结论；只有在结果支持时才调整 worker 数量，并确认每个实例的参数、profile、JVM 和运行目录完全独立。
 指针：core/jvm_debug.py，core/store.py，lessons §四十七 / §六十五 / §六十六
-阻塞于：等待 `jvm-worker-lease`、`jvm-batch-chunk` 完成并取得单 worker 基线；若容量收益不足，直接关闭本条，不实施多开。
+阻塞于：等待 `jvm-worker-lease` 完成并取得单 worker 基线；若容量收益不足，直接关闭本条，不实施多开。
 
 ### 条目：jvm-debug-worker · 交互调试专用常驻 worker
 状态：todo
-依赖：jvm-worker-lease, jvm-scheduler-policy, jvm-batch-chunk
+依赖：jvm-worker-lease
 优先级：P1
 背景：交互调试对首个结果延迟敏感，和批量校验的吞吐目标不同；两者共用一个常驻 JVM 会让 profile、cookie、旧类和运行参数互相污染。
 约束：交互 worker 独占 JVM daemon、浏览器 profile、参数文件、运行根目录和 worker 身份；同一 profile 内仍按安全边界串行，不能以常驻为理由放开请求间状态清理。调试任务只由该 worker 消费，取消必须等待实际 Gradle/JVM 线程收尾后再释放租约；worker 停止要确认子进程退出。
@@ -297,81 +241,22 @@
 
 ### 条目：syntax-gap · 本地回放的语法缺口
 状态：open
-依赖：无
+依赖：ai-verify
 优先级：P2
-背景：本地回放**已不在校验与调试链路上**，今天还在用它的只剩 AI 修复那条链
-  （`core/repair/*`）。所以下面这张缺口表的价值取决于 `ai-verify` 拍板——在那
-  之前它只是「本地验不了」的账，不是待办。
-约束：只有**还留在 AI 修复那条链上**的语义才急；动手之前先确认它还在不在那条
-  路径上。别为了「让本地能验」把 webView 去掉——去掉就真的读不了。
+背景：本地回放**已不在校验与调试链路上**，还在用它的只剩 AI 修复那条链
+  （`core/repair/*`）——在 `ai-verify` 拍板之前，下面这张缺口表只是
+  「本地验不了」的账，不是待办。
+约束：只有**还留在 AI 修复链上**的语义才急，动手前先确认它在不在那条路径上；
+  别为了「让本地能验」把 webView 去掉——去掉就真的读不了。
 子项：
-- syntax-bang / syntax-fallback / syntax-jsonpath / syntax-xpath / syntax-bracket / syntax-range / syntax-shorthand
-验收：每个子项各自落地；缺口表里每行的语义都能在本地回放上跑通或有明确归因。
+- syntax-bang · 排除索引 `li!0` / `dd!0:1:2`：`findIndexSet` 里 `.` 与 `!` 语义相反，只实现了点式（最大一块）
+- syntax-fallback · 执行期兜底的「选择器解析不了」：样例（URL 模板、JSONPath 片段、碎片）先逐个归类再实现
+- syntax-jsonpath · JSONPath 超出子集：`[*]` / `['键']` 已支持，`[1:3]` 切片没有，扩展时已有写法行为不变
+- syntax-xpath · `//` 开头的 XPath：引引擎或恒 unknown，别静默当 CSS（AGENTS #4），决议归 xa-1111
+- syntax-bracket · 方括号索引 `[-1]` / `[0]` / `[1,3]` 与区间 `[0:10]`：未实现，与点式保持同一套归一
+- syntax-shorthand · `text.` / `children.` 简写：语义已查清，实现即可，判定半边一律 unknown 不动
+验收：每行语义能在本地回放跑通或有明确归因，带正反例测试。
 指针：lessons §二十三 / §四十四 / §四十九 / §六十，core/rules/replayer.py
-
-### 条目：syntax-bang · 排除索引 `li!0` / `dd!0:1:2`
-状态：todo
-依赖：ai-verify
-优先级：P2
-背景：最大一块。`findIndexSet` 里 `.` 与 `!` 是**相反语义**的分隔符，我们只实现了点式。
-约束：按 App 的语义实现，别新造。
-验收：带 `!` 的排除索引能回放出与 App 一致的结果，并有正反例测试。
-指针：lessons §一，core/rules/replayer.py
-
-### 条目：syntax-fallback · 执行期兜底的「选择器解析不了」
-状态：todo
-依赖：ai-verify
-优先级：P2
-背景：样例是 URL 模板、JSONPath 片段、碎片——**还没逐个归类**。
-约束：先归类再实现，别一次性全当「不支持」。
-验收：每条样例有归类结论（能做到 / 做不到 / 需引引擎）。
-指针：lessons §四十四，core/rules/replayer.py
-
-### 条目：syntax-jsonpath · JSONPath 超出子集（`[1:3]` 切片等）
-状态：todo
-依赖：ai-verify
-优先级：P2
-背景：`[*]` 与 `['键']` 已支持，切片类还没。
-约束：扩展子集时要保证已有写法行为不变。
-验收：切片类写法能回放，且有正反例测试。
-指针：lessons §一，core/rules/replayer.py
-
-### 条目：syntax-xpath · `//` 开头的 XPath
-状态：todo
-依赖：ai-verify
-优先级：P2
-背景：要引入 XPath 引擎，或者一直判 unknown。
-约束：**别把 `//` 开头的写法静默当成 CSS 处理**（AGENTS #4）。XPath 引擎不在
-  「已明确不做」的名单里——它是「还没定」（见 `xa-1111`）。
-验收：要么引入引擎并给正反例，要么明确判 unknown 且原因一路走到用户眼前。
-指针：lessons §二十六，core/rules/replayer.py
-
-### 条目：syntax-bracket · 方括号索引式 `[-1]` / `[0]` / `[1,3]`
-状态：todo
-依赖：ai-verify
-优先级：P2
-背景：方括号索引式还没实现。
-约束：与点式语义保持同一套归一。
-验收：三种写法都能回放，并有正反例测试。
-指针：lessons §一，core/rules/replayer.py
-
-### 条目：syntax-range · 区间索引 `[0:10]`
-状态：todo
-依赖：ai-verify
-优先级：P2
-背景：区间索引还没实现。
-约束：与切片语义保持一致。
-验收：区间索引能回放，并有正反例测试。
-指针：lessons §一，core/rules/replayer.py
-
-### 条目：syntax-shorthand · `text.` / `children.` 简写
-状态：todo
-依赖：ai-verify
-优先级：P2
-背景：语义已查清，实现即可。
-约束：判定半边一律 unknown 已是当前行为，别在这一项里顺手改判定。
-验收：简写能回放，且判定半边行为不变。
-指针：lessons §二十三 / §四十四，core/rules/replayer.py
 
 ### 条目：webview-content · webView 型正文（本地与 JVM 都验不了）
 状态：todo
@@ -388,18 +273,6 @@
   不可信」。
 指针：lessons §四十九 / §六十 / §七十五，appservice/test/io/legado/app/service/ShadowBackstageWebView.kt
 
-### 条目：unknown-outlet · 「没结论」缺产品出口
-状态：todo
-依赖：无
-优先级：P1
-背景：步骤级 unknown、动态正文和生成后未验证，界面上只有解释文案，没有把用户带到已经
-  存在的调试工作台。
-约束：优先回到当前源的调试工作台；只有本机引擎无法复现、需要用户网络出口或 WebView
-  登录态时，才继续指向 `S5B-real`。不新造第三条验证通道。
-验收：unknown 结果旁边有可点击动作；点击后能带着当前源、步骤和 URL 打开调试；需要真机
-  时动作明确显示「连 App 调试 / 真机复检」，并保留原因。
-指针：lessons §五十二，frontend/src/components/RuleDebugDrawer.vue
-
 ### 条目：strengthen-contract · 用契约测试钉住那个隐式约定
 状态：todo
 依赖：无
@@ -411,48 +284,60 @@
 验收：两条约定各有契约测试钉住，破坏任一条测试变红。
 指针：lessons §七十八，tests/test_jvm_debug_contract.py
 
-### 条目：strengthen-hint · 没验成时补一句可执行的话
+
+### 条目：ux-debug-flow · 调试与规则验证闭环
 状态：todo
 依赖：无
 优先级：P1
-背景：生成或验证没成时，当前提示仍容易停在原因文字；用户不知道下一步应进入哪个步骤、
-  该看哪份 HTML。
-约束：文案只指向动作：打开调试工作台、选择失败步骤、查看命中源码或框选节点；不把未知
-  说成规则失败，也不重复解释引擎机制。
-验收：生成失败、验证 unknown、动态正文三种结果各有一句可点击的下一步提示，并能带入对应
-  步骤和 URL。
-指针：lessons §四十六 / §七十八，frontend/src/components/RuleDebugDrawer.vue
+背景：调试工作台、证据摘要、DOM 候选和动作层级共同服务同一条用户流程：定位当前步骤、判断材料是否可信、选择规则、应用并用真实引擎验证。原先拆成多个条目会让同一闭环的完成条件分散。
+约束：保留 `useDebugSession`、`steps`、`activeStep`、`diffRows` 作为唯一状态来源；首屏先展示当前步骤、结论、证据来源和推荐动作；候选必须按搜索/目录/正文/媒体意图生成，并显示示例；规则候选只能提议，最终以真实引擎验证；每个步骤只有一个推荐主动作，应用、重调和连 App 验证按状态合并；详细命中数、重复率、稳定性、事件流和整页源码属于可展开诊断；移动端退化为横向步骤导航；重跑保留旧结果和差异。
+验收：用户进入步骤后无需长距离滚动即可知道卡在哪里、材料能否作为依据以及下一步做什么；候选可直接应用并验证，结果能与前一轮对比；App 实测、本机引擎、补抓页面和本地投影不混淆；搜索、目录、正文、媒体四类字段均有意图化候选；fail、unknown、stale、pass+notes 的主动作稳定；桌面和窄屏均无主动作被挤走；相关纯函数和组件测试通过。
+指针：frontend/src/components/DebugWorkbench.vue，frontend/src/utils/debugNextAction.js，frontend/src/utils/debugEvidence.js，frontend/src/utils/selector.js，frontend/src/utils/debugCompare.js
 
+### 条目：ux-debug-editor · 调试页承接编辑与保存闭环
+状态：todo
+依赖：ux-debug-flow
+优先级：P1
+背景：已有源的规则编辑、源级配置、证据、重跑和保存应在独立调试页完成；弹窗只承担新建、快速生成、快速编辑和摘要。
+约束：当前步骤规则在工作台编辑；基本信息、类型、标签、请求、发现和原始 JSON 放入源设置抽屉；`session.source` 是唯一编辑事实；区分应用到会话、验证当前规则和保存落库；保存保留标签、锁定状态、脏状态和另存为语义；刷新或离开前明确提示未保存修改。
+验收：已有源从列表进入调试页后，不返回弹窗即可修改规则和源级配置、重跑、对比并保存；保存结果与原编辑路径逐字段一致；刷新、返回、源 URL 变化和另存为都有明确行为；弹窗不维护第二套长期规则状态。
+指针：frontend/src/views/DebugWorkbenchView.vue，frontend/src/components/DebugWorkbench.vue，frontend/src/components/SourceEditDialog.vue，frontend/src/composables/useDebugSession.js
 
-### 条目：ux-debug-config · 调试入口降噪与状态记忆
+### 条目：ux-debug-config · 调试入口状态记忆
 状态：todo
 依赖：无
+优先级：P1
+背景：调试入口已经完成层级简化，但同一源重复调试仍需重新填写目标和关键词。
+约束：按归一化源 URL 记住最近目标、关键词、通道和缓存档；不保存规则、cookie 或登录态；不得改变 `debugKeyOf` 和 App 分派语义；环境检查成功时只显示状态标签，失败才展开原因。
+验收：同一源第二次打开时目标和关键词可直接复跑；首屏可见开始调试和上次关键词；本机环境正常时不常驻展开明细；连 App 仍能就地完成 IP、预检和推送；有纯函数测试钉住记忆键和默认值。
+指针：frontend/src/views/DebugWorkbenchView.vue，frontend/src/composables/useDebugSession.js
+
+### 条目：ux-debug-reading · 调试高级信息与响应式阅读体验
+状态：todo
+依赖：ux-debug-flow
 优先级：P2
-背景：调试卡用三排控件起手（通道 radio、5 个目标 chips、关键词框）加常驻的环境自检
-  alert 与登录提示；目标 chips 只改 placeholder 和 key 前缀（不改变 App 分派），关键词
-  每次重填——高频动作被低频配置压住。
-约束：目标收敛为一个入口选择并**记住上次的关键词与目标**（下次默认复用，能记住的
-  状态别让人重填）；环境自检 alert 通过时收起、失败才展开；通道 radio 保留但降为
-  次要控件；高频动作不得塞进折叠菜单。
-验收：二次调试零输入可复跑上次目标；不滚动首屏能看到「开始调试」与上次关键词；
-  相关断言与文案机检同步更新。
-指针：frontend/src/components/SourceEditDialog.vue
+背景：运行态、事件流、整页源码、语法速查和详细 AI 信息对熟悉用户有用，但不应挤走首次调试所需的结论和动作。
+约束：默认层只展示结论、原因、主动作、核心值和证据来源；高级材料可展开；运行态继续消费 `useDebugSession`，固定显示等待、预算和取消状态；移动端保持当前步骤、结论和主动作在首屏；不复制运行态或结果状态。
+验收：滚动到证据区仍能找到运行态；取消等待与后端任务状态文案明确；展开高级信息后原有材料仍可用；窄屏下步骤、结论、来源和主动作可触摸访问且无横向页面溢出。
+指针：frontend/src/components/DebugWorkbench.vue，frontend/src/views/DebugWorkbenchView.vue，frontend/src/composables/useDebugSession.js
+
 
 ---
 
 ## 3 · 待决策
 
 ### 条目：ai-verify · 十-7 AI 提议验收换真引擎
-状态：blocked
+状态：todo
 依赖：无
 优先级：P2
-背景：`core/repair/suggest.py` 的 `replay_step` 换成跑一次本机引擎；`dry_run` 免费的
-  `preselect`（用 `replayer.parse_rule` / `extract_all`）要单独设计。
-约束：**先改 AGENTS #3**（「验证必须由规则回放器完成」）与 lessons §二十六 / §七十三
-  的决议，用户拍板后再动。
-阻塞于：AGENTS #3 的决议需用户拍板（「验证必须由规则回放器完成」）
-验收：AGENTS #3 改完，且 `replay_step` 换成真引擎后验收结论与今天一致或更好。
-指针：lessons §二十六 / §七十三，AGENTS.md #3，core/repair/suggest.py
+背景：AGENTS #3 已按 2026-09-29 拍板改写（校验与生成验证由本机引擎完成，AI 提议的
+  候选由回放器初筛）。本条剩最后一环：`core/repair/suggest.py` 的 `replay_step` 换成
+  跑一次本机引擎；`dry_run` 免费的 `preselect`（用 `replayer.parse_rule` /
+  `extract_all`）要单独设计。
+约束：换引擎只动修复循环的验收那一步；`dry_run` 的候选初筛仍走回放器——那是筛选
+  不是验收（lessons §七十三）。
+验收：`replay_step` 换成真引擎后验收结论与今天一致或更好。
+指针：lessons §二十六 / §七十三 / §八十，AGENTS.md #3，core/repair/suggest.py
 
 ### 条目：s5a-a2 · A2 之后可评估：跑批不再剥 webView 选项
 状态：blocked
@@ -474,7 +359,9 @@
 背景：`ruleSearch.bookUrl` 是在**搜索页**的每个 `bookList` 节点内求值的——证据在
   搜索页上，而 Python 按「段自己的 url + 段名」取（详情段的 url 是详情页），
   `(url, 段名)` 这把键表达不了。
-约束：要么改契约，要么让它继续走投影；两条选一，别两边都改。
+约束：要么改契约（把记录扩成 `{page_url, step, container_selector}`，或 App 侧
+  `DebugService.kt` 新增按列表节点求 bookUrl 的分支并定义同页多条书取哪个节点），
+  要么让它继续走投影；两条选一，别两边都改。
 验收：一张实测的「详情段想看的其实是搜索页的那块 DOM」样例，据此定契约或维持投影。
 指针：lessons §七十五
 
@@ -484,7 +371,7 @@
 优先级：P2
 背景：兜底只认那五个动作词；属性名与标签名同形（`title` / `style`）。
 约束：要做得先有与 `core/rules/replayer._is_attr_or_action_name` 对齐的词表 + 逐词
-  比对测试（AGENTS #22⑤）。
+  比对测试（AGENTS #22⑤）与 App 侧末段回填分支（`DebugService.kt`）。
 验收：词表与逐词比对测试落地，末段属性名规则能给出命中。
 指针：lessons §七十五，core/rules/replayer.py
 
@@ -574,16 +461,6 @@
 验收：评估结论 + 用户拍板。
 指针：lessons §五十五
 
-### 条目：copy-kotlin · Kotlin 侧文案还没进机检
-状态：todo
-依赖：无
-优先级：P2
-背景：`TARGETS` 里没有 `appservice`，而 `render_reason` 这类串是**直接显示给用户**的。
-约束：要加得先写一个跳过注释的 Kotlin 提取器（那个目录里中文注释远多于文案串，
-  直接扫会把注释算成文案），加完还要有人守基线——**别只把目录塞进 `TARGETS`**。
-验收：Kotlin 提取器能只抓文案串，且 `python tools/check_copy.py` 覆盖到 `appservice`。
-指针：lessons §四十六，tools/check_copy.py
-
 ### 条目：xa-1111 · XPath 引擎：引还是判 unknown
 状态：todo
 依赖：无
@@ -605,199 +482,124 @@
 状态：done
 依赖：无
 优先级：P1
-背景：2026-09-26 交付：`build_steps` 对「⇒正文规则为空」的短路段判
-  **unknown** 并给可执行原因（原判据下它跟着「︽正文页解析完成」落成 0.1 秒假
-  pass，实测：管理库 content 规则丢失后调试正文段「通过」而整页没抓）；
-  `webview_render_failed` 的失败段带下一步附注（先试最新章节 / jvm_login.py）。
-  端到端：空规则正文段由 pass 变 unknown。看 git log（1ab4a19）。
-约束：空规则的段显式标「没验（规则为空）」，不许落成 pass——判据在 `build_steps`
-  一层做，不动上游；段失败按原因给可执行下一步（与 strengthen-hint 同一纪律：只指向
-  动作，如「先试最新章节」「在浏览器 profile 里人工过一次」）；原因要一路走到用户
-  眼前（AGENTS #4）。
-验收：空 content 规则的该段显示「没验」而非通过；渲染超时/失败的段带下一步动作；
-  两者都有断言钉住（改行为回退断言会红）。
-指针：core/app_debug.py，appservice/test/io/legado/app/service/ShadowBackstageWebView.kt，lessons §八十
+背景：2026-09-26 交付（1ab4a19）：空 content 规则的短路段判 unknown 带可执行原因，
+  不再跟着「正文页解析完成」落成假 pass；渲染失败段带下一步附注。机制 lessons §八十。
+约束：空规则的段显式标「没验（规则为空）」，不许落成 pass；段失败按原因给可执行下一步（AGENTS #4）。
+验收：断言钉住（空规则段显示「没验」而非通过、失败段带动作）；细节看 git log（1ab4a19）。
+指针：core/app_debug.py，lessons §八十
 
 ### 条目：jvm-debug-budget · 调试的墙钟预算分层
 状态：done
 依赖：无
 优先级：P1
-背景：2026-09-26 交付：整链预算收进 `settings_store`（`debug.timeout`，
-  默认 90 > 桥的渲染上限 60、区间 30–300，注释写明为何不得同值）；`/rules/jvm-debug`
-  不传参吃设置、显式越界 400 不静默夹；`/app-debug` 同源同值；前端不再写死 60，
-  预算口径摆在调试入口（同跑批弹框：代价由事实说）。全量 1008 绿。看 git log（06d1fc1）。
-  **有意不做**：渲染预算按剩余整链预算动态取需要改 App 侧字段，实测渲染 0.9s 后
-  收益存疑，留给真出现「合法渲染吃满 60s」的靶子再议。
-约束：渲染预算从剩余整链预算里取（或 webView 段自动上调整链超时），两者不得同值
-  互掐；调试超时的默认值与上下界按 AGENTS #8 收进 `core/settings_store`，前端不再
-  写死；预算口径摆到调试入口（同跑批弹框：代价由事实说）；补抓的记账口径在
-  site-req-opt ④，本条不重复。
-验收：webView 源调试不再因「渲染预算=整链预算」提前判超时；开跑前能看到预算口径；
-  默认值只在 settings_store 一处。
-指针：core/jvm_debug.py，core/settings_store.py，appservice/test/io/legado/app/service/BrowserBridge.kt，frontend/src/components/SourceEditDialog.vue
+背景：2026-09-26 交付（06d1fc1）：整链预算收进 `settings_store`（`debug.timeout`，默认 90、
+  区间 30–300，不得与桥的渲染上限 60 同值）；`/rules/jvm-debug` 不传参吃设置、显式越界 400。
+约束：默认值与上下界只在 settings_store 一处（AGENTS #8）；「渲染预算按剩余整链动态取」
+  有意不做，留给真出现「合法渲染吃满 60s」的靶子再议。
+验收：webView 源调试不再因「渲染预算=整链预算」提前判超时；细节看 git log（06d1fc1）。
+指针：core/jvm_debug.py，core/settings_store.py
 
 ### 条目：ux-debug-wait · 调试等待态可见可取消
 状态：done
 依赖：无
 优先级：P1
-背景：2026-09-26 交付：等待区显示已等待秒数与预算；AbortController「取消
-  等待」如实命名——只断前端的等，后端 lane 那次仍跑完（两条调试通道共用）。
-  完整版（排队可见、阶段状态、服务端取消）仍归 jvm-scheduler-policy。看 git log
-  （210e3e3）。
-约束：小步不依赖 jobs 化：等待区显示已等待秒数与预算口径；前端加 AbortController
-  让用户能松手（后端取消另立口径，本条不装完成）。完整版（排队可见、阶段状态、
-  服务端取消、NDJSON tail 成实时段事件）与 jvm-scheduler-policy 合流，别做两套。
-验收：调试进行中能看到已等待时长与当前阶段（至少有墙钟秒数）；点取消后界面立即
-  恢复可操作，不再锁到超时。
-指针：frontend/src/components/SourceEditDialog.vue，frontend/src/api/client.js，core/jvm_debug.py，backend/jobs/runner.py
+背景：2026-09-26 交付（210e3e3）：等待区显示已等待秒数与预算；AbortController「取消
+  等待」只断前端的等，后端 lane 那次仍跑完（两条调试通道共用）。
+约束：排队可见、阶段状态、服务端取消的服务端完整版不在这里装完成，另立口径。
+验收：调试进行中可见等待时长与预算；点取消后界面立即恢复可操作；细节看 git log（210e3e3）。
+指针：frontend/src/components/SourceEditDialog.vue，core/jvm_debug.py
 
 ### 条目：ux-debug-loop · 重跑不清场，上一份结果可对比
 状态：done
 依赖：无
 优先级：P1
-背景：2026-09-26 交付：重跑不清场——重跑期间旧结果照常显示（按钮在途
-  禁用），新结果到来后旧份精简为对比基线；页签逐段标「相同 / 变了 / 新失败 /
-  换了目标 / 新出现」+ 汇总行，**对比键（段名, URL）**；失败与成功同样自动进
-  抽屉，失败时滚到诊断区。判据在 `utils/debugCompare.js`（node 测试 42 条绿），
-  历史容器一次定型最近 K=5 次。看 git log（210e3e3）。
-约束：结果容器一次定型为「最近 K 次运行」（K 小、内存友好：历史只留步骤摘要与
-  结论，完整 HTML 只留最近一份）——先做两份再改数组是二次改形状；对比取最后两份，
-  逐段标注「与上次相同 / 变了 / 新失败」，**对比键是（段名, URL）**：URL 变了标
-  「换了目标」，不与「值变了」混。失败与成功同样自动进抽屉；默认子页签随 verdict
-  走（失败→诊断，成功→提取值），事件流与源码按需展开。过期判定与 strengthen-src
-  是同一份事实（改了哪段规则哪段过期），别做两套。
-验收：重跑完成后上次结论仍可见且有差异标记（换了 URL 的段单独可辨）；失败步骤
-  直达诊断区；改规则→重跑→对比不丢中间状态；有断言钉住「重跑不清空结果」。
-指针：frontend/src/components/SourceEditDialog.vue，frontend/src/components/RuleDebugDrawer.vue
+背景：2026-09-26 交付（210e3e3）：重跑不清场——重跑期间旧结果照常显示，新结果到来后
+  旧份精简为对比基线，页签逐段标「相同 / 变了 / 新失败 / 换了目标 / 新出现」+ 汇总行；
+  判据在 `utils/debugCompare.js`。
+约束：对比键是（段名, URL）；结果容器一次定型为「最近 K 次运行」；过期判定与
+  strengthen-src 是同一份事实（改了哪段规则哪段过期），别做两套。
+验收：断言钉住「重跑不清空结果」；细节看 git log（210e3e3）。
+指针：frontend/src/utils/debugCompare.js，frontend/src/components/RuleDebugDrawer.vue
 
 ### 条目：jvm-webview-nav · webView 段的相对地址静默等满渲染预算
 状态：done
 依赖：无
 优先级：P0
-背景：2026-09-26 交付，两道防线都在我们自己的层：① `BrowserBridge` 的 navigate 改走
-  `sendForResult` 并用 `navigationFailure` 判应答——CDP 命令级错误（相对/无效地址的
-  「Cannot navigate to invalid URL」）立即 `navigation_failed` 带原因返回；加载期失败
-  有意不管（Chromium 渲染错误页并照常发 load 事件，由「不是站点」的判据处置）。
-  ② `ShadowBackstageWebView.resolveAgainstTag` 在导航前按 `tag`（源 URL）补全相对
-  地址——一个咽喉覆盖重跑 / 正文翻页 / 目录分段，判据复用 App 自己的
-  `NetworkUtils.getAbsoluteURL`。实测同 key：75.5s fail → 链内 6.5s pass、常驻复用
-  2.8s（渲染本体 0.9s，引擎带回渲染后整页）。
-约束：只判**命令级 error**，不把 `result.errorText` 判进来（ERR_ABORTED 会误杀马上
-  被 JS 重定向的正常页）；不动上游 `Debug.kt` 的分派语义；webView 取数能力是另一条
-  （webview-content）。
-验收：8 条 Kotlin 测试（WebViewNavigationTest：CDP error→原因 / 受理→null /
-  无应答→失败 / 相对补全 / 绝对直通 / 空 tag 原样 / 锚点形态）；两处变异（判据恒
-  null / 解析撤掉）各一次 Gradle 跑红；Python 全量 1000 条绿。看 git log（18b79ab）。
-指针：appservice/test/io/legado/app/service/BrowserBridge.kt，appservice/test/io/legado/app/service/ShadowBackstageWebView.kt，appservice/test/io/legado/app/service/WebViewNavigationTest.kt
-
-### 条目：ux-debug-shell · 工作台换壳：全页三栏 + 入口统一（第三、四期）
-状态：done
-依赖：ux-debug-session
-优先级：P1
-背景：2026-09-26 拍板、2026-09-27 交付：抽屉本体**逐字抽出**为
-  `DebugWorkbench.vue`（运行态改读 useDebugSession，编辑上下文留 props），
-  `RuleDebugDrawer` 变薄壳暂留对照；新路由 `#/debug/:url` 挂工作台页（运行入口 +
-  保存 + DebugWorkbench），key 进 URL query 可刷新/分享；列表行与手机卡加「调试」
-  直达，弹框的查看证据/生成流程改为**会话交接源快照后跳路由**。真浏览器实测：
-  按 URL 拉源、全链 63 事件、定层/步骤/规则编辑/候选/证据全渲染，等待态与预算
-  在途可见。
-约束：右栏**轻量编辑起步**——只编当前步骤那条规则、直接写 session.source，
-  「应用并重跑」= 写快照 + 触发 run；完整 rules 表单留弹框。入口状态（key/channel）
-  进 URL query，刷新可恢复；键盘流：Enter 重跑、Esc 取消。旧 drawer 留一个提交
-  周期灰度对照，确认无功能缺口再删。**第四期收尾同批做**：删草稿/应用层；改掉指
-  RuleDebugDrawer.vue / SourceEditDialog.vue 的 TODO 与 lessons 指针（strengthen-src /
-  strengthen-hint / unknown-outlet / fe-drawer-tests / proj-3）；新文案过
-  tools/check_copy.py；清掉为 dialog/teleport 写的不带 scoped 样式（AGENTS #15）；
-  枚举继续从 `/api/settings` 取（AGENTS #7 / #8）。
-验收：列表页到调试 ≤ 一次点击（实测）；改规则→重跑→对比在工作台内闭环（实测）；
-  全量 1008 + node 47 绿、构建过、文案机检无新增。看 git log（36af8dc）。
-指针：frontend/src/views/DebugWorkbenchView.vue，frontend/src/components/DebugWorkbench.vue，frontend/src/router/index.js
-
-### 条目：jvm-dump-gate · 常驻选路的 dump 对拍把模块目录当成仓库根
-状态：done
-依赖：jvm-runtime-snapshot
-优先级：P0
-背景：2026-09-26 交付：`_runtime_dump_mismatch` 的 workingDir 一项改判**同仓库关系**
-  （相等或子目录、os.sep 切边界），判据 `dir_inside_repo` 落在 `jvm_runtime_snapshot`
-  与对拍链共用一处；异仓库仍回落且附注写明「不同仓库」。实测同机调试从「每次回落
-  Gradle +13 秒」变为常驻复用 2.6 秒、回落附注消失。
-约束：归一判据与 runtime-snapshot 对拍**共用一份**（norm_path / dir_inside_repo），
-  别各写一份；放宽不得放过「dump 是另一个 App 仓库」与 `D:\foo` vs `D:\foobar`
-  前缀陷阱。
-验收：7 条新测试（真实形态模块目录 vs 仓库根 / 异仓库 / 前缀陷阱 / 缺字段 /
-  常驻保住 / 异仓库回落），两处变异（恒 False / 去 os.sep 边界）全红；全量 1000 条绿。
-  修复与测试看 git log（5268307）。
-指针：core/jvm_debug.py，core/jvm_runtime_snapshot.py，lessons §九十
-
-### 条目：jvm-single-fast-path · 单条校验脱离 Gradle 冷启动
-状态：done
-依赖：jvm-runtime-snapshot, jvm-task-manifest
-优先级：P0
-背景：2026-09-26 实测验收通过：准备态能报出 compileSdk=android-37 与 SDK 根；单条校验 daemon 冷启动 16.1s、复用常驻 2.5s；同源 fallback 逐字段对账零差异；运行目录无残留。
-约束：执行态检查只钉 classpath 负载文件（jar/zip），目录缺失交由 daemon 运行期失败回退；接线测试须把 dump_path 隔离出真机状态，否则真实 snapshot 一存在就整批变红。
-验收：细节与提交看 `git log`（fb472ee / 0572eb8 / 406941c / 9b1c0b0，更早的 groundwork 8d152a0 / 2d3fd68 / 8074ada / a99835e）。
-指针：backend/api/jvm.py，core/jvm_direct.py，core/jvm_validate_daemon.py，lessons §六十五 / §六十八
+背景：2026-09-26 交付（18b79ab）：`BrowserBridge` 的 navigate 改走 `sendForResult` 并用
+  `navigationFailure` 判 CDP 命令级错误立即带原因返回；`ShadowBackstageWebView.resolveAgainstTag`
+  在导航前按源 URL 补全相对地址。实测同 key 75.5s fail → 常驻复用 2.8s（渲染本体 0.9s）。
+约束：只判命令级 error，不把 `result.errorText` 判进来（ERR_ABORTED 会误杀马上被 JS
+  重定向的正常页）；不动上游 `Debug.kt` 的分派语义；webView 取数能力归 webview-content。
+验收：8 条 Kotlin 测试（WebViewNavigationTest）；细节看 git log（18b79ab）。
+指针：appservice/test/io/legado/app/service/BrowserBridge.kt，ShadowBackstageWebView.kt，WebViewNavigationTest.kt
 
 ### 条目：jvm-runtime-snapshot · 让 JVM 实际运行环境与 dump 对拍
 状态：done
 依赖：无
 优先级：P1
-背景：2026-09-26 完成真实对拍：refresh / gradle / validate_daemon / direct 四份 snapshot 齐全（按 mode+entry 后缀各留一份，互不覆盖），全部差异逐条归因为三类口径性差异 + 一处直起静默继承（已修），见 lessons §九十。
-约束：actual 差异报告只进排障，不进入源健康判定链；对拍口径（workingDir 归一、classpath 按项、-Xmx 纳入后比 jvmArgs、systemProperties 逐键）已按原约束落地。
-验收：修复与边界测试看 `git log`（406941c classpath 只钉负载文件；同日 run_direct 注入本次 args 路径，修复直起 0 事件）。
-指针：core/jvm_direct.py，core/jvm_runtime_snapshot.py，appservice/test/io/legado/app/service/ServiceJson.kt，lessons §九十
+背景：2026-09-26 交付（406941c）：refresh / gradle / validate_daemon / direct 四份 snapshot
+  齐全（按 mode+entry 后缀各留一份），差异逐条归因为三类口径性差异 + 一处直起静默继承
+  （已修）。机制 lessons §九十。
+约束：actual 差异报告只进排障，不进入源健康判定链。
+验收：修复与边界测试看 git log（406941c）。
+指针：core/jvm_runtime_snapshot.py，lessons §九十
 
 ### 条目：jvm-scheduler-policy · 调试优先但不能饿死批量校验
 状态：done
 依赖：无
 优先级：P1
-背景：2026-09-27 交付：lane 从 FIFO asyncio.Lock 升级为 _Lane——unit 边界按有效优先级发放许可（debug=0 恒定；batch=10，等待超阈值后逐级老化到 floor=2，仍高于调试），调试越过排在前面的批量，批量靠老化最终必跑；被取消的获许可者立即转交许可，lane 不死锁。排队现状经 GET /api/jobs/lane 可观测。生命周期沿用存量词表（pending/done，与约束里 queued/succeeded 同义——不迁移历史行，理由同 AGENTS #17）。多方并发真实演练未做，调度语义由 lane 单测四条覆盖。
-约束：优先级只影响排队顺序，不绕过同一 JVM/profile 的独占约束；老化常量集中在 runner 模块顶部（无实测依据不进 settings）。
-验收：lane 单测四条（插队/老化/快照/取消转交）+ 全量 994 条绿；细节与提交看 `git log`（17117c6）。
-指针：backend/jobs/runner.py，backend/api/rules.py，backend/api/jobs.py，lessons §六十八 / §七十四
+背景：2026-09-27 交付（17117c6）：lane 从 FIFO asyncio.Lock 升级为 _Lane——unit 边界按
+  有效优先级发放许可（debug=0 恒定；batch=10，等待超阈值后逐级老化到 floor=2，仍高于
+  调试），被取消的获许可者立即转交许可；排队现状经 GET /api/jobs/lane 可观测。
+约束：优先级只影响排队顺序，不绕过同一 JVM/profile 的独占约束；老化常量集中在 runner
+  模块顶部（无实测依据不进 settings）。
+验收：lane 单测四条（插队/老化/快照/取消转交）；细节看 git log（17117c6）。
+指针：backend/jobs/runner.py，lessons §六十八 / §七十四
 
 ### 条目：jvm-batch-chunk · 批量校验按可恢复分块执行
 状态：done
-依赖：jvm-scheduler-policy, jvm-task-manifest
+依赖：无
 优先级：P1
-背景：2026-09-27 交付：批量按 jvm.chunk_size（settings 新键，默认 25、限幅 [5,200]）分块，块大小提交时冻结进 manifest（schema 3）；每块独立运行目录/args/results 与块级 manifest 信封，块完成即 store_checks 入库并写 DONE 标记；块间交还 lane 重排队（与 scheduler-policy 同一机制）；块环境级失败中止余下块并明说「第 N/M 块失败」，不把环境错误归因给源；重试（POST /api/jobs/{id}/retry 已对 jvm_run 放开）扫描原目录 DONE 块只补失败块。真实环境两块验收：6 条源 5+1 两块全部入库（105s）。
-约束：分块引用冻结的 runtime snapshot；重试不覆盖旧产物（uuid 目录 + DONE 文件即状态）；单条不分块，取消语义不变（单条不遗留、批量保留现场供恢复）。
-验收：单元测试钉住分块调用数/失败中止/重试恢复 + 全量 994 条绿；真实两块验收见上。
-指针：backend/api/jvm.py，backend/jobs/runner.py，core/settings_store.py，backend/api/jobs.py，lessons §五十三 / §五十四
+背景：2026-09-27 交付：批量按 `jvm.chunk_size`（settings 新键，默认 25、限幅 [5,200]，
+  提交时冻结进 manifest）分块；块完成即入库并写 DONE 标记，块间交还 lane 重排队；重试
+  只补失败块。真实环境两块验收通过。
+约束：分块引用冻结的 runtime snapshot；重试不覆盖旧产物；单条不分块，取消语义不变。
+验收：单元测试钉住分块调用数/失败中止/重试恢复；细节看 git log（同日 batch-chunk 提交）。
+指针：backend/api/jvm.py，backend/jobs/runner.py，core/settings_store.py，lessons §五十三 / §五十四
 
 ### 条目：strengthen-src · 给生成后的验证标出处
 状态：done
 依赖：无
 优先级：P1
-背景：2026-09-27 交付：出处标签此前已有（quickVerifyFrom 三态）；本次补齐分步新鲜度——各规则组在验证时刻定格快照（utils/verifyFreshness），改哪组规则只让映射到的步骤过期（ruleSearch 波及 search+bookUrl，同页求值），未改动步骤结论保留可用；过期步骤带「重新调试本步」入口（复用抽屉 rerunFromStep 的真引擎通道），重验后标记撤下。分步判据有 node 测试 5 条钉着（经 test_frontend_utils 自动收编）。
-约束：过期判据唯一一份在 utils/verifyFreshness；与抽屉「重新调试本步」同一条纪律，不新造通道。
-验收：node 断言 5 条倒着写会复活旧误导；细节与提交看 `git log`（同日 strengthen-src 提交）。
-指针：frontend/src/utils/verifyFreshness.js，frontend/src/components/SourceEditDialog.vue，lessons §七十八
+背景：2026-09-27 交付：分步新鲜度——各规则组在验证时刻定格快照，改哪组规则只让映射到
+  的步骤过期（ruleSearch 波及 search+bookUrl），未改动步骤结论保留可用；过期步骤带
+  「重新调试本步」入口。
+约束：过期判据唯一一份在 utils/verifyFreshness，与抽屉「重新调试本步」同一条纪律，
+  不新造通道。
+验收：node 断言钉住（倒着写会复活旧误导）；细节看 git log（同日 strengthen-src 提交）。
+指针：frontend/src/utils/verifyFreshness.js，lessons §七十八
 
 
 ### 条目：jvm-env-readiness · JVM 环境收尾与跨平台启动器
 状态：done
-依赖：jvm-runtime-snapshot, jvm-task-manifest
+依赖：无
 优先级：P1
-背景：2026-09-26 交付：SDK 发现跳过不完整的候选根（platform-tools-only 不再冒充「缺平台」，诚实报因并继续试下一候选，Android Studio 默认目录列为兜底候选）；refresh 与 prepare_gradle 改用 readiness 解析出的同一份 runtime（不再要求手工传 LEGADO_REPO/ANDROID_HOME 等）；准备态/执行态两层检查、多路 JDK 推导、Gradle User Home 可写检查、非 Windows 明确拒绝此前已具备。跨卷与非 Windows 主机由代码路径与单测覆盖，真非 Windows 硬件未实测。
+背景：2026-09-26 交付：SDK 发现跳过不完整的候选根（诚实报因并继续试下一候选），refresh
+  与 prepare_gradle 改用 readiness 解析出的同一份 runtime；跨卷与非 Windows 主机由代码
+  路径与单测覆盖，真非 Windows 硬件未实测。
 约束：自检不下载依赖、不隐式构建；准备态与执行态各自只检查自己该检查的。
-验收：细节与提交看 `git log`（同日 env-readiness 提交：SDK 候选过滤 + Studio 兜底 + refresh 共用 runtime，含边界测试）。
-指针：core/jvm_env.py，core/jvm_direct.py，scripts/prepare_gradle.py，lessons §六十五
-
-### 条目：jvm-runtime-tmp · 明确 java.io.tmpdir 的归属
-状态：done
-依赖：jvm-runtime-snapshot
-优先级：P2
-背景：2026-09-26 一次实测定案（约束二选一取②）：tmpdir 是平台继承值、不属于 dump 推导范围——同一个 dump 解析出的 java.exe 以 -XshowSettings 实测 java.io.tmpdir=%LOCALAPPDATA%\Temp（直起/常驻的落点）；Gradle 测试 worker 由 Gradle 自己注入 -Dorg.gradle.internal.worker.tmpdir（对拍报告的 actual jvmArgs 可见）；dump 的 systemProperties 不含该键。结论落一处：core/jvm_direct.java_env 的注释。
-约束：不显式注入、不把快照内容接入判定链（避免两套来源）。
-验收：实测命令与三个事实见本条背景与上述注释；无需进一步动作。
-指针：core/jvm_direct.py
+验收：细节看 git log（同日 env-readiness 提交，含边界测试）。
+指针：core/jvm_env.py，scripts/prepare_gradle.py，lessons §六十五
 
 ### 条目：jvm-task-manifest · 固定每次任务的输入、环境、产物和执行方式
 状态：done
-依赖：jvm-runtime-snapshot
+依赖：无
 优先级：P1
-背景：2026-09-26 交付：单条/批量与调试的运行目录在执行开始落盘 manifest.json（信封 job/owner/chunk/generation/retry_of + 提交冻结的 inputs，schema 2 带 sha256）与 runtime-snapshot.json 副本，Gradle 全量 stdout/stderr.log 同落；保留策略=成功/取消清理、失败/崩溃保留现场（上限 20 修剪）；refresh 用固定名 refresh-manifest.json 随发布更新、失败时保留旧的继续描述旧 dump。chunk/owner/generation 的字段已就位，取值随 batch-chunk 与 worker-lease 实义化。
-约束：SQLite 仍是任务管理事实源；重试天然生成新运行目录（uuid 命名），retry_of 记录它替代谁，旧产物不被覆盖。
-验收：细节与提交看 `git log`（abda384 与同日 refresh/retry_of 提交）；全量 984 条测试绿。
-指针：backend/api/jvm.py，backend/jobs/runner.py，core/jvm_debug.py，core/jvm_direct.py，lessons §六十五 / §六十八
+背景：2026-09-26 交付（abda384 及同日提交）：单条/批量与调试的运行目录在执行开始落盘
+  manifest.json（信封 job/owner/chunk/generation/retry_of + 提交冻结的 inputs）与
+  runtime-snapshot 副本，Gradle 全量 stdout/stderr 同落；保留策略=成功/取消清理、
+  失败/崩溃保留现场（上限 20 修剪）。
+约束：SQLite 仍是任务管理事实源；重试天然生成新运行目录（retry_of 记录它替代谁），
+  旧产物不被覆盖。
+验收：细节看 git log（abda384）。
+指针：backend/jobs/runner.py，core/jvm_debug.py，lessons §六十五 / §六十八
