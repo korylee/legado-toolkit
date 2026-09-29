@@ -1,10 +1,9 @@
 # -*- coding: utf-8 -*-
-"""本机引擎（App 真源码）的结论 → `checks` 那份口径：失败分因、五档、星级。
+"""本机引擎（App 真源码）的结论 → `checks` 那份口径：失败分因、五档和验证阶段。
 
 **为什么要有这一层**：App 引擎回的是 `state` + 异常原文（`reason` / `root` /
-`root_stack`），而列表要的是五档健康、星级、「验到哪一步」。这一层只做映射——
-判据全部**复用本地那套**（`evaluate_stars` 的阶梯、`err_desc` 的措辞、
-`dns_verdict_text` 的三句判词），不另写第二份（AGENTS #10）。
+`root_stack`），而列表要的是五档健康、验证阶段和逐段结果。这一层只做映射——
+判据复用本地的传输归因和错误措辞，不另写第二份（AGENTS #10）。
 
 **两条边界**（照本地口径，不许放宽）：
 
@@ -29,7 +28,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from core import dns_check
 from core.checker import (CACHE_VERSION, classify_transport_error, dns_verdict_text,
-                          err_desc, evaluate_stars, static_rule_complete)
+                          err_desc, static_rule_complete)
 from core.loader import _normalize_url, fingerprint
 from core.models import Engine, Health
 from core.settings_store import DEPTH_CONTENT, DEPTH_SEARCH, DEPTH_TOC
@@ -147,16 +146,8 @@ def health_for(row: Dict[str, Any], *, host: str = "",
     return classify_transport_error(cause), err_desc(cause, _detail(row))
 
 
-def _has_search(row: Dict[str, Any]) -> bool:
-    """源有没有声明搜索规则。分不出时按「有」——星级那边只影响封顶，不判死。"""
-    if str(row.get("state") or "") == "invalid":
-        return False
-    blob = str(row.get("reason") or "") + str(row.get("root") or "")
-    return "搜索url不能为空" not in blob
-
-
 def _hit_name(row: Dict[str, Any]) -> str:
-    """命中的书名（星级只看有没有命中，取第一条给它看）。"""
+    """命中的书名（从引擎样本中取第一条用于展示）。"""
     sample = row.get("sample")
     if isinstance(sample, list) and sample:
         return str(sample[0])
@@ -184,10 +175,6 @@ def checks_row(row: Dict[str, Any], *, batch: str, checked_at: str = "",
     search_ms = cost_ms if state in ("ok", "no_result") else 0
     toc_ok = row.get("toc_complete") if stage in ("toc", "content") else None
     content_ok = row.get("content_ok") if stage == "content" else None
-    if has_search is None:
-        has_search = _has_search(row)
-    stars, basis = evaluate_stars(health, has_search, search_ms, _hit_name(row),
-                                 toc_ok, content_ok, raw)
     return {
         "url": url,
         "v": CACHE_VERSION,
@@ -200,8 +187,6 @@ def checks_row(row: Dict[str, Any], *, batch: str, checked_at: str = "",
         "search_hit": _hit_name(row),
         "search_response_ms": search_ms,
         "search_probed": bool(search_ms),
-        "quality_stars": stars,
-        "star_basis": basis,
         "quality_tags": ["规则完整"] if static_rule_complete(raw) else [],
         "probe_depth": _STAGE_DEPTH.get(stage, DEPTH_SEARCH),
         "chapter_count": int(row.get("toc_count") or 0),

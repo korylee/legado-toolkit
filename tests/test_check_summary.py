@@ -20,8 +20,7 @@ from core.models import Health, build_record
 
 #: 一条真实的 checks 行（从库里取的最小切片：`Store.checks_map()` 的取值形状）
 CHECKS_ROW = {
-    "url": "https://a.com", "health": Health.OK, "quality_stars": 5,
-    "star_basis": "search_hit", "error": "", "toc_complete": True,
+    "url": "https://a.com", "health": Health.OK, "error": "", "toc_complete": True,
     "content_ok": True, "search_hit": "绍宋", "checked_at": "2026-09-21 10:00:00",
     "engine": "jvm", "probe_depth": 3,
 }
@@ -39,11 +38,12 @@ class ShapeParityTests(unittest.TestCase):
         self.assertEqual(sorted(from_record), sorted(from_checks))
         self.assertEqual(sorted(from_record), sorted(ITEM_KEYS))
 
-    def test_checks_row_maps_to_the_frontend_names(self):
-        """`quality_stars` → `stars`：前端回填读的是后者（列表列名）。"""
+    def test_checks_row_maps_validation_facts(self):
+        """checks 行直接映射为健康、搜索、目录和正文事实。"""
         it = check_items_from_checks({"https://a.com": CHECKS_ROW})[0]
-        self.assertEqual(it["stars"], 5)
         self.assertEqual(it["health"], Health.OK)
+        self.assertTrue(it["toc_complete"])
+        self.assertTrue(it["content_ok"])
         self.assertEqual(it["search_hit"], "绍宋")
 
     def test_url_is_normalized_and_name_comes_from_the_payload(self):

@@ -15,11 +15,6 @@ class SourceOut(BaseModel):
     enabled: int = 1
     fingerprint: str = ""
     health: Optional[str] = None
-    stars: Optional[int] = None
-    #: 这个星级是实测来的还是按静态规则推的（"measured" / "static" / ""）。
-    #: **必须声明在这里**：response_model 会按模型裁字段，漏了它就静默丢掉，
-    #: 前端那边表现为「这个词永远不显示」——查起来很像前端 bug
-    star_basis: Optional[str] = None
     checked_at: Optional[str] = None
     probe_depth: Optional[int] = None
     toc_complete: Optional[int] = None
@@ -28,9 +23,6 @@ class SourceOut(BaseModel):
     #: 来源阶梯（S2）：最近一批 JVM 校验的结论。state 取 ok/no_result/
     #: empty_js_shell/login_wall/timeout/error/invalid，空串 = 没跑过。hit 是**命中的条数**
     #: （不是百分比——百分比那个是本地回放的 search_hit，两个字段别混）。
-    #: 同 star_basis：**必须声明在这里**，
-    #: response_model 会按模型裁字段——之前 enrichment 在服务端明明算出来了，
-    #: HTTP 响应里却全变空，查起来极像前端 bug。
     #: 这一行的结论**是谁判的**（`checks.engine`：local/jvm/device）。
     #: 界面用它标出处——藏"选择"不藏"证据来源"（口径见 lessons §七十二）。
     #: **Optional**：没有 checks 行的源这一列是 NULL（同 health），
@@ -272,6 +264,8 @@ class CandidateVerifyRequest(BaseModel):
     target: str = "search"
     query: str = ""
     timeout: Optional[int] = None
+    cookie: str = ""
+    cache: str = "auto"
 
 
 class LLMProfileIn(BaseModel):

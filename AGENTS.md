@@ -57,7 +57,7 @@
    `cli/main.py` 的 argparse 默认值是**独立的另一条链路**，不要试图统一。
 9. **`sources.source_url` 的唯一性是「仅在用」，不是全表**
    （`idx_sources_live_url ... WHERE deleted_at = ''`，见
-   `Store.migrate_sources_url_scope_once`）。**不要在它上面加回 `UNIQUE`**：
+   `idx_sources_live_url`）。**不要在它上面加回 `UNIQUE`**：
    那会让删除变成"原地打标记而没腾出 URL"，于是「先删掉旧的、再导入新版」必然
    撞上回收站里那一行、被判冲突——三条路（更新 / 清空回收站 / 删了重来）会同时堵死。
    在用（`deleted_at=''`）每个 URL 至多一行这条**必须保住**：App 存书源是
@@ -84,9 +84,9 @@
    - **不要往 README 里塞坑**。它是给使用者的，坑是给改代码的人的。
    - **README 的分工**（用户向文档只有这一份，原 `WORKFLOW.md` 2026-09-21 并入）：
      README = 是什么 / 怎么装 / 怎么用 / 接口与配置 **reference**（含按场景的命令表与健康
-     五档的动作列）。**口径不再收成文档**：星级阶梯 / 深度档位 / 缓存 TTL / 归因分桶的
-     枚举与默认值都在 `core/`（`models.HEALTH_NAMES`、`checker.evaluate_stars`、
-     `settings_store`、`reclassify.ACTION_OF`），文档要用就给符号名。同一张表、同一份清单、
+     五档的动作列）。**口径不再收成文档**：深度档位 / 缓存 TTL / 归因分桶的
+     枚举与默认值都在 `core/`（`models.HEALTH_NAMES`、`settings_store`、
+     `reclassify.ACTION_OF`），文档要用就给符号名。同一张表、同一份清单、
      同一句告诫**只在一处维护**，另一处留一行指针。
      判据是实测的：同一份内容两处写，**腐烂只发生在一侧**；读者无从判断该信哪一份
      （当年的论证见 lessons §二十）。

@@ -34,7 +34,7 @@ from core.tags import (
     split_system_user as _split_group,
 )
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 #: 本进程内已经建过 schema 的库（绝对路径）。
 #:
@@ -109,8 +109,6 @@ DDL = [
         search_hit          TEXT DEFAULT '',
         search_response_ms  INTEGER,
         search_probed       INTEGER DEFAULT 0,
-        stars               INTEGER DEFAULT 0,
-        star_basis          TEXT DEFAULT '',
         quality_tags        TEXT DEFAULT '',
         probe_depth         INTEGER DEFAULT 1,
         chapter_count       INTEGER DEFAULT 0,
@@ -238,11 +236,6 @@ class Store:
         # checker.is_cache_item_valid 的 min_search。**不落这一列等于没修**：
         # item 里写了但读回来恒为 None，所有 OK 源的缓存永远不复用
         ("search_probed", "INTEGER DEFAULT 0"),
-        # 星级旁边那个「实测 / 仅规则」。不落这一列的话，列表只能显示星级，
-        # 用户分不出「5★ 是验出来的」还是「5★ 只是规则写齐了」——实测库里
-        # 180 条 5★ 有 170 条是后者（2026-09-17 全量；probe_depth 默认 1，
-        # 目录/正文一次都没验）。
-        ("star_basis", "TEXT DEFAULT ''"),
         # 结论**是谁判的**（core/models.Engine：'' / local / jvm / device）。撤掉本地
         # 引擎之后，存量行是本地判的、新行是本机引擎判的——两种证据等级的判据强度不同
         # （本地跑不了 `@js:`、没有登录态），不记出处就是一份没有来源的结论
@@ -262,7 +255,7 @@ class Store:
     VIEW_DDL = """CREATE VIEW v_sources AS
         SELECT s.id, s.source_url, s.name, s.source_type, s.group_name, s.enabled,
                s.user_tags, s.system_tags_locked, s.fingerprint, s.deleted_at, s.updated_at,
-               c.health, c.stars, c.star_basis, c.checked_at, c.probe_depth,
+               c.health, c.checked_at, c.probe_depth,
                c.toc_complete, c.content_ok, c.search_hit, c.quality_tags, c.engine
         FROM sources s
         LEFT JOIN checks c ON c.id = (
@@ -310,17 +303,8 @@ class Store:
                     self.conn.execute("ALTER TABLE %s ADD COLUMN %s %s" % (table, name, decl))
         # 表结构迁移要在建视图**之前**：它会重建 sources，而重建过程必须先
         # DROP VIEW（否则 RENAME 会改写视图定义）
-        self.migrate_sources_url_scope_once()
-        self._backfill_job_expiry()
         self.conn.execute("DROP VIEW IF EXISTS v_sources")
         self.conn.execute(self.VIEW_DDL)
-        self.migrate_user_tags_once()
-        self.migrate_health_tiers_once()
-        self.migrate_cert_tier_once()
-        self.migrate_checks_engine_once()
-        self.cleanup_system_tags_once()
-        self.fix_enabled_explore_once()
-        self.fix_dirty_source_type_once()
         self.conn.execute(
             "INSERT OR IGNORE INTO meta(key, value) VALUES (?, ?)", ("schema_version", "1"))
         self.conn.execute("UPDATE meta SET value = ? WHERE key = ?",
@@ -340,70 +324,6 @@ class Store:
         self.close()
 
     # ------------------------------------------------------------ meta
-    def migrate_sources_url_scope_once(self) -> bool:
-        """Once-off：把 source_url 的「全表唯一」放宽成「仅在用唯一」。
-
-        **要解决的问题**：原先 ``source_url TEXT NOT NULL UNIQUE``，而删除只是
-        **原地打标记**、没有腾出 URL。于是「先删掉旧的、再导入新版」这条最自然的
-        路径必然撞上回收站里那一行，被判成「同 URL 不同规则」→ 冲突 → 留存到一个
-        谁也没法采纳的文件里。实测：导入 2 条源、2 条全进冲突；而用户既不能更新、
-        也不能清空回收站——三条路同时堵死。
-
-        **改法**：表级 UNIQUE 换成部分唯一索引 ——
-
-          - 在用（``deleted_at = ''``）：每个 URL 至多一行。**这条必须保住**：
-            App 存书源是 ``@Insert(onConflict = REPLACE)``、键是 bookSourceUrl
-            （``BookSourceController.kt:33``），两条同 URL 的源导出过去只会留最后
-            一条，另一条**静默消失**。
-          - 回收站：同一 URL 可以留多个历史版本。于是「删了再导入」天然成立，
-            旧版还留在回收站里可回滚。
-
-        **SQLite 不能直接删约束**，只能重建表。老结构的标志是
-        ``sqlite_autoindex_sources_1``（表级 UNIQUE 自动建的那个索引）。
-
-        **必须先 DROP VIEW**：SQLite 3.25 起 ``ALTER TABLE ... RENAME`` 会**改写**
-        引用该表的视图定义，不先删掉的话 ``v_sources`` 会被改写成指向临时表名。
-        （``_init_schema`` 后面本来就会重建它，所以这里删掉是安全的。）
-
-        口径同其它 ``*_once``：进程级幂等，标记 ``sources_url_scope_v2``。
-        """
-        if self.get_meta("sources_url_scope_v2"):
-            return False
-        idx = {r["name"] for r in self.conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='sources'")}
-        if "sqlite_autoindex_sources_1" not in idx:
-            # 全新库（DDL 已按新结构建表）或已经迁过
-            self.set_meta("sources_url_scope_v2", now())
-            return False
-        old_cols = [r["name"] for r in self.conn.execute("PRAGMA table_info(sources)")]
-        with self.conn:
-            self.conn.execute("DROP VIEW IF EXISTS v_sources")
-            self.conn.execute("ALTER TABLE sources RENAME TO sources_old_migrate")
-            self.conn.execute(SOURCES_DDL)
-            new_cols = [r["name"] for r in self.conn.execute("PRAGMA table_info(sources)")]
-            # 只拷两边都有的列：老库可能有新结构没有的列（迁移的目标就是对齐结构，
-            # 不是保留一切）。反过来新结构新增的列由 DDL 的默认值兜。
-            common = [c for c in new_cols if c in old_cols]
-            # **NOT NULL 列必须兜底**：老库的列可以是可空的（例如更早的结构里
-            # `fingerprint TEXT` 没有 NOT NULL，实测就是这样），直接拷会整体
-            # 失败在 "NOT NULL constraint failed: sources.fingerprint"。
-            # `source_url` / `raw_json` 不兜底——它们是行的身份与本体，为 NULL 说明
-            # 这行本来就没法用；这时**应该**报错，而不是静默编一个空值糊过去。
-            fill = {"name": "''", "source_type": "0", "group_name": "''",
-                    "user_tags": "''", "system_tags_locked": "0", "enabled": "1",
-                    "fingerprint": "''", "deleted_at": "''",
-                    "created_at": "''", "updated_at": "''"}
-            sel = ", ".join("COALESCE(%s, %s)" % (c, fill[c]) if c in fill else c
-                            for c in common)
-            self.conn.execute("INSERT INTO sources(%s) SELECT %s FROM sources_old_migrate"
-                              % (", ".join(common), sel))
-            self.conn.execute("DROP TABLE sources_old_migrate")
-            self.conn.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS idx_sources_live_url "
-                "ON sources(source_url) WHERE deleted_at = ''")
-        self.set_meta("sources_url_scope_v2", now())
-        return True
-
     def get_meta(self, key: str, default: str = "") -> str:
         row = self.conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
         return row["value"] if row else default
@@ -660,7 +580,7 @@ class Store:
         """前端列表页用：服务端筛选 + 排序 + 分页（不要全量传给浏览器）。"""
         where, args = self._where(source_type, group, health, q, only_enabled,
                                  include_deleted, user_tag, urls)
-        allowed = ("id", "name", "source_type", "group_name", "stars",
+        allowed = ("id", "name", "source_type", "group_name",
                    "probe_depth", "checked_at", "updated_at")
         key = (order or "id").lstrip("-")
         direction = "DESC" if str(order).startswith("-") else "ASC"
@@ -818,229 +738,6 @@ class Store:
             "SELECT group_name, COUNT(*) AS c FROM sources GROUP BY group_name ORDER BY c DESC")]
 
     # ------------------------------------------------------------ tags
-    def migrate_user_tags_once(self) -> bool:
-        """把旧 group_name / raw_json 分组拆成系统标签和用户标签。"""
-        if self.get_meta("user_tags_migrated_at"):
-            return False
-        rows = list(self.conn.execute(
-            "SELECT id, source_type, group_name, raw_json FROM sources"))
-        if not rows:
-            self.set_meta("user_tags_migrated_at", now())
-            return False
-        from core.organizer import group_title, infer_health_from_group
-        updates = []
-        for row in rows:
-            try:
-                raw_group = str(json.loads(row["raw_json"]).get("bookSourceGroup", "") or "")
-            except Exception:
-                raw_group = ""
-            old_group = str(row["group_name"] or "")
-            system, user = _split_group(_parse_group(raw_group) + _parse_group(old_group))
-            if system:
-                system_group = _merge_group(system, [])
-            else:
-                health_group = raw_group or old_group
-                system_group = group_title(row["source_type"], infer_health_from_group(health_group))
-            updates.append((system_group, _merge_group([], _canonical_tags(user)), row["id"]))
-        with self.conn:
-            self.conn.executemany(
-                "UPDATE sources SET group_name=?, user_tags=? WHERE id=?", updates)
-        self.set_meta("user_tags_migrated_at", now())
-        return True
-
-    def migrate_health_tiers_once(self) -> bool:
-        """Once-off：健康档位收拢——映射 checks 里的旧值，并刷新组名里的旧词。
-
-        2026-09 档位重设计（判据「下一步动作相同才合并」，见 lessons）：timeout /
-        error / no_search / skipped 并入 pending（待验证）。这是一次**纯子集合并**
-        ——每个旧值的含义都完整落在新档里，底层观测（status_code / error / steps）
-        一个字节没动，所以历史 checks 就地映射、不必作废；ok / dead / auth / gfw /
-        cert 五个值原样保留。
-
-        **组名里的旧词要跟着换掉，否则旧词会以用户标签的身份现形**：
-        `sources.group_name` 里写的是**当时**的标签词（实测 1051 条「需验证」+
-        98 条「需代理复检」），而前端的 `splitSystemUser` 认的是 `/tags/meta`
-        下发的新词表——认不出的旧词会被当成**用户标签**渲染出来（`core/tags.py`
-        判定表注释里记的正是这个坑）。
-
-        **只换名、不重算状态**：这一步刻意**不**调 `rebuild_system_tags()`。
-        重算是另一件事，且在这里做有害——它按 `checks` 表推导，而「从未校验」的源
-        没有 checks 行，重算会把它们统一压成「待验证」，**抹掉导入时从旧分组
-        推断出来的状态**（`infer_health_from_group` 存在的意义就是留住那个信号）。
-        改名则原样保留每个源的状态，
-        锁定行也照改（钉住的是「状态」，不是「这个词怎么写」）。
-
-        **与 CACHE_VERSION 的分工**：checks 是历史记录，映射后照常可读；探测缓存
-        是「当时的结论」，词表变了整体作废重探（checker.CACHE_VERSION 14）——
-        两边各管各的，不要在这里「顺手」清缓存。
-        """
-        if self.get_meta("health_tiers_v2"):
-            return False
-        with self.conn:
-            cur = self.conn.execute(
-                "UPDATE checks SET health = 'pending' "
-                "WHERE health IN ('timeout', 'error', 'no_search', 'skipped')")
-            n = cur.rowcount
-        renamed = self._rename_retired_status_tags()
-        self.set_meta("health_tiers_v2", now())
-        return n > 0 or renamed > 0
-
-    def migrate_checks_engine_once(self) -> bool:
-        """Once-off：存量 checks 行补上 `engine='local'`。
-
-        `engine` 这一列是 2026-09-20（B1）才加的，而**在此之前只有本地引擎写 checks**
-        （本机引擎的结论落在 meta、只喂列表那一列）——所以空值就是"本地判的"，不是
-        "不知道"。不回填的话，列表 tooltip 会把三千多行历史结论显示成「未记录」。
-        """
-        if self.get_meta("checks_engine_backfilled"):
-            return False
-        with self.conn:
-            cur = self.conn.execute("UPDATE checks SET engine = 'local' WHERE engine = ''")
-            n = cur.rowcount
-        self.set_meta("checks_engine_backfilled", now())
-        return n > 0
-
-    def migrate_cert_tier_once(self) -> bool:
-        """Once-off：撤掉「证书问题」一档——存量 cert 行就地映射成 pending。
-
-        2026-09-20（TODO §一点九）：校验收成 App 引擎，而 App 侧**产不出 cert**——
-        它要么直接通过（不校验证书信任链），要么报 TLS 阻断（`Unable to parse TLS
-        packet header` → 需翻墙）。这一档因此不再存在，存量那几十行按「下一步动作
-        相同」并入 pending（重跑一次定案）。组名里的「证书问题」由
-        `_rename_retired_status_tags` 换词（映射在 core/tags.py 的换词表里）。
-
-        **与 CACHE_VERSION 的分工**同 `migrate_health_tiers_once`：checks 是历史记录，
-        就地映射、照常可读；探测缓存是「当时的结论」，词表少了一个取值 → 整体作废
-        重探（checker.CACHE_VERSION 16）。两边各管各的，别在这里顺手清缓存。
-        """
-        if self.get_meta("cert_tier_removed"):
-            return False
-        with self.conn:
-            cur = self.conn.execute(
-                "UPDATE checks SET health = 'pending' WHERE health = 'cert'")
-            n = cur.rowcount
-        renamed = self._rename_retired_status_tags()
-        self.set_meta("cert_tier_removed", now())
-        return n > 0 or renamed > 0
-
-    def _rename_retired_status_tags(self) -> int:
-        """把 `group_name` 里已退役的状态标签词换成现役词（映射见 core/tags.py）。
-
-        **不动状态本身**：同名换词，段的顺序与其它标签（类型、规则完整、用户标签）
-        一概原样保留。返回改过的行数。
-        """
-        from core.tags import RETIRED_STATUS_TAG_RENAMES
-
-        updates = []
-        for row in self.conn.execute("SELECT id, group_name FROM sources"):
-            segments = _parse_group(row["group_name"])
-            renamed = [RETIRED_STATUS_TAG_RENAMES.get(t, t) for t in segments]
-            if renamed != segments:
-                updates.append((",".join(renamed), row["id"]))
-        if not updates:
-            return 0
-        with self.conn:
-            self.conn.executemany(
-                "UPDATE sources SET group_name=? WHERE id=?", updates)
-        return len(updates)
-
-    def cleanup_system_tags_once(self) -> bool:
-        """Once-off cleanup: remove system tags that leaked into user_tags."""
-        if self.get_meta("system_tags_cleaned_at"):
-            return False
-        rows = list(self.conn.execute(
-            "SELECT source_url, user_tags FROM sources"))
-        updates = []
-        for row in rows:
-            old = row["user_tags"] or ""
-            new = _merge_group(
-                [], [t for t in _canonical_tags(old) if not _is_system_tag(t)])
-            if new != old:
-                updates.append((new, now(), row["source_url"]))
-        if updates:
-            with self.conn:
-                self.conn.executemany(
-                    "UPDATE sources SET user_tags=?, updated_at=? WHERE source_url=?",
-                    updates)
-        self.set_meta("system_tags_cleaned_at", now())
-        return bool(updates)
-
-    def fix_enabled_explore_once(self) -> bool:
-        """Once-off：把 `enabledExplore` 与发现配置对齐。
-
-        **它必须由配置推导**。实测库里 885 条不一致：739 条「开着却完全没配置」
-        （App 的发现页里就是一堆点了没反应的死项）、146 条「有配置却被关着」
-        （功能静默失效）。编辑弹窗已在保存时推导，这条负责把存量一次摆正。
-
-        改的是 `raw_json` 里的字段，**不动指纹**——`fingerprint` 只覆盖
-        name/url/searchUrl/ruleSearch/ruleToc/ruleContent/exploreUrl（见 `core.loader`），
-        `enabledExplore` 不在其中，所以不会连带失效校验缓存。
-        """
-        if self.get_meta("enabled_explore_fixed_at"):
-            return False
-        rows = list(self.conn.execute("SELECT source_url, raw_json FROM sources"))
-        updates = []
-        for row in rows:
-            try:
-                src = json.loads(row["raw_json"])
-            except Exception:
-                continue
-            if not isinstance(src, dict):
-                continue
-            want = bool(str(src.get("exploreUrl") or "").strip()
-                        or (src.get("ruleExplore") or {}))
-            if bool(src.get("enabledExplore", False)) == want:
-                continue
-            src["enabledExplore"] = want
-            updates.append((json.dumps(src, ensure_ascii=False), now(), row["source_url"]))
-        if updates:
-            with self.conn:
-                self.conn.executemany(
-                    "UPDATE sources SET raw_json=?, updated_at=? WHERE source_url=?",
-                    updates)
-        self.set_meta("enabled_explore_fixed_at", now())
-        return bool(updates)
-
-    def fix_dirty_source_type_once(self) -> bool:
-        """Once-off：把 `bookSourceType` 的脏值归 0。
-
-        Legado 的 `@IntDef` 只有 0/1/2/3（`BookSourceType.kt`），而库里有过 `4`
-        这种不存在的取值（实测 5 条）。`clean_source` 已补上归一——**导入**与
-        **保存**都走它，所以新数据不会再带进来；这条负责存量。
-
-        **列与 raw_json 都要改**：`source_type` 列供筛选/统计/分组，而 `raw_json`
-        是导出与指纹的来源——只改一边会出现「列表按 4 分组、导出的却是 0」。
-        """
-        if self.get_meta("dirty_source_type_fixed_at"):
-            return False
-        rows = list(self.conn.execute(
-            "SELECT source_url, source_type, raw_json FROM sources"))
-        updates = []
-        for row in rows:
-            col_bad = int(row["source_type"] or 0) not in (0, 1, 2, 3)
-            raw_bad = False
-            src = None
-            try:
-                src = json.loads(row["raw_json"])
-                raw_bad = int(src.get("bookSourceType", 0) or 0) not in (0, 1, 2, 3)
-            except Exception:
-                src = None
-            if not (col_bad or raw_bad):
-                continue
-            if isinstance(src, dict):
-                src["bookSourceType"] = 0
-                raw_json = json.dumps(src, ensure_ascii=False)
-            else:
-                raw_json = row["raw_json"]
-            updates.append((0, raw_json, now(), row["source_url"]))
-        if updates:
-            with self.conn:
-                self.conn.executemany(
-                    "UPDATE sources SET source_type=?, raw_json=?, updated_at=? "
-                    "WHERE source_url=?", updates)
-        self.set_meta("dirty_source_type_fixed_at", now())
-        return bool(updates)
-
     def is_system_tags_locked(self, url: str) -> bool:
         from core.loader import _normalize_url
         row = self.conn.execute(
@@ -1266,7 +963,7 @@ class Store:
             where = " WHERE v.source_url IN (%s)" % ",".join("?" * len(keys))
             args = keys
         rows = list(self.conn.execute(
-            "SELECT v.id, v.source_type, v.group_name, v.health, v.stars, "
+            "SELECT v.id, v.source_type, v.group_name, v.health, "
             "v.quality_tags, v.system_tags_locked "
             "FROM v_sources v" + where, args))
         updates = []
@@ -1274,7 +971,7 @@ class Store:
             if row["system_tags_locked"]:
                 continue
             health = row["health"] or Health.PENDING
-            base = group_title(int(row["source_type"] or 0), health, int(row["stars"] or 0))
+            base = group_title(int(row["source_type"] or 0), health)
             quality = _normalize_tags(row["quality_tags"] or "")
             if "规则完整" in quality:
                 base = _merge_group(_parse_group(base), ["规则完整"])
@@ -1299,9 +996,9 @@ class Store:
         out["health"] = {str(r["health"]): r["c"] for r in c(
             "SELECT health, COUNT(*) AS c FROM v_sources "
             "WHERE deleted_at = '' GROUP BY health")}
-        out["stars"] = {str(r["stars"]): r["c"] for r in c(
-            "SELECT stars, COUNT(*) AS c FROM v_sources "
-            "WHERE deleted_at = '' GROUP BY stars")}
+
+
+
         return out
 
     def backup(self, path: str) -> str:
@@ -1342,8 +1039,6 @@ class Store:
                 r.get("search_response_ms"),
                 # 缺失按 0 处理（= 没验过搜索）：方向是保守重验，不是错误复用
                 1 if r.get("search_probed") else 0,
-                int(r.get("quality_stars", 0) or 0),
-                str(r.get("star_basis", "") or ""),
                 tags or "",
                 int(r.get("probe_depth", 1) or 1),
                 int(r.get("chapter_count", 0) or 0),
@@ -1361,9 +1056,9 @@ class Store:
         sql = (
             "INSERT INTO checks(source_url,fingerprint,cache_version,health,"
             "status_code,response_time_ms,search_hit,search_response_ms,search_probed,"
-            "stars,star_basis,quality_tags,probe_depth,chapter_count,toc_complete,content_ok,"
+            "quality_tags,probe_depth,chapter_count,toc_complete,content_ok,"
             "toc_fail_reason,content_fail_reason,content_response_ms,error,checked_at,engine) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
         with self.conn:
             self.conn.executemany(sql, out)
         return len(out)
@@ -1416,17 +1111,12 @@ class Store:
             d = dict(r)
             d["url"] = d.pop("source_url", "")
             d["v"] = d.pop("cache_version", 0)
-            d["quality_stars"] = d.pop("stars", 0)
             d["quality_tags"] = [t for t in (d.pop("quality_tags", "") or "").split(",") if t]
             d["toc_complete"] = _untri(d.get("toc_complete"))
             d["content_ok"] = _untri(d.get("content_ok"))
             # 库里存的是 0/1，转成 bool 与 ndjson 后端返回同样的类型。
             # 老库没有这一列时（补列前落下的行）默认 0 → 保守重验，方向安全
             d["search_probed"] = bool(d.get("search_probed"))
-            # 老库没有这一列时（补列前落下的行）给空串 = 「没有可标注的来源」，
-            # 前端不渲染那个词。**不要默认成 "measured"**——那会把「不知道」
-            # 说成「验过了」，正是这一列要解决的病
-            d["star_basis"] = str(d.get("star_basis") or "")
             out[d["url"]] = d
         return out
 
@@ -1477,21 +1167,6 @@ class Store:
                 "DELETE FROM jobs WHERE pinned = 0 AND expires_at < ?"
                 " AND status IN ('done', 'failed', 'cancelled')", (now(),))
         return cur.rowcount or 0
-
-    def _backfill_job_expiry(self) -> None:
-        """给补列之前落下的任务行补上过期时间。
-
-        **不补的话它们会被立刻扫掉**：`expires_at` 补列时是空串，而空串按字符串
-        比较**小于任何时间戳**——`sweep_jobs` 一跑就把历史任务全删了，用户那边看起来
-        就是「升级一次，任务列表空了」。按 `updated_at + TTL` 补，等价于
-        「从最后一次更新算起还有 7 天」。
-        幂等：补完之后不会再有空串，之后每天启动都是一次 0 行的 UPDATE。
-        """
-        with self.conn:
-            self.conn.execute(
-                "UPDATE jobs SET expires_at = "
-                "COALESCE(datetime(updated_at, '+%d days'), '') WHERE expires_at = ''"
-                % JOBS_TTL_DAYS)
 
     def create_job(self, job_id: str, kind: str, total: int = 0, payload=None,
                    retry_of: str = "") -> None:

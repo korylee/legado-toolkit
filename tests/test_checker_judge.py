@@ -26,7 +26,7 @@ from unittest import mock
 # `AsyncChecker.run()` / `_request()` 的用例单独跑没事、一起跑就报
 # `module 'aiohttp' has no attribute 'ClientSession'`。已删。
 from core import checker
-from core.checker import (calc_stars, classify_http_status, evaluate_stars,
+from core.checker import (classify_http_status,
                           parse_search_request, split_url_options)
 from core.loader import fingerprint
 from core.models import BookSourceRecord, Engine, Health, build_record
@@ -239,125 +239,6 @@ class SearchRequestOptionTests(unittest.TestCase):
         self.assertEqual(method, "GET")
         self.assertEqual(headers, {})
         self.assertEqual(body, "")
-
-
-class StarBasisTests(unittest.TestCase):
-    """星级旁边要能说清「这一级是实测来的，还是按规则推的」。
-
-    3★ 有**两种完全不同的来源**，界面上长得一模一样：
-
-        (a) 搜索实测命中              → 实测
-        (b) 没验过，只是静态规则齐全   → 仅规则
-
-    用户看到「可用 3★」分不出这是验出来的还是看规则推的。海豚书屋（404 却报 3★）
-    本质就撞在这一格上。
-
-    **判据要跟 `calc_stars` 同源**：另写一份必然漂移，所以这里测的是同一个阶梯的
-    两个出口——`evaluate_stars` 返回 `(星级, 来源)`，`calc_stars` 只是取星级。
-
-    来源的判定规则只有一条：**这个星级所依赖的每一级，中间有没有哪一级是靠
-    `_static_*` 回退通过的**。有 → `static`，没有 → `measured`。
-    """
-
-    #: 目录 + 正文规则都齐全（静态判据只要求非空）
-    RAW_COMPLETE = {"ruleToc": {"chapterList": "class.c"},
-                    "ruleContent": {"content": "class.content"}}
-    RAW_EMPTY: dict = {}
-
-    def _args(self, **over):
-        base = dict(health=Health.OK, has_search=True, search_response_ms=120,
-                    search_hit="", toc_complete=None, content_ok=None,
-                    raw=self.RAW_COMPLETE)
-        base.update(over)
-        return base
-
-    def test_three_stars_when_toc_is_unverifiable_and_rules_are_incomplete(self):
-        """目录验不了，静态目录规则**也**不齐 → 停在 3★，来源仍是**实测**。
-
-        这一级的依据是「搜索实测命中」（实测），静态判据虽然被问过但**没放行**——
-        所以不能标成「仅规则」。这条守的是 `used_static` 只在**回退成功**时才置位：
-        写成「只要回退过就算推的」的话，这里会被误标。
-        """
-        stars, basis = evaluate_stars(**self._args(search_hit="斗破苍穹",
-                                                   toc_complete=None,
-                                                   raw=self.RAW_EMPTY))
-        self.assertEqual(stars, 3)
-        self.assertEqual(basis, "measured")
-
-    def test_three_stars_from_rules_alone_is_static(self):
-        """**核心用例**：没命中、全靠静态规则齐全拿到的 3★，必须标成「仅规则」。"""
-        stars, basis = evaluate_stars(**self._args(search_hit=""))
-        self.assertEqual(stars, 3)
-        self.assertEqual(basis, "static")
-
-    def test_three_stars_from_a_real_failed_toc_is_measured(self):
-        """反向断言：目录**真的验过**且结论是不完整 → 仍是实测，不是「没验」。"""
-        stars, basis = evaluate_stars(**self._args(search_hit="斗破苍穹",
-                                                   toc_complete=False))
-        self.assertEqual(stars, 3)
-        self.assertEqual(basis, "measured")
-
-    def test_four_stars_with_a_measured_toc_is_measured(self):
-        # 目录实测通过、正文实测不通过 → 4★，两级都有实测支撑
-        stars, basis = evaluate_stars(**self._args(search_hit="斗破苍穹",
-                                                   toc_complete=True,
-                                                   content_ok=False))
-        self.assertEqual(stars, 4)
-        self.assertEqual(basis, "measured")
-
-    def test_four_stars_with_an_unverified_toc_is_static(self):
-        """4★ 也可能是推的：目录验不了（None）→ 回退静态目录规则。"""
-        stars, basis = evaluate_stars(**self._args(search_hit="斗破苍穹",
-                                                   toc_complete=None,
-                                                   content_ok=False))
-        self.assertEqual(stars, 4)
-        self.assertEqual(basis, "static")
-
-    def test_five_stars_fully_measured(self):
-        stars, basis = evaluate_stars(**self._args(search_hit="斗破苍穹",
-                                                   toc_complete=True,
-                                                   content_ok=True))
-        self.assertEqual(stars, 5)
-        self.assertEqual(basis, "measured")
-
-    def test_five_stars_with_both_depth_levels_unverified_is_static(self):
-        """**这条最重要**：命中 + 规则齐全，但**目录和正文一次都没验**，照样 5★。
-
-        现有的阶梯就是这样的——`calc_stars` 的注释写着「None=无法验证→回退静态」。
-        5★ 的含义是「正文可用」，可这个 5★ 里没有一格正文是实测的。
-        标成 `static` 是如实呈现；**要不要连星级本身也收紧**已于 2026-09-17
-        定案为「不收紧」（理由见 `skills/legado-source-lessons` §二十六）。
-        """
-        stars, basis = evaluate_stars(**self._args(search_hit="斗破苍穹",
-                                                   toc_complete=None,
-                                                   content_ok=None))
-        self.assertEqual(stars, 5)
-        self.assertEqual(basis, "static")
-
-    def test_unreachable_has_no_basis(self):
-        """0★（不可达）没什么可标注的——空串，别硬凑一个词。"""
-        stars, basis = evaluate_stars(**self._args(health=Health.DEAD))
-        self.assertEqual(stars, 0)
-        self.assertEqual(basis, "")
-
-    def test_low_levels_are_measured(self):
-        """1★（域名）/ 2★（搜索）都来自真实请求 → 实测。"""
-        self.assertEqual(evaluate_stars(**self._args(search_response_ms=0))[1],
-                         "measured")
-        self.assertEqual(evaluate_stars(**self._args(has_search=False))[1],
-                         "measured")
-
-    def test_two_stars_when_nothing_is_measured_and_rules_are_incomplete(self):
-        # 没命中、规则也不全 → 2★。这时静态判据被问过但没给分，不算「推的」
-        stars, basis = evaluate_stars(**self._args(raw=self.RAW_EMPTY))
-        self.assertEqual(stars, 2)
-        self.assertEqual(basis, "measured")
-
-    def test_calc_stars_still_returns_a_plain_int(self):
-        """`calc_stars` 的签名与返回类型不能变——调用点不止一处。"""
-        self.assertIsInstance(calc_stars(**self._args()), int)
-
-
 
 
 class JudgeMappingTests(unittest.TestCase):

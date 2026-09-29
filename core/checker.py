@@ -105,7 +105,9 @@ from core.constants import DEFAULT_UA
 # （App 真源码）的结论写进同一张 checks 表，而它与本地回放的判据强度不同（本地跑不了
 # `@js:`、没有登录态、超时 8s vs App 60s）——缓存条目不记出处的话，换个引擎重跑会
 # **静默复用**另一台引擎的结论（AGENTS #5b）。
-CACHE_VERSION = 16
+# 17：校验结果改为只保留健康状态和逐段验证事实，移除星级及来源字段。
+# 旧缓存即使含有星级，也不能作为新结果形状继续复用。
+CACHE_VERSION = 17
 
 
 
@@ -347,7 +349,8 @@ def build_domain_url(url: str) -> str:
     return url
 
 
-# ------------------------------------------------------------ 星级与缓存公共逻辑
+# ------------------------------------------------------------ 校验公共逻辑
+
 
 def _strip_rule_prefix(rule: str) -> str:
     """剥离 Legado 规则类型前缀（@css:），保留纯 CSS 选择器给 apply_css_rule。"""
@@ -380,109 +383,6 @@ def _static_content_ok(raw: Optional[Dict[str, Any]]) -> bool:
 def static_rule_complete(raw: Optional[Dict[str, Any]]) -> bool:
     """静态判定：目录 + 正文规则均齐全（quality_tags 里的「规则完整」标签依据）。"""
     return _static_toc_ok(raw) and _static_content_ok(raw)
-
-
-def evaluate_stars(
-    health: str,
-    has_search: bool,
-    search_response_ms: int,
-    search_hit: str,
-    toc_complete: Optional[bool],
-    content_ok: Optional[bool],
-    raw: Optional[Dict[str, Any]] = None,
-) -> Tuple[int, str]:
-    """星级评分 + **这一级是实测还是推定**。
-
-    返回 ``(星级, 来源)``，来源取值：
-
-    - ``"measured"``：这个星级依赖的每一级都有真实请求的结论支撑
-    - ``"static"``  ：中间有某一级是「没验到，按静态规则回退通过」的
-    - ``""``        ：0★（不可达），没有可标注的东西
-
-    **为什么要这一维**：3★ 有**两种完全不同的来源**，界面上长得一模一样——
-
-        (a) 搜索实测命中              → 看就是「验过了」
-        (b) 没验过，只是静态规则齐全   → 其实是「看规则推的」
-
-    用户看到「可用 3★」分不出这两种。海豚书屋（404 却报 3★）本质就撞在这一格上。
-    4★/5★ 同样可能是推的：`toc_complete` / `content_ok` 为 None（验证跑不了，
-    例如规则含 JS）时会回退静态规则，**那一格就没有实测支撑**。
-
-    判定规则只有一条：**把「靠静态规则回退通过」的那几级记下来，出现任意一级就是
-    ``static``**。所以「命中 + 规则齐全、但目录正文一次都没验」的源会拿到
-    ``5★ static``——5★ 的含义是「正文可用」，而它里面没有一格正文是实测的。
-    如实呈现；**要不要连星级本身也收紧是另一个问题，本函数只负责说清楚**。
-
-    阶梯本身（每一级依赖上一级，方案D 分档宽松）：
-
-      1★ 可达：health ∈ (ok / auth)（域名通或能访问，仅需登录）
-      2★ 搜索连通：有搜索规则且搜索请求有响应（search_response_ms > 0）
-      3★ 弱证据档：搜索真实命中测试作品 或 静态规则完整（目录+正文规则齐全）
-      4★ 目录完整：命中源用实测 toc_complete（None=无法验证→回退静态目录规则非空）；
-                    未命中源静态目录规则非空
-      5★ 正文可用：命中源用实测 content_ok（None=无法验证→回退静态正文规则非空）；
-                    未命中源静态正文规则非空
-
-    宽严边界（方案D）：
-      - 未命中测试作品的源最高 3★（弱证据档封顶）：测试集仅覆盖大众作品，
-        未命中≠源差，规则齐全即给 3★，但 4★/5★ 保留给有命中实测证据的源
-      - 深度验证「无法验证」（None）的维度回退静态规则判定——不误杀规则齐全的源
-      - 实测明确不达标（False）仍按不满足扣分——不误放真坏的源
-    """
-    if health not in (Health.OK, Health.AUTH):
-        return 0, ""
-    stars = 1  # 可达（域名请求本身是实测）
-    if not (has_search and search_response_ms > 0):
-        return stars, "measured"
-    stars = 2  # 搜索连通（实测）
-    # 命中和静态规则都不满足 → 2★。静态判据被问过但**没给分**，不算「推的」
-    if not (search_hit or static_rule_complete(raw)):
-        return stars, "measured"
-    stars = 3  # 命中 或 静态规则完整（弱证据档）
-    if not search_hit:
-        # 这一级的依据**就是**静态规则 → 推定
-        return stars, "static"
-    used_static = False
-    # 目录完整：实测优先，None（无法验证）回退静态规则；False 仍不达标
-    toc_ok = toc_complete
-    if toc_ok is None:
-        toc_ok = _static_toc_ok(raw)
-        # **只有静态回退真的放行了才算「推的」**：回退了但没通过时，这一级并没有
-        # 靠静态规则拿到东西（星级由下面的 return 决定，依据是实测的命中）
-        if toc_ok:
-            used_static = True
-    if not toc_ok:
-        return stars, _basis(used_static)
-    stars = 4  # 目录完整
-    # 正文可用：实测优先，None（无法验证）回退静态规则；False 仍不达标
-    content_ok_ = content_ok
-    if content_ok_ is None:
-        content_ok_ = _static_content_ok(raw)
-        if content_ok_:
-            used_static = True
-    if not content_ok_:
-        return stars, _basis(used_static)
-    return 5, _basis(used_static)  # 正文可用
-
-
-def _basis(used_static: bool) -> str:
-    return "static" if used_static else "measured"
-
-
-def calc_stars(
-    health: str,
-    has_search: bool,
-    search_response_ms: int,
-    search_hit: str,
-    toc_complete: Optional[bool],
-    content_ok: Optional[bool],
-    raw: Optional[Dict[str, Any]] = None,
-) -> int:
-    """星级评分（0-5★）。阶梯、宽严边界、以及「实测 / 推定」的口径见
-    :func:`evaluate_stars`（本函数只是它的取值出口，**不要在这里另写一套阶梯**）。
-    """
-    return evaluate_stars(health, has_search, search_response_ms, search_hit,
-                          toc_complete, content_ok, raw)[0]
 
 
 def _decode_body(body: bytes) -> str:

@@ -23,7 +23,7 @@ ITEMS_LIMIT = 500
 
 #: 前端 `applyCheckResults` 逐字段回填的就是这些键。**加字段要两条路一起加**，
 #: 否则另一条路回填时会把那一列清空（它就是按 key 取的）
-ITEM_KEYS = ("url", "name", "health", "stars", "star_basis", "error",
+ITEM_KEYS = ("url", "name", "health", "error",
              "toc_complete", "content_ok", "search_hit", "checked_at")
 
 
@@ -35,7 +35,7 @@ def check_items_from_records(results: Iterable[Any]) -> List[Dict[str, Any]]:
         # 是 build_record 从 bookSourceUrl 直接取的原文——两侧不归一的话前端
         # 一条都匹配不上，表现是「校验完了列表不更新」，且看不出任何异常（lessons §五）
         "url": _normalize_url(r.url), "name": r.name, "health": r.health,
-        "stars": r.quality_stars, "star_basis": r.star_basis, "error": r.error,
+        "error": r.error,
         "toc_complete": r.toc_complete, "content_ok": r.content_ok,
         "search_hit": r.search_hit, "checked_at": r.checked_at,
     } for r in results]
@@ -45,10 +45,8 @@ def check_items_from_checks(checks: Dict[str, Dict[str, Any]],
                             names: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
     """本机引擎那条：`Store.checks_map()` 的行 → items。
 
-    引擎结论**已经按 checks 口径落库**（五档 / 星级 / 深度，`core/jvm_health`），
-    这里只做键名映射（`quality_stars` → `stars`，见 `ITEM_KEYS`）——**不再算一遍**
-    五档与星级：那是 `jvm_health` 的事，两份实现必然漂。
-
+    引擎结论已经按 checks 口径落库（五档健康与验证深度，`core/jvm_health`），
+    这里只做键名映射，不重新计算健康状态或验证事实。
     ``names``：`{url: 源名}`。checks 行里不存名字，而「变成 X」的明细要显示它。
     """
     out: List[Dict[str, Any]] = []
@@ -58,8 +56,6 @@ def check_items_from_checks(checks: Dict[str, Dict[str, Any]],
             "url": key,
             "name": (names or {}).get(key, ""),
             "health": d.get("health"),
-            "stars": d.get("quality_stars"),
-            "star_basis": d.get("star_basis"),
             "error": d.get("error") or "",
             "toc_complete": d.get("toc_complete"),
             "content_ok": d.get("content_ok"),

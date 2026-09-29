@@ -146,7 +146,6 @@ class ChecksRowTests(unittest.TestCase):
         self.assertEqual(it["probe_depth"], 2, "搜索档 = 本地那根深度轴的 2")
         self.assertEqual(it["search_hit"], "斗破苍穹")
         self.assertTrue(it["search_probed"])
-        self.assertGreaterEqual(it["quality_stars"], 1)
 
     def test_deep_stage_maps_to_the_depth_axis(self) -> None:
         toc = H.checks_row({"url": "https://a.com", "state": "ok", "stage": "toc",
@@ -187,7 +186,7 @@ class StoreChecksTests(unittest.TestCase):
     def tearDown(self) -> None:
         shutil.rmtree(self.root, ignore_errors=True)
 
-    def test_store_checks_writes_health_stars_and_engine(self) -> None:
+    def test_store_checks_writes_health_and_engine(self) -> None:
         with Store(self.db) as st:
             st.upsert_sources([{"bookSourceUrl": "https://a.com", "bookSourceName": "甲",
                                 "bookSourceType": 0, "ruleSearch": {"bookList": ".x"}}])

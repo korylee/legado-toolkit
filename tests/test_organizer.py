@@ -78,7 +78,6 @@ class OrganizerTests(unittest.TestCase):
         )
         record = build_record(raw, 0)
         record.health = Health.OK
-        record.quality_stars = 5
 
         result = organize_sources([record])
 

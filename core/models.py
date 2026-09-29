@@ -173,7 +173,7 @@ class BookSourceRecord:
     #
     # 两处**有意的例外**，不在这里、也不该顺手补回来：
     #   - `dead_tagged` 留着：`core/reporter.py` 在读它（同名的 `auth_tagged` 没人读，删了）
-    #   - `has_search` 留着：探测门与星级都在读
+    #   - `has_search` 留着：探测门与搜索结果展示都在读
     # 另外 `AUTH_TAG_PATTERNS` 也随 `auth_tagged` 一起删了——它的唯一读者就是那个字段。
     # ---- 动态校验结果 ----
     health: str = Health.PENDING
@@ -181,15 +181,10 @@ class BookSourceRecord:
     response_time_ms: int = 0
     error: str = ""
     checked_at: str = ""
-    # ---- 优质度检测结果 ----
-    search_hit: str = ""             # 命中的测试作品名（空=未命中/未测）
-    search_response_ms: int = 0      # 搜索请求响应耗时
-    quality_stars: int = 0           # 星级 0-5
-    #: 这个星级是**实测**来的还是**按静态规则推的**（见 checker.evaluate_stars）：
-    #: "measured" / "static" / ""（0★ 不可达，无可标注）。**必须与 quality_stars 一起
-    #: 看**——3★ 有「搜索实测命中」和「只是规则齐全」两种来源，光看星级分不出来。
-    star_basis: str = ""
-    quality_tags: List[str] = field(default_factory=list)  # 如 ["规则完整"]（命中不在此打标签，见 search_hit）
+    # ---- 验证结果 ----
+    search_hit: str = ""         # 命中的测试作品名（空=未命中/未测）
+    search_response_ms: int = 0    # 搜索请求响应耗时
+    quality_tags: List[str] = field(default_factory=list)  # 如 ["规则完整"]
     # ---- 深度验证结果（probe_depth >= 2 时填充；None=未验证/无法验证）----
     probe_depth: int = 1             # 实际执行的验证深度（1=浅探测 / 2=+目录 / 3=+正文）
     chapter_count: int = 0           # 目录解析出的章节数

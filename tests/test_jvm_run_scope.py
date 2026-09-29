@@ -501,7 +501,7 @@ class ResultShapeTests(_Base):
         _r, out = self._run_single()
         it = out["items"][0]
         self.assertEqual(it["url"], "https://a.com")      # 归一化后的键
-        for key in ("name", "health", "stars", "star_basis",
+        for key in ("name", "health", "error",
                     "toc_complete", "content_ok", "search_hit", "checked_at"):
             self.assertIn(key, it, "回填缺字段: %s" % key)
         # 结论是 checks 口径来的（engine=jvm），并进了那张表

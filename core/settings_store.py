@@ -28,18 +28,17 @@ SETTINGS_NAME = "settings.json"
 #: **加一就意味着 `_migrate_legacy` 多一条迁移分支**，不是单纯的标记位。
 VERSION = 2
 
-#: 探测深度：**一根轴四档，一档对一级星级**。
+#: 探测深度：一根轴四档，分别对应实际验证阶段。
 #:
-#:   1 主页  仅域名探测（1 次请求）                → 1★ 可达
-#:   2 搜索  搜索探测 + 命中判定（+1~2 次）         → 2★ 连通 / 3★ 命中
-#:   3 目录  详情页 + 目录页，比对章节数（+2 次）    → 4★ 实测目录
-#:   4 正文  章节页抓一章全文（+1 次）              → 5★ 实测正文
+#:   1 主页  仅域名探测（1 次请求）
+#:   2 搜索  搜索探测 + 命中判定（+1~2 次）
+#:   3 目录  详情页 + 目录页，比对章节数（+2 次）
+#:   4 正文  章节页抓一章全文（+1 次）
 #:
 #: 合并前这里是「深度 1/2/3」**加**一个独立的 `probe_search` 开关，两根轴能配出
 #: 非法组合：关掉搜索探测却选 2/3 档——目录/正文的门要求 `search_hit`，于是永远
-#: 进不去，深度白设。合成一根轴之后「深度 = 星级 = 每源的请求数」，不用再理解
-#: 两个开关的交互。``AsyncChecker`` 的收敛口径就是这个元组
-#: （``core/checker.py`` 直接 import 这里的常量），改这里即两边同时改。
+#: 进不去，深度白设。合成一根轴后，设置直接对应实际验证阶段。``AsyncChecker`` 的
+#: 收敛口径就是这个元组（``core/checker`` 直接 import 这里的常量）。
 PROBE_DEPTHS = (1, 2, 3, 4)
 DEPTH_HOME, DEPTH_SEARCH, DEPTH_TOC, DEPTH_CONTENT = PROBE_DEPTHS
 
@@ -63,9 +62,8 @@ DEPTH_HOME, DEPTH_SEARCH, DEPTH_TOC, DEPTH_CONTENT = PROBE_DEPTHS
 #: ``CACHE_VERSION``**：编号含义没变、历史缓存仍然可比。
 PROBE_DEPTH_CHOICES = (DEPTH_SEARCH, DEPTH_TOC, DEPTH_CONTENT)
 
-#: JVM 校验的探测深度（S3）。**与上面的 ``PROBE_DEPTHS`` 是两根轴**：那根是本地
-#: 回放的（1/2/3/4，按星级口径），这根是 App 真引擎跑到哪一段——两者编号独立，
-#: 不要互相换算（深度轴的含义一平移，历史结论整列都会变意思，AGENTS #5b）。
+#: JVM 校验的探测深度（S3）。与上面的 ``PROBE_DEPTHS`` 是两根轴：那根是本地
+#: 回放的（1/2/3/4），这根是 App 真引擎跑到哪一段——两者编号独立，不要互相换算。
 #: 取值与 ``appservice`` 的 ``ValidateService.DEPTH_*`` 一一对应。
 JVM_DEPTHS = ("search", "toc", "content")
 

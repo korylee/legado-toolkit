@@ -68,16 +68,10 @@ def infer_health_from_group(group: str) -> str:
     return Health.PENDING
 
 
-def group_title(source_type: int, health: str, stars: int = 0, style: str = "status") -> str:
-    """生成面向使用的分组；默认不把星级和临时检测证据写入分组。"""
+def group_title(source_type: int, health: str) -> str:
+    """生成面向使用的类型与健康状态分组。"""
     # 兜底口径同 models.type_name：未定义类型（如 4）留空，由 _dedupe 丢弃空段
     type_name = BOOK_SOURCE_TYPE_NAMES.get(source_type, "")
-    if style != "status":
-        health_name = HEALTH_NAMES.get(health, health)
-        if stars and health == Health.OK:
-            star_str = "★" * min(stars, 5) + "☆" * (5 - min(stars, 5))
-            return f"{type_name}{star_str}"
-        return f"{type_name},{health_name}"
     return f"{type_name},{STATUS_GROUP_NAMES.get(health, '待验证')}"
 
 
@@ -142,7 +136,7 @@ def organize_sources(
         new_rec = dict(rec.raw)  # 浅拷贝，保留全部字段
         # 主分组：类型 + 生命周期状态；验证事实在列表和报告明细中展示
         # 系统标签 = 类型 + 健康状态 + 规则完整
-        system_group = group_title(rec.source_type, rec.health, rec.quality_stars)
+        system_group = group_title(rec.source_type, rec.health)
         system_quality = quality_tags_str(rec)
         if system_quality:
             system_group = merge_group(parse_group_tags(system_group), parse_group_tags(system_quality))
@@ -162,6 +156,6 @@ def summarize_grouping(records: List[BookSourceRecord]) -> List[Dict[str, Any]]:
     for r in records:
         if not r.enabled:
             continue
-        counter[group_title(r.source_type, r.health, r.quality_stars)] += 1
+        counter[group_title(r.source_type, r.health)] += 1
     summary = [{"group": g, "count": c} for g, c in counter.most_common()]
     return summary
