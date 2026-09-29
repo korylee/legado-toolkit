@@ -217,7 +217,7 @@
 > JS 里**尽量不写反斜杠转义**：换行用 `String.fromCharCode(10)`，这样 JSON 只过一层转义，
 > 不会在「JSON → JS 字符串 → 正则」中被吃掉。
 
-站点个案（口袋漫画的图片签名会过期、目录选错会重复 30 章）在 lessons §五十八 四 与 §七十五。
+站点个案（口袋漫画的图片签名会过期、目录选错会重复 30 章）2026-09-20 修过一轮，细节看 git log。
 
 ### 其余场景速查
 
@@ -291,7 +291,7 @@ Map）、`java.connect(url, header)`、`java.log` / `java.toast`、`baseUrl`、`
 | `bookSourceGroup` | 分组名，**多个用逗号（或分号）分隔**——上游就按 `[,;，；]` 切
 （`AppPattern.splitGroupRegex`）。`&&` 是 **`exploreUrl` 多项之间**的分隔，不是分组分隔符 |
 | `enabledExplore` | 是否启用发现。**不要手写**：有 `exploreUrl` / `ruleExplore` 才算数，
-由配置推导（AGENTS #13——手写实测漂了 885 条），缺这个键时导入链路会自己对齐 |
+由配置推导（AGENTS #13——2026-09 实测漂了 885 条），缺这个键时导入链路会自己对齐 |
 | `header` | 全局请求头，JSON 字符串 |
 | `charset` | GBK 页面需指定，如 `gbk` |
 
