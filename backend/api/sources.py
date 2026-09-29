@@ -65,7 +65,7 @@ def list_sources(
     include_deleted: bool = False,
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
-    order: str = Query("id", description="id/name/stars/checked_at，前缀 - 表示倒序"),
+    order: str = Query("id", description="id/name/verified/checked_at，前缀 - 表示倒序"),
     st=Depends(get_store),
 ):
     # 服务端筛选 + 排序 + 分页：不要把 3700 行全量传给浏览器
@@ -157,7 +157,7 @@ def tags_meta():
     （书源类型一度把 3 当成视频、还编出了 Legado 不存在的 4）。
     """
     from core.constants import TYPE_MAP
-    from core.models import BOOK_SOURCE_TYPE_NAMES
+    from core.models import BOOK_SOURCE_TYPE_NAMES, HEALTH_NAMES
     from core.tags import (
         SYSTEM_QUALITY_TAG_ORDER,
         SYSTEM_STATUS_TAG_ORDER,
@@ -178,6 +178,10 @@ def tags_meta():
         # 用户标签别名表。不下发的话，用户手输「精品排版」时界面显示原文，
         # 保存后被后端归一成「精排」，下次打开标签就"变了"——静默不一致
         "user_tag_aliases": dict(USER_TAG_ALIASES),
+        # 健康度显示名（含 emoji）。这是前端那份副本的最后一处——不下发的话
+        # 「✅可用」这类词要在 core/models 与 health.js 各改一遍，漂了就是
+        # 同一档两个名字。顺序即 models 里的定义序，界面下拉沿用
+        "health_names": [{"value": h, "label": n} for h, n in HEALTH_NAMES.items()],
     }
 
 

@@ -69,8 +69,7 @@ def main() -> int:
                 "INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)",
                 (key, json.dumps(r, ensure_ascii=False)))
         st.conn.commit()
-        # 与产品那条路**同一份映射**（core/jvm_health）：结论写进 checks，五档 / 星级 /
-        # 深度才跟着更新（本脚本原来只写 meta，列表的健康列不认）
+        # 与产品那条路**同一份映射**（core/jvm_health）：结论写进 checks，五档 / 验证阶段 / 谁判的
         from core import jvm_health
         n_checks = jvm_health.store_checks(rows, batch=batch_id, store=st)
     finally:

@@ -14,7 +14,7 @@ export function debugOutletFor({ channel, verdict, layer }) {
   }
   return {
     kind: "app",
-    label: "连 App 调试（真机复检）",
+    label: "连 App 调试（真机复查）",
     reason: layer === "L5"
       ? "这一步需要登录态或真实网络出口，本机引擎无法判定"
       : "这一步的数据要渲染、解密或执行脚本后才有，本机引擎取不到",

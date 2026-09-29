@@ -30,6 +30,7 @@ from uuid import uuid4
 
 from core.app_debug import (build_steps, engine_pages, fetch_debug_pages, matched_map,
                             network_entries)
+from core.debug_keys import EXPLORE_PREFIX
 from core.fetch import CACHE_AUTO
 from core.paths import ARGS_PARTS, data_path
 
@@ -397,7 +398,7 @@ def page_from_engine(url: str, *, timeout: int = 60, render: bool = True,
     probe = {"bookSourceName": "取页探针", "bookSourceUrl": origin,
              "bookSourceType": 0, "exploreUrl": url}
     # 选项挂在**key 的 URL** 上：App 拿它当 mUrl 交给 AnalyzeUrl，那里才认 `,{...}`
-    key = "发现::" + url + (',{"webView":true}' if render else "")
+    key = EXPLORE_PREFIX + url + (',{"webView":true}' if render else "")
     from core import settings_store
 
     out = run_jvm_debug(probe, key=key, timeout=timeout, proxy=settings_store.resolve_proxy(),

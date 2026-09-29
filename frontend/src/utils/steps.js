@@ -12,3 +12,13 @@ export const STEP_LABELS = {
   toc: "目录",
   content: "正文",
 };
+
+//: 步骤 → 表单里那个字段的路径（「应用候选」「应用并重调」写规则时用）。
+//: 步骤词表相关的映射都收在这一份（原在 ruleCandidates.js，随候选启发式
+//: 下沉后端后搬到这）
+export const FIELD_OF_STEP = {
+  search: "ruleSearch.bookList",
+  bookUrl: "ruleSearch.bookUrl",
+  toc: "ruleToc.chapterList",
+  content: "ruleContent.content",
+};

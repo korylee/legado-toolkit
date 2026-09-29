@@ -14,8 +14,11 @@ const sourceTypes = ref([]);    // [{ value: 0, tag: "📖小说" }, ...]
 const statusTags = ref([]);
 const qualityTags = ref([]);
 const userTagAliases = ref({});
+// 健康度显示名（[{value: "ok", label: "✅可用"}, ...]）。真源 core/models.HEALTH_NAMES，
+// 前端 health.js 从这里取——那份逐字副本已删
+const healthNames = ref([]);
 
-export { sourceTypes, statusTags, qualityTags, userTagAliases };
+export { sourceTypes, statusTags, qualityTags, userTagAliases, healthNames };
 
 let metaPromise = null;
 
@@ -25,6 +28,7 @@ async function fetchTagMeta() {
   statusTags.value = meta.status_tags || [];
   qualityTags.value = meta.quality_tags || [];
   userTagAliases.value = meta.user_tag_aliases || {};
+  healthNames.value = meta.health_names || [];
 }
 
 /**

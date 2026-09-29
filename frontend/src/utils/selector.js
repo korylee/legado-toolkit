@@ -1,8 +1,8 @@
 // 点选式选择器（九-2a）：**给一个元素，给出可用的选择器候选**。
 //
-// 为什么要有它：候选面板是**算法猜**出来的（`ruleCandidates.js` 按自己的假设扫 DOM），
-// 猜不出（页面结构不合假设、容器空、L2–L4）就没有第二条路。点选不需要猜：
-// 用户在渲染视图里点一下，我们把这个元素的「几种写法」摆出来，并**当场算出准不准**。
+// 为什么要有它：候选面板是**算法猜**出来的（后端 `core/candidates.py` 按自己的
+// 假设扫原文），猜不出（页面结构不合假设、容器空、L2–L4）就没有第二条路。点选
+// 不需要猜：用户在渲染视图里点一下，我们把这个元素的「几种写法」摆出来，并**当场算出准不准**。
 //
 // 四类候选（每类的用途不同，别只给一类）：
 //   1. **同层兄弟集合**——点一个章节 `<li>`，`bookList`/`chapterList` 要的其实是**这一组**
@@ -18,6 +18,19 @@
 
 //: 空元素 / 不能当选择器骨架的标签
 const SKIP_TAGS = new Set(["html", "body", "head", "script", "style", "title", "meta", "link"]);
+
+const INTENT_OF_STEP = {
+  search: "list", bookUrl: "link", toc: "link", content: "text", explore: "list",
+};
+
+function intentOf(opts = {}) {
+  if (opts.intent) return opts.intent;
+  if (opts.step && INTENT_OF_STEP[opts.step]) return INTENT_OF_STEP[opts.step];
+  if (String(opts.field || "").includes("bookList") || String(opts.field || "").includes("chapterList")) return "list";
+  if (String(opts.field || "").includes("Url")) return "link";
+  return "list";
+}
+
 
 /** 元素上「像选择器」的 class（丢掉 Tailwind 变体与纯布局类——含冒号的会破坏 CSS 语法）。 */
 export function classesOf(cls) {
@@ -52,26 +65,51 @@ export function cssToLegado(css) {
   return out.join("@");
 }
 
-/** 一个候选的实测：命中数 / 去重数 / 占页面链接比。 */
-function measure(doc, css) {
+function valueOfNode(node, intent) {
+  if (!node) return "";
+  if (intent === "link") return node.getAttribute && node.getAttribute("href") || "";
+  if (intent === "media") return node.getAttribute && (node.getAttribute("src") || node.getAttribute("data-src") || "") || "";
+  return String(node.textContent || "").replace(/\s+/g, " ").trim();
+}
+
+/** HTML → 文档（**同一个解析口径**：`DOMParser`）。「这条规则选中几个」的
+ *  本地对数与高亮都用它。（原在 ruleCandidates.js，随候选启发式下沉后端后搬来） */
+export function parseDoc(html) {
+  try {
+    return new DOMParser().parseFromString(String(html || ""), "text/html");
+  } catch (e) {
+    return null;
+  }
+}
+
+/**
+ * 元素上「像选择器」的实测：节点命中、有效值、去重、空值与稳定性。
+ *
+ * **口径与 `core/candidates.py` 的实测同一条 spec**（hits/uniq/ratio 的定义）：
+ * 候选面板那半已下沉后端，两边不许各改各的——那边数的是「值」，这里数的是
+ * 「节点」（点选时还没有提取值），差异写在那边的模块注释里。
+ */
+function measure(doc, css, opts = {}) {
+  const intent = intentOf(opts);
   let nodes = [];
   try {
     nodes = [...doc.querySelectorAll(css)];
   } catch (e) {
-    return null;      // 选择器不合法（理论上不会，兜一手）
+    return null;
   }
-  if (!nodes.length) return { hits: 0, uniq: 0, ratio: 0 };
+  if (!nodes.length) return { hits: 0, uniq: 0, ratio: 0, valid: 0, empty: 0, duplicate: 0, samples: [], stability: 0 };
   const seen = new Set();
-  for (const n of nodes) {
-    // 去重口径：元素自身的 HTML。重复项（同一章被列两遍）在这一列会露出来
-    seen.add(String(n.outerHTML || "").slice(0, 400));
-  }
+  for (const n of nodes) seen.add(String(n.outerHTML || "").slice(0, 400));
+  const values = nodes.map((n) => valueOfNode(n, intent));
+  const validValues = values.filter(Boolean);
+  const uniqueValues = new Set(validValues);
   const links = doc.querySelectorAll("a[href]").length || 1;
+  const stability = /:nth-(?:child|of-type)\(/i.test(css) ? 0.25 : (/^(?:a|div|p|li|span)$/.test(css) ? 0.45 : 1);
   return {
-    hits: nodes.length,
-    uniq: seen.size,
-    // 占页面链接比只对「链接类」候选有意义（列表项常常就是一堆 <a>）
-    ratio: nodes.length / links,
+    hits: nodes.length, uniq: seen.size, ratio: nodes.length / links,
+    valid: validValues.length, empty: values.length - validValues.length,
+    duplicate: validValues.length - uniqueValues.size,
+    samples: [...uniqueValues].slice(0, 3), stability,
   };
 }
 
@@ -109,6 +147,7 @@ export function elementSpec(el) {
  */
 export function candidateSpecs(spec, opts = {}) {
   const limit = Number(opts.limit) || 6;
+  const intent = intentOf(opts);
   if (!spec || !spec.tag) return [];
   const out = [];
   const push = (css, why, kind) => {
@@ -142,10 +181,17 @@ export function candidateSpecs(spec, opts = {}) {
 
   for (const c of out) c.legado = cssToLegado(c.css);
 
-  // 排序：唯一命中优先，其次「一组兄弟」，再次容器，最后结构路径。同分按命中数少的在前
-  const rank = { self: 0, siblings: 1, container: 2, path: 3 };
+  // 列表字段优先同层集合；链接/正文字段优先稳定的自身选择器。
+  const rank = intent === "list"
+    ? { siblings: 0, container: 1, self: 2, path: 3 }
+    : { self: 0, siblings: 1, container: 2, path: 3 };
   out.sort((a, b) => (rank[a.kind] - rank[b.kind]));
-  return out.slice(0, limit);
+  return out.slice(0, limit).map((c) => ({
+    ...c,
+    intent,
+    role: intent === "list" ? "列表项" : intent === "link" ? "链接" : intent === "media" ? "媒体" : "正文文本",
+    stability: c.kind === "path" ? 0.25 : (c.kind === "self" && c.css && !/:nth-/.test(c.css) ? 1 : 0.75),
+  }));
 }
 
 /**
@@ -158,8 +204,10 @@ export function selectorCandidates(doc, el, opts = {}) {
   const spec = elementSpec(el);
   if (!spec) return [];
   return candidateSpecs(spec, opts).map((c) => {
-    const m = measure(doc, c.css);
-    return { ...c, hits: m ? m.hits : 0, uniq: m ? m.uniq : 0, ratio: m ? m.ratio : 0 };
+    const m = measure(doc, c.css, opts);
+    return { ...c, hits: m ? m.hits : 0, uniq: m ? m.uniq : 0, ratio: m ? m.ratio : 0,
+      valid: m ? m.valid : 0, empty: m ? m.empty : 0, duplicate: m ? m.duplicate : 0,
+      samples: m ? m.samples : [], stability: m ? m.stability : c.stability };
   });
 }
 
@@ -192,16 +240,4 @@ export function previewCss(doc, rule) {
     if (m && m.hits > 0) return { css, ...m };
   }
   return null;
-}
-
-/**
- * 从**取到的值**这一侧算实测（候选面板用）。与 `measure` 同一套口径，只是数的是值：
- * `uniq` 明显小于 `hits` 就说明**同一项被列了多遍**（实测那类「重复 30 条最新章节」
- * 就是这么露出来的），`ratio` 是它占页面链接的比例。
- */
-export function measureValues(doc, values) {
-  const list = (values || []).filter((v) => String(v || "").trim());
-  const uniq = new Set(list.map((v) => String(v))).size;
-  const links = (doc && doc.querySelectorAll("a[href]").length) || 1;
-  return { hits: list.length, uniq, ratio: list.length / links };
 }

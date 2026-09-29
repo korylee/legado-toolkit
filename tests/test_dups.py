@@ -116,11 +116,19 @@ class KeepSuggestionTests(unittest.TestCase):
             self._keep_url([src("https://a.com#♤x"), src("https://a.com")]),
             "https://a.com")
 
+    def test_verified_content_beats_cleaner_unverified_url(self) -> None:
+        from core.loader import _normalize_url
+        checks = {_normalize_url("https://a.com#x"): {"health": "ok", "content_ok": True},
+                  _normalize_url("https://a.com"): {"health": "ok"}}
+        self.assertEqual(
+            self._keep_url([src("https://a.com"), src("https://a.com#x")], checks),
+            "https://a.com#x")
+
     def test_a_working_source_beats_a_cleaner_dead_one(self) -> None:
         """镜像站那类：一个通一个死时，**能用的优先**，地址干净与否让位。"""
         from core.loader import _normalize_url
-        checks = {_normalize_url("https://a.com#♤x"): {"health": "ok", "quality_stars": 5},
-                  _normalize_url("https://a.com"): {"health": "dead", "quality_stars": 0}}
+        checks = {_normalize_url("https://a.com#♤x"): {"health": "ok", "content_ok": True},
+                  _normalize_url("https://a.com"): {"health": "dead", "content_ok": None}}
         self.assertEqual(
             self._keep_url([src("https://a.com"), src("https://a.com#♤x")], checks),
             "https://a.com#♤x")

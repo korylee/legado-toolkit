@@ -181,8 +181,12 @@ function toggleGroup(key, on) {
 }
 
 function memberLabel(m) {
-  return [m.name || "（无名）", m.host, HEALTH_LABELS[m.health] || m.health || "未校验",
-          m.stars ? m.stars + "★" : "", m.checked_at || ""].filter(Boolean).join(" · ");
+  const verified = m.content_ok === true ? "正文✓"
+    : m.toc_complete === true ? "目录✓"
+    : m.search_hit ? "搜索命中"
+    : m.probe_depth ? "已校验" : "";
+  return [m.name || "（无名）", m.host, HEALTH_LABELS.value[m.health] || m.health || "未校验",
+          verified, m.checked_at || ""].filter(Boolean).join(" · ");
 }
 
 function groupBody(g) {

@@ -3,18 +3,55 @@
 
 import asyncio
 
+from typing import Any, Dict
+
 from fastapi import APIRouter, HTTPException
 
 from backend.jobs import runner
 from backend.schemas import (
     AppDebugRequest,
     AppHostRequest,
+    CandidatesRequest,
+    CandidateVerifyRequest,
     JvmDebugRequest,
     ReplayStepRequest,
     SuggestRuleRequest,
 )
 
 router = APIRouter()
+
+
+@router.get("/meta")
+async def rules_meta():
+    """规则域的**结构事实**下发：规则组 → 该组规则求值所在的步骤。
+
+    前端的新鲜度判定（生成后验证「改了哪组规则就过期哪些步骤」）原来自己抄
+    一份这个映射——后端改了求值位置它会静默判错，这里从 ``core.verify`` 读
+    唯一一份。
+    """
+    from core.verify import RULE_GROUP_TO_STEPS
+
+    return {"rule_group_to_steps": RULE_GROUP_TO_STEPS}
+
+
+def _debug_key(body, source: Dict[str, Any], keyword: str) -> str:
+    """请求 → App 的调试 key。``key`` 非空时原样用（手工覆盖口）；否则由
+    ``target`` + ``query`` 语义化拼装——App 的 key 语法只在 `core.debug_keys`
+    一份，前端不再各抄一遍。发现页回落用的 ``exploreUrl`` 从 source 原文取
+    （与调试 tag 同一原则：不做任何规范化）；非字符串（数组形态）视为没配。"""
+    from core.debug_keys import build_key
+
+    explicit = str(body.key or "").strip()
+    if explicit:
+        return explicit
+    raw_explore = source.get("exploreUrl")
+    explore_url = str(raw_explore or "").strip() if isinstance(raw_explore, str) else ""
+    try:
+        return build_key(body.target, body.query, explore_url=explore_url, keyword=keyword)
+    except ValueError as e:
+        # 拼装口径的错（目标不合法 / 发现页没得回落）在这里转 400：
+        # 原因要一路走到界面，不能静默换成一个别的目标（AGENTS #4）
+        raise HTTPException(400, str(e))
 
 
 @router.post("/jvm-debug")
@@ -55,12 +92,15 @@ async def jvm_debug(body: JvmDebugRequest):
     jvm_conf = settings_store.load().get("jvm", {})
     readiness_result = readiness(
         jvm_conf.get("app_repo", ""), jvm_conf.get("android_sdk_dir", ""))
+    # key 在占 lane **之前**拼好：入参不合法就快速 400，不占着 JVM lane 报错
+    keyword = str(jvm_conf.get("keyword") or settings_store.DEFAULTS["jvm"]["keyword"])
+    key = _debug_key(body, dict(body.source or {}), keyword)
     # JVM 与批量校验共用一条 lane。常驻 daemon 本身也只能串行处理请求；后来的
     # 调试请求按**优先级**排队（debug 档先于批量档）等待，而不是拿不到
     # `RUN_LOCK` 后直接返回 busy。
     async with runner.acquire_lane("jvm", kind="debug"):
         work = asyncio.create_task(asyncio.to_thread(
-            run_jvm_debug, dict(body.source or {}), body.key or "我",
+            run_jvm_debug, dict(body.source or {}), key,
             int(timeout), body.cookie or "", cache, resolve_proxy(),
             readiness_result=readiness_result,
         ))
@@ -102,6 +142,11 @@ async def app_debug(body: AppDebugRequest):
     if cache not in CACHE_MODES:
         raise HTTPException(400, "未知的缓存策略：%s（只能是 %s）"
                                  % (body.cache, " / ".join(CACHE_MODES)))
+    # key 在推送**之前**拼好：入参不合法就快速 400——不能先把源推进 App
+    # 才发现 key 拼不出来（推送会改 App 里的数据，失败要留给真正的失败）
+    jvm_conf = settings_store.load().get("jvm", {})
+    keyword = str(jvm_conf.get("keyword") or settings_store.DEFAULTS["jvm"]["keyword"])
+    key = _debug_key(body, source, keyword)
     if body.push:
         # 调试 WS 的 tag 是拿去 App 库里精确匹配的，库里没有这个源就静默无响应。
         # 先推一次（App 侧是 REPLACE，幂等），新源/改过还没保存的源就都能调试了。
@@ -117,7 +162,7 @@ async def app_debug(body: AppDebugRequest):
         # 预算与本机引擎同源（settings_store.debug_timeout）：两条通道的
         # 「等多久」不一样而没人知道，是查不出来的不一致（AGENTS #8）
         return await asyncio.to_thread(
-            run_app_debug, host, tag, body.key or "我",
+            run_app_debug, host, tag, key,
             body.port or None, settings_store.debug_timeout(), source, cache=cache,
         )
     except Exception as e:
@@ -162,6 +207,40 @@ async def app_push(body: AppHostRequest):
     return {"ok": ok, "error": err}
 
 
+@router.post("/verify-candidate")
+async def verify_candidate_rule(body: CandidateVerifyRequest):
+    """用本机真实 JVM 引擎验收一条候选规则。
+
+    这是用户显式点击后的动作：只运行临时源副本，不保存源、不推送 App。候选的最终
+    结论由目标步骤给出，不能用整条链的 ``all_ok`` 替代；引擎不可用时返回结构化
+    状态，让前端显示原因而不是把它当成规则失败。
+    """
+    from core import settings_store
+    from core.repair.suggest import verify_candidate
+
+    timeout = (body.timeout if body.timeout is not None
+               else settings_store.debug_timeout())
+    lo, hi = settings_store.LIMITS["debug_timeout"]
+    if not lo <= int(timeout) <= hi:
+        raise HTTPException(400, "调试预算须在 %d～%d 秒（收到 %s）" %
+                            (lo, hi, timeout))
+
+    source = dict(body.source or {})
+    if not str(source.get("bookSourceUrl", "") or "").strip():
+        raise HTTPException(400, "缺少 bookSourceUrl")
+
+    async with runner.acquire_lane("jvm", kind="debug"):
+        try:
+            return await asyncio.to_thread(
+                verify_candidate, source, body.field, body.rule,
+                body.target, body.query, int(timeout))
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        except Exception as exc:
+            raise HTTPException(400, "候选引擎验收失败：%s：%s" %
+                                (type(exc).__name__, exc))
+
+
 @router.post("/suggest-rule")
 async def suggest_rule(body: SuggestRuleRequest):
     """让 AI 给某一步提候选规则。**只提议，每条都要过本地回放器**（AGENTS #3）。
@@ -191,6 +270,27 @@ async def suggest_rule(body: SuggestRuleRequest):
         }, dry_run=body.dry_run)
     except Exception as e:
         raise HTTPException(400, "AI 提议失败: %s: %s" % (type(e).__name__, e))
+
+
+@router.post("/candidates")
+async def rule_candidates(body: CandidatesRequest):
+    """从已抓到的 HTML 里猜「这一步该写什么规则」，**不发网络请求、不调模型**。
+
+    启发式的唯一一份在 ``core/candidates``（前端 ruleCandidates.js 已随本次
+    下沉删除）。返回体里每条候选都带 count / samples / hits / uniq / ratio；
+    空列表是个结论（页面上确实没有），前端连同诊断一起展示。
+    """
+    from core.candidates import find_candidates
+
+    if not (body.html or "").strip():
+        raise HTTPException(400, "这一步没有页面 HTML，先抓到页面再找候选")
+    try:
+        candidates = await asyncio.to_thread(find_candidates, body.html, body.kind, body.limit)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(400, "候选生成失败：%s：%s" % (type(e).__name__, e))
+    return {"candidates": candidates}
 
 
 @router.post("/replay-step")

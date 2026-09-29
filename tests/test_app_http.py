@@ -322,6 +322,68 @@ class AppDebugRouteCacheTests(unittest.TestCase):
         self.assertEqual(seen["cache"], "auto")
 
 
+class AppDebugRouteKeyTests(unittest.TestCase):
+    """``/rules/app-debug`` 的 key 入参：语义化 target+query 拼装、key 覆盖口、
+    以及**拼装失败时不得已经把源推进 App**（推送改 App 数据，失败要留给真正的失败）。"""
+
+    SETTINGS = {"network": {"proxy": ""},
+                "jvm": {"app_repo": "", "android_sdk_dir": "", "keyword": "斗破"},
+                "debug": {"timeout": 120}}
+
+    def _body(self, **kw):
+        from backend.schemas import AppDebugRequest
+
+        payload = {"source": {"bookSourceUrl": "https://a.example",
+                              "bookSourceName": "测试源"},
+                   "host": "127.0.0.1"}
+        payload.update(kw)
+        return AppDebugRequest(**payload)
+
+    def _run(self, body):
+        """直调端点：run_app_debug 只回记 key；push_source 一旦被调即断言失败。"""
+        import asyncio
+
+        from backend.api.rules import app_debug
+
+        seen = {}
+
+        def fake_run(host, tag, key, port=None, timeout=60, source=None,
+                     proxy="", cache="auto"):
+            seen["key"] = key
+            return {"source": "app", "steps": [], "pages": [], "all_ok": True,
+                    "events": [], "error": ""}
+
+        with patch("core.app_debug.run_app_debug", side_effect=fake_run),                patch("core.app_debug.push_source", side_effect=AssertionError("不得推送")),                patch("core.settings_store.load", return_value=dict(self.SETTINGS)):
+            asyncio.run(app_debug(body))
+        return seen
+
+    def test_target_and_query_build_the_key(self):
+        seen = self._run(self._body(target="toc", query="++https://a.example/t"))
+        self.assertEqual(seen["key"], "++https://a.example/t")
+
+    def test_explicit_key_wins(self):
+        seen = self._run(self._body(key="https://x.example/b/1"))
+        self.assertEqual(seen["key"], "https://x.example/b/1")
+
+    def test_explore_without_url_is_400_and_not_pushed(self):
+        """发现没得回落 → 400 带原因；推送桩用 AssertionError 兜底——拼装在
+        推送之前失败，走到推送就是顺序错了。"""
+        import asyncio
+
+        from backend.api.rules import app_debug
+        from fastapi import HTTPException
+
+        source = {"bookSourceUrl": "https://a.example", "bookSourceName": "测试源",
+                  "exploreUrl": ""}
+        body = self._body(source=source, target="explore", query="")
+        with patch("core.settings_store.load", return_value=dict(self.SETTINGS)),                patch("core.app_debug.push_source",
+                      side_effect=AssertionError("不得推送")):
+            with self.assertRaises(HTTPException) as ctx:
+                asyncio.run(app_debug(body))
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertIn("exploreUrl", str(ctx.exception.detail))
+
+
 class ReplayStepTests(unittest.TestCase):
     """离线重放单步：改完规则不发请求就能看判定变化。"""
 

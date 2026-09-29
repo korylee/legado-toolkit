@@ -561,6 +561,42 @@ class EndpointTests(_RunCase):
         self.assertEqual(ctx.exception.status_code, 400)
         self.assertIn("300", str(ctx.exception.detail))
 
+    @staticmethod
+    def _settings(keyword: str) -> dict:
+        return {"network": {"proxy": ""},
+                "jvm": {"app_repo": "", "android_sdk_dir": "", "keyword": keyword},
+                "debug": {"timeout": 120}}
+
+    def test_target_and_query_build_the_key(self) -> None:
+        """语义化入参 → `core.debug_keys` 拼装（App 的 key 语法只有后端一份）；
+        ``key`` 非空时优先（手工覆盖口）。"""
+        from core import settings_store
+
+        with mock.patch.object(settings_store, "load",
+                               return_value=self._settings("斗破")),                mock.patch("core.jvm_env.readiness",
+                           return_value={"ok": True, "checks": []}):
+            self._call(target="toc", query="++https://a.com/t")
+            self.assertEqual(self.seen["key"], "++https://a.com/t")
+            self._call()
+            self.assertEqual(self.seen["key"], "斗破",
+                             "详情/目录/正文留空回落搜索起步，关键词吃设置")
+            self._call(key="https://x.example/b/1")
+            self.assertEqual(self.seen["key"], "https://x.example/b/1")
+
+    def test_explore_without_url_is_400(self) -> None:
+        """发现没得回落 → 400 带原因，不静默换目标（AGENTS #4）。"""
+        from core import settings_store
+
+        src = fake_source()
+        src["exploreUrl"] = ""
+        with mock.patch.object(settings_store, "load",
+                               return_value=self._settings("斗破")),                mock.patch("core.jvm_env.readiness",
+                           return_value={"ok": True, "checks": []}):
+            with self.assertRaises(HTTPException) as ctx:
+                self._call(target="explore", query="")
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertIn("exploreUrl", str(ctx.exception.detail))
+
 
 class DebugRunManifestTests(unittest.TestCase):
     """调试任务自己的运行目录：manifest.json 落盘；成功清理、崩溃保留现场。"""

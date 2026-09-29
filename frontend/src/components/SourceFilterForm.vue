@@ -35,9 +35,7 @@ const userTagOptions = computed(() => props.tags
   .filter((t) => t.kind === "user")
   .map((t) => ({ value: t.tag, label: withCount(t.tag, t.count) })));
 
-//: 排序键必须与列里显示的东西一致：列里显示的是**结果**（正文 ✓ / 目录 ✗），
-//: 所以排序也按结果（验过且通过 → 验了没过 → 还没验到），而不是按深度。
-//: 星级不再成列，于是它只是可选排序。
+//: 排序选项按列表中实际显示的健康状态、验证结果、校验时间和名称提供。
 const ORDER_OPTIONS = [
   { value: "-verified", label: "验证结果 ↓" },
   { value: "verified", label: "验证结果 ↑" },
@@ -61,7 +59,7 @@ const fields = computed(() => [
   {
     key: "health", label: "健康度", kind: "select",
     barCls: "w-health", barPh: "健康度", sheetPh: "全部",
-    options: HEALTH_OPTIONS,
+    options: HEALTH_OPTIONS.value,
   },
   {
     key: "group", label: "分组", kind: "select", filterable: true,

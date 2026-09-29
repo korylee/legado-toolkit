@@ -5,20 +5,21 @@ import { useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { api, subscribeJob } from "../api/client";
 import { getDetail, listTags, saveSource, sourceExists } from "../api/sources";
-import { appDebug, appPreflight, jvmDebug } from "../api/rules";
 import { jobFailReason } from "../utils/jobs";
 import {
   canonicalTag, ensureTagMeta, isQualityTag, isStatusTag,
   mergeGroup, sourceTypes, splitSystemUser, statusTags, tagOfType, typeKeyOf,
 } from "../utils/tags";
 import { useMobile } from "../composables/useMobile";
+import SourceFields from "./SourceFields.vue";
 // 步骤名 → 中文的**唯一**一份（调试抽屉共用），别再在本组件里写第二份
 import { STEP_LABELS } from "../utils/steps";
-// 调试会话 + key 拼装（ux-debug-session 第二期）
-import { useDebugSession, DEBUG_TARGETS, DEBUG_CACHE_MODES } from "../composables/useDebugSession";
-import { debugKeyOf, rerunKey } from "../utils/debugKeys";
+// 调试会话（ux-debug-session 第二期）。key 的拼装在后端 core/debug_keys，
+// 前端只发 target + query
+import { useDebugSession, DEBUG_TARGETS, DEBUG_CACHE_MODES, STEP_TARGETS } from "../composables/useDebugSession";
 // 生成后验证的新鲜度判定（strengthen-src）：分步过期判据的唯一一份
-import { snapshotRuleGroups, staleVerifySteps as computeStaleSteps } from "../utils/verifyFreshness";
+import { ensureRuleSteps, snapshotRuleGroups, staleVerifySteps as computeStaleSteps } from "../utils/verifyFreshness";
+import { firstNextDebugAction, nextDebugAction } from "../utils/debugNextAction";
 
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
@@ -50,6 +51,7 @@ const {
   env: jvmEnv, envLoading: jvmEnvLoading, envTitle: jvmEnvTitle,
   preflightState: appPreflightState, checking: appChecking, pushed,
   startRun, cancelRun: cancelDebugRun, loadEnvironment, runPreflight,
+  setResult, clearResult, resetDebugState, clearPreflight, invalidatePreflight,
 } = useDebugSession();
 const router = useRouter();
 
@@ -68,10 +70,10 @@ const router = useRouter();
 // （isAbsUrl → contains("::") → ++ → -- → 兜底搜索）。所以「搜索」下填一个 URL
 // 会被 App 当详情页跑，「详情」下填关键词会被当搜索跑。这不是我们拼错了——App
 // 自己就是同一个 when，保持一致才是对的。
-//: hint 只回答「这格填什么」。详情 / 目录 / 正文留空会退回搜索入口（理由见
-//: debugKey），「可留空」写进各自 placeholder 就够；留空之后跑什么不复述——
-//: 三格是同一个答案。例外是「发现」：留空落回配置里的 `exploreUrl` 而不是
-//: 搜索，说不到一起，所以由它自己写
+//: hint 只回答「这格填什么」。详情 / 目录 / 正文留空会退回搜索入口（回落语义
+//: 在后端 core/debug_keys），「可留空」写进各自 placeholder 就够；留空之后跑什么
+//: 不复述——三格是同一个答案。例外是「发现」：留空落回配置里的 `exploreUrl`
+//: 而不是搜索，说不到一起，所以由它自己写
 const currentTarget = computed(
   () => DEBUG_TARGETS.find((t) => t.value === debugTarget.value) || DEBUG_TARGETS[0],
 );
@@ -86,11 +88,6 @@ const debugHint = computed(() => {
   return currentTarget.value.hint;
 });
 
-// key 拼装在 utils/debugKeys（纯函数、有测试）：五类形态 + 手抄前缀幂等 +
-// 「详情/目录/正文留空退回搜索入口」（App 自己会沿链往下跑）。
-function debugKey() {
-  return debugKeyOf(debugTarget.value, debugQuery.value, form.value.exploreUrl);
-}
 //: 这个源**有没有发现配置**。判断口径与 `tabDot("discover")` 一致。
 const hasExploreConfig = computed(
   () => !!(String(form.value.exploreUrl || "").trim()
@@ -145,7 +142,15 @@ const quickVerifyError = computed(() => String((quickVerify.value || {}).error |
 const verifyRuleSnapshot = ref(null);   // {ruleSearch: json, ...} 验证时刻的规则
 const refreshedSteps = ref(new Set());  // 点过「重新调试本步」、拿到新结论的步骤
 
-function captureVerifyRuleSnapshot() {
+async function captureVerifyRuleSnapshot() {
+  // 映射（规则组→步骤）从后端下发（唯一一份在 core/verify.py）；没拿到就不定格
+  // 快照——staleVerifySteps 对 null 不标过期，同「没有快照」语义，绝不猜一份本地映射
+  try {
+    await ensureRuleSteps();
+  } catch (e) {
+    console.error("[verifyFreshness] 规则组映射加载失败，本次不做过期判定:", e);
+    return;
+  }
   verifyRuleSnapshot.value = snapshotRuleGroups(form.value);
 }
 
@@ -381,7 +386,28 @@ function testSummary(steps) {
 }
 // 只有真的 fail 才提示「去改规则」——unknown 是工具的能力边界，改规则没用
 function summaryHint(summary) {
-  return summary.level === "fail" ? "，可手动修改规则，或补充详情页 URL 后重试。" : "";
+  if (summary.level === "fail") return "，先查看失败步骤的诊断。";
+  if (summary.level === "unknown") return "，有步骤需要进一步调试。";
+  return "";
+}
+
+function quickStepAction(step) {
+  return nextDebugAction(step, {
+    channel: String((quickVerify.value || {}).source || ""),
+    stale: staleVerifySteps.value.has(step.name),
+  });
+}
+
+const quickNextAction = computed(() => firstNextDebugAction(
+  (quickVerify.value || {}).steps || [],
+  { channel: String((quickVerify.value || {}).source || "") },
+));
+
+function openQuickStepAction(step) {
+  const action = quickStepAction(step);
+  if (!action) return;
+  if (action.kind === "rerun") return rerunStaleStep(step.name);
+  return openDebug(step.name, step.url);
 }
 
 function expandTestFailures(res) {
@@ -421,19 +447,22 @@ watch(form, () => {
   if (testResult.value) testStale.value = true;
   // 预检里的「已连接」= App 里那份与本地规则一致，规则一改这句话就不成立了。
   // 其余三态（连不上 / App 里没有 / 是旧版本）与本地规则无关，留着仍然成立
-  if ((appPreflightState.value || {}).state === "ready") appPreflightState.value = null;
+  invalidatePreflight();
   // 用户没动过文本域时保持快照新鲜——否则「应用到表单」会把表单改动全部回滚
   if (!rawDirty) rawJsonText.value = JSON.stringify(form.value, null, 2);
 }, { deep: true });
 
+// 书源 URL 变了以后，missing/stale 也不再属于当前 App 源；不能沿用旧标签。
+watch(() => String(form.value.bookSourceUrl || "").trim(), (url, oldUrl) => {
+  if (oldUrl !== undefined && url !== oldUrl) clearPreflight();
+});
+
 watch(() => [props.modelValue, props.sourceUrl], async ([show, url]) => {
   if (!show) return;
-  testResult.value = null;
+  resetDebugState();
   generationError.value = "";
   // 下次打开就会自己弹出来；而且挂载时 modelValue 已是 true，
   // 抽屉里那个没有 immediate 的 watch 不触发，:initial-step 会被忽略
-  appPreflightState.value = null;   // 预检结果是上一次会话的，别带到这次
-  pushed.value = "";
   // 同理：本组件在 SourcesView 里是常驻挂载、从不卸载的，isDuplicate 会跨
   // 「关闭 → 再打开」残留。不复位的话下次打开编辑弹窗会直接是「另存」状态
   // （域名框解禁、标题错成「另存为新源」、跳过查重），而用户以为自己只是在编辑。
@@ -492,8 +521,10 @@ async function applyGenerated(result) {
   refreshedSteps.value = new Set();
   // 自动生成得到的是草稿。把生成时的 JVM 验证直接作为调试工作台的首屏证据，
   // 不再让用户回到右侧再点一次；没有可用步骤时才补跑一次本机调试。
-  testResult.value = result.verify && Array.isArray(result.verify.steps)
+  const generatedVerify = result.verify && Array.isArray(result.verify.steps)
     && result.verify.steps.length ? result.verify : null;
+  resetDebugState();
+  if (generatedVerify) setResult(generatedVerify);
   testStale.value = false;
   debugChannel.value = "jvm";
   debugTarget.value = "search";
@@ -530,7 +561,7 @@ async function openDebugForGenerationFailure(reason) {
       try { form.value.bookSourceName = new URL(url).hostname; } catch (e) { /* ignore */ }
     }
   }
-  testResult.value = null;
+  resetDebugState();
   testStale.value = false;
   debugChannel.value = "jvm";
   // 打开抽屉的旧路径已换成工作台路由（见 openDebug）
@@ -628,14 +659,14 @@ function loadJvmEnvironment() {
   return loadEnvironment();
 }
 
-async function debugRun(keyOverride = "", rerunStep = "") {
-  // keyOverride：「从此步重跑」拼好的分段 key（--/++/绝对URL）。空串走表单里选的入口
-  // ——两个通道认的是**同一套 key 形态**（都跑 App 的分派），所以这里共享
-  const key = keyOverride || debugKey();
-  // 除「搜索」外都必须给出 URL（搜索空着会用默认关键词兜底）。放空进去会拼出
-  // `发现::` / `++` 这种 App 认不了的目标——它对无效 key 是**静默无响应**，
-  // 排查成本极高，宁可在这里挡住。
-  if (!key) {
+async function debugRun(rerun = null, rerunStep = "") {
+  // rerun：「从此步重跑」的语义化入参 {target, query}（步骤名 → target 见
+  // STEP_TARGETS）；null 走表单里选的入口——两个通道认的是**同一套 key 语法**
+  // （都跑 App 的分派），拼装在后端 core.debug_keys，这里只拦「肯定拼不出」的输入
+  const entry = rerun || { target: debugTarget.value, query: debugQuery.value };
+  // 后端对同样的输入会 400 说同一件事；这里先挡是为了不发一次注定失败的请求
+  if (!rerun && debugTarget.value === "explore" && !debugQuery.value.trim()
+      && !String(form.value.exploreUrl || "").trim()) {
     return ElMessage.warning("这个源没配 exploreUrl，请先填发现页 URL");
   }
   // **不清掉上一份结果**（ux-debug-loop）：重跑期间抽屉照常显示它（按钮在途禁用），
@@ -653,7 +684,7 @@ async function debugRun(keyOverride = "", rerunStep = "") {
   }
   // 运行交给会话（startRun 是两条通道唯一的入口）：秒表、取消、预检、推送确认、
   // 结果落位、对比基线滚动都在那里；这里只管入口校验与跑完的界面反应
-  const r = await startRun({ source: form.value, key, confirmPush });
+  const r = await startRun({ source: form.value, ...entry, confirmPush });
   expandTestFailures(r);
   // 失败与成功同样进抽屉：失败恰恰最需要诊断区（ux-debug-loop）。
   // rerunStep：「从此步重跑」要直接定位到重跑的那一步
@@ -663,12 +694,12 @@ async function debugRun(keyOverride = "", rerunStep = "") {
 function rerunFromStep(stepName) {
   const step = ((testResult.value || {}).steps || [])
     .find((s) => s.name === stepName) || {};
-  const key = stepName === "search" ? debugKey() : rerunKey(stepName, step.url);
-  if (key) {
-    return debugRun(key, stepName);
+  if (stepName === "search") return debugRun(null, stepName);   // 搜索段重跑 = 整链入口
+  if (!String(step.url || "").trim()) {
+    return ElMessage.warning(
+      "上一轮结果里没有这一步的链接。先跑一次完整调试，再重试这一步");
   }
-  return ElMessage.warning(
-    "上一轮结果里没有这一步的链接。先跑一次完整调试，再重试这一步");
+  return debugRun({ target: STEP_TARGETS[stepName], query: step.url }, stepName);
 }
 
 //: 预检状态 → 卡片上的短标签与颜色
@@ -691,7 +722,7 @@ const preflightType = computed(
 async function appPreflightRun() {
   const h = appHost.value.trim();
   if (!h) {
-    appPreflightState.value = null;
+    clearPreflight();
     return;
   }
   if (!String(form.value.bookSourceUrl || "").trim()) return;
@@ -701,7 +732,7 @@ async function appPreflightRun() {
 //: 调试抽屉里点「用这条」→ 写进表单对应字段。
 //:
 //: **只改表单、不落库**：保存仍由用户自己决定（那个按钮在弹窗底部）。
-//: 路径形如 `ruleSearch.bookList`，与 `utils/ruleCandidates.FIELD_OF_STEP` 同源
+//: 路径形如 `ruleSearch.bookList`，与 `utils/steps.FIELD_OF_STEP` 同源
 function onApplyRule({ field, rule }) {
   const [group, key] = String(field || "").split(".");
   if (!group || !key || !form.value[group]) return;
@@ -709,12 +740,19 @@ function onApplyRule({ field, rule }) {
   ElMessage.success("已填入 " + field + "，在抽屉里点「重新调试本页」看效果");
 }
 
-function openDebug(step) {
+function openDebug(step, stepUrl = "") {
   // 会话接管（ux-debug-shell）：把当前表单快照进会话（深拷贝，工作台里的
   // 编辑不穿透弹框），跳工作台路由。失败与成功同路——那里有诊断区
   setSource(form.value);
   const url = encodeURIComponent(form.value.bookSourceUrl || "");
-  router.push({ name: "debug", params: { url }, query: step ? { step } : {} });
+  router.push({
+    name: "debug",
+    params: { url },
+    query: {
+      ...(step ? { step } : {}),
+      ...(stepUrl ? { url: stepUrl } : {}),
+    },
+  });
 }
 
 // 抽屉请求跳到某个页签。两种形态：
@@ -878,76 +916,38 @@ async function doSave(s) {
                   <el-button size="small" link type="primary"
                              @click="rerunStaleStep(s.name)">重新调试本步</el-button>
                 </template>
+                <el-button v-else-if="quickStepAction(s)" size="small" link type="primary"
+                           @click="openQuickStepAction(s)">
+                  {{ quickStepAction(s).label }}
+                </el-button>
               </div>
               <p v-if="quickVerify.steps && quickVerify.steps.length"
                  class="muted" style="margin: 6px 0 0">
                 <b>{{ testSummary(quickVerify.steps).text }}</b>
                 <span v-if="quickVerify.steps.some((s) => s.has_notes)">（有疑点，见调试详情）</span>
                 <span>{{ summaryHint(testSummary(quickVerify.steps)) }}</span>
+                <el-button v-if="quickNextAction" size="small" link type="primary"
+                           @click="openQuickStepAction(quickNextAction.step)">
+                  {{ quickNextAction.action.label }}：{{ STEP_LABELS[quickNextAction.step.name] || quickNextAction.step.name }}
+                </el-button>
               </p>
             </div>
           </el-tab-pane>
-          <el-tab-pane name="basic">
+                    <el-tab-pane name="basic">
             <template #label>
               <span class="tab-label">基本信息<i class="dot" :class="tabDot('basic')"></i></span>
             </template>
-            <el-form :label-width="isMobile ? 'auto' : '96px'"
-                     :label-position="isMobile ? 'top' : 'right'" size="small">
-              <el-form-item label="名称"><el-input v-model="form.bookSourceName" /></el-form-item>
-              <el-form-item label="域名">
-                <el-input v-model="form.bookSourceUrl" :disabled="!isNew"
-                          placeholder="https://example.com" />
-                <span v-if="!isNew" class="muted">编辑模式下域名不可改；需要更换请点右上角「另存为新源」。</span>
-              </el-form-item>
-              <el-form-item label="类型">
-                <el-radio-group v-model="form.bookSourceType">
-                  <el-radio-button v-for="t in sourceTypes" :key="t.value" :value="t.value">
-                    {{ t.tag }}
-                  </el-radio-button>
-                </el-radio-group>
-              </el-form-item>
-              <el-form-item label="启用"><el-switch v-model="form.enabled" /></el-form-item>
-              <el-form-item label="备注">
-                <el-input v-model="form.bookSourceComment" type="textarea" :rows="2" />
-              </el-form-item>
-              <el-form-item label="健康状态">
-                <el-switch v-model="statusLocked" :disabled="!currentStatus"
-                           active-text="锁定" inactive-text="自动" inline-prompt />
-                <el-select v-if="statusLocked" v-model="manualStatus"
-                           style="width: 170px; margin-left: 10px">
-                  <el-option v-for="t in statusTags" :key="t" :label="t" :value="t" />
-                </el-select>
-                <span v-else class="muted" style="margin-left: 10px">
-                  跟随校验结果{{ currentStatus ? "：" + currentStatus : "（尚无校验结果）" }}
-                </span>
-              </el-form-item>
-              <el-form-item label="标签">
-                <div style="width: 100%">
-                  <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap">
-                    <span class="muted">自动维护</span>
-                    <el-tooltip v-for="t in qualityTags" :key="t" placement="top"
-                                content="由校验结果自动判定，不可手动修改">
-                      <el-tag size="small" type="info" effect="plain">{{ t }}</el-tag>
-                    </el-tooltip>
-                    <span v-if="!qualityTags.length" class="muted">（暂无）</span>
-                  </div>
-                  <el-select v-model="userTags" multiple filterable allow-create default-first-option
-                             :reserve-keyword="false" style="width: 100%; margin-top: 8px"
-                             placeholder="我的标签：选择或输入，如 原创、精排、R18">
-                    <el-option v-for="t in userTagOptions" :key="t.tag" :value="t.tag"
-                               :label="t.tag + ' (' + t.count + ')'" />
-                  </el-select>
-                </div>
-              </el-form-item>
-              <el-form-item label="编码">
-                <el-input v-model="form.charset" placeholder="如 gbk，留空默认 utf-8" />
-              </el-form-item>
-              <el-form-item label="排序/权重">
-                <el-input-number v-model="form.customOrder" :min="0" controls-position="right" />
-                <el-input-number v-model="form.weight" :min="0" controls-position="right"
-                                 style="margin-left: 8px" />
-              </el-form-item>
-            </el-form>
+            <SourceFields v-model:source="form" v-model:user-tags="userTags" :user-tag-options="userTagOptions"
+                          :is-new="isNew" :url-editable="isNew"
+                          >
+               <template #editor-fields>
+                 <el-form-item label="启用"><el-switch v-model="form.enabled" /></el-form-item>
+                 <el-form-item label="备注"><el-input v-model="form.bookSourceComment" type="textarea" :rows="2" /></el-form-item>
+                 <el-form-item label="健康状态"><el-switch v-model="statusLocked" :disabled="!currentStatus" active-text="锁定" inactive-text="自动" inline-prompt /><el-select v-if="statusLocked" v-model="manualStatus" style="width: 170px; margin-left: 10px"><el-option v-for="t in statusTags" :key="t" :label="t" :value="t" /></el-select><span v-else class="muted">跟随校验结果{{ currentStatus ? "：" + currentStatus : "（尚无校验结果）" }}</span></el-form-item>
+                 <el-form-item label="编码"><el-input v-model="form.charset" placeholder="如 gbk，留空默认 utf-8" /></el-form-item>
+                 <el-form-item label="排序/权重"><el-input-number v-model="form.customOrder" :min="0" controls-position="right" /><el-input-number v-model="form.weight" :min="0" controls-position="right" style="margin-left: 8px" /></el-form-item>
+               </template>
+             </SourceFields>
           </el-tab-pane>
           <el-tab-pane name="rules">
             <template #label>

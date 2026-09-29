@@ -322,6 +322,76 @@
 指针：frontend/src/components/DebugWorkbench.vue，frontend/src/views/DebugWorkbenchView.vue，frontend/src/composables/useDebugSession.js
 
 
+### 条目：agent-layer-orchestration · 按 Layer 编排受限调试 Agent
+状态：open
+依赖：ai-verify
+优先级：P1
+背景：当前项目已经有 `core/page_layer.py` 的 L1-L4 判定、`debugNextAction.js` 的下一步动作、`/rules/suggest-rule` 的 AI 提议，以及 JVM/App 两条真实引擎通道；缺的是把它们按 Layer 串成一个小上下文、有限动作、逐步验证的 Agent。第一目标是因地制宜支持口袋漫画的 L3 动态正文，不建设通用逆向平台。
+约束：Agent 只输出结构化动作和受控提议，不直接改源、不自行联网、不判定成功、不猜密钥；L1 优先走本地候选，L2/L3 优先转 App/JVM 实测，L4 只消费已观测接口摘要，L5 只提示登录上下文；所有提议必须经过 `replay-step`、`jvm-debug` 或 `app-debug` 验证；上下文只传本地压缩摘要，完整 HTML/脚本/事件流按需取证；AI 调用必须由用户显式触发，免费 dry-run 不发模型请求。
+验收：对 L1 静态页、L2 空容器、L3 口袋漫画正文、L4 接口页、L5 登录提示各有一条结构化动作链；Agent 输出不能绕过真实引擎；口袋漫画能从选定章节得到 `webView + webJs + content` 草稿并通过图片数量与可访问性验证；未知、缺证据和验证失败均保留具体原因。
+子项：
+- agent-context
+- agent-action-schema
+- agent-layer-router
+- agent-pocket-comic
+- agent-workbench
+- agent-evidence-budget
+指针：core/page_layer.py，frontend/src/utils/debugNextAction.js，frontend/src/components/DebugWorkbench.vue，backend/api/rules.py，lessons §七十三 / §八十
+
+### 条目：agent-context · 生成按 Layer 压缩的 AgentContext
+状态：todo
+依赖：agent-layer-orchestration
+优先级：P1
+背景：模型不应接收完整 HTML、外部 bundle、Cookie 和全量事件流；需要从现有页面判定、证据、候选规则、运行态和网络事件生成小型上下文。
+约束：L1 只带目标、统计、证据引用和候选；L2 带容器统计与可用引擎；L3 带加密痕迹、运行时对象类型/键/数量；L4 带接口方法、状态码、JSON 形状和候选路径；L5 带登录事实与会话能力；敏感值只传类型、长度、哈希或脱敏样本；缺材料时通过有限取证动作补充，不把整页塞回模型。
+验收：每个 L1-L5 输入都能生成稳定 JSON 摘要；相同调试结果生成的上下文字段和顺序稳定；上下文不包含 Cookie、密钥、完整密文和完整响应；缺少材料时返回明确缺口而不是空结论。
+指针：core/page_layer.py，frontend/src/components/DebugWorkbench.vue，backend/api/rules.py
+
+### 条目：agent-action-schema · 固定 AgentProposal 动作协议
+状态：todo
+依赖：agent-context
+优先级：P1
+背景：自然语言建议无法可靠驱动现有调试链，需要统一的 `action / layer / reason_code / proposal / verification / evidence_refs` 结构。
+约束：动作限定为 `suggest_rule`、`run_jvm_debug`、`run_app_debug`、`inspect_runtime`、`suggest_api_rule`、`ask_user`、`stop_unsupported`；Proposal 只能写受控规则字段或策略字段；`verification.required` 必须为真；模型输出非 JSON、未知动作或越权字段必须显式返回错误原因并拒绝应用。
+验收：L1-L5 各有合法样例和非法样例；前端只消费协议字段不解析模型散文；未知动作不会触发网络、推送 App 或改写源；Proposal 能关联到已有证据行。
+指针：backend/schemas.py，backend/api/rules.py，frontend/src/utils/debugNextAction.js
+
+### 条目：agent-layer-router · 按 L1-L5 选择本地动作与 AI 场景
+状态：todo
+依赖：agent-action-schema
+优先级：P1
+背景：明显场景应由确定性代码处理，不能每一步都调用模型；Agent 只处理本地规则无法收敛的解释、候选和缺口。
+约束：L1 先用候选选择器与回放；L2 先建议运行时引擎；L3 不从密文猜算法，优先运行时对象和 App 实测；L4 只从网络证据生成接口候选；L5 把登录词作为事实并请求会话选择；Layer 判定继续唯一来自 `core/page_layer.py`，前端只渲染后端结果。
+验收：同一输入在无模型配置时仍能完成可确定动作；L1 不因未配置模型而阻塞；L2/L3 能导向对应引擎；L4/L5 的建议不会伪装成已验证结论；动作原因能显示给用户。
+指针：core/page_layer.py，frontend/src/utils/debugNextAction.js，frontend/src/utils/debugOutlets.js
+
+### 条目：agent-pocket-comic · 口袋漫画 L3 专项策略
+状态：todo
+依赖：agent-layer-router, agent-action-schema
+优先级：P1
+背景：口袋漫画正文页的图片地址在 WebView 执行后的 `params.chapter_images`，图片签名会过期，目录选错还会导致重复章节；第一版应验证运行时数据，不应让用户配置 AES 或复制旧图片地址。
+约束：入口要求用户选择具体章节；Agent 只生成 `requires_webview / runtime_field / content_mode` 策略；本机/App 实测确认 `params` 已为对象、`chapter_images` 非空且图片可访问后，才生成 ES5 `webJs + content + imageStyle`；每次调试重新获取图片地址；章节与图片失败原因不得压成“解密失败”。
+验收：选定一章能显示页面、WebView、运行时字段、图片数量和可访问性；成功时生成源草稿正文规则并由 App 实测复验；params 仍为字符串、图片为空、签名过期、目录地址不具体时分别给出对应下一步；不在源中硬编码站点 AES 或图片 URL。
+指针：skills/legado-book-source/SKILL.md，core/js_hints.py，tests/test_page_layer.py，data/app_probe/source.json
+
+### 条目：agent-workbench · 在现有调试工作台承载 Agent 建议
+状态：todo
+依赖：agent-action-schema, agent-layer-router
+优先级：P1
+背景：不新增聊天页；现有 `DebugWorkbench` 已有步骤、证据、结果、重跑和规则应用入口，只需增加按当前步骤显示的“下一步建议”卡片。
+约束：默认只显示当前 Layer、已确认事实、一个主动作和证据入口；AI 推测、本机验证、App 实测、用户确认分开标识；应用 Proposal 前必须经过 schema 校验；任何自动调用 AI、自动推送 App 和自动保存源都禁止；移动端首屏保留失败原因与主动作。
+验收：L1-L5 都能在工作台看到唯一主动作；口袋漫画成功时可从建议卡应用正文策略并重跑；失败时可直达对应证据或引擎重试；未配置模型时仍能看到确定性动作；现有重跑、对比、取消和证据展示不回归。
+指针：frontend/src/components/DebugWorkbench.vue，frontend/src/views/DebugWorkbenchView.vue，frontend/src/composables/useDebugSession.js
+
+### 条目：agent-evidence-budget · 限制 Agent 取证范围与调用次数
+状态：todo
+依赖：agent-context, agent-action-schema
+优先级：P2
+背景：Agent 的价值是压缩调试循环，而不是扩大模型上下文；需要先固定按需取证工具和每轮预算，防止模型反复索取整页材料。
+约束：只允许读取证据行附近片段、运行时键摘要、字段类型/长度、网络响应形状和指定脚本命中片段；禁止读取完整 Cookie、密钥和无界 bundle；每轮最多一次模型调用和有限次取证，超过预算转为用户动作；预算与错误原因写入结果，不静默截断。
+验收：完整 HTML/脚本不会默认进入模型请求；超出预算时界面显示具体原因和手动入口；同一失败不会自动循环调用；脱敏与截断有单测覆盖。
+指针：backend/api/rules.py，core/js_hints.py，frontend/src/components/DebugWorkbench.vue
+
 ---
 
 ## 3 · 待决策

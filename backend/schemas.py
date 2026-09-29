@@ -154,7 +154,12 @@ class JvmDebugRequest(BaseModel):
     """
 
     source: Dict[str, Any]
-    key: str = "我"
+    #: 调试入参两选一：``target`` + ``query``（语义化，key 由 `core.debug_keys`
+    #: 拼装——App 的 key 语法只有那一份，前端不再各抄一遍）；``key``（App 语法
+    #: 原文，手工覆盖口，脚本直调用）。**``key`` 非空时优先**。
+    target: str = "search"
+    query: str = ""
+    key: str = ""
     #: 整次调试的墙钟预算（秒）。**不给就吃设置里的 ``debug.timeout``**（默认值只在
     #: `core/settings_store`，前端不再写死 60——它曾与桥的渲染上限同为 60 而互相
     #: 掐死）；显式给要落在 ``LIMITS["debug_timeout"]`` 区间内，越界 400 不静默夹
@@ -176,7 +181,11 @@ class AppDebugRequest(BaseModel):
     """
 
     source: Dict[str, Any]
-    key: str = "我"
+    #: 与 ``JvmDebugRequest`` 同一约定：``target`` + ``query`` 语义化入参，
+    #: ``key`` 是手工覆盖口（App 语法原文），**``key`` 非空时优先**。
+    target: str = "search"
+    query: str = ""
+    key: str = ""
     host: str = ""
     #: 0 = 用默认端口（App 的 HTTP 端口 1122 + 1 = 1123）
     port: int = 0
@@ -204,6 +213,19 @@ class ReplayStepRequest(BaseModel):
     rule: str = ""
     step: str = ""
     source_type: int = 0
+
+
+class CandidatesRequest(BaseModel):
+    """从已抓到的 HTML 里找候选规则（交互候选面板）。
+
+    启发式的唯一一份在 `core/candidates`；前端只在换页/换步时调一次
+    （不逐键），点选与逐键高亮仍在前端做。
+    """
+
+    html: str = ""
+    kind: str = ""
+    #: 最多返回几条；越界由 core.candidates 夹住（纯排序问题，不值得 400）
+    limit: int = 6
 
 
 class SuggestRuleRequest(BaseModel):
@@ -236,6 +258,20 @@ class SuggestRuleRequest(BaseModel):
     replay_note: str = ""
     #: 前端诊断（第 0 层）那几行文字，直接透传给模型
     diagnosis: List[str] = []
+
+
+class CandidateVerifyRequest(BaseModel):
+    """用本机真实引擎验收一条候选规则。
+
+    只接受完整源的内存副本和一个规则字段；接口不会保存源，也不会推送到 App。
+    """
+
+    source: Dict[str, Any]
+    field: str
+    rule: str
+    target: str = "search"
+    query: str = ""
+    timeout: Optional[int] = None
 
 
 class LLMProfileIn(BaseModel):

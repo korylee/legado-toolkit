@@ -9,8 +9,7 @@ import { api, subscribeJob } from "../api/client";
 import { jvmRun } from "../api/jvm.js";
 import { jobFailReason } from "../utils/jobs";
 import { ensureTagMeta } from "../utils/tags";
-import { HEALTH_OPTIONS, describeChanges, engineLabel, healthLabel,
-         starBasisLabel } from "../utils/health";
+import { HEALTH_OPTIONS, describeChanges, engineLabel, healthLabel } from "../utils/health";
 // 一行的显示事实（健康/深度/标签/逐段结论）都在 utils/sourceRow.js——移动卡片与
 // 桌面表格共用同一份判断，这里只负责渲染
 import { depthClass, depthText, hasAnyTag, healthCell, jvmStateLabel, jvmSteps,
@@ -247,7 +246,7 @@ async function runJvmBatch() {
           if (res.ok === false) {
             ElMessage.warning(res.reason || "跑批没跑成");
           } else {
-            // 结论写进 checks（健康档位 / 星级 / 深度）与 meta——跑完必须重新拉列表
+            // 结论写进 checks 与 meta——跑完必须重新拉列表
             ElMessage.success("跑批完成：" + (res.count || 0) + " 条结论已入库"
                               + (res.checks ? "（健康档位 " + res.checks + " 条）" : ""));
           }
@@ -358,8 +357,6 @@ function applyCheckResults(resultJson) {
     const it = byUrl.get(urlKey(row.source_url));
     if (!it) return;
     row.health = it.health;
-    row.stars = it.stars;
-    row.star_basis = it.star_basis;
     row.toc_complete = triToInt(it.toc_complete);
     row.content_ok = triToInt(it.content_ok);
     row.search_hit = it.search_hit;
@@ -602,7 +599,7 @@ async function checkSources(urls = []) {
           if (summary) {
             // 行没动 → 排序和筛选项都可能已经不再成立。**只有就地回填时才谈得上
             // 过期**：退回全量刷新的话列表就是刚查的，没有过期问题。
-            // 排序过期只在按星级排时才成立（别的排序键不会因校验而变）
+            // 健康度与验证结果排序会受新结论影响，名称和校验时间排序不会。
             summary.stale = backfilled
               && (filterCount.value > 0 || /verified/.test(query.order));
             // **把 job_id 存进摘要**：resetCheckState() 刚把 checkJobId 清空了，
@@ -923,7 +920,6 @@ onUnmounted(() => {
                 <div>搜索：{{ row.search_hit ? "命中《" + row.search_hit + "》" : "未命中" }}</div>
                 <div>目录：{{ row.toc_complete === 1 ? "完整 ✓" : row.toc_complete === 0 ? "不完整 ✗" : "未验证" }}</div>
                 <div>正文：{{ row.content_ok === 1 ? "可用 ✓" : row.content_ok === 0 ? "不可用 ✗" : "未验证" }}</div>
-                <div v-if="row.stars">星级：{{ row.stars }}★ {{ starBasisLabel(row.star_basis) }}</div>
                 <!-- 本机引擎那一层（证据阶梯的第二层）：同一台引擎的逐段明细，
                      跑到的段才显示（没跑的不写"未验证"——那是**没跑**，不是**跑了没过**） -->
                 <template v-if="row.jvm_state">
@@ -955,9 +951,7 @@ onUnmounted(() => {
                 <div v-if="row.jvm_batch" class="muted">批次：{{ row.jvm_batch }}</div>
                 </template>
               </template>
-              <!-- 显示**验到哪一步**而不是星级：星级里大部分是「按规则推的」
-                   （实测 static 占多数），而「验到哪一步」是用户真正能据此判断的东西；
-                   星级与「实测/仅规则」收进同一个 tooltip，信息不丢 -->
+              <!-- 显示**验到哪一步**与实际结果；详细证据收进同一个 tooltip -->
               <span v-if="row.probe_depth" :class="depthClass(row)">{{ depthText(row) }}</span>
               <span v-else class="muted">未校验</span>
             </el-tooltip>

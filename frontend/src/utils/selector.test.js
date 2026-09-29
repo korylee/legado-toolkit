@@ -6,7 +6,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { candidateSpecs, classesOf, cssToLegado, elementSpec, measureValues,
+import { candidateSpecs, classesOf, cssToLegado, elementSpec,
   previewCss, selectorCandidates } from "./selector.js";
 
 // ---- 极小的假 DOM：只实现被测到的那几个访问器（node 里没有 document）----
@@ -119,11 +119,3 @@ test("previewCss：末段是裸词就丢掉；丢完还选不中就返回 null�
   assert.equal(previewCss(hit3, ""), null);
 });
 
-test("measureValues：按**取到的值**算实测（候选面板那条路）", () => {
-  const doc = { querySelectorAll: () => new Array(8).fill({}) };
-  const m = measureValues(doc, ["/1", "/1", "/2", "  ", ""]);
-  assert.equal(m.hits, 3, "空白值不算命中");
-  assert.equal(m.uniq, 2, "重复的 /1 要去掉");
-  assert.ok(Math.abs(m.ratio - 0.375) < 1e-6, "3 / 8 = 0.375，实测 " + m.ratio);
-  assert.equal(measureValues(doc, []).hits, 0);
-});

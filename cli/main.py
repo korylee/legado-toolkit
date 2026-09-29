@@ -34,9 +34,8 @@ from core.models import build_record, Health  # noqa: E402
 # 这里只引用——CLI 的 argparse 默认值曾与 AsyncChecker / ops.py 各写一份而漂移
 from core.settings_store import PROBE_DEPTHS, DEPTH_SEARCH  # noqa: E402
 
-#: ``--probe-depth`` 的帮助文本。**一档对一级星级**，并把每档要多打几次请求写出来——
-#: 这是决定「值不值得开高档」的唯一依据（深度到正文档 = 每源多 3 个请求）
-DEPTH_HELP = ("探测深度（一档对一级星级）：1=主页 只测域名连通；"
+#: ``--probe-depth`` 的帮助文本：说明每档实际会探测什么，避免把验证深度包装成评分。
+DEPTH_HELP = ("探测深度：1=主页 只测域名连通；"
               "2=搜索 搜索探测 + 命中判定（默认）；"
               "3=目录 再加详情页与目录页、比对章节数；4=正文 再抓一章全文")
 
@@ -320,7 +319,7 @@ def cmd_add(args: argparse.Namespace) -> int:
 
 # ---------------------------------------------------------------- menu（交互菜单）
 MENU_ITEMS = [
-    ("check",    "联网校验书源（可用性/星级/被墙检测）"),
+    ("check",    "联网校验书源（可用性/验证结果/被墙检测）"),
     ("organize", "整理分组（按类型+健康度重建）"),
     ("report",   "生成诊断报告（Markdown）"),
     ("run",      "一条龙：校验+整理+报告"),

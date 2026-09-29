@@ -29,6 +29,114 @@ MAX_APP_VALUES = 8
 #: 别让一个几 MB 的页面把这次请求变成一次内存事故
 MAX_HTML_CHARS = 400_000
 
+#: 候选验收只允许触碰书源规则组，不能借这个入口改元数据或请求上下文。
+CANDIDATE_RULE_GROUPS = ("ruleSearch", "ruleToc", "ruleContent", "ruleExplore", "ruleBookInfo")
+
+
+def patch_candidate(source: Dict[str, Any], field: str, rule: str) -> Dict[str, Any]:
+    """复制源并只替换一个规则字段，供候选验收使用。
+
+    这是一次性的验证输入，不修改调用方的 ``source``，也不允许候选改写源元数据、请求头、
+    登录配置或其他规则组。``@js:`` 等本地回放器不支持的规则在这里可以保留——它们
+    需要后续真实引擎验收，不能在这个边界被提前当成非法规则。
+    """
+    if not isinstance(source, dict):
+        raise ValueError("source 必须是对象")
+    if not isinstance(field, str) or field.count(".") != 1:
+        raise ValueError("候选字段必须是 ruleGroup.field")
+    group, name = (part.strip() for part in field.split(".", 1))
+    if group not in CANDIDATE_RULE_GROUPS:
+        raise ValueError("候选字段不是规则组：%s" % group)
+    if not name:
+        raise ValueError("候选字段名不能为空")
+    if not isinstance(rule, str) or not rule.strip():
+        raise ValueError("候选规则不能为空")
+
+    patched = dict(source)
+    current_group = source.get(group)
+    if current_group is not None and not isinstance(current_group, dict):
+        raise ValueError("源字段 %s 不是对象" % group)
+    patched[group] = dict(current_group or {})
+    patched[group][name] = rule.strip()
+    return patched
+
+
+_STEP_OF_TARGET = {
+    "search": "search",
+    "explore": "explore",
+    "info": "bookUrl",
+    "toc": "toc",
+    "content": "content",
+}
+
+
+def verify_candidate(source: Dict[str, Any], field: str, rule: str,
+                     target: str, query: str, timeout: int = 60,
+                     runner: Any = None) -> Dict[str, Any]:
+    """用本机真实引擎验收一个候选规则，不保存或推送临时源。
+
+    ``runner`` 是测试注入点，签名为 ``runner(source, key, timeout)``，生产默认使用
+    ``core.jvm_debug.run_jvm_debug``。只评价目标步骤；整链其他步骤失败不能把这条候选
+    的结论偷换掉。真实引擎不可用、目标步骤缺失和明确失败分别返回不同状态。
+    """
+    if not isinstance(target, str) or target not in _STEP_OF_TARGET:
+        raise ValueError("未知的验收目标：%s" % (target or "未提供"))
+    if not isinstance(timeout, int) or timeout <= 0:
+        raise ValueError("timeout 必须是正整数")
+
+    patched = patch_candidate(source, field, rule)
+    from core.debug_keys import build_key
+    key = build_key(target, query, keyword=query)
+    if runner is None:
+        from core.jvm_debug import run_jvm_debug
+        runner = lambda src, run_key, run_timeout: run_jvm_debug(  # noqa: E731
+            src, key=run_key, timeout=run_timeout)
+
+    try:
+        result = runner(patched, key, timeout) or {}
+    except Exception as exc:
+        return {
+            "status": "engine_unavailable", "local": {"status": "not_run"},
+            "engine": {"status": "unavailable", "channel": "jvm",
+                        "reason": "%s: %s" % (type(exc).__name__, exc)},
+            "target": target, "step": _STEP_OF_TARGET[target], "key": key,
+        }
+
+    if not isinstance(result, dict):
+        return {
+            "status": "engine_unavailable", "local": {"status": "not_run"},
+            "engine": {"status": "unavailable", "channel": "jvm",
+                        "reason": "引擎返回不是对象"},
+            "target": target, "step": _STEP_OF_TARGET[target], "key": key,
+        }
+    step_name = _STEP_OF_TARGET[target]
+    step = next((item for item in (result.get("steps") or [])
+                 if isinstance(item, dict) and item.get("name") == step_name), None)
+    if step is None:
+        reason = str(result.get("error") or result.get("code_text") or
+                     "引擎没有返回目标步骤")
+        return {
+            "status": "engine_unavailable", "local": {"status": "not_run"},
+            "engine": {"status": "unavailable", "channel": "jvm", "reason": reason},
+            "target": target, "step": step_name, "key": key,
+        }
+
+    ok = bool(step.get("ok"))
+    engine_status = "pass" if ok else "fail"
+    out = {
+        "status": "verified" if ok else "rejected",
+        "local": {"status": "not_run"},
+        "engine": {
+            "status": engine_status, "channel": "jvm",
+            "step": step_name, "detail": str(step.get("detail") or ""),
+            "count": len(step.get("values") or []),
+            "samples": [str(v) for v in (step.get("values") or [])[:3]],
+        },
+        "target": target, "step": step_name, "key": key,
+    }
+    return out
+
+
 SYSTEM_PROMPT = """你是 Legado（阅读 App）书源的规则专家。用户正在调试**一步**规则，你只给这一步的候选规则。只输出 JSON，不要解释。
 
 Legado 规则语法（`@` 分段，前面是选择器，最后一段是取值动作）：
@@ -138,7 +246,10 @@ def _outline(html: str, focus: str = "") -> str:
 
 def verify(html: str, rule: str, step: str, source_type: int = 0,
            with_values: bool = False) -> Dict[str, Any]:
-    """用**回放器**验一条候选（不联网）。取到值才算数。
+    """用**回放器**验一条候选（不联网）。取到值才算本地通过。
+
+    返回同时保留旧的 ``verified`` 字段和新的 ``local`` / ``engine`` / ``status``
+    三段结果；真实引擎验收留给后续 ai-verify 步骤，本函数不把本地通过冒充引擎通过。
 
     ``with_values=True`` 时额外带回**全部**取值（默认只给前 3 条样本）——
     ``preselect`` 要靠全量值去和 App 实测值比对；而回给前端的结果只要样本，
@@ -150,17 +261,29 @@ def verify(html: str, rule: str, step: str, source_type: int = 0,
     values = [str(v) for v in (r.get("values") or [])]
     rule_error = str(r.get("rule_error") or "")
     out: Dict[str, Any] = {
+        # 兼容旧消费者：verified/count/samples/rule_error/note 暂时保留。
         "verified": False, "count": len(values), "samples": values[:3],
         "verdict": r.get("verdict") or "", "rule_error": rule_error, "note": "",
+        # 新口径：local 是当前回放器能证明的事实；engine 留给后续真实引擎验收。
+        "local": {"status": "", "count": len(values), "samples": values[:3],
+                  "rule_error": rule_error},
+        "engine": {"status": "not_required"},
+        "status": "",
     }
     if with_values:
         out["values"] = values
     if rule_error:
         # 「我们验不了」——不是「规则不好」。前端必须显式标「只能连 App 试」
+        out["local"]["status"] = "unsupported"
+        out["status"] = "needs_engine"
         out["note"] = "本地调试不了（%s），只能连 App 试" % rule_error
     elif not values:
+        out["local"]["status"] = "fail"
+        out["status"] = "rejected"
         out["note"] = "在这份页面上取不到值"
     else:
+        out["local"]["status"] = "pass"
+        out["status"] = "verified"
         out["verified"] = True
     return out
 

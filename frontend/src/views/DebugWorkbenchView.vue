@@ -1,66 +1,57 @@
-<!-- 调试工作台页面（ux-debug-shell）：#/debug/:url，列表页与编辑弹框都直达。
-     运行态与结果全在 useDebugSession（单例）；本体是 DebugWorkbench（自抽屉
-     抽出的判定/诊断/证据/规则编辑）。保存走 saveSource，标签沿用加载时的
-     拆分结果——这里不编辑标签。 -->
+<!-- 调试工作台页面：#/debug/:url。运行态与结果全在 useDebugSession（单例）。 -->
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from "vue";
 import { useRoute, useRouter } from "vue-router";
-import { ElMessage } from "element-plus";
+import { ElMessage, ElMessageBox } from "element-plus";
 import DebugWorkbench from "../components/DebugWorkbench.vue";
-import { useDebugSession, DEBUG_TARGETS, DEBUG_CACHE_MODES } from "../composables/useDebugSession";
+import SourceFields from "../components/SourceFields.vue";
+import { useDebugSession, DEBUG_TARGETS, DEBUG_CACHE_MODES, STEP_TARGETS } from "../composables/useDebugSession";
 import { getDetail, saveSource } from "../api/sources";
-import { ensureTagMeta, splitSystemUser } from "../utils/tags";
-import { debugKeyOf, rerunKey } from "../utils/debugKeys";
+import { ensureTagMeta, splitSystemUser, sourceTypes } from "../utils/tags";
 
 const route = useRoute();
 const router = useRouter();
 const {
-  source, setSource, result, running, elapsed, budget,
+  source, sourceDirty, markSourceSaved, setSource, updateSourceField, result, running, elapsed, budget,
   channel, target, query, cacheMode, host,
   env, envLoading, envTitle,
-  preflightState, checking, pushed,
+  preflightState,
   startRun, cancelRun, confirmPush, loadEnvironment,
 } = useDebugSession();
 
 const loading = ref(false);
+const settingsOpen = ref(false);
+const rawOpen = ref(false);
+const settingsJson = ref("");
+const settingsTags = ref("");
 const userTags = ref([]);
 const sysLocked = ref(false);
 
 const name = computed(() => (source.value || {}).bookSourceName || "（无名）");
 const url = computed(() => (source.value || {}).bookSourceUrl || "");
-
-// 每步的规则（DebugWorkbench 的草稿与「重新调试本步」的基准）
 const ruleByStep = computed(() => {
   const rs = (source.value || {}).ruleSearch || {};
   const rt = (source.value || {}).ruleToc || {};
   const rc = (source.value || {}).ruleContent || {};
-  return {
-    search: rs.bookList || "",
-    bookUrl: rs.bookUrl || "",
-    toc: rt.chapterList || "",
-    content: rc.content || "",
-  };
+  return { search: rs.bookList || "", bookUrl: rs.bookUrl || "", toc: rt.chapterList || "", content: rc.content || "" };
 });
-const hasExploreConfig = computed(() =>
-  !!(String((source.value || {}).exploreUrl || "").trim()));
-const currentTarget = computed(
-  () => DEBUG_TARGETS.find((t) => t.value === target.value) || DEBUG_TARGETS[0]);
+const hasExploreConfig = computed(() => !!String((source.value || {}).exploreUrl || "").trim());
+const currentTarget = computed(() => DEBUG_TARGETS.find((t) => t.value === target.value) || DEBUG_TARGETS[0]);
 const initialStep = computed(() => String(route.query.step || ""));
+const debugHint = computed(() => target.value === "explore" && !hasExploreConfig.value
+  ? "这个源没配 exploreUrl，请填一个发现页 URL" : currentTarget.value.hint);
 
-const debugHint = computed(() => {
-  if (target.value === "explore" && !hasExploreConfig.value) {
-    return "这个源没配 exploreUrl，请填一个发现页 URL";
-  }
-  return currentTarget.value.hint;
-});
-
-// 加载：会话里已有同一源（编辑弹框跳转的交接）就直接用，否则按 URL 拉
 onMounted(async () => {
   loadEnvironment();
   const urlParam = decodeURIComponent(route.params.url || "");
-  const handoff = source.value
-    && String(source.value.bookSourceUrl || "") === urlParam;
-  if (route.query.key) query.value = String(route.query.key);
+  const handoff = source.value && String(source.value.bookSourceUrl || "") === urlParam;
+  if (handoff) {
+    try { await ensureTagMeta(); } catch (e) { /* 使用现有会话源继续 */ }
+    userTags.value = splitSystemUser(source.value.bookSourceGroup || "").user;
+  }
+  // URL 参数存 query 原文（不再回拼 key——拼装在后端 core/debug_keys），
+  // 刷新后输入框从这里恢复
+  if (route.query.url) query.value = String(route.query.url);
   if (handoff || !urlParam) return;
   loading.value = true;
   try {
@@ -78,41 +69,68 @@ onMounted(async () => {
 });
 
 async function debugRun() {
-  const key = debugKeyOf(target.value, query.value,
-                         (source.value || {}).exploreUrl);
-  if (!key) {
+  // 后端对同样的输入会 400 说同一件事；这里先挡是为了不发一次注定失败的请求
+  if (target.value === "explore" && !query.value.trim()
+      && !String((source.value || {}).exploreUrl || "").trim()) {
     return ElMessage.warning("这个源没配 exploreUrl，请先填发现页 URL");
   }
-  const r = await startRun({ source: source.value, key, confirmPush });
-  // key 进 URL：刷新可恢复、问题场景可直接分享
-  router.replace({ query: { key, step: target.value, url: query.value || undefined } });
+  const r = await startRun({ source: source.value, target: target.value,
+                             query: query.value, confirmPush });
+  router.replace({ query: { step: target.value, url: query.value || undefined } });
   return r;
 }
 
-function rerunFromStep(stepName) {
-  const step = ((result.value || {}).steps || [])
-    .find((s) => s.name === stepName) || {};
-  const key = stepName === "search"
-    ? debugKeyOf(target.value, query.value, (source.value || {}).exploreUrl)
-    : rerunKey(stepName, step.url);
-  if (!key) {
-    return ElMessage.warning(
-      "上一轮结果里没有这一步的链接。先跑一次完整调试，再重试这一步");
+function openSettings() {
+  settingsJson.value = JSON.stringify(source.value || {}, null, 2);
+  settingsTags.value = userTags.value.join(", ");
+  rawOpen.value = false;
+  settingsOpen.value = true;
+}
+
+function applySourceUpdate(next) {
+  const previous = source.value || {};
+  for (const [field, value] of Object.entries(next || {})) {
+    if (previous[field] !== value) updateSourceField(field, value);
   }
-  router.replace({ query: { key, step: stepName, url: step.url || undefined } });
-  return startRun({ source: source.value, key, confirmPush });
+}
+
+function onApplyRawSettings(parsed) {
+  setSource(parsed, { saved: false });
+  userTags.value = splitSystemUser(parsed.bookSourceGroup || "").user;
+  settingsJson.value = JSON.stringify(parsed, null, 2);
+  ElMessage.success("已应用 JSON 到当前会话");
+}
+
+function applyRawSettings() {
+  try {
+    const parsed = JSON.parse(settingsJson.value);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("必须是 JSON 对象");
+    setSource(parsed);
+    ElMessage.success("已应用 JSON 到当前会话");
+  } catch (e) {
+    ElMessage.error("JSON 无法应用：" + e.message);
+  }
+}
+
+function applySettingsTags() {
+  userTags.value = settingsTags.value.split(",").map((x) => x.trim()).filter(Boolean);
+}
+
+function rerunFromStep(stepName) {
+  const step = ((result.value || {}).steps || []).find((s) => s.name === stepName) || {};
+  if (stepName === "search") return debugRun();   // 搜索段重跑 = 整链入口
+  if (!String(step.url || "").trim()) {
+    return ElMessage.warning("上一轮结果里没有这一步的链接。先跑一次完整调试，再重试这一步");
+  }
+  router.replace({ query: { step: stepName, url: step.url || undefined } });
+  return startRun({ source: source.value, target: STEP_TARGETS[stepName],
+                    query: step.url, confirmPush });
 }
 
 function onApplyRule({ field, rule }) {
-  const [group, key] = String(field || "").split(".");
-  if (!group || !key || !source.value[group]) return;
-  source.value[group][key] = rule;
+  if (!updateSourceField(field, rule)) return;
 }
-
-// DebugWorkbench 的「去改规则」：工作台里规则编辑就在本页顶部，滚回去即可
-function gotoEditor() {
-  window.scrollTo({ top: 0, behavior: "smooth" });
-}
+function gotoEditor() { window.scrollTo({ top: 0, behavior: "smooth" }); }
 
 async function save() {
   if (!source.value) return;
@@ -122,72 +140,96 @@ async function save() {
   if (!String(s.bookSourceName || "").trim()) return ElMessage.warning("名称不能为空");
   try {
     await saveSource(s, userTags.value, sysLocked.value);
+    markSourceSaved();
     ElMessage.success("已保存");
-  } catch (e) {
-    ElMessage.error("保存失败：" + e.message);
-  }
+  } catch (e) { ElMessage.error("保存失败：" + e.message); }
 }
 
-// 键盘流：Esc 取消等待（Enter 重跑在输入框上）
-function onKeydown(e) {
-  if (e.key === "Escape" && running.value) cancelRun();
+function onBeforeUnload(e) {
+  if (!sourceDirty.value) return;
+  e.preventDefault();
+  e.returnValue = "";
 }
-onMounted(() => window.addEventListener("keydown", onKeydown));
-onUnmounted(() => window.removeEventListener("keydown", onKeydown));
+
+async function leaveWorkbench() {
+  if (!sourceDirty.value) return router.push({ name: "sources" });
+  try {
+    await ElMessageBox.confirm("当前有未保存修改，确定要离开吗？", "未保存", {
+      confirmButtonText: "丢弃修改", cancelButtonText: "继续编辑", type: "warning",
+    });
+    router.push({ name: "sources" });
+  } catch (e) { /* 用户继续编辑 */ }
+}
+
+function onKeydown(e) { if (e.key === "Escape" && running.value) cancelRun(); }
+onMounted(() => {
+  window.addEventListener("keydown", onKeydown);
+  window.addEventListener("beforeunload", onBeforeUnload);
+});
+ onUnmounted(() => {
+  window.removeEventListener("keydown", onKeydown);
+  window.removeEventListener("beforeunload", onBeforeUnload);
+});
 </script>
 
 <template>
   <div class="workbench-page">
-    <div class="wb-head">
-      <el-button size="small" link @click="router.push({ name: 'sources' })">← 返回列表</el-button>
-      <b>{{ name }}</b>
-      <span class="mono muted">{{ url }}</span>
-      <span class="grow" />
-      <el-button size="small" type="primary" @click="save">保存</el-button>
-    </div>
+    <header class="wb-head wb-panel">
+      <div class="wb-head-main">
+        <el-button size="small" link @click="leaveWorkbench">← 返回列表</el-button>
+        <div class="wb-source"><b>{{ name }}</b><span class="mono muted wb-source-url" :title="url">{{ url }}</span></div>
+      </div>
+      <div class="wb-head-actions">
+        <el-tag v-if="sourceDirty" size="small" type="warning">有未保存修改</el-tag><el-tag v-else-if="source" size="small" :type="running ? 'warning' : 'info'">{{ running ? '调试进行中' : '编辑工作台' }}</el-tag>
+        <el-button size="small" @click="openSettings">源设置</el-button>
+        <el-button size="small" type="primary" @click="save">保存</el-button>
+      </div>
+    </header>
 
-    <!-- 运行入口：通道 / 目标 / 关键词 / 预算。失败下一步与证据都在下面的本体里 -->
-    <div class="wb-controls">
-      <el-radio-group v-model="channel" size="small">
-        <el-radio-button value="jvm">本机引擎</el-radio-button>
-        <el-radio-button value="app">连 App</el-radio-button>
-      </el-radio-group>
-      <el-radio-group v-model="target" size="small">
-        <el-radio-button v-for="t in DEBUG_TARGETS" :key="t.value" :value="t.value">
-          {{ t.label }}
-        </el-radio-button>
-      </el-radio-group>
-      <el-input v-model="query" size="small" :placeholder="debugHint"
-                style="flex: 1 1 180px" @keyup.enter="debugRun()" />
-      <el-select v-model="cacheMode" size="small" style="width: 112px">
-        <el-option v-for="m in DEBUG_CACHE_MODES" :key="m.value" :value="m.value" :label="m.label" />
-      </el-select>
-      <el-button size="small" type="primary" :loading="running" @click="debugRun()">开始调试</el-button>
-      <el-button v-if="running" size="small" @click="cancelRun">取消等待</el-button>
-    </div>
-    <p v-if="running" class="muted" style="margin: 4px 0 0">
-      已等待 {{ elapsed }} 秒<template v-if="budget"> / 预算 {{ budget }} 秒</template>
-    </p>
-    <p v-else-if="budget" class="muted" style="margin: 4px 0 0">
-      调试预算 {{ budget }} 秒
-    </p>
-    <div v-if="channel === 'app'" style="margin-top: 6px">
-      <el-input v-model="host" size="small"
-                placeholder="App 的 IP，如 192.168.1.5" style="max-width: 260px" />
-    </div>
+    <section class="wb-entry wb-panel">
+      <div class="wb-panel-title"><div><b>开始调试</b><span class="muted wb-panel-subtitle">选择一个入口，结果会在下面按步骤展开</span></div><el-tag v-if="env" size="small" :type="env.ok ? 'success' : 'warning'">{{ envLoading ? '正在检查环境…' : envTitle }}</el-tag></div>
+      <div class="wb-primary-row">
+        <el-select v-model="target" size="small" class="wb-target" aria-label="调试目标"><el-option v-for="t in DEBUG_TARGETS" :key="t.value" :value="t.value" :label="'目标：' + t.label" /></el-select>
+        <el-input v-model="query" size="small" class="wb-query" :placeholder="debugHint" @keyup.enter="debugRun()" />
+        <el-button size="small" type="primary" :loading="running" @click="debugRun()">开始调试</el-button>
+        <el-button v-if="running" size="small" @click="cancelRun">取消等待</el-button>
+      </div>
+      <div class="wb-secondary-row">
+        <span class="muted wb-option-label">通道</span><el-radio-group v-model="channel" size="small"><el-radio-button value="jvm">本机引擎</el-radio-button><el-radio-button value="app">连 App</el-radio-button></el-radio-group>
+        <span class="muted wb-option-label">缓存</span><el-select v-model="cacheMode" size="small" class="wb-cache"><el-option v-for="m in DEBUG_CACHE_MODES" :key="m.value" :value="m.value" :label="m.label" /></el-select>
+        <span v-if="budget" class="muted wb-budget">预算 {{ budget }} 秒</span><el-input v-if="channel === 'app'" v-model="host" size="small" class="wb-host" placeholder="App IP，如 192.168.1.5" /><span v-if="running" class="muted wb-elapsed">已等待 {{ elapsed }} 秒<template v-if="budget"> / {{ budget }} 秒</template></span>
+      </div>
+      <p v-if="channel === 'app' && preflightState" class="wb-preflight muted">App 预检：{{ preflightState.state || '未知' }}</p>
+    </section>
 
-    <DebugWorkbench class="wb-body" :initial-step="initialStep" :rules="ruleByStep"
-                    :source-type="Number((source || {}).bookSourceType) || 0"
-                    :source="source || {}"
-                    @apply-rule="onApplyRule" @rerun-from="rerunFromStep"
-                    @goto="gotoEditor" />
-  </div>
+    <DebugWorkbench class="wb-body" :initial-step="initialStep" :rules="ruleByStep" :source-type="Number((source || {}).bookSourceType) || 0" :source="source || {}" @apply-rule="onApplyRule" @rerun-from="rerunFromStep" @goto="gotoEditor" />
+    <el-drawer v-model="settingsOpen" title="源设置" size="min(520px, 92vw)" append-to-body>
+      <SourceFields v-if="source" :source="source" v-model:user-tags="userTags" @update:source="applySourceUpdate" />
+      <el-empty v-else description="源尚未加载" :image-size="60" />       <el-button v-if="source" class="raw-entry" size="small" link type="info" @click="rawOpen = !rawOpen">
+         {{ rawOpen ? "收起原始 JSON" : "编辑原始 JSON" }}
+       </el-button>
+       <div v-if="rawOpen && source" class="raw-panel">
+         <el-divider content-position="left">原始 JSON</el-divider>
+         <el-input v-model="settingsJson" type="textarea" :rows="12" class="settings-json" spellcheck="false" />
+         <el-button size="small" type="primary" plain style="margin-top: 8px" @click="applyRawSettings">应用 JSON 到当前会话</el-button>
+         <p class="muted settings-tip">这里只修改当前会话；点击右上角“保存”才会写入数据库。</p>
+       </div>
+    </el-drawer>
+   </div>
 </template>
 
 <style scoped>
-.wb-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
-.wb-controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-.grow { flex: 1 1 auto; }
-.mono { font-family: Consolas, Monaco, monospace; }
-.wb-body { margin-top: 12px; }
+.workbench-page { min-height: 100%; padding: 20px clamp(14px, 3vw, 36px) 36px; background: #f5f7fa; }
+.wb-panel { background: #fff; border: 1px solid #e4e7ed; border-radius: 10px; box-shadow: 0 1px 2px rgb(0 0 0 / 3%); }
+.wb-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 16px; }
+.wb-head-main, .wb-head-actions, .wb-source { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.wb-source { gap: 8px; }.wb-source-url { max-width: min(48vw, 620px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.wb-head-actions { flex: 0 0 auto; }
+.wb-entry { margin-top: 12px; padding: 14px 16px; }.wb-panel-title, .wb-primary-row, .wb-secondary-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }.wb-panel-title { justify-content: space-between; gap: 12px; margin-bottom: 12px; }.wb-panel-subtitle { margin-left: 8px; }.wb-primary-row { flex-wrap: nowrap; }.wb-target { width: 126px; flex: 0 0 auto; }.wb-query { min-width: 160px; flex: 1 1 280px; }.wb-secondary-row { margin-top: 10px; }.wb-option-label { margin-left: 2px; }.wb-cache { width: 112px; }.wb-host { width: 210px; }.wb-budget, .wb-elapsed { margin-left: 4px; }.wb-preflight { margin: 8px 0 0; }.wb-body { margin-top: 14px; }
+@media (max-width: 720px) { .workbench-page { padding: 10px 10px 24px; }.wb-head { align-items: flex-start; padding: 10px 12px; }.wb-head-main { align-items: flex-start; }.wb-head-actions { flex-direction: column; align-items: flex-end; gap: 6px; }.wb-source { flex-direction: column; align-items: flex-start; gap: 2px; }.wb-source-url { max-width: 56vw; }.wb-entry { padding: 12px; }.wb-primary-row { flex-wrap: wrap; }.wb-target, .wb-query { width: 100%; flex-basis: 100%; }.wb-primary-row .el-button { flex: 1 1 auto; }.wb-secondary-row { align-items: flex-start; }.wb-host { width: 100%; } }
+</style>
+
+<style>
+/* el-drawer teleport 到 body，内部控件样式不能依赖 scoped 属性。 */
+.settings-json textarea { font-family: Consolas, Monaco, monospace; font-size: 12px; }
+.settings-tip { margin: 8px 0 0; font-size: 12px; line-height: 1.5; }
 </style>

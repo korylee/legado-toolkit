@@ -3,8 +3,8 @@
 分组整理：按内容类型 + 健康状态重建清晰分组。
 
 原文件里 4395 个源散落在数百个混乱分组（含"失效""全部来自论坛"等噪音），
-本模块把每个源重新归入形如「📖小说★★★★★」的清晰分组（类型与星级合为同一个标记），
-同时保留原始分组信息到 bookSourceComment 尾部以便回溯。
+本模块把每个源重新归入形如「📖小说,可用」的状态分组，同时保留原始分组信息到
+bookSourceComment 尾部以便回溯。
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from typing import Any, Dict, List
 from core.models import BookSourceRecord, Health, BOOK_SOURCE_TYPE_NAMES, HEALTH_NAMES
 from core.tags import extract_user_tags_from_group, merge_group, parse_group_tags
 
-# 分组排序：类型优先，健康次之，星级再之
+# 分组排序：类型优先，健康次之，验证事实由列表单独展示
 TYPE_ORDER = {0: 0, 2: 1, 1: 2, 3: 3, 4: 4}
 HEALTH_ORDER = {
     Health.OK: 0,
@@ -102,13 +102,12 @@ def quality_tags_str(rec: BookSourceRecord) -> str:
     return ",".join(tags) if tags else ""
 
 def sort_records(records: List[BookSourceRecord]) -> List[BookSourceRecord]:
-    """按类型 + 健康状态 + 星级降序 + 名称排序。"""
+    """按类型 + 健康状态 + 名称排序。"""
     return sorted(
         records,
         key=lambda r: (
             TYPE_ORDER.get(r.source_type, 9),
             HEALTH_ORDER.get(r.health, 9),
-            -r.quality_stars,
             r.name,
         ),
     )
@@ -141,7 +140,7 @@ def organize_sources(
     result: List[Dict[str, Any]] = []
     for rec in records:
         new_rec = dict(rec.raw)  # 浅拷贝，保留全部字段
-        # 主分组：类型 + 生命周期状态；星级只在报告中展示
+        # 主分组：类型 + 生命周期状态；验证事实在列表和报告明细中展示
         # 系统标签 = 类型 + 健康状态 + 规则完整
         system_group = group_title(rec.source_type, rec.health, rec.quality_stars)
         system_quality = quality_tags_str(rec)

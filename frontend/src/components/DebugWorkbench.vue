@@ -22,21 +22,24 @@
 import { ref, computed, watch, nextTick, onMounted } from "vue";
 import { ElMessage } from "element-plus";
 
-import { replayStep, suggestRule } from "../api/rules";
+import { replayStep, ruleCandidates, suggestRule } from "../api/rules";
 import { getLLMStatus } from "../api/llm";
 // 步骤名 → 中文的**唯一**一份（编辑弹窗共用），别再在本组件里写第二份
-import { STEP_LABELS } from "../utils/steps";
+import { FIELD_OF_STEP, STEP_LABELS } from "../utils/steps";
 import { useDebugSession } from "../composables/useDebugSession";
 import { compareRuns, statusLabel } from "../utils/debugCompare";
-// 第 1 层「在页面上找目标」：候选规则从补抓的 HTML 里算出来（纯函数，不发请求）
-import { FIELD_OF_STEP, findCandidates, parseDoc } from "../utils/ruleCandidates";
+// 第 1 层「在页面上找目标」：候选规则由后端 core/candidates 在补抓的原文上算出来
+// （启发式的唯一一份；不发请求、不调模型），见下方 watch
 // 源码的显示层（折行缩进 + 实体展开，纯函数）：好看的和能抄的是两份东西，见 htmlView
 import { formatHtml } from "../utils/htmlView";
 // 定层（九-1）：先定层再写规则——判据与证据行都在纯函数里，这里只负责把「这一步要什么」传进去
 import { classifyLayer } from "../utils/layers";
 import { debugOutletFor } from "../utils/debugOutlets";
+import { nextDebugAction } from "../utils/debugNextAction";
 // 点选（九-2a）：元素 → 候选选择器 + 实测三个数。**只是提议**，验收仍走真引擎
-import { previewCss, selectorCandidates } from "../utils/selector";
+import { parseDoc, previewCss, selectorCandidates } from "../utils/selector";
+import { assessRuleQuality } from "../utils/ruleQuality";
+import { buildEvidenceSummary } from "../utils/debugEvidence";
 
 const props = defineProps({
   initialStep: { type: String, default: "" },
@@ -290,6 +293,10 @@ function selectStep(name) {
 //: 这样输入一个字符就能先看网页视图里的命中高亮，不会把半成品静默写入源。
 const draftRule = ref("");
 const currentRule = computed(() => draftRule.value);
+const ruleDirty = computed(() => {
+  const name = (current.value || {}).name || "";
+  return draftRule.value !== String((props.rules || {})[name] || "");
+});
 watch([current, () => props.rules], ([step, rules]) => {
   draftRule.value = (rules || {})[(step || {}).name] || "";
 }, { immediate: true, deep: true });
@@ -299,6 +306,29 @@ function applyDraftRule(replay = false) {
   if (!field) return;
   emit("applyRule", { field, rule: draftRule.value });
   if (replay) doReplay();
+}
+
+const verifyAction = computed(() => {
+  if (running.value) return { label: "调试进行中", kind: "running", disabled: true };
+  if (currentNextAction.value && currentNextAction.value.kind === "app") {
+    return { label: "连 App 验证", kind: "app", disabled: false };
+  }
+  if (!canRerun.value) return { label: "先完成一次调试", kind: "disabled", disabled: true };
+  return { label: ruleDirty.value ? "应用并重调" : "重新调试本步", kind: "rerun", disabled: false };
+});
+
+function verifyCurrentRule(rule = draftRule.value) {
+  if (verifyAction.value.kind === "app") return switchToApp();
+  if (verifyAction.value.disabled) return;
+  const field = FIELD_OF_STEP[(current.value || {}).name];
+  if (!field) return;
+  if (rule !== draftRule.value) {
+    draftRule.value = rule;
+    emit("applyRule", { field, rule });
+  } else if (ruleDirty.value) {
+    emit("applyRule", { field, rule: draftRule.value });
+  }
+  emit("rerunFrom", (current.value || {}).name);
 }
 
 function resetDraftRule() {
@@ -419,6 +449,11 @@ const layer = computed(() => classifyLayer(
   // 这半（源声明 + 合并）留在前端，因为要对正在编辑的表单即时反应
   (currentPage.value || {}).page_layer || null, props.source || null,
   { step: (current.value || {}).name || "" }));
+const currentNextAction = computed(() => nextDebugAction(current.value, {
+  channel: channel.value,
+  layer: layer.value.layer || "",
+  inWorkbench: true,
+}));
 //: 补抓页面上的节点统计。「你要的东西这页上到底有没有」全靠它——
 //: 没有的话，选择器改多少遍都取不到
 const pageStats = computed(() => (layer.value.page || {}).stats || null);
@@ -428,9 +463,9 @@ const hasWanted = computed(() => {
 });
 
 // —— 第 1 层：在页面上找目标 ——
-//: 候选从**补抓的那份 HTML** 里算（纯函数，不发请求、不调模型）。**没有「试」**：
-//: 验一条候选要走真引擎，也就是「用这条」填进表单 + 「重新调试本步」——本地跑一遍
-//: 给的是近似结论，撤掉它正是这一轮的目的。
+//: 候选由**后端**（core/candidates，启发式的唯一一份）在补抓的那份原文上算：
+//: 不发请求、不调模型。**没有「试」**：验一条候选要走真引擎，也就是「用这条」
+//: 填进表单 + 「重新调试本步」——本地跑一遍给的是近似结论，撤掉它正是这一轮的目的。
 const candidates = ref([]);
 
 //: 候选面板只对 **L1**（或判不出层）开着：对 L2–L5，这份 HTML 上的选择器能选中、
@@ -438,10 +473,25 @@ const candidates = ref([]);
 //: 判不出来（没有页面 / 没有目标定义）时照旧给，那是 L1 的正常情况
 const candidatesUsable = computed(() => !layer.value.layer || layer.value.layer === "L1");
 
-watch([result, activeStep, currentPage], () => {
-  candidates.value = (currentPage.value && want.value)
-    ? findCandidates(currentPage.value.html, want.value.kind)
-    : [];
+//: 竞态保护：换页/换步后，迟到的旧响应不得覆盖新结论（序号不匹配就丢弃）
+let candidatesSeq = 0;
+watch([result, activeStep, currentPage], async () => {
+  const page = currentPage.value;
+  const kind = (want.value || {}).kind || "";
+  const seq = ++candidatesSeq;
+  if (!page || !kind || !String(page.html || "").trim()) {
+    candidates.value = [];
+    return;
+  }
+  try {
+    const r = await ruleCandidates(page.html, kind);
+    if (seq === candidatesSeq) candidates.value = (r || {}).candidates || [];
+  } catch (e) {
+    if (seq === candidatesSeq) {
+      candidates.value = [];
+      ElMessage.error("候选生成失败：" + e.message);
+    }
+  }
 }, { immediate: true });
 
 /** 取到的值能不能当链接打开，返回可打开的绝对地址（空串 = 打不开）。
@@ -469,8 +519,14 @@ function openableUrl(v) {
 //: 「用这条」：只是把规则**填进表单**，不落库——保存由用户自己在弹窗里决定
 function useCandidate(c) {
   const field = FIELD_OF_STEP[(current.value || {}).name];
-  if (!field) return;
+  if (!field) return false;
   emit("applyRule", { field, rule: c.rule });
+  return true;
+}
+
+function applyCandidateAndRerun(c) {
+  if (!c || !canRerun.value || rerunning.value) return;
+  if (useCandidate(c)) emit("rerunFrom", (current.value || {}).name);
 }
 
 // —— 点选：在渲染出来的页面上直接选（九-2a）——
@@ -485,11 +541,21 @@ const picked = ref(null);
 //: 正在预览（高亮全部命中）的那条候选
 const activeCss = ref("");
 
-//: 塞进 iframe 的 HTML。**剥掉两样会自己跑掉的**：`<meta refresh>` 会把 iframe 导航走，
-//: `<base>` 会让相对地址去站点拉图/样式（与「预览默认不联网」冲突）
-const frameHtml = computed(() => String(pageTextRaw.value || "")
-  .replace(/<meta[^>]+http-equiv=["']?refresh["']?[^>]*>/gi, "")
-  .replace(/<base[^>]*>/gi, ""));
+//: 塞进 iframe 的 HTML。移除会把 iframe 自己导航走的 meta refresh，
+//: 同时把资源基准改回当前页面 URL。否则 srcdoc 里的 `/static/...` 会继承 GUI
+//: 的 origin，请求被发到本后端而不是原站，日志里就会出现本地 `/static/css/...` 404。
+const frameHtml = computed(() => {
+  const raw = String(pageTextRaw.value || "")
+    .replace(/<meta[^>]+http-equiv=["']?refresh["']?[^>]*>/gi, "")
+    .replace(/<base[^>]*>/gi, "");
+  const pageUrl = String((currentPage.value && currentPage.value.url) || "").trim();
+  if (!pageUrl) return raw;
+  const safeUrl = pageUrl.replace(/&/g, "&amp;").replace(/"/g, "&quot;");
+  const base = `<base href="${safeUrl}">`;
+  return /<head(?:\s[^>]*)?>/i.test(raw)
+    ? raw.replace(/(<head(?:\s[^>]*)?>)/i, `$1${base}`)
+    : base + raw;
+});
 
 function frameDoc() {
   const f = frameRef.value;
@@ -505,7 +571,10 @@ function ensureFrameStyle(doc) {
   const st = doc.createElement("style");
   st.id = "zc-pick-style";
   st.textContent = ".zc-picked{outline:2px solid #e6a23c !important;outline-offset:1px}"
-    + ".zc-hit{outline:2px dashed #409eff !important;outline-offset:1px}";
+    + ".zc-hit{outline:2px dashed #409eff !important;outline-offset:1px}"
+    + "html{background:#fff;color:#303133}body{margin:12px;font:14px/1.7 system-ui,-apple-system,Segoe UI,sans-serif;"
+    + "word-break:break-word}img,video{max-width:100%;height:auto}pre{white-space:pre-wrap;word-break:break-word}"
+    + "a{color:#409eff}";
   (doc.head || doc.documentElement).appendChild(st);
 }
 
@@ -567,6 +636,30 @@ const engineCount = computed(() => {
   return null;
 });
 
+//: 质量是「规则是否值得继续保留」的证据摘要，不是替代真引擎 verdict。
+//: 本地命中、引擎实际值、去重、数量对数和选择器稳定性分开计，避免 DOM 命中自证。
+const ruleQuality = computed(() => assessRuleQuality({
+  rule: currentRule.value,
+  preview: rulePreview.value,
+  values: (current.value && current.value.values) || [],
+  expectedCount: engineCount.value && engineCount.value.n,
+  verdict: (current.value || {}).verdict,
+  kind: (want.value || {}).kind,
+}));
+
+function qualityTagType(q) {
+  return { good: "success", usable: "warning", weak: "warning", bad: "danger" }[q.key] || "info";
+}
+
+const evidenceSummary = computed(() => buildEvidenceSummary({
+  channel: channel.value,
+  step: current.value || {},
+  page: currentPage.value,
+  replay: replayResult.value,
+  layer: layer.value,
+  quality: ruleQuality.value,
+}));
+
 function onFrameClick(ev) {
   const doc = frameDoc();
   const el = ev.target;
@@ -574,7 +667,10 @@ function onFrameClick(ev) {
   ev.preventDefault();
   ev.stopPropagation();
   if (!doc || !el || !el.tagName) return;
-  const candidates = selectorCandidates(doc, el);
+  const candidates = selectorCandidates(doc, el, {
+    step: (current.value || {}).name,
+    field: FIELD_OF_STEP[(current.value || {}).name],
+  });
   picked.value = { tag: el.tagName.toLowerCase(), candidates };
   clearMark(doc, "zc-picked");
   el.classList.add("zc-picked");
@@ -810,6 +906,23 @@ function gotoRuleField(step) {
   emit("goto", ruleTab ? { tab: "rules", ruleTab } : { tab: "basic" });
 }
 
+function focusRunEntry() {
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+function runCurrentNextAction() {
+  const action = currentNextAction.value;
+  const step = current.value;
+  if (!action || !step) return;
+  if (action.kind === "app") return switchToApp();
+  if (action.kind === "workbench") return gotoRuleField(step);
+  if (action.kind === "rerun") return emit("rerunFrom", step.name);
+  if (action.kind === "diagnosis") {
+    return nextTick(() => diagnosisBox.value && diagnosisBox.value.scrollIntoView(
+      { behavior: "smooth", block: "start" }));
+  }
+}
+
 function loadMore() {
   renderLimit.value += RENDER_CHUNK;
 }
@@ -857,16 +970,36 @@ function copyPage() {
     </div>
 
     <el-alert v-if="entryError" type="warning" :closable="false" show-icon
-              style="margin-bottom: 10px"
-              :title="'自动生成未完成：' + entryError" />
+              style="margin-bottom: 10px" title="自动生成未完成">
+      <span>{{ entryError }}</span>
+      <el-button size="small" link type="primary" @click="focusRunEntry">
+        重新调试搜索
+      </el-button>
+    </el-alert>
     <el-alert v-if="result && result.error" type="error" :closable="false" show-icon
               style="margin-bottom: 10px" :title="String(result.error)" />
     <el-empty v-if="!steps.length" description="没有调试结果；可先检查上面的原因或重新调试" :image-size="80" />
 
     <template v-else>
-      <!-- 定层横幅（九-1）：**先定层，再写规则**。摆在这儿是因为它改变的是「下一步做什么」
-           ——L1 写选择器就能过，L2/L3 得换通道，L4 要抓接口。证据行一并列出来，
-           用户要能反驳它（「你说加密，哪一行看出来的」） -->
+      <div class="debug-workspace">
+        <aside class="debug-step-panel">
+          <div class="debug-step-panel-title">调试步骤</div>
+          <div class="debug-step-tabs">
+            <!-- 高亮要跟着「实际显示的那一步」（current 在 activeStep 失效时会回退到
+                 steps[0]），否则重跑后会出现「有内容、没有任何页签高亮」 -->
+            <button v-for="s in steps" :key="s.name" type="button" class="debug-step-tab"
+                    :class="{ active: !!current && s.name === current.name }"
+                    @click="selectStep(s.name)">
+              <i class="dot" :class="dotClass(s)"></i>
+              <span class="debug-step-tab-label">{{ STEP_LABELS[s.name] || s.name }}</span>
+              <el-tag v-if="diffOf(s.name) && diffOf(s.name).status !== 'same'"
+                      size="small" :type="diffTagType(diffOf(s.name).status)"
+                      class="diff-tag">{{ statusLabel(diffOf(s.name).status) }}</el-tag>
+            </button>
+          </div>
+        </aside>
+        <section class="debug-step-main">
+      <!-- 定层横幅（九-1）：**先定层，再写规则**：它改变的是下一步做什么 -->
       <div v-if="isEngineResult && (layer.layer || layer.unsure)" class="layer-banner">
         <el-tag v-if="layer.layer" size="small"
                 :type="layer.layer === 'L1' ? 'success' : 'warning'">{{ layer.info.name }}</el-tag>
@@ -880,18 +1013,6 @@ function copyPage() {
             <code class="layer-snippet">{{ e.snippet }}</code>
           </li>
         </ul>
-      </div>
-
-      <div class="debug-step-tabs">
-        <!-- 高亮要跟着「实际显示的那一步」（current 在 activeStep 失效时会回退到
-             steps[0]），否则重跑后会出现「有内容、没有任何页签高亮」 -->
-        <span v-for="s in steps" :key="s.name" class="debug-step-tab"
-              :class="{ active: !!current && s.name === current.name }" @click="selectStep(s.name)">
-          <i class="dot" :class="dotClass(s)"></i>{{ STEP_LABELS[s.name] || s.name }}
-          <el-tag v-if="diffOf(s.name) && diffOf(s.name).status !== 'same'"
-                  size="small" :type="diffTagType(diffOf(s.name).status)"
-                  class="diff-tag">{{ statusLabel(diffOf(s.name).status) }}</el-tag>
-        </span>
       </div>
 
       <!-- 与上次相比（ux-debug-loop）：重跑不清场，差异摆在一眼能看见的地方 -->
@@ -909,15 +1030,29 @@ function copyPage() {
                       ? '让 App 从这一步重新调试：目录会连正文一起跑，正文只跑正文。规则改过会先问你是否推送。'
                       : '让本机引擎从这一步重新调试：目录会连正文一起跑，正文只跑正文。'">
           <span>
-            <el-button v-if="isEngineResult" size="small" plain :loading="rerunning"
+            <el-button v-if="isEngineResult && !FIELD_OF_STEP[current.name]" size="small" plain :loading="rerunning"
                        :disabled="rerunning || !canRerun"
                        @click="emit('rerunFrom', current.name)">重新调试本步</el-button>
           </span>
         </el-tooltip>
-        <!-- 失败 / 没结论（多半是规则为空或没页面）都把人送到规则编辑，省得瞎猜 -->
-        <el-button v-if="current.verdict === 'fail' || current.verdict === 'unknown'"
-                   size="small" type="primary" plain
-                   @click="gotoRuleField(current)">去改规则</el-button>
+        <!-- 失败 / 没结论统一给一个主动作；unknown 按动态层优先切到 App，
+             其余情况留在诊断区，避免把环境问题误导成改规则。 -->
+        <el-button v-if="currentNextAction" size="small" type="primary" plain
+                   @click="runCurrentNextAction">
+          {{ currentNextAction.label }}
+        </el-button>
+      </div>
+
+      <div v-if="current" class="evidence-summary">
+        <div class="evidence-summary-head">
+          <b>证据来源</b>
+          <el-tag v-for="source in evidenceSummary.sources" :key="source.key"
+                  size="small" :type="source.type">{{ source.label }}</el-tag>
+        </div>
+        <div v-if="evidenceSummary.boundaries.length" class="evidence-boundaries">
+          <span class="muted">可信边界：</span>
+          <span v-for="(boundary, i) in evidenceSummary.boundaries" :key="i">{{ boundary }}</span>
+        </div>
       </div>
 
       <div v-if="current && FIELD_OF_STEP[current.name]" class="rule-editor">
@@ -930,10 +1065,11 @@ function copyPage() {
                   placeholder="输入 Legado 规则，例如 .media-content .title@href" />
         <div class="toolbar rule-editor-actions">
           <el-button size="small" @click="resetDraftRule">撤销编辑</el-button>
-          <el-button size="small" @click="applyDraftRule(false)">应用到表单</el-button>
+          <el-button size="small" @click="applyDraftRule(false)">应用但不验证</el-button>
           <el-button size="small" type="primary" plain
-                     :loading="replaying" @click="applyDraftRule(true)">
-            应用并重新调试本步
+                     :disabled="verifyAction.disabled"
+                      :loading="rerunning" @click="verifyCurrentRule()">
+            {{ verifyAction.label }}
           </el-button>
         </div>
       </div>
@@ -967,9 +1103,6 @@ function copyPage() {
         <div v-if="debugOutlet" class="diag-line">
           <el-tag size="small" type="warning">提示</el-tag>
           <span class="why">{{ debugOutlet.reason }}</span>
-          <el-button size="small" type="primary" plain @click="switchToApp">
-            {{ debugOutlet.label }}
-          </el-button>
         </div>
       </div>
 
@@ -989,15 +1122,17 @@ function copyPage() {
         </div>
         <div v-for="(c, i) in candidates" :key="i" class="cand">
           <span class="mono rule">{{ c.rule }}</span>
-          <el-tag size="small" :type="c.count ? 'success' : 'info'">{{ c.count }} 条</el-tag>
+          <el-tag size="small" :type="c.count ? 'warning' : 'danger'">{{ c.count ? '需确认' : '不建议' }}</el-tag>
           <!-- 「命中 1228」与「命中 1198」在界面上都只是个数字：**去重**与占比才分得开 -->
           <el-tag v-if="c.uniq < c.count" size="small" type="warning">
             去重后 {{ c.uniq }}（{{ c.count - c.uniq }} 条重复）
           </el-tag>
           <span class="muted">占比 {{ formatRatio(c.ratio) }}</span>
-          <span class="muted samples">{{ (c.samples || []).join("  |  ") || "（无样本）" }}</span>
+          <span class="muted samples">{{ (c.samples || []).join("  |  ") || "没有取到示例" }}</span>
           <span class="grow" />
-          <el-button size="small" type="primary" plain @click="useCandidate(c)">用这条</el-button>
+          <el-button size="small" type="primary" plain @click="useCandidate(c)">应用</el-button>
+           <el-button size="small" type="success" plain :disabled="!canRerun || rerunning"
+                      @click="applyCandidateAndRerun(c)">应用并重调</el-button>
         </div>
       </div>
 
@@ -1077,7 +1212,7 @@ function copyPage() {
           </span>
           <span class="grow" />
           <el-button size="small" type="primary" plain
-                     @click="useCandidate(c)">用这条</el-button>
+                     @click="useCandidate(c)">应用</el-button>
         </div>
       </div>
 
@@ -1165,7 +1300,20 @@ function copyPage() {
             </el-tag>
             <el-tag v-else size="small" type="danger">数量不一致，先别改规则</el-tag>
           </p>
-          <p v-else-if="currentRule" class="muted" style="margin: 6px 0 0">
+          <div v-if="currentRule" class="rule-quality">
+             <span class="muted">规则质量</span>
+             <el-tag size="small" :type="qualityTagType(ruleQuality)">
+               {{ ruleQuality.label }}
+             </el-tag>
+             <span v-if="ruleQuality.reasons.length" class="muted">
+               {{ ruleQuality.reasons.slice(0, 1).join("；") }}
+             </span>
+             <details v-if="ruleQuality.reasons.length > 1" class="quality-details">
+               <summary>更多诊断</summary>
+               <span>{{ ruleQuality.reasons.join("；") }}</span>
+             </details>
+           </div>
+           <p v-if="currentRule && !localRuleCount" class="muted" style="margin: 6px 0 0">
             当前字段的规则在这一页上**选不中任何节点**：它可能不是选择器（`@js:` 那种），
             或者数据要渲染后才有。
           </p>
@@ -1176,11 +1324,14 @@ function copyPage() {
                :class="{ 'pick-active': c.css === activeCss }">
             <span class="mono rule">{{ c.legado || c.css }}</span>
             <el-tag v-if="!c.legado" size="small" type="info">纯 CSS</el-tag>
-            <span class="muted">命中 {{ c.hits }} · 去重 {{ c.uniq }} · 占比 {{ formatRatio(c.ratio) }}</span>
+            <span class="muted">{{ c.role }} · 命中 {{ c.hits }} · 有效值 {{ c.valid }} · 空值 {{ c.empty }} · 去重 {{ c.uniq }}</span>
+             <span class="muted">稳定性 {{ Math.round(c.stability * 100) }}%</span>
             <span class="muted">{{ c.why }}</span>
             <span class="grow" />
             <el-button size="small" plain @click="previewCandidate(c)">预览</el-button>
             <el-button size="small" type="primary" plain @click="usePicked(c)">用这条</el-button>
+             <el-button size="small" type="success" plain :disabled="!canRerun || rerunning"
+                        @click="applyCandidateAndRerun({ rule: c.legado || c.css })">应用并重调</el-button>
           </div>
           <el-empty v-if="!picked" description="点上面的页面选一块" :image-size="60" />
         </el-tab-pane>
@@ -1251,6 +1402,8 @@ function copyPage() {
         </el-tab-pane>
 
       </el-tabs>
+        </section>
+      </div>
     </template>
   </div>
 </template>
@@ -1288,14 +1441,47 @@ function copyPage() {
 .diag-line { display: flex; align-items: baseline; gap: 6px; padding: 2px 0; }
 .diag-line .why { flex: 0 1 auto; }
 .diag-line .todo { flex: 1 1 auto; min-width: 0; }
-.debug-step-tabs { display: flex; gap: 4px; margin-bottom: 12px; flex-wrap: wrap; }
-.debug-step-tab {
-  display: inline-flex; align-items: center; gap: 6px;
-  padding: 4px 10px; border-radius: 4px; cursor: pointer;
-  border: 1px solid #dcdfe6; font-size: 13px;
+.debug-workspace { display: flex; gap: 14px; align-items: flex-start; }
+.debug-step-panel {
+  flex: 0 0 190px;
+  position: sticky;
+  top: 0;
+  padding: 12px;
+  background: var(--el-bg-color, #fff);
+  border: 1px solid var(--el-border-color-lighter, #ebeef5);
+  border-radius: 8px;
 }
-.debug-step-tab.active { border-color: #409eff; color: #409eff; }
+.debug-step-panel-title {
+  margin: 0 2px 8px;
+  color: var(--el-text-color-primary, #303133);
+  font-size: 13px;
+  font-weight: 600;
+}
+.debug-step-tabs { display: flex; flex-direction: column; gap: 5px; }
+.debug-step-tab {
+  display: flex; align-items: center; gap: 7px; width: 100%; min-width: 0;
+  padding: 8px 9px; border: 1px solid transparent; border-radius: 6px;
+  background: transparent; color: var(--el-text-color-regular, #606266);
+  font: inherit; font-size: 13px; text-align: left; cursor: pointer;
+}
+.debug-step-tab:hover { background: var(--el-fill-color-light, #f5f7fa); }
+.debug-step-tab.active {
+  border-color: var(--el-color-primary-light-5, #a0cfff);
+  background: var(--el-color-primary-light-9, #ecf5ff);
+  color: var(--el-color-primary, #409eff);
+}
+.debug-step-tab-label { min-width: 0; flex: 1 1 auto; }
+.debug-step-main { min-width: 0; flex: 1 1 auto; }
 .debug-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.evidence-summary {
+  margin: 8px 0 10px; padding: 8px 10px;
+  border: 1px solid var(--el-border-color-lighter, #ebeef5);
+  border-radius: 6px; background: var(--el-fill-color-lighter, #fafafa);
+  font-size: 12px;
+}
+.evidence-summary-head { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.evidence-boundaries { display: flex; flex-wrap: wrap; gap: 4px 10px; margin-top: 6px; line-height: 1.5; }
+.evidence-boundaries > span:not(.muted)::before { content: "· "; color: var(--el-color-warning); }
 .rule-editor {
   margin: 8px 0 10px;
   padding: 8px 10px;
@@ -1332,6 +1518,28 @@ function copyPage() {
 }
 .debug-pre-wrap { white-space: pre-wrap; word-break: break-all; }
 .debug-hit-active { outline: 2px solid #f56c6c; }
+.rule-quality {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 6px;
+  margin: 6px 0; padding: 6px 8px;
+  border: 1px solid var(--el-border-color-lighter, #ebeef5);
+  border-radius: 4px; background: var(--el-fill-color-lighter, #fafafa);
+  font-size: 12px;
+}
+.quality-metric { color: var(--el-text-color-secondary, #909399); }
+.quality-details, .cand-details { color: var(--el-text-color-secondary, #909399); font-size: 12px; }
+.quality-details summary, .cand-details summary { cursor: pointer; color: var(--el-color-primary, #409eff); }
+
+@media (max-width: 720px) {
+  .debug-workspace { display: block; }
+  .debug-step-panel { position: static; padding: 8px; margin-bottom: 10px; }
+  .debug-step-panel-title { margin-bottom: 6px; }
+  .debug-step-tabs {
+    flex-direction: row; overflow-x: auto; gap: 6px; padding-bottom: 2px;
+  }
+  .debug-step-tab { flex: 0 0 auto; width: auto; min-width: 86px; }
+  .debug-step-tab-label { flex: 0 0 auto; }
+  .debug-head { flex-wrap: wrap; }
+}
 </style>
 
 <!-- 抽屉里**我们自己的元素**虽然带 data-v-*（scoped 也能中），但这两块都按 AGENTS #15

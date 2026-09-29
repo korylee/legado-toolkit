@@ -52,36 +52,9 @@ def build_report(
         lines.append(f"| {type_names.get(t, t)} | {c} | {c/len(enabled)*100:.1f}% |")
     lines.append("")
 
-    # ---- 健康状态分布
+    # ---- 健康状态分布与深度验证结果
     health_ok = [r for r in enabled if r.health == Health.OK]
-    # ---- 星级分布（校验后）：覆盖全部源（0★=未评级/不可达，含失效/需登录等）
-    starred = list(enabled)
-    if starred:
-        lines.append("## 二、星级分布（优质度检测）")
-        lines.append("")
-        lines.append("| 星级 | 数量 | 说明 |")
-        lines.append("|------|-----:|------|")
-        star_counts = Counter(r.quality_stars for r in starred)
-        star_desc = {
-            5: "命中 + 目录完整 + 正文可用",
-            4: "命中 + 目录完整（正文未达标）",
-            3: "命中 或 规则完整（弱证据档）",
-            2: "可达 + 搜索连通（无规则证据）",
-            1: "可达（可访问，但搜索未验证）",
-            0: "未评级/不可达",
-        }
-        # 本次统计中的最大验证深度：≥2 的源其目录/正文维度为实测，其余为静态规则判定
-        depth_max = max((r.probe_depth for r in enabled if r.probe_depth), default=1)
-        lines.append("")
-        lines.append(f"> 星级为阶梯规则（1★可达 → 2★搜索连通 → 3★命中或规则完整 → 4★目录完整 → 5★正文可用）。")
-        lines.append(f"> 命中源按实测判定（无法验证的维度回退静态规则）；未命中但规则完整的源最高 3★。")
-        lines.append(f"> 本次最高验证深度 **{depth_max}**（--probe-depth 3 时命中源为目录+正文实测；浅探测为静态规则判定）。")
-        lines.append("")
-        for s in sorted(star_counts, reverse=True):
-            c = star_counts[s]
-            lines.append(f"| {'★' * s + '☆' * (5 - s)} | {c} | {star_desc.get(s, '')} |")
-        lines.append("")
-
+    if enabled:
         # ---- 深度验证异常源（仅 --probe-depth 2/3 时有数据）
         deep = [r for r in enabled if r.toc_complete is not None or r.content_ok is not None]
         if deep:
@@ -132,44 +105,10 @@ def build_report(
                     lines.append(f"- …共 {len(unverifiable)} 个")
                 lines.append("")
 
-        # ---- 优质 TOP（五星源）
-        top = sorted(
-            [r for r in starred if r.quality_stars >= 4],
-            key=lambda r: (r.quality_stars, -r.search_response_ms if r.search_response_ms else 0, r.name),
-            reverse=False,
-        )
-        # 按星级降序、响应时间升序
-        top.sort(key=lambda r: (-r.quality_stars, r.search_response_ms or 10 ** 9))
-        if top:
-            lines.append("### 优质源 TOP（4★以上）")
-            lines.append("")
-            lines.append("| 星级 | 源名称 | 类型 | 命中作品 | 目录 | 搜索响应 |")
-            lines.append("|------|--------|------|----------|-----:|----------|")
-            for r in top[:25]:
-                toc_col = f"{r.chapter_count}章" if r.chapter_count else "-"
-                lines.append(
-                    f"| {'★' * r.quality_stars} | {r.name} | {r.type_name} | "
-                    f"{r.search_hit or '-'} | {toc_col} | {r.search_response_ms or '-'}ms |"
-                )
-            lines.append("")
 
-        # ---- 响应速度排行（同星级内排序参考）
-        fast = sorted(
-            [r for r in enabled if r.health == Health.OK and r.quality_stars >= 3],
-            key=lambda r: r.search_response_ms or r.response_time_ms,
-        )
-        if fast:
-            lines.append("### 最快响应源 TOP（可用且3★以上）")
-            lines.append("")
-            lines.append("| 源名称 | 类型 | 星级 | 响应 |")
-            lines.append("|--------|------|------|------|")
-            for r in fast[:15]:
-                ms = r.search_response_ms or r.response_time_ms
-                lines.append(f"| {r.name} | {r.type_name} | {'★' * r.quality_stars} | {ms}ms |")
-            lines.append("")
 
     if health_ok:
-        lines.append("## 三、健康状态分布（已校验）")
+        lines.append("## 二、健康状态分布（已校验）")
         lines.append("")
         lines.append("| 状态 | 数量 | 占比 |")
         lines.append("|------|-----:|-----:|")
@@ -205,7 +144,7 @@ def build_report(
         lines.append("")
 
     # ---- 原分组混乱度
-    lines.append("## 四、原分组混乱度")
+    lines.append("## 三、原分组混乱度")
     lines.append("")
     orig_groups = Counter((r.group or "(空)") for r in enabled)
     noise_groups = [g for g in orig_groups if any(p in g for p in DEAD_TAG_PATTERNS)]
@@ -216,7 +155,7 @@ def build_report(
     lines.append("")
 
     # ---- 问题清单
-    lines.append("## 五、问题源清单")
+    lines.append("## 四、问题源清单")
     lines.append("")
     no_search = [r for r in enabled if not r.has_search]
     no_toc = [
@@ -238,7 +177,7 @@ def build_report(
     if include_duplicates:
         dup = _find_duplicates(records)
         if dup:
-            lines.append("## 六、疑似重复源（同 URL 或同名称）")
+            lines.append("## 五、疑似重复源（同 URL 或同名称）")
             lines.append("")
             for group_key, items in list(dup.items())[:20]:
                 lines.append(f"- **{group_key}**：{len(items)} 个")
@@ -249,7 +188,7 @@ def build_report(
             lines.append("")
 
     # ---- 建议
-    lines.append("## 七、使用建议")
+    lines.append("## 六、使用建议")
     lines.append("")
     if health_ok:
         good = health_ok[:10]

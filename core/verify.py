@@ -23,6 +23,18 @@ from core.rules.replayer import extract_all_nodes
 #: 一个列表步骤，judge_list_step 只对 "toc" 有特殊语义，传进去是对的。
 _LIST_STEPS = (Q.STEP_SEARCH, Q.STEP_BOOK_URL, Q.STEP_TOC, "explore")
 
+#: 规则组 → 该组规则**求值所在的步骤**。这是本模块 verify 链的结构事实
+#: （「bookUrl 规则在搜索页求值」，proj-3-bookurl），唯一一份在这里：
+#: 前端的新鲜度判定（verifyFreshness）经 ``GET /api/rules/meta`` 读它——
+#: 前端自己抄一份的话，这里改了求值位置它就会静默判错「哪些步骤过期」。
+#: content 没有常量，同上面 explore 的处理。
+RULE_GROUP_TO_STEPS = {
+    "ruleSearch": (Q.STEP_SEARCH, Q.STEP_BOOK_URL),
+    "ruleBookInfo": (Q.STEP_BOOK_URL,),
+    "ruleToc": (Q.STEP_TOC,),
+    "ruleContent": ("content",),
+}
+
 
 def replay_step(html: str, rule: str, step: str, source_type: int = 0) -> dict:
     """用**已经抓到的 HTML** 重放一步规则——不发任何网络请求。

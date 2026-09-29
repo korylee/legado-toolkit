@@ -107,19 +107,35 @@ def _member(src: Dict[str, Any], item: Optional[Dict[str, Any]],
         "has_fragment": "#" in url,
         "has_port": bool(_PORT_RE.search(url.split("#", 1)[0].split("//", 1)[-1])),
         "health": str((item or {}).get("health", "") or ""),
-        "stars": int((item or {}).get("quality_stars", 0) or 0),
+        "probe_depth": int((item or {}).get("probe_depth", 0) or 0),
+        "search_hit": str((item or {}).get("search_hit", "") or ""),
+        "toc_complete": (item or {}).get("toc_complete"),
+        "content_ok": (item or {}).get("content_ok"),
         "checked_at": str((item or {}).get("checked_at", "") or ""),
     }
 
 
+def _verification_rank(m: Dict[str, Any]) -> Tuple:
+    """同一健康状态内按已验证事实排序，不合成新的质量分数。"""
+    if m["content_ok"] is True:
+        return (0,)
+    if m["toc_complete"] is True:
+        return (1,)
+    if m["search_hit"]:
+        return (2,)
+    if m["probe_depth"]:
+        return (3,)
+    return (4,)
+
+
 def _keep_rank(m: Dict[str, Any]) -> Tuple:
-    """建议保留哪个：**先看能不能用**，再看地址干不干净，最后看导入早晚。
+    """建议保留哪个：先看健康状态，再看验证事实，最后看地址和导入顺序。
 
     可用性排在最前，是因为跨域名的组里镜像站的差别很大（一个通、一个死了）——
     这时候"地址更干净"要让位给"真的能用"。
     """
     return (0 if m["health"] == Health.OK else 1,
-            -m["stars"],
+            _verification_rank(m),
             1 if m["has_fragment"] else 0,     # 带署名/畸形端口的排在后面
             1 if m["has_port"] else 0,
             0 if m["url"].startswith("https://") else 1,
@@ -350,8 +366,14 @@ def _suffix(m: Dict[str, Any]) -> str:
     bits = []
     if m["health"]:
         bits.append(HEALTH_NAMES.get(m["health"], m["health"]))
-    if m["stars"]:
-        bits.append("%d★" % m["stars"])
+    if m["content_ok"] is True:
+        bits.append("正文✓")
+    elif m["toc_complete"] is True:
+        bits.append("目录✓")
+    elif m["search_hit"]:
+        bits.append("搜索命中")
+    elif m["probe_depth"]:
+        bits.append("已校验")
     if m["checked_at"]:
         bits.append(m["checked_at"])
     if m["comment"]:

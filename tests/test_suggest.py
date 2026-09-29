@@ -221,21 +221,175 @@ class LoginWallTests(unittest.TestCase):
                 self.assertIs(S.login_wall(bad, True), False)
 
 
+class CandidatePatchTests(unittest.TestCase):
+    def setUp(self):
+        self.source = {
+            "bookSourceName": "demo",
+            "bookSourceUrl": "https://example.com",
+            "header": "secret-header",
+            "ruleSearch": {"bookList": ".old", "name": ".name@text"},
+            "ruleContent": {"content": ".content@text"},
+        }
+
+    def test_patches_one_rule_field_without_mutating_source(self):
+        patched = S.patch_candidate(self.source, "ruleSearch.bookList", ".new")
+        self.assertEqual(patched["ruleSearch"]["bookList"], ".new")
+        self.assertEqual(patched["ruleSearch"]["name"], ".name@text")
+        self.assertEqual(patched["ruleContent"], self.source["ruleContent"])
+        self.assertEqual(self.source["ruleSearch"]["bookList"], ".old")
+        self.assertEqual(patched["header"], "secret-header")
+
+    def test_allows_engine_only_rule_without_local_validation(self):
+        patched = S.patch_candidate(self.source, "ruleContent.content", "@js:readRuntime()")
+        self.assertEqual(patched["ruleContent"]["content"], "@js:readRuntime()")
+
+    def test_rejects_metadata_and_malformed_fields(self):
+        for field in ("bookSourceUrl", "header", "ruleSearch", "other.name", "ruleSearch."):
+            with self.subTest(field=field):
+                with self.assertRaises(ValueError):
+                    S.patch_candidate(self.source, field, ".x")
+
+    def test_rejects_invalid_source_group_and_rule(self):
+        with self.assertRaises(ValueError):
+            S.patch_candidate(dict(self.source, ruleSearch="bad"),
+                              "ruleSearch.bookList", ".x")
+        with self.assertRaises(ValueError):
+            S.patch_candidate(self.source, "ruleSearch.bookList", "")
+        with self.assertRaises(ValueError):
+            S.patch_candidate(self.source, "ruleSearch.bookList", None)
+
+
+class CandidateEngineVerifyTests(unittest.TestCase):
+    SOURCE = {
+        "bookSourceUrl": "https://example.com",
+        "ruleSearch": {"bookList": ".old"},
+    }
+
+    def _runner(self, result, seen=None):
+        def run(source, key, timeout):
+            if seen is not None:
+                seen.update({"source": source, "key": key, "timeout": timeout})
+            return result
+        return run
+
+    def test_engine_pass_only_marks_target_step_verified(self):
+        seen = {}
+        result = {"all_ok": False, "steps": [
+            {"name": "search", "ok": True, "values": ["甲", "乙"], "detail": "ok"},
+            {"name": "toc", "ok": False, "detail": "无目录"},
+        ]}
+        out = S.verify_candidate(self.SOURCE, "ruleSearch.bookList", ".item",
+                                 "search", "demo", timeout=7,
+                                 runner=self._runner(result, seen))
+        self.assertEqual(out["status"], "verified")
+        self.assertEqual(out["engine"]["status"], "pass")
+        self.assertEqual(out["engine"]["count"], 2)
+        self.assertEqual(seen["key"], "demo")
+        self.assertEqual(seen["timeout"], 7)
+        self.assertEqual(seen["source"]["ruleSearch"]["bookList"], ".item")
+        self.assertEqual(self.SOURCE["ruleSearch"]["bookList"], ".old")
+
+    def test_engine_fail_rejects_candidate(self):
+        result = {"all_ok": False, "steps": [
+            {"name": "content", "ok": False, "values": [], "detail": "正文为空"},
+        ]}
+        out = S.verify_candidate(self.SOURCE, "ruleContent.content", ".content@text",
+                                 "content", "https://example.com/c/1",
+                                 runner=self._runner(result))
+        self.assertEqual(out["status"], "rejected")
+        self.assertEqual(out["engine"]["status"], "fail")
+        self.assertIn("正文为空", out["engine"]["detail"])
+
+    def test_missing_target_step_is_engine_unavailable(self):
+        out = S.verify_candidate(self.SOURCE, "ruleSearch.bookList", ".item",
+                                 "search", "demo",
+                                 runner=self._runner({"steps": [], "error": "零事件"}))
+        self.assertEqual(out["status"], "engine_unavailable")
+        self.assertEqual(out["engine"]["status"], "unavailable")
+        self.assertIn("零事件", out["engine"]["reason"])
+
+    def test_runner_exception_is_engine_unavailable(self):
+        def broken(source, key, timeout):
+            raise RuntimeError("JVM 未配置")
+        out = S.verify_candidate(self.SOURCE, "ruleSearch.bookList", ".item",
+                                 "search", "demo", runner=broken)
+        self.assertEqual(out["status"], "engine_unavailable")
+        self.assertIn("JVM 未配置", out["engine"]["reason"])
+
+    def test_invalid_target_and_timeout_are_rejected_before_runner(self):
+        for args in (("bad", "demo", 60), ("search", "demo", 0)):
+            with self.subTest(args=args):
+                with self.assertRaises(ValueError):
+                    S.verify_candidate(self.SOURCE, "ruleSearch.bookList", ".item",
+                                       args[0], args[1], timeout=args[2],
+                                       runner=self._runner({}))
+
+
+class CandidateVerifyRouteTests(unittest.TestCase):
+    def _req(self, **over):
+        from backend.schemas import CandidateVerifyRequest
+        payload = {
+            "source": {"bookSourceUrl": "https://example.com",
+                       "ruleSearch": {"bookList": ".old"}},
+            "field": "ruleSearch.bookList",
+            "rule": ".item",
+            "target": "search",
+            "query": "demo",
+        }
+        payload.update(over)
+        return CandidateVerifyRequest(**payload)
+
+    def test_missing_source_url_is_400_before_engine(self):
+        from fastapi import HTTPException
+        from backend.api.rules import verify_candidate_rule
+        with self.assertRaises(HTTPException) as ctx:
+            asyncio.run(verify_candidate_rule(self._req(source={})))
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertIn("bookSourceUrl", str(ctx.exception.detail))
+
+    def test_timeout_out_of_range_is_400(self):
+        from fastapi import HTTPException
+        from backend.api.rules import verify_candidate_rule
+        with self.assertRaises(HTTPException) as ctx:
+            asyncio.run(verify_candidate_rule(self._req(timeout=1)))
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertIn("调试预算", str(ctx.exception.detail))
+
+    def test_route_calls_candidate_verifier_without_push(self):
+        from unittest.mock import patch
+        from backend.api.rules import verify_candidate_rule
+        expected = {"status": "verified", "engine": {"status": "pass"}}
+        with patch("core.repair.suggest.verify_candidate", return_value=expected) as verify:
+            out = asyncio.run(verify_candidate_rule(self._req()))
+        self.assertEqual(out, expected)
+        verify.assert_called_once()
+        args = verify.call_args.args
+        self.assertEqual(args[1:5], ("ruleSearch.bookList", ".item", "search", "demo"))
+        self.assertNotIn("push", verify.call_args.kwargs)
+
+
 class VerifyTests(unittest.TestCase):
     def test_replayable_rule_is_verified_with_values(self):
         v = S.verify(HTML, "class.item@tag.a@text", "search")
         self.assertIs(v["verified"], True)
+        self.assertEqual(v["local"]["status"], "pass")
+        self.assertEqual(v["status"], "verified")
+        self.assertEqual(v["engine"]["status"], "not_required")
         self.assertEqual(v["count"], 2)
         self.assertEqual(v["samples"][0], "诡秘之主")
 
     def test_js_rule_is_not_verified_and_says_connect_the_app(self):
         v = S.verify(HTML, "@js:return doc.select('.item')", "search")
         self.assertIs(v["verified"], False)
+        self.assertEqual(v["local"]["status"], "unsupported")
+        self.assertEqual(v["status"], "needs_engine")
         self.assertIn("只能连 App 试", v["note"])
 
     def test_no_match_is_not_verified(self):
         v = S.verify(HTML, "class.nothing@tag.a@text", "search")
         self.assertIs(v["verified"], False)
+        self.assertEqual(v["local"]["status"], "fail")
+        self.assertEqual(v["status"], "rejected")
         self.assertIn("取不到值", v["note"])
         self.assertEqual(v["rule_error"], "")
 
