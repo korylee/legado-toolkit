@@ -5,6 +5,9 @@ data/cache/
 data/check_cache*/
 data/imports/
 data/out/
+# 跨进程锁（后端哨兵锁等）：进程生命周期状态，不是数据；*.bak 是运行时备份
+data/locks/
+data/*.bak
 candidates*.json
 final_*.json
 auto_added.json

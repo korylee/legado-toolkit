@@ -17,23 +17,39 @@ from backend import netinfo
 from backend.api import (export, feed, imports, jvm, jobs, llm, ops, rules,
                          settings, sources)
 from backend.jobs import runner
+from core.paths import data_path
+from core.plocks import ProcLock, read_owner
 from core.store import Store
 
 
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
-    # 收尾上一次进程留下的任务（崩溃、强杀、热重载都会留下）。
-    # **位置就是这段逻辑的一部分**，三个候选只有这个对：
-    #   - 模块级 import：测试与 CLI 顺手 import 一下就会写库
-    #   - backend/__main__.py：--reload 下跑在监督进程里，热重载重启子进程时不会执行
-    #   - lifespan：跑在**服务进程**里，每次启动/重启都执行一次
-    runner.recover_orphans()
-    runner.sweep_expired()
-    await runner.start_job_sweeper()
+    # 单实例哨兵：第二个后端进程到此为止。误开 `--workers`、旧进程没退干净，
+    # 都会表现为「两个进程各自认为自己拿到了 JVM」（8787 曾被旧进程抢答那次）。
+    # 判死交给内核：持有者一死锁就没了，不用心跳/TTL 去猜（lessons §二十八）。
+    # 锁路径**调用时**解析——测试用 LEGADO_DATA_DIR 换数据目录，import 时算死
+    # 会把它钉在真目录上（同 core.paths.ARGS_PARTS 注释的理由）。
+    sentinel = ProcLock(data_path("locks", "backend.lock"))
+    if not sentinel.acquire():
+        who = read_owner(str(sentinel.path))
+        raise RuntimeError(
+            "拒绝启动：另一个后端实例正在运行（pid=%s，%s 起）。"
+            "同一时刻只允许一个后端；若是残留进程请先结束它。"
+            "uvicorn 多进程模式（--workers）不受支持。"
+            % (who.get("pid") or "未知", who.get("acquired_at") or "未知"))
     try:
+        # 收尾上一次进程留下的任务（崩溃、强杀、热重载都会留下）。
+        # **位置就是这段逻辑的一部分**，三个候选只有这个对：
+        #   - 模块级 import：测试与 CLI 顺手 import 一下就会写库
+        #   - backend/__main__.py：--reload 下跑在监督进程里，热重载重启子进程时不会执行
+        #   - lifespan：跑在**服务进程**里，每次启动/重启都执行一次
+        runner.recover_orphans()
+        runner.sweep_expired()
+        await runner.start_job_sweeper()
         yield
     finally:
         await runner.stop_job_sweeper()
+        sentinel.release()
 
 
 app = FastAPI(title="Legado 书源管理", version="0.1.0",
