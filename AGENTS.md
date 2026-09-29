@@ -261,7 +261,7 @@
 
 ## 改文件的正确姿势
 
-**不要在多行 shell 字符串里拼接代码**：走 stdin 通道执行完整 Python 脚本，写回一律用
-`write_bytes`（`write_text` 会把整个文件的行尾翻成 CRLF，而 `git diff` 看不出来）。
-通道配方、改代码纪律与陷阱速查**只维护一份**，在 `skills/agent-write-safety/SKILL.md`；
-行级改动直接用 `tools/apply_edits.py`（保留原行尾、锚点不唯一就报错）。
+修改仓库文件必须先读取当前内容，使用 `edit` 或 `tools/apply_edits.py`。
+`old_string` 不匹配、重复匹配或文件版本变化时必须停止、重新读取并重新定位；不得改用
+PowerShell / shell 直接写回，也不得整文件重写。详细写入纪律见
+`skills/agent-write-safety/SKILL.md`。
