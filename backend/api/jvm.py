@@ -913,6 +913,9 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
         from backend.jobs import runner as job_runner
 
         RUN_LOCK.acquire()
+        # 块墙钟（jvm-batch-daemon 批次 2 的基线数据）：没有每块耗时，
+        # 「daemon 省了多少启动」就只能靠猜（lessons §四十七：性能结论必须实测）
+        started = time.monotonic()
         try:
             if has_manifest and chunk_dir is not None:
                 _write_run_manifest(chunk_dir, manifest, job_id,
@@ -977,7 +980,8 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
                         "reason": snapshot_reason, "gradle": gradle,
                         "execution_mode": ("validate_daemon" if daemon_mode
                                            else "gradle"),
-                        "daemon_failure": daemon_failure}
+                        "daemon_failure": daemon_failure,
+                        "cost_sec": round(time.monotonic() - started, 1)}
             if code != 0 or not chunk_out.exists():
                 return {"index": idx, "ok": False, "exit": code,
                         "reason": (_gradle_failure_reason(gradle)
@@ -986,7 +990,8 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
                         "gradle": gradle,
                         "execution_mode": ("validate_daemon" if daemon_mode
                                            else "gradle"),
-                        "daemon_failure": daemon_failure}
+                        "daemon_failure": daemon_failure,
+                        "cost_sec": round(time.monotonic() - started, 1)}
             # 读结果前先停本块轮询：终值以解析出的 rows 为准（理由同单条）
             tail_stop.set()
             tail.join(5)
@@ -1002,7 +1007,8 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
             return {"index": idx, "ok": True, "count": len(rows),
                     "execution_mode": ("validate_daemon" if daemon_mode
                                        else "gradle"),
-                    "daemon_failure": daemon_failure}
+                    "daemon_failure": daemon_failure,
+                    "cost_sec": round(time.monotonic() - started, 1)}
         finally:
             tail_stop.set()
             tail.join(5)

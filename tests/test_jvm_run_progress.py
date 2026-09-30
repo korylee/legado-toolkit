@@ -81,6 +81,8 @@ class JvmRunProgressTests(unittest.TestCase):
                                lambda dump=None: {"ok": True}), \
              mock.patch("core.jvm_direct.load_dump", return_value=dict(_DUMP)), \
              mock.patch("core.jvm_validate_daemon.run", daemon), \
+             mock.patch("core.settings_store.batch_via_daemon",
+                        return_value=False), \
              mock.patch.object(jvm_api.runner, "Store",
                                lambda *a, **kw: Store(self.db)):
             return asyncio.run(

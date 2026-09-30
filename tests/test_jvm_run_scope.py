@@ -63,7 +63,10 @@ class _Base(unittest.TestCase):
             mock.patch.object(jvm_api.settings_store, "load",
                               lambda: {"network": {"proxy": ""}, "jvm": {"app_repo": "X:/repo", "keyword": "我",
                                                "timeout": 25, "concurrency": 8,
-                                               "limit": 2, "depth": "search"}}),
+                                               "limit": 2, "depth": "search",
+                                               # 显式钉 off：这批用例守 Gradle 路径语义；
+                                               # daemon 路径只在 BatchDaemonTests 里开
+                                               "batch_via_daemon": False}}),
         ):
             p.start()
             self.addCleanup(p.stop)
@@ -921,6 +924,8 @@ class BatchDaemonTests(_Base):
         self.assertEqual(report.get("daemon_failure") or "", "")
         # socket 等待按块规模缩放：每源预算(25) × 块源数 + 60
         self.assertEqual(calls["socket_timeout"], 25 * calls["sources"] + 60)
+        # 块墙钟落进报告（批次 2 基线数据）：数值随环境漂，只钉存在与非负
+        self.assertGreaterEqual(report.get("cost_sec", -1), 0)
 
     def test_batch_daemon_busy_falls_back_without_killing_it(self) -> None:
         """probe 返回 None（忙/未启动/版本不符）→ 回落 Gradle，且**不得**触碰

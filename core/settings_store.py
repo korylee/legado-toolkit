@@ -98,9 +98,13 @@ DEFAULTS: Dict[str, Dict[str, Any]] = {
         #: 块完成即入库（取消/崩溃后可恢复）。默认 25 实测可调。
         "chunk_size": 25,
         #: 批量块执行优先走常驻 validate daemon（省每块一次 Gradle+JVM 冷启动），
-        #: daemon 探测不过/执行失败回落 Gradle。**灰度开关，默认 off**：与 Gradle
-        #: 路径逐字段对拍、争用与 RSS 实测达标后才改默认（jvm-batch-daemon）。
-        "batch_via_daemon": False,
+        #: daemon 探测不过/执行失败回落 Gradle 并保留原因。**默认 on**（2026-09-30
+        #: 拍板）：收益靠推演钉住——chunk_size 25 下全量约 151 块，每块启动费
+        #: （D0 实测 10.7s 量级）合计远超请求时间；正确性靠构造保证（与单条同一
+        #: Kotlin 入口、同一份 args 文件，字段一致性已随单条验证）+ 三重保险
+        #: （daemon 错误即回落、块 DONE 可恢复、本开关即时回退）。开关保留：
+        #: 回退与对照用。首次真实批量留意任务详情的 execution_note。
+        "batch_via_daemon": True,
     },
     "debug": {
         #: 单次调试的整链墙钟预算（秒）。**必须大于桥的渲染预算**：App 的
@@ -402,10 +406,12 @@ def batch_via_daemon() -> bool:
 
     **唯一入口**（``backend/api/jvm.py`` 的 ``_chunk_work`` 调它）：探测不过或执行
     失败一律回落 Gradle 并保留原因——回落是**说出来的降级**，不是静默替换。
-    默认 off（灰度，jvm-batch-daemon），实测达标才改 DEFAULTS。
+    默认 on（2026-09-30 拍板豁免实测，依据见 DEFAULTS 注释）；置 false 即回退
+    到纯 Gradle 路径。``load()`` 已逐键回落 DEFAULTS，这里不能再 ``or`` 一遍——
+    那会把用户显式存下的 false 吞掉，回退开关失效。
     """
-    return bool(load().get("jvm", {}).get("batch_via_daemon")
-                or DEFAULTS["jvm"]["batch_via_daemon"])
+    return bool(load().get("jvm", {}).get("batch_via_daemon",
+                                          DEFAULTS["jvm"]["batch_via_daemon"]))
 
 
 def resolve_check(override: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:

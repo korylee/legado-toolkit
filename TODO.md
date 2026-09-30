@@ -18,31 +18,12 @@
 
 ## 0 · 现在做
 
-> 当前排期：引擎与调试执行链的基础设施已完成；后续调试体验以“入口降噪 → 工作台闭环 → 证据前置 → 编辑能力合入 → DOM 意图化生成”为主线。worker 线收口：哨兵锁已交付，批量校验拉起接常驻 daemon（jvm-batch-daemon）一条；专用 worker 与切换条目已删——隔离前提早被双 daemon 消化（lessons §六十五 / §六十六）。
+> 当前排期：引擎与调试执行链的基础设施已完成；后续调试体验以“入口降噪 → 工作台闭环 → 证据前置 → 编辑能力合入 → DOM 意图化生成”为主线。worker 线已收口：哨兵锁与批量 daemon 拉起均已交付（默认 on，回退开关 jvm.batch_via_daemon），专用 worker 与切换条目已删——隔离前提早被双 daemon 消化（lessons §六十五 / §六十六）。
 > P0 的 unknown 出口与可执行提示已交付，当前前端待办集中在新调试页的视觉层级、编辑闭环和证据可信度。
 
 ---
 
 ## 1 · 排队
-
-### 条目：jvm-batch-daemon · 批量校验的拉起方式接常驻 daemon
-状态：todo
-依赖：无
-优先级：P1
-背景：批量每个块独立拉起一次 Gradle+JVM（`_chunk_work` → `_run_gradle`），冷启动
-  是块数 × 纯等待；而 validate daemon 已经常驻、已经会跑批次形状的 args——单条快
-  路径就把 `_write_args` 的产物发给它（`jvm_validate_daemon.run`），与批次 args
-  同形状同 Kotlin 入口，差别只是 sources 文件条数。原「独立批量 worker 进程」的
-  常驻价值由此拿走，独立 Python worker 与切换工程不再需要（条目已删）。
-约束：**「频繁跑全量会被封 IP」是硬约束**（toolchain §四）：daemon 路径只省启动，
-  不改并发与请求量。`_chunk_work` 换成单条路径同形的「daemon 优先、
-  `ValidateDaemonError` 回落 Gradle 并保留原因」（AGENTS #4：回落要露出，不能装成
-  源失败）；灰度开关进 `settings_store`（AGENTS #8），默认 off，实测达标才改默认；
-  块级 DONE 恢复天然兼容（daemon 死 → 该块回落/重试，不重复已完成块）。
-验收：同一批次同一参数下 daemon 路径与 Gradle 路径结果逐字段一致；单条与批次共用
-  daemon 的争用实测（记录单条等待时长）——冲突常态化再给批次开第二个 daemon 实例
-  （客户端按命名实例参数化，即原多开容量问题的归宿）；长块 RSS 与中途死掉恢复实测。
-指针：backend/api/jvm.py，core/jvm_validate_daemon.py，lessons §六十五 / §六十六
 
 ### 条目：jvm-request-coalesce · 合并重复的进行中请求
 状态：blocked
@@ -645,3 +626,22 @@
 验收：子进程 `os._exit` 模拟真实死亡后锁立即可再持有；实机双实例拒绝 +
   杀树重启通过；变异记录见 tests/test_plocks.py 尾注。
 指针：core/plocks.py，backend/app.py，lessons §二十八 / §七十四
+
+### 条目：jvm-batch-daemon · 批量校验的拉起方式接常驻 daemon
+状态：done
+依赖：无
+优先级：P1
+背景：2026-09-30 交付（d0b30b4 / 2476001 / ada0476）：批量每块原独立拉起一次
+  Gradle+JVM，`_chunk_work` 改为 daemon 优先、`ValidateDaemonError` 回落 Gradle
+  并带原因；socket 等待按块规模缩放（Kotlin 侧 op 无时长上限，客户端等待是唯一
+  护栏）；`probe()` 只读探测——忙 ≠ 死，探测方不持有互斥，绝不触发 ensure 的
+  杀语义。默认 on：收益推演（块数 × 启动费，D0 10.7s 锚点，chunk_size 25 下全量
+  约 151 块）远超请求时间，用户拍板豁免实测（历史批量数据不可用：分块交付后
+  真库零记录）；正确性靠同一 Kotlin 入口 + 回落/块 DONE/开关三重保险。**首次
+  真实批量留意任务详情 execution_note**（块级 cost_sec/execution_mode 已落报告，
+  异常随时 jvm.batch_via_daemon=false 回退）。
+约束：只读探测不杀 daemon；「频繁跑全量会被封 IP」硬约束不受影响（只省启动，
+  不改并发与请求量）；读取端不得 ``or DEFAULTS``——会把显式 false 吞掉（有钉）。
+验收：scope 44 用例钉开关回归/daemon 成功/busy 回落不杀/code≠0 回落/超时缩放；
+  settings_store 钉默认 on + 显式 false 生效；全量绿；变异 M1/M2 红。
+指针：backend/api/jvm.py，core/jvm_validate_daemon.py，core/settings_store.py，lessons §六十五 / §六十六

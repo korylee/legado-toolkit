@@ -46,6 +46,14 @@ class SettingsStoreTests(unittest.TestCase):
         self.assertEqual(S.load()["network"], S.DEFAULTS["network"])
         self.assertEqual(S.load()["jvm"], S.DEFAULTS["jvm"])
 
+    def test_batch_via_daemon_default_on_and_false_is_honoured(self) -> None:
+        """批量 daemon 开关（jvm-batch-daemon）：默认 on（2026-09-30 拍板豁免实测）；
+        用户显式存 false 必须真生效（回退路径）——读取端写成 ``or DEFAULTS`` 会把
+        false 吞掉，回退开关失效，这条钉的就是那个坑。"""
+        self.assertTrue(S.batch_via_daemon())
+        self._write_raw(json.dumps({"jvm": {"batch_via_daemon": False}}))
+        self.assertFalse(S.batch_via_daemon())
+
     def test_debug_timeout_default_and_clamp(self) -> None:
         """调试预算（jvm-debug-budget）：默认值只在 DEFAULTS，越界 clamp 到区间。
 
