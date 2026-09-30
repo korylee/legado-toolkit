@@ -5,10 +5,10 @@
 ``m.suixkan.com`` 一个域名下有 5 种（「随心看吧」4 条重复 + 「阅友小说」2 种 +
 「随心看」1 条），按域名合并会把能用的源误删。
 
-**为什么不能按地址去重**（现有的 `core.loader.dedupe_sources`）：它的键是地址原文，
-而分享圈的习惯是在地址后面挂署名——``#guaner`` / ``#♤guaner`` / ``#关耳`` / ``#🎃``
-都是同一条源被转发几次的产物，地址不同、内容一字不差。那套去重有意的"署名不同即
-两个源"（对齐 Legado 的 ``getSourceKey()``）在这里恰好一条都抓不到。
+**为什么不能按地址去重**（App 的 ``getSourceKey()``、库里的 URL 唯一索引同理）：键是
+地址原文，而分享圈的习惯是在地址后面挂署名——``#guaner`` / ``#♤guaner`` / ``#关耳`` /
+``#🎃`` 都是同一条源被转发几次的产物，地址不同、内容一字不差。"署名不同即两个源"
+在这里恰好一条都抓不到。
 
 所以这里换一个判据：**比"行为字段"**——把与"这条源怎么工作"无关的字段排除再比。
 
@@ -28,7 +28,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from urllib.parse import urlsplit
 
 from core.loader import _normalize_url
-from core.models import HEALTH_NAMES, Health
+from core.models import Health
 
 #: 与「这条源怎么工作」无关的字段，比较时排除。每一条都有理由，**不要图省事扩大**：
 #:   bookSourceUrl    地址本身——重复的正是"地址不同、内容相同"这种东西
@@ -344,81 +344,3 @@ def summarize_by_kind(groups: Sequence[Dict[str, Any]]) -> Dict[str, Dict[str, i
         row["rows"] += len(g.get("members") or [])
         row["redundant"] += int(g.get("redundant", 0) or 0)
     return out
-
-
-def summarize(groups: Sequence[Dict[str, Any]], total: int) -> Dict[str, int]:
-    """统计：总数 / 组数 / 两种类别各自的条数与可精简数。"""
-    same = [g for g in groups if g.get("same_site", g.get("same_host"))]
-    cross = [g for g in groups if not g.get("same_site", g.get("same_host"))]
-    return {
-        "sources": total,
-        "groups": len(groups),
-        "same_site_groups": len(same),
-        "same_site_rows": sum(len(g["members"]) for g in same),
-        "same_site_redundant": sum(g["redundant"] for g in same),
-        "cross_site_groups": len(cross),
-        "cross_site_rows": sum(len(g["members"]) for g in cross),
-        "cross_site_redundant": sum(g["redundant"] for g in cross),
-    }
-
-
-def _suffix(m: Dict[str, Any]) -> str:
-    bits = []
-    if m["health"]:
-        bits.append(HEALTH_NAMES.get(m["health"], m["health"]))
-    if m["content_ok"] is True:
-        bits.append("正文✓")
-    elif m["toc_complete"] is True:
-        bits.append("目录✓")
-    elif m["search_hit"]:
-        bits.append("搜索命中")
-    elif m["probe_depth"]:
-        bits.append("已校验")
-    if m["checked_at"]:
-        bits.append(m["checked_at"])
-    if m["comment"]:
-        bits.append("备注:" + m["comment"].replace("\n", " ")[:20])
-    return ("  " + " ".join(bits)) if bits else ""
-
-
-def render_report(groups: Sequence[Dict[str, Any]], total: int,
-                  source_label: str = "") -> str:
-    """把分组渲染成给人看的清单。**只读**，不产生任何写入。"""
-    s = summarize(groups, total)
-    lines: List[str] = ["# 重复书源清单（只读）", ""]
-    if source_label:
-        lines.append("数据来源：%s" % source_label)
-    lines += [
-        "共 %d 条源，其中 **%d 组规则完全相同**（相差的只有地址/署名/排序/备注/分组）："
-        % (s["sources"], s["groups"]),
-        "",
-        "- **同一站点**（域名 + 有效端口）：%d 组 / %d 条 → 可精简 **%d 条**（这类是可合并的重复）"
-        % (s["same_site_groups"], s["same_site_rows"], s["same_site_redundant"]),
-        "- **跨站点**：%d 组 / %d 条 → 逐组自己看（可能是镜像站，也可能其中一条已经不能用了）"
-        % (s["cross_site_groups"], s["cross_site_rows"]),
-        "",
-        "判据：比较**行为字段**（规则、类型、搜索地址、header、cookie 开关……），"
-        "排除地址、名称、App 排序、更新时间、上次耗时、分组、备注。",
-        "「建议保留」按「先能用的、再地址干净的、最后先导入的」挑一条，**仅供参考**。",
-        "本清单不改任何数据——删哪条由你定。",
-        "",
-    ]
-    if not groups:
-        lines.append("没有发现规则完全相同的源。")
-        return "\n".join(lines) + "\n"
-
-    for i, g in enumerate(groups, 1):
-        kind = "同一站点" if g.get("same_site", g.get("same_host")) else "跨站点"
-        shown = g.get("sites") or g["hosts"]
-        title = "、".join(shown[:3]) + ("…" if len(shown) > 3 else "")
-        lines.append("---")
-        lines.append("")
-        lines.append("## %d. %d 条 · %s（%s，可精简 %d 条）"
-                     % (i, len(g["members"]), title, kind, g["redundant"]))
-        lines.append("")
-        for m in g["members"]:
-            mark = "**[建议保留]** " if m["order"] == g["keep"] else ""
-            lines.append("- %s`%s` 「%s」%s"
-                         % (mark, m["url"], m["name"], _suffix(m)))
-        lines.append("")
-    return "\n".join(lines) + "\n"

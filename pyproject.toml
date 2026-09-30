@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "legado-source-tools"
 version = "0.2.0"
-description = "Legado 书源管理工具：校验 / 归因 / AI 修复 / Web 前后端"
+description = "Legado 书源管理工具：校验 / 归因 / Web 前后端"
 requires-python = ">=3.10"
 dependencies = [
     "aiohttp>=3.9",
@@ -22,4 +22,4 @@ dependencies = [
 ]
 
 [tool.setuptools]
-packages = ["core", "core.rules", "core.repair", "services", "cli", "backend", "backend.api", "backend.jobs", "tools"]
+packages = ["core", "core.rules", "core.repair", "services", "backend", "backend.api", "backend.jobs", "tools"]

@@ -10,7 +10,7 @@
 ## 硬性约定
 
 1. **运行时数据都在 `data/`，不进版本库**（已 gitignore）。
-   `candidates.json` 是唯一候选主库，**请单独备份**。
+   **管理库 `data/sources.sqlite3` 是唯一事实库，请单独备份**（`Store.backup()` 现成）。
    **启动器的参数文件也在 `data/`**（`data/app_probe/args.properties`，见
    `core.paths.ARGS_PARTS`）：跑批/调试每次都重写它，拉起 Gradle 时用
    `LEGADO_APPSERVICE_ARGS` 把绝对路径交过去（`legado-gradle.bat` 会 `pushd` 进 App
@@ -34,13 +34,12 @@
    `result_json.items[].url` 来自 `build_record` 的**原文**——下游（就地回填、
    跳转、匹配）拿它当 key 时必须先归一，否则一条都对不上，且**不报错**。
    详见 lessons §五。
-5b. **缓存有效性的轴**：`probe_depth`（探得多深，`core/settings_store.PROBE_DEPTHS`
-   一根四档）与 `search_probed`（那一轮**实际**跑没跑搜索，见
-   `core/checker.is_cache_item_valid`）。新增任何影响结论的探测维度，都要在这里加一根
-   轴并把 `CACHE_VERSION` 加一——只比版本/指纹/时间的话，换个探测参数重跑会**静默复用**
-   上一次的结论，界面上显示「校验完成」，看起来一切正常。
-   改 `probe_depth` 的**编号含义**（而不只是取值范围）同样要加版本号：缓存里的这一列
-   记的是「实际执行到的深度」，编号一平移，整列的含义就跟着变。
+5b. **结论行的版本轴**：每条校验结论带 `v`（`core/checker.CACHE_VERSION`，由
+   `core/jvm_health` 落库时写入）。判定口径一变——新增影响结论的探测维度，或
+   `probe_depth`（`core/settings_store.PROBE_DEPTHS`，一根四档）的**编号含义**平移——
+   必须 bump 一版：库里新旧口径的结论行长存（每源留最近一条），没有版本轴就分不出
+   哪行是哪个口径判的，界面上看着一切正常。`checks.search_probed` 是先例：那根轴
+   记的是「这一轮实际跑没跑搜索」。
 6. **改代码前确保 `git status` 干净**，改完立刻跑
    `python -c "import 模块"` 与 `python -m unittest discover -s tests -t .`。
 7. **系统标签枚举只在后端定义**（`core/tags.py`、`core/models.py`），
@@ -54,7 +53,6 @@
    拿 `limits` 渲染上下界，不得再硬编码一份。历史上并发数曾在 `ops.py`(20)、
    CLI(50)、`AsyncChecker`(50) 三处各写一遍（后两处已随本地校验链退场），结果是界面上改不动、也没人知道该信哪个——
    这种漂移靠「对齐数字」修不掉，只能靠**把数字从调用点删掉**。
-   `cli/main.py` 的 argparse 默认值是**独立的另一条链路**，不要试图统一。
 9. **`sources.source_url` 的唯一性是「仅在用」，不是全表**
    （`idx_sources_live_url ... WHERE deleted_at = ''`，见
    `idx_sources_live_url`）。**不要在它上面加回 `UNIQUE`**：
@@ -86,13 +84,13 @@
      README = 是什么 / 怎么装 / 怎么用 / 接口与配置 **reference**（含按场景的命令表与健康
      五档的动作列）。**口径不再收成文档**：深度档位 / 缓存 TTL / 归因分桶的
      枚举与默认值都在 `core/`（`models.HEALTH_NAMES`、`settings_store`、
-     `reclassify.ACTION_OF`），文档要用就给符号名。同一张表、同一份清单、
+     `dns_check` 的判定常量与 `checker` 的归因函数），文档要用就给符号名。同一张表、同一份清单、
      同一句告诫**只在一处维护**，另一处留一行指针。
      判据是实测的：同一份内容两处写，**腐烂只发生在一侧**；读者无从判断该信哪一份
      （当年的论证见 lessons §二十）。
 11. **判定逻辑里不能放「我们自己写进去的结论」当输入。**
-    `organizer` 按 `bookSourceType` 生成分组标签，而 `reclassify` 又把分组当特征
-    文本读——于是「类型错 → 分组写成 📖小说 → 判据读到小说字样 → 再判成小说」，
+    `organizer` 按 `bookSourceType` 生成分组标签；凡是把分组当特征文本读的判据，
+    都会「类型错 → 分组写成 📖小说 → 判据读到小说字样 → 再判成小说」——
     **错的标签自我固化，永远纠正不过来**。
     凡是「A 的输出被写回 A 的输入」，先问这个字段是**原始观测**还是**我们的结论**。
     判据要经得起一句反问：**把派生字段全清掉，结论还成立吗？**

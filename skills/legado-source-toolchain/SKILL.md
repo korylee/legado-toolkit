@@ -1,6 +1,6 @@
 ---
 name: legado-source-toolchain
-description: 本仓库 Legado 书源工具链的用法——SQLite 管理库（含迁移与对拍）、规则回放器的边界、AI 提议与验收的边界。命令清单与典型参数见 README 的「按场景查命令」。
+description: 本仓库 Legado 书源工具链的用法——SQLite 管理库、规则回放器的边界、AI 提议与验收的边界。
 ---
 
 # Legado 书源工具链
@@ -12,17 +12,8 @@ description: 本仓库 Legado 书源工具链的用法——SQLite 管理库（�
 **不在这里抄第二份签名**。
 
 **设计要点**：`raw_json` 存完整原文（导出无损）；只把要 WHERE / ORDER BY 的字段抽成列；
-规则不拆表；视图 `v_sources` = 源 LEFT JOIN 最近一次校验。
-
-迁移与对拍（都不联网）：
-
-    python -m core.store_migrate migrate --reset   # 导入并自动做一致性校验
-    python -m core.store_migrate verify            # 比对源数与类型分布，全一致才算成功
-
-缓存后端是 SQLite（`checks` 表）；旧 NDJSON 后端与对拍脚本随本地校验链一起退场
-（2026-09-22），`--legacy-cache` 那类开关已不存在。
-
-
+规则不拆表；视图 `v_sources` = 源 LEFT JOIN 最近一次校验。缓存后端是 SQLite（`checks`
+表）；备份对象就是 `data/sources.sqlite3`。
 
 → 给 Legado 的 JSON 永远由 `Store.export_json` 生成，别拿它当事实来源（AGENTS #2）。
 
@@ -41,25 +32,20 @@ description: 本仓库 Legado 书源工具链的用法——SQLite 管理库（�
 
 ## 三、AI 提议（只有调试工作台一条路）
 
-CLI 的批量修复循环（`cli repair` / `core/repair/loop.py`）已按调用图退场（2026-09-30）：
-它 file-in/file-out 回写 JSON、绕开管理库，验收那一步也没有可用提供方。今天 AI 只做**单步提议**：
+AI 只做**单步提议**：
 
     POST /api/rules/suggest-rule      # 只提议；dry_run 那趟免费（回放器初筛，不发模型请求）
     POST /api/rules/verify-candidate  # 用户显式点击才跑，本机引擎验收这一条
 
 **模型只提议，验收一律由本机引擎完成**；回放器只用在不花钱的初筛上（AGENTS #3）。
-
-批量的诊断仍走 CLI：
-
-    python cli/main.py diagnose -i x.json -o out/diagnose.md --only-dead
+失效归因看跑批校验的明细（自带归因，结论落在管理库），没有独立命令。
 
 → 花钱与验收都在用户点击之后；回放器不是第二个健康事实（lessons §七十三）。
 
 ## 四、一次批量的完整动作
 
-    # 动手前先单独备份（candidates.json 不在版本库里）
-    Copy-Item data/candidates.json "data/backups/candidates_$(Get-Date -Format yyyyMMdd_HHmm).json"
+    # 动手前先单独备份管理库（data/sources.sqlite3 不在版本库里）
+    Copy-Item data/sources.sqlite3 "data/backups/sources_$(Get-Date -Format yyyyMMdd_HHmm).bak"
     # 校验在 Web 管理台：书源列表的「全量校验 / 校验选中」（本机引擎）
-    #   cli 的 check / organize / report / run 已于 2026-09-22 退场（本地校验链收成一台引擎）
 
 → 先备份、跑完看分布；**「频繁跑全量会被封 IP」是硬约束**，能跑增量就别跑全量。

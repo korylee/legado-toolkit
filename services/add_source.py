@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """快速新增源：从一个站点 URL 反推出一份可用的书源。
 
-**CLI 与 Web 共用这一份**（`cli/main.py` 的 add、`backend/api/ops.py` 的
-`run_add_job`），所以它不能塞进任一个入口目录里——这就是 `services/` 这层存在的理由。
+Web 经 `backend/api/ops.py` 的 `run_add_job` 调它；放 `services/` 是流程编排层
+（与库内合并 `services/merge_sources.py` 同层），不进 core、不进入口目录。
 
 > 这里原本写着「由 services/add_source.py 拆分而来」——那句是从 `core/verify.py`
 > 抄过来的，在**人家的文件里**才成立（`verify.py` 确实是从本模块拆出去的）。

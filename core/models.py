@@ -64,12 +64,6 @@ HEALTH_NAMES: Dict[str, str] = {
 
 # ---------------------------------------------------------------- 失效/异常特征词
 
-#: 分组标签中表示"失效"的信号词
-DEAD_TAG_PATTERNS: List[str] = [
-    "失效", "网站失效", "搜索失效", "搜索目录失效", "发现失效",
-    "js失效", "校验超时", "搜索链接规则为空",
-]
-
 #: 响应体中出现的"反爬/验证"特征
 ANTI_BOT_MARKERS: List[str] = [
     "验证码", "人机验证", "安全验证", "滑动验证",
@@ -164,17 +158,17 @@ class BookSourceRecord:
     has_search: bool = False           # 是否有**可探测**的搜索（searchUrl 或 ruleSearch.url）
     search_url_template: str = ""      # 提取的搜索 URL 模板
     # ---- 静态诊断 ----
-    dead_tagged: bool = False          # 分组/备注标注失效（reporter 在读）
     #
     # 这里删掉了一批「算了没人读」的字段（2026-09-16 逐个 grep 确认零读者）：
     #   login_url / has_book_list / has_explore / has_header_js / has_login_js /
     #   concurrent_rate / auth_tagged，以及**没有声明过、动态挂上去的** raw_book_list。
+    # 2026-09-30 又删了 `dead_tagged`：唯一读者 `core/reporter.py` 随 CLI 一起退场。
     # 它们大多能从 `raw` 现算，留着只会让人以为有人在用。
     #
-    # 两处**有意的例外**，不在这里、也不该顺手补回来：
-    #   - `dead_tagged` 留着：`core/reporter.py` 在读它（同名的 `auth_tagged` 没人读，删了）
+    # 剩下的一处**有意例外**，不在这里、也不该顺手补回来：
     #   - `has_search` 留着：探测门与搜索结果展示都在读
-    # 另外 `AUTH_TAG_PATTERNS` 也随 `auth_tagged` 一起删了——它的唯一读者就是那个字段。
+    # 另外 `AUTH_TAG_PATTERNS` / `DEAD_TAG_PATTERNS` 也分别随 `auth_tagged` /
+    # `dead_tagged` 一起删了——它们的唯一读者就是各自那个字段。
     # ---- 动态校验结果 ----
     health: str = Health.PENDING
     status_code: int = 0
@@ -252,9 +246,5 @@ def build_record(raw: Dict[str, Any], index: int) -> BookSourceRecord:
     # 这里原本还算了 header / loginCheckJs / loginUi / exploreUrl 的四个静态标记
     # （has_header_js / has_login_js / has_explore，以及动态挂上去的 raw_book_list），
     # **都已删除**——逐个 grep 确认零读者。
-
-    # 静态失效标注（`dead_tagged` 是这里唯一有读者的产物，见 reporter.py）
-    combined_tag = f"{rec.group} {rec.comment} {rec.name}"
-    rec.dead_tagged = any(p in combined_tag for p in DEAD_TAG_PATTERNS)
 
     return rec

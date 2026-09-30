@@ -1,16 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-高并发联网校验核心。
-
-使用 asyncio + aiohttp 异步并发探测每个书源的：
-1. 域名连通性（GET 根路径，检查状态码与响应体特征）
-2. 搜索可用性（若存在 searchUrl，构造一次搜索请求）
-3. 反爬 / 登录 / 失效特征识别
-
-性能设计：
-- 单连接复用（keep-alive），信号量控制并发上限
-- 短超时（默认 8s），快速失败，避免卡死
-- 结果按源写入 NDJSON 缓存，可断点续跑
+校验判定判据库：传输错误归因、登录墙 / 反爬特征、HTTP 状态分类、搜索请求解析、
+静态规则完整性——本机引擎链共用的那一份（`core/jvm_health` 的归因与落库、
+`core/repair/suggest` 的归因读它）。`CACHE_VERSION` 是结论行的版本轴：
+判定口径一变就 bump，库里的历史结论才分得出是哪个口径判的。
 """
 
 from __future__ import annotations
@@ -52,11 +45,11 @@ from core.quality import rate_interval_ms
 # 这里不再引用——**别顺手补回来**，那会让两处档位定义重新漂开。
 # 常见 User-Agent（规避简单 UA 拦截）的**唯一实现在 constants**，这里只引用——
 # 本模块原来自己存了一份，已经和 constants 漂成两条（`Chrome/124.0.0.0` vs
-# `Chrome/124.0`），而构建 / fetch / reclassify 读的都是 constants 那份。
+# `Chrome/124.0`），而构建 / fetch 读的都是 constants 那份。
 # 与上面 rate_interval_ms 同一个道理：core 层不许有第二份定义
 from core.constants import DEFAULT_UA
 
-# 缓存版本 8：判定口径新增「验过搜索」这一维（见 is_cache_item_valid 的 search_probed）。
+# 缓存版本 8：判定口径新增「验过搜索」这一维（结论行的 `search_probed` 列）。
 # 现在库里的条目没有 search_probed 字段，item.get("search_probed") 为假——对开着
 # 搜索探测的用户来说，所有历史 OK 缓存都会被判为"没验过搜索"而重验。这正是想要的，
 # 但必须**显式**发生：只靠"字段缺失"这个巧合的话，将来若给旧条目补回该字段就会
@@ -145,8 +138,8 @@ def classify_http_status(status: Optional[int], text: str,
                          enabled_cookie_jar: bool = False) -> str:
     """HTTP 状态码 + 响应体 → 健康态。**全仓库唯一的判定表**。
 
-    需要它的是域名探测（`core/jvm_health` 的归因读到它）与
-    `reclassify.diagnose_source`（失效归因）。原来各写一份，实测已在 5 种输入上分叉：
+    需要它的是登录墙判定（`is_login_wall`，`repair/suggest` 的归因走它）。
+    原来各写一份，实测已在 5 种输入上分叉：
 
         503（无响应体）         域名探测=dead    归因=需登录
         404 / 500 / 406         域名探测=dead    归因=继续判
@@ -201,17 +194,7 @@ def is_inconclusive(health: str) -> bool:
 
     **名字说的是这件事本身，不是它的成因**：早先叫 `is_transient`（瞬时网络
     错误），但档位收拢后这一档的含义就是「没有结论」——它既包含瞬时抖动，
-    也包含「压根没跑过」。留着旧名会让人以为它在判「瞬时性」，从而照它加条件。
-
-    它只用来决定"能不能复用"，不再用来决定"要不要写"。
-    再早它叫 `should_cache_result`，同时管着写库那道门——结果是超时/异常的源
-    **一条都不落库**，而列表是按"有没有 checks 行"算「未校验」的，于是这些源永久
-    显示成「未校验」：明明刚跑过，界面上却像没跑（实测 3861 条里有 1222 条是
-    这个状态，占 31.7%），而且每次全量都会把它们的请求重打一遍。
-
-    现在拆开：**照写**（界面能显示「❓待验证」、能筛出来单独重测）+ **不复用**
-    （一次断网/抖动不会变成源的结论）。原来要防的那件事（污染）靠 `is_cache_item_valid`
-    的那道早退照样堵着。
+    也包含「压根没跑过」。当前没有消费方；判据本身是 `Health.PENDING` 的定义。
     """
     return health == Health.PENDING
 

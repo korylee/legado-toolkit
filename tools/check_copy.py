@@ -205,13 +205,13 @@ def _template_span(code: str) -> Tuple[int, int]:
     return start, (end + len("</template>")) if end > start else len(code)
 
 
-def frontend_candidates(path: pathlib.Path) -> List[Tuple[int, int, str]]:
+def frontend_candidates(raw: str) -> List[Tuple[int, int, str]]:
     """``.vue`` / ``.js`` 里用户看得到的字符串：字面量 + ``<template>`` 里的文本节点。
 
+    参数是**原文**（读盘统一在 ``scan`` 做，屏蔽注释前后的两份都要用）。
     返回 ``(起始行, 结束行, 文案)``——结束行是给 ``copy-ok`` 例外用的（多行字符串
     的标记可能写在收尾那行）。
     """
-    raw = path.read_text(encoding="utf-8")
     code = _blank_console_lines(_blank_html_comments(_blank_js_comments(raw)))
     found: List[Tuple[int, int, str]] = []
 
@@ -234,16 +234,15 @@ def frontend_candidates(path: pathlib.Path) -> List[Tuple[int, int, str]]:
     return found
 
 
-def python_candidates(path: pathlib.Path) -> List[Tuple[int, int, str]]:
+def python_candidates(raw: str) -> List[Tuple[int, int, str]]:
     """``.py`` 里用户看得到的字符串：**docstring 不算**（那是给改代码的人看的）。
 
     用 ``ast`` 而不是正则：本仓库的 Python 注释与文档字符串全是中文，
-    正则分不出「文档」与「要显示给用户的话」。
-    返回 ``(起始行, 结束行, 文案)``，与前端侧同形。
+    正则分不出「文档」与「要显示给用户的话」。返回 ``(起始行, 结束行, 文案)``，
+    与前端侧同形。
     """
-    src = path.read_text(encoding="utf-8")
     try:
-        tree = ast.parse(src)
+        tree = ast.parse(raw)
     except SyntaxError:
         return []          # 语法错误的文件由测试流程管，文案检查不该抢这个角色
     doc_ids = set()
@@ -273,29 +272,24 @@ def python_candidates(path: pathlib.Path) -> List[Tuple[int, int, str]]:
 TARGETS = (("frontend/src", (".vue", ".js")),
            ("core", (".py",)),
            ("backend", (".py",)),
-           ("cli", (".py",)),
            ("README.md", (".md",)))
 
 
-def has_copy_ok(path: pathlib.Path, start: int, end: int) -> bool:
+def has_copy_ok(lines: List[str], start: int, end: int) -> bool:
     """``start..end`` 这几行里有没有 ``copy-ok`` 例外标记。
 
-    **按原文查，不按屏蔽后的代码查**：JS/Vue 侧标记写成行尾注释，而注释在提取前
+    **传原文的行，不传屏蔽后的代码**：JS/Vue 侧标记写成行尾注释，而注释在提取前
     已经被抹成空格了——在屏蔽后的文本里找它永远是假。
     范围取**字符串自己跨的行**（不是"本行 + 上一行"）：后者会把紧挨着的无关字符串
     一起放过，实测就是这么漏的。
     """
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except (OSError, UnicodeDecodeError):
-        return False
     for probe in range(max(1, start), min(end, len(lines)) + 1):
         if COPY_OK in lines[probe - 1]:
             return True
     return False
 
 
-def markdown_candidates(path: pathlib.Path) -> List[Tuple[int, int, str]]:
+def markdown_candidates(raw: str) -> List[Tuple[int, int, str]]:
     """Markdown 的「文案」：正文行（含表格单元格），跳过围栏与缩进代码块。
 
     **围栏代码块不是文案**（那样本模块的 docstring 就该被扫了）：JSON 片段、命令行、
@@ -304,7 +298,7 @@ def markdown_candidates(path: pathlib.Path) -> List[Tuple[int, int, str]]:
     """
     out: List[Tuple[int, int, str]] = []
     in_fence = False
-    for i, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+    for i, line in enumerate(raw.splitlines(), 1):
         stripped = line.strip()
         if stripped.startswith("```"):
             in_fence = not in_fence
@@ -329,19 +323,22 @@ def scan(root: pathlib.Path) -> List[dict]:
         for path in paths:
             if path.suffix not in exts or not path.is_file():
                 continue
+            try:
+                raw = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError) as e:
+                print("跳过 %s（读取失败：%s）" % (path, e), file=sys.stderr)
+                continue
             if path.suffix == ".py":
                 reader = python_candidates
             elif path.suffix == ".md":
                 reader = markdown_candidates
             else:
                 reader = frontend_candidates
-            try:
-                candidates = reader(path)
-            except (OSError, UnicodeDecodeError) as e:
-                print("跳过 %s（读取失败：%s）" % (path, e), file=sys.stderr)
-                continue
-            for line, end, text in candidates:
-                if has_copy_ok(path, line, end):
+            lines = raw.splitlines()
+            # 整文件没有例外标记就不必逐候选查（绝大多数文件没有 copy-ok）
+            marked = COPY_OK in raw
+            for line, end, text in reader(raw):
+                if marked and has_copy_ok(lines, line, end):
                     continue
                 for level, rule, why in check_text(text):
                     out.append({
@@ -393,16 +390,15 @@ def main(argv: List[str]) -> int:
     only_errors = "--errors" in argv
     update = "--update-baseline" in argv
 
-    hits = scan(root)
-    if only_errors:
-        hits = [v for v in hits if v["level"] == "error"]
+    all_hits = scan(root)
+    hits = [v for v in all_hits if v["level"] == "error"] if only_errors else all_hits
     base = load_baseline()
     fresh = [v for v in hits if key_of(v) not in base]
 
     if update:
         # 基线只记 **error** 档：闸门管的就是这一档，账本与口径必须一致。
         # warn 档（长句、破折号）需要人判断，写进基线只会让文件常年对不上。
-        keys = {key_of(v) for v in scan(root) if v["level"] == "error"}
+        keys = {key_of(v) for v in all_hits if v["level"] == "error"}
         save_baseline(keys)
         print("基线已更新：%d 条（仅 error 档）" % len(keys))
         return 0

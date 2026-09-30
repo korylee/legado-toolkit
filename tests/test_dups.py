@@ -17,8 +17,8 @@ import unittest
 
 from core.dups import (find_dup_groups, find_groups, find_host_groups,
                        find_mergeable_groups, find_mirror_groups,
-                       find_name_groups, host_of, render_report,
-                       rule_signature, same_site, site_key, summarize)
+                       find_name_groups, host_of,
+                       rule_signature, same_site, site_key)
 
 
 def src(url: str, name: str = "站", **extra) -> dict:
@@ -137,25 +137,6 @@ class KeepSuggestionTests(unittest.TestCase):
         self.assertEqual(
             self._keep_url([src("https://a.com#1"), src("https://a.com#2")]),
             "https://a.com#1")
-
-
-class ReportTests(unittest.TestCase):
-    def test_report_states_the_criteria_and_the_two_categories(self) -> None:
-        """清单是给人做删除决策的：判据和"哪类能自动处理、哪类要人看"都要写在纸上。"""
-        # 两组**规则不同**的源：一组同域名重复、一组跨域名（别写成一模一样的规则，
-        # 那样四条会并成一组，测的就不是"两类分别统计"了）
-        sources = [src("https://a.com#x"), src("https://a.com#y"),
-                   src("https://b.com", searchUrl="/other?q={{key}}"),
-                   src("https://b.net", searchUrl="/other?q={{key}}")]
-        groups = find_dup_groups(sources)
-        text = render_report(groups, len(sources), source_label="测试")
-        self.assertIn("只读", text)
-        self.assertIn("同一站点", text)
-        self.assertIn("跨站点", text)
-        self.assertIn("不改任何数据", text)
-        s = summarize(groups, len(sources))
-        self.assertEqual(s["same_site_redundant"], 1)
-        self.assertEqual(s["cross_site_groups"], 1)
 
 
 class HostAndNameGroupTests(unittest.TestCase):

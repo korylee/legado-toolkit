@@ -25,7 +25,7 @@ _ROOT = pathlib.Path(__file__).resolve().parent.parent
 #: 400+ 个 .py、frontend/node_modules 的 1371 个目录全在监视范围内。代价实测：
 #: 退回 StatReload 轮询时是 313ms/次（125% 单核，忙循环），限定后 10ms/次；
 #: 即便用 WatchFilesReload，少注册一千多个目录句柄也更省。
-RELOAD_DIRS = ("backend", "core", "services", "cli", "tools")
+RELOAD_DIRS = ("backend", "core", "services", "tools")
 
 
 def _env_flag(name: str) -> bool:
