@@ -346,7 +346,7 @@ class SettingsPatch(BaseModel):
 
 
 class JobCreate(BaseModel):
-    kind: str = Field(description="check / diagnose / repair")
+    kind: str = Field(description="任务类型：check / add / jvm_run")
     payload: Dict[str, Any] = Field(default_factory=dict)
 
 

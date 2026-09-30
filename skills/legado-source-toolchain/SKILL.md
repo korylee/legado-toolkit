@@ -1,6 +1,6 @@
 ---
 name: legado-source-toolchain
-description: 本仓库 Legado 书源工具链的用法——SQLite 管理库（含迁移与对拍）、规则回放器的边界、AI 修复循环。命令清单与典型参数见 README 的「按场景查命令」。
+description: 本仓库 Legado 书源工具链的用法——SQLite 管理库（含迁移与对拍）、规则回放器的边界、AI 提议与验收的边界。命令清单与典型参数见 README 的「按场景查命令」。
 ---
 
 # Legado 书源工具链
@@ -39,17 +39,21 @@ description: 本仓库 Legado 书源工具链的用法——SQLite 管理库（�
 
 → 这是 AGENTS #4 的落点：**「我们做不到」必须说出来**，不能被读成源坏了。
 
-## 三、AI 修复循环
+## 三、AI 提议（只有调试工作台一条路）
 
-    $env:LEGADO_LLM_API_KEY = "sk-..."       # 没配 key 时自动降级成 dry_run
+CLI 的批量修复循环（`cli repair` / `core/repair/loop.py`）已按调用图退场（2026-09-30）：
+它 file-in/file-out 回写 JSON、绕开管理库，验收那一步也没有可用提供方。今天 AI 只做**单步提议**：
+
+    POST /api/rules/suggest-rule      # 只提议；dry_run 那趟免费（回放器初筛，不发模型请求）
+    POST /api/rules/verify-candidate  # 用户显式点击才跑，本机引擎验收这一条
+
+**模型只提议，验收一律由本机引擎完成**；回放器只用在不花钱的初筛上（AGENTS #3）。
+
+批量的诊断仍走 CLI：
+
     python cli/main.py diagnose -i x.json -o out/diagnose.md --only-dead
-    python cli/main.py repair   -i x.json --report out/repair.md
-    python cli/main.py repair   -i x.json --write -o data/x_fixed.json
 
-闭环是「抓证据 → 模型提议 → 回放验证 → 失败差异回喂重试」；**模型只提议，验收一律由回放器
-完成**，不通过不落地（AGENTS #3）。
-
-→ 花钱那一步永远在 `--write` 之前；`dry_run` 那趟不花模型。
+→ 花钱与验收都在用户点击之后；回放器不是第二个健康事实（lessons §七十三）。
 
 ## 四、一次批量的完整动作
 
