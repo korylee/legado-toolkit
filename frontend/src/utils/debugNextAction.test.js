@@ -3,15 +3,15 @@ import test from "node:test";
 
 import { firstNextDebugAction, nextDebugAction } from "./debugNextAction.js";
 
-test("unknown 动态层给出连 App 调试出口", () => {
+test("unknown 动态层给出本机缺口诊断动作", () => {
   const result = nextDebugAction(
     { name: "content", verdict: "unknown" },
     { channel: "jvm", layer: "L3" },
   );
   assert.deepEqual(result, {
-    kind: "app",
-    label: "连 App 调试（真机复查）",
-    reason: "这一步的数据要渲染、解密或执行脚本后才有，本机引擎取不到",
+    kind: "diagnosis",
+    label: "查看本机缺口",
+    reason: "本机引擎尚未取得渲染、解密或脚本执行后的运行时材料",
   });
 });
 

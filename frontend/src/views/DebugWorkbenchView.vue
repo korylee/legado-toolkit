@@ -31,6 +31,12 @@ const name = computed(() => (source.value || {}).bookSourceName || "（无名）
 const url = computed(() => (source.value || {}).bookSourceUrl || "");
 const hasExploreConfig = computed(() => !!String((source.value || {}).exploreUrl || "").trim());
 const currentTarget = computed(() => DEBUG_TARGETS.find((t) => t.value === target.value) || DEBUG_TARGETS[0]);
+//: 入口层在有结果之后收成一行：结果一出来，视线该落在步骤卡片上，
+//: 通道/缓存/IP 这些**本次运行参数**折进「调试选项」（AGENTS #68：动作与结果同屏）
+const advancedOpen = ref(false);
+const entryCompact = computed(() => !!result.value && !advancedOpen.value);
+const channelLabel = computed(() => (channel.value === "app" ? "连 App" : "本机引擎"));
+const cacheLabel = computed(() => (DEBUG_CACHE_MODES.find((m) => m.value === cacheMode.value) || {}).label || "");
 const initialStep = computed(() => String(route.query.step || ""));
 const debugHint = computed(() => target.value === "explore" && !hasExploreConfig.value
   ? "这个源没配 exploreUrl，请填一个发现页 URL" : currentTarget.value.hint);
@@ -188,10 +194,17 @@ onMounted(() => {
         <el-button size="small" type="primary" :loading="running" @click="debugRun()">开始调试</el-button>
         <el-button v-if="running" size="small" @click="cancelRun">取消等待</el-button>
       </div>
-      <div class="wb-secondary-row">
+      <div class="wb-secondary-row" :class="{ 'is-hidden': entryCompact }">
         <span class="muted wb-option-label">通道</span><el-radio-group v-model="channel" size="small"><el-radio-button value="jvm">本机引擎</el-radio-button><el-radio-button value="app">连 App</el-radio-button></el-radio-group>
         <span class="muted wb-option-label">缓存</span><el-select v-model="cacheMode" size="small" class="wb-cache"><el-option v-for="m in DEBUG_CACHE_MODES" :key="m.value" :value="m.value" :label="m.label" /></el-select>
         <span v-if="budget" class="muted wb-budget">预算 {{ budget }} 秒</span><el-input v-if="channel === 'app'" v-model="host" size="small" class="wb-host" placeholder="App IP，如 192.168.1.5" /><span v-if="running" class="muted wb-elapsed">已等待 {{ elapsed }} 秒<template v-if="budget"> / {{ budget }} 秒</template></span>
+      </div>
+      <!-- 有结果后：一眼看到「本次跑的是什么」，参数折着不占位 -->
+      <div v-if="result" class="wb-options-summary">
+        <span class="muted">{{ channelLabel }} · {{ cacheLabel }}<template v-if="budget"> · 预算 {{ budget }} 秒</template></span>
+        <el-button size="small" link type="primary" @click="advancedOpen = !advancedOpen">
+          {{ advancedOpen ? "收起调试选项" : "调试选项" }}
+        </el-button>
       </div>
       <p v-if="channel === 'app' && preflightState" class="wb-preflight muted">App 预检：{{ preflightState.state || '未知' }}</p>
     </section>
@@ -214,13 +227,30 @@ onMounted(() => {
 </template>
 
 <style scoped>
-.workbench-page { min-height: 100%; padding: 20px clamp(14px, 3vw, 36px) 36px; background: #f5f7fa; }
-.wb-panel { background: #fff; border: 1px solid #e4e7ed; border-radius: 10px; box-shadow: 0 1px 2px rgb(0 0 0 / 3%); }
-.wb-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 16px; }
+.workbench-page { min-height: 100%; padding: 20px clamp(14px, 3vw, 36px) 36px; background: var(--app-bg); }
+.wb-panel { background: var(--app-surface); border: 1px solid var(--app-border-light); border-radius: 10px; box-shadow: 0 1px 2px rgb(0 0 0 / 3%); }
+/* 三层结构靠「阴影 + 底色 + 状态条」区分，而不是三张一样的白卡：
+   页面层只交代源身份（扁平），入口层是一张卡，工作区的步骤卡片最强 */
+.wb-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 16px; box-shadow: none; }
 .wb-head-main, .wb-head-actions, .wb-source { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .wb-source { gap: 8px; }.wb-source-url { max-width: min(48vw, 620px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.wb-head-actions { flex: 0 0 auto; }
-.wb-entry { margin-top: 12px; padding: 14px 16px; }.wb-panel-title, .wb-primary-row, .wb-secondary-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }.wb-panel-title { justify-content: space-between; gap: 12px; margin-bottom: 12px; }.wb-panel-subtitle { margin-left: 8px; }.wb-primary-row { flex-wrap: nowrap; }.wb-target { width: 126px; flex: 0 0 auto; }.wb-query { min-width: 160px; flex: 1 1 280px; }.wb-secondary-row { margin-top: 10px; }.wb-option-label { margin-left: 2px; }.wb-cache { width: 112px; }.wb-host { width: 210px; }.wb-budget, .wb-elapsed { margin-left: 4px; }.wb-preflight { margin: 8px 0 0; }.wb-body { margin-top: 14px; }
-@media (max-width: 720px) { .workbench-page { padding: 10px 10px 24px; }.wb-head { align-items: flex-start; padding: 10px 12px; }.wb-head-main { align-items: flex-start; }.wb-head-actions { flex-direction: column; align-items: flex-end; gap: 6px; }.wb-source { flex-direction: column; align-items: flex-start; gap: 2px; }.wb-source-url { max-width: 56vw; }.wb-entry { padding: 12px; }.wb-primary-row { flex-wrap: wrap; }.wb-target, .wb-query { width: 100%; flex-basis: 100%; }.wb-primary-row .el-button { flex: 1 1 auto; }.wb-secondary-row { align-items: flex-start; }.wb-host { width: 100%; } }
+.wb-entry { margin-top: 12px; padding: 14px 16px; }.wb-panel-title, .wb-primary-row, .wb-secondary-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }.wb-panel-title { justify-content: space-between; gap: 12px; margin-bottom: 12px; }.wb-panel-subtitle { margin-left: 8px; }.wb-primary-row { flex-wrap: nowrap; }.wb-target { width: 126px; flex: 0 0 auto; }.wb-query { min-width: 160px; flex: 1 1 280px; }.wb-secondary-row { margin-top: 10px; }.wb-secondary-row.is-hidden { display: none; }.wb-options-summary { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 8px; }.wb-option-label { margin-left: 2px; }.wb-cache { width: 112px; }.wb-host { width: 210px; }.wb-budget, .wb-elapsed { margin-left: 4px; }.wb-preflight { margin: 8px 0 0; }.wb-body { margin-top: 14px; }
+@media (max-width: 720px) {
+  .workbench-page { padding: 10px 10px 24px; }
+  .wb-head { display: block; padding: 10px 12px; }
+  .wb-head-main { width: 100%; align-items: flex-start; }
+  .wb-source { min-width: 0; flex: 1 1 auto; flex-direction: column; align-items: flex-start; gap: 2px; }
+  .wb-source-url { width: 100%; max-width: 100%; }
+  .wb-head-actions { width: 100%; margin-top: 10px; flex-direction: row; align-items: center; gap: 6px; }
+  .wb-head-actions .el-tag { margin-right: auto; }
+  .wb-head-actions .el-button { flex: 1 1 0; min-width: 0; }
+  .wb-entry { padding: 12px; }
+  .wb-primary-row { flex-wrap: wrap; }
+  .wb-target, .wb-query { width: 100%; flex-basis: 100%; }
+  .wb-primary-row .el-button { flex: 1 1 auto; }
+  .wb-secondary-row { align-items: flex-start; }
+  .wb-host { width: 100%; }
+}
 </style>
 
 <style>

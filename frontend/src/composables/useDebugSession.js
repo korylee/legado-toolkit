@@ -379,8 +379,8 @@ async function executeRun({ source: runSource, target: runTarget, query: runQuer
   pushed.value = "";
   try {
     if (runChannel === "jvm") {
-      const r = await jvmDebug(runSourceSnapshot, runTarget, runQuery, null, "",
-        runCacheMode, abort ? abort.signal : null);
+      const r = await jvmDebug({ source: runSourceSnapshot, target: runTarget,
+        query: runQuery, cache: runCacheMode, signal: abort?.signal });
       return storeResult(r);
     }
     // 连 App：先预检——调试 WS 对 App 库里查不到的 tag 静默无响应，而且它跑的
@@ -394,8 +394,9 @@ async function executeRun({ source: runSource, target: runTarget, query: runQuer
     if (needPush && !(askPush ? await askPush(pf.state) : false)) {
       return null; // 用户取消推送：保留原结果，但不让调用方误当成这次运行的结果
     }
-    const r = await appDebug(runSourceSnapshot, runTarget, runQuery, runHost, 0,
-      needPush, runCacheMode, abort ? abort.signal : null);
+    const r = await appDebug({ source: runSourceSnapshot, target: runTarget,
+      query: runQuery, host: runHost, port: 0, push: needPush,
+      cache: runCacheMode, signal: abort?.signal });
     const stored = storeResult(r);
     if (!stored.error) {
       pushed.value = needPush ? pf.state : "";

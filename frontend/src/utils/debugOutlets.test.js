@@ -3,11 +3,11 @@ import test from "node:test";
 
 import { debugOutletFor } from "./debugOutlets.js";
 
-test("本机 unknown 的动态层提供 App 真机复查出口", () => {
+test("本机 unknown 的动态层提供本机缺口诊断动作", () => {
   for (const layer of ["L2", "L3", "L4", "L5"]) {
     const outlet = debugOutletFor({ channel: "jvm", verdict: "unknown", layer });
-    assert.equal(outlet.kind, "app");
-    assert.equal(outlet.label, "连 App 调试（真机复查）");
+    assert.equal(outlet.kind, "diagnosis");
+    assert.equal(outlet.label, "查看本机缺口");
   }
 });
 

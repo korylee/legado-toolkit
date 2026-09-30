@@ -20,8 +20,10 @@ import { api } from "./client";
 // cache 是**页面缓存**策略，只管我们补抓的那几页（跑链本身还得联网，是 App 在跑）：
 //   "auto"（默认）命中就用，缺失就抓 · "only" 一页都不补抓 · "refresh" 忽略缓存重抓。
 // 取值就是后端 core.fetch 的那三个常量（后端按同一份枚举校验，对不上给 400）。
-export const appDebug = (source, target, query, host, port, push = false,
-                         cache = "auto", signal = null) =>
+// 下面两个调试入口一律**对象传参**：形参七八个，位置传参在 JS 下不设防——
+// 801a0ec 曾整体右移一位（signal 位吃到 "auto"，fetch 当场抛 TypeError）。
+export const appDebug = ({ source, target, query, host, port, push = false,
+                           cache = "auto", signal = null }) =>
   api.post("/rules/app-debug",
            { source, target, query, host, port, push, cache },
            signal ? { signal } : {});
@@ -35,14 +37,17 @@ export const appDebug = (source, target, query, host, port, push = false,
 //
 // cache 与连 App 那条同一个含义：只管**我们补抓的那几页**。
 //
+// target + query 语义化入参，与上面 appDebug 同一约定：key 由后端
+// `core/debug_keys` 拼装，前端不拼。
+//
 // timeout **不传**（null）就吃设置里的 debug.timeout——默认值只有后端一份
 // （AGENTS #8）；前端曾经写死 60，与桥的渲染上限同值、互相掐死。
-export const jvmDebug = (source, key, timeout = null, cookie = "", cache = "auto",
-                         signal = null) =>
+export const jvmDebug = ({ source, target, query, timeout = null, cookie = "",
+                           cache = "auto", signal = null }) =>
   api.post("/rules/jvm-debug",
            timeout == null
-             ? { source, key, cookie, cache }
-             : { source, key, timeout, cookie, cache },
+             ? { source, target, query, cookie, cache }
+             : { source, target, query, timeout, cookie, cache },
            signal ? { signal } : {});
 
 // 调试前预检：把「静默无响应」拆成 unreachable / missing / ready 三种状态。

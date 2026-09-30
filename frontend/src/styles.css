@@ -7,10 +7,45 @@ html, body, #app {
 }
 * { box-sizing: border-box; }
 
+/* ================= 设计令牌 =================
+   全局只放跨页面复用的语义令牌；页面/组件专属的（如调试面板底色）挂在组件根节点，
+   否则调试页换配色会外溢到列表、回收站和任务抽屉。
+   颜色以 Element Plus 变量为底层来源：这里只做语义命名，不另存一份色值——
+   两处各写一遍的话，主题一换就只烂一边。 */
+:root {
+  --app-bg: #f5f7fa;                                  /* 页面底色，EP 无对应变量 */
+  --app-surface: var(--el-bg-color, #ffffff);
+  --app-border: var(--el-border-color, #dcdfe6);
+  --app-border-light: var(--el-border-color-light, #e4e7ed);
+  --app-text: var(--el-text-color-primary, #303133);
+  --app-text-secondary: var(--el-text-color-regular, #606266);
+  --app-text-muted: var(--el-text-color-secondary, #909399);
+
+  --app-primary: var(--el-color-primary, #409eff);
+  --app-success: var(--el-color-success, #67c23a);
+  --app-warning: var(--el-color-warning, #e6a23c);
+  --app-danger: var(--el-color-danger, #f56c6c);
+
+  /* 状态语义：圆点、标签、调试摘要共用一套，同一个状态不许在不同组件里换色 */
+  --app-status-pass: var(--app-success);
+  --app-status-fail: var(--app-danger);
+  --app-status-warning: var(--app-warning);
+  --app-status-unknown: var(--el-color-info, #909399);
+
+  --app-radius-sm: 4px;
+  --app-radius-md: 6px;
+  --app-radius-lg: 8px;
+  --app-space-1: 4px;
+  --app-space-2: 8px;
+  --app-space-3: 12px;
+  --app-space-4: 16px;
+  --app-touch-size: 36px;
+}
+
 body {
   font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
-  background: #f5f7fa;
-  color: #303133;
+  background: var(--app-bg);
+  color: var(--app-text);
   -webkit-font-smoothing: antialiased;
   -webkit-tap-highlight-color: transparent;
 }
@@ -22,9 +57,9 @@ body {
 .app-header {
   flex: 0 0 52px;
   display: flex; align-items: center; gap: 14px;
-  padding: 0 16px;
-  background: #fff;
-  border-bottom: 1px solid #e4e7ed;
+  padding: 0 var(--app-space-4);
+  background: var(--app-surface);
+  border-bottom: 1px solid var(--app-border-light);
   z-index: 10;
 }
 .app-header .title { font-size: 16px; font-weight: 600; white-space: nowrap; }
@@ -55,19 +90,19 @@ body {
 
 /* ================= 工具栏 ================= */
 .bar {
-  display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
-  padding: 10px 12px;
-  background: #fff;
-  border: 1px solid #e4e7ed;
-  border-radius: 6px;
+  display: flex; flex-wrap: wrap; gap: var(--app-space-2); align-items: center;
+  padding: 10px var(--app-space-3);
+  background: var(--app-surface);
+  border: 1px solid var(--app-border-light);
+  border-radius: var(--app-radius-md);
 }
 .bar .grow { flex: 1 1 auto; }
 
 /* ================= 通用 ================= */
-.toolbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.toolbar { display: flex; gap: var(--app-space-2); flex-wrap: wrap; align-items: center; }
 .toolbar .grow { flex: 1 1 auto; }
 
-.muted { color: #909399; font-size: 12px; }
+.muted { color: var(--app-text-muted); font-size: 12px; }
 .mono { font-family: Consolas, Monaco, monospace; font-size: 12px; }
 .nowrap { white-space: nowrap; }
 
@@ -75,11 +110,11 @@ body {
    别按"弹窗/抽屉内部样式"去理解它：`<i class="dot">` 是我们写进各自模板的元素，
    谁写的谁管，scoped 本来也够得到自己那份（AGENTS #15）。 */
 .dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; background: #c0c4cc; }
-.dot.ok { background: #67c23a; }
-.dot.warn { background: #e6a23c; }
-.dot.err { background: #f56c6c; }
+.dot.ok { background: var(--app-status-pass); }
+.dot.warn { background: var(--app-status-warning); }
+.dot.err { background: var(--app-status-fail); }
 /* 试跑调试：unknown（无法判定）用灰色，与 fail 的红明确区分 */
-.dot.unknown { background: #909399; }
+.dot.unknown { background: var(--app-status-unknown); }
 .el-table .cell { word-break: break-all; }
 
 /* ================= 移动端（<=900px） ================= */
@@ -90,8 +125,8 @@ body {
   .page-flex { gap: 10px; }
 
   /* 触摸目标：不再用 small，按钮/输入统一高度 */
-  .el-button:not(.is-link):not(.is-circle) { min-height: 36px; }
-  .el-input__wrapper, .el-select__wrapper { min-height: 36px; }
+  .el-button:not(.is-link):not(.is-circle) { min-height: var(--app-touch-size); }
+  .el-input__wrapper, .el-select__wrapper { min-height: var(--app-touch-size); }
 
   /* 对话框：占满宽度，顶部对齐留出键盘空间 */
   .el-dialog {
