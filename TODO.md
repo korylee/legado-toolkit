@@ -103,7 +103,7 @@
   再决定值不值。
 约束：受「频繁跑全量会被封 IP」这条硬约束，等下次真要跑量时顺带量（skills/legado-source-toolchain §四）。
 验收：给出上调前后的一档实测对比（时长与失败率）。
-指针：lessons §七十四，appservice/ValidateService.kt
+指针：lessons §七十四，appservice/test/io/legado/app/service/ValidateService.kt
 
 ### 条目：proj-3 · 第三期收尾：摘抽屉里最后那块本地投影
 状态：open
@@ -122,7 +122,8 @@
 依赖：无
 优先级：P2
 背景：摘要里的变化数点了没反应。
-约束：要与统计条 chip 的筛选状态协同，不能各管一套筛选。
+约束：要与统计条 chip 的筛选状态协同，不能各管一套筛选；动手时顺手把筛选条
+  拆成独立组件，别再往 SourcesView 续写。
 验收：点变化数后列表筛到对应子集，且 chip 状态同步。
 指针：frontend/src/views/SourcesView.vue
 
@@ -264,7 +265,7 @@
 依赖：agent-action-schema, agent-layer-router
 优先级：P1
 背景：不新增聊天页；现有 `DebugWorkbench` 已有步骤、证据、结果、重跑和规则应用入口，只需增加按当前步骤显示的“下一步建议”卡片。
-约束：默认只显示当前 Layer、已确认事实、一个主动作和证据入口；AI 推测、本机验证、App 实测、用户确认分开标识；应用 Proposal 前必须经过 schema 校验；任何自动调用 AI、自动推送 App 和自动保存源都禁止；移动端首屏保留失败原因与主动作。
+约束：默认只显示当前 Layer、已确认事实、一个主动作和证据入口；AI 推测、本机验证、App 实测、用户确认分开标识；应用 Proposal 前必须经过 schema 校验；任何自动调用 AI、自动推送 App 和自动保存源都禁止；移动端首屏保留失败原因与主动作；建议卡与证据区以独立组件落地，不在 DebugWorkbench 主文件续写。
 验收：L1-L5 都能在工作台看到唯一主动作；口袋漫画成功时可从建议卡应用正文策略并重跑；失败时可直达对应证据或引擎重试；未配置模型时仍能看到确定性动作；现有重跑、对比、取消和证据展示不回归。
 指针：frontend/src/components/DebugWorkbench.vue，frontend/src/views/DebugWorkbenchView.vue，frontend/src/composables/useDebugSession.js
 
@@ -276,29 +277,6 @@
 约束：只允许读取证据行附近片段、运行时键摘要、字段类型/长度、网络响应形状和指定脚本命中片段；禁止读取完整 Cookie、密钥和无界 bundle；每轮最多一次模型调用和有限次取证，超过预算转为用户动作；预算与错误原因写入结果，不静默截断。
 验收：完整 HTML/脚本不会默认进入模型请求；超出预算时界面显示具体原因和手动入口；同一失败不会自动循环调用；脱敏与截断有单测覆盖。
 指针：backend/api/rules.py，core/js_hints.py，frontend/src/components/DebugWorkbench.vue
-
-### 条目：arch-thin · jvm.py 执行引擎拆层与前端瘦身
-状态：todo
-依赖：无
-优先级：P2
-背景：2026-09-30 盘点出的三个维护面，收口成一条：
-  ① `backend/api/jvm.py`（1221 行）里 manifest 写盘、Gradle 拉起、分块执行、
-  tail 线程这些执行引擎和 HTTP 端点同层，引擎没法被 jobs 页 / CLI 复用；
-  ② 前端 `DebugWorkbench.vue`（1773 行）与 `SourcesView.vue`（1197 行）没有
-  拆分计划（`SourceEditDialog` 已由 ux-debug-editor 覆盖，不在此列）；
-  ③ `frontend/src/utils/*.test.js` 存在但 `package.json` 没有 test 入口，
-  前端断言不可发现也不可持续跑。
-约束：
-  ① 拆层只挪位置不改行为，执行逻辑落 `backend/jobs/`，靠现有用例钉住；时机与
-  agent-* 批次正相关——先拆再加，别在 API 模块里继续堆 agent 链。
-  ② DebugWorkbench 的增量（agent-workbench 的建议卡、证据区）走独立组件，
-  不在主文件续写；SourcesView 的筛选条在做 ux-chip-jump 时顺手拆。
-  ③ 前端测试入口从简（node --test 聚合或 vitest 择一），跑法写进 README
-  已有的测试段，不另开文档。
-验收：jvm.py 端点只剩 HTTP 编排、执行引擎可独立调用且全量用例绿；`package.json`
-  有 test 入口、全部前端断言一键可跑且与 tests/test_frontend_utils 同一跑法；
-  两个大组件的后续增量有独立组件可落。
-指针：backend/api/jvm.py，backend/jobs/runner.py，frontend/src/components/DebugWorkbench.vue，frontend/src/views/SourcesView.vue，frontend/package.json
 
 ---
 

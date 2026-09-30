@@ -136,7 +136,7 @@ class EngineWiringTests(unittest.TestCase):
         self.assertIn("resolve_proxy()", src, "/rules/jvm-debug 没把全局代理交下去")
 
     def test_the_batch_exporter_applies_it_per_source(self):
-        src = (pathlib.Path(__file__).parent.parent / "backend/api/jvm.py").read_text(
+        src = (pathlib.Path(__file__).parent.parent / "backend/jobs/jvm_exec.py").read_text(
             encoding="utf-8")
         self.assertIn("apply_proxy_header(row, proxy)", src,
                       "跑批导出的源没带代理（那就会「跑批没走、调试走了」）")

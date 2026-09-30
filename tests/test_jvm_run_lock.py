@@ -26,6 +26,7 @@ import unittest
 from unittest import mock
 
 from backend.api import jvm as jvm_api
+from backend.jobs import jvm_exec
 from core import jvm_debug, jvm_direct
 
 
@@ -62,16 +63,18 @@ class _Base(unittest.TestCase):
         self.fail_gradle = False
 
         for p in (
-            mock.patch.object(jvm_api, "_AGSVC", agsvc),
+            mock.patch.object(jvm_exec, "_AGSVC", agsvc),
             mock.patch.object(jvm_api, "data_dir", lambda: self.tmp / "data"),
+            mock.patch.object(jvm_exec, "data_dir", lambda: self.tmp / "data"),
             mock.patch.object(jvm_api, "Store", _FakeStore),
+            mock.patch.object(jvm_exec, "Store", _FakeStore),
             mock.patch.object(jvm_api, "readiness", lambda repo, sdk="": {"ok": True, "checks": []}),
             # 同 test_jvm_run_scope：机器上存在真实 snapshot 时不能走上真 daemon
             mock.patch.object(jvm_direct, "dump_path",
                               lambda: self.tmp / "data" / "app_probe" / "test_jvm_env.json"),
             mock.patch.object(jvm_api, "_export_sources_file", self._fake_export),
-            mock.patch.object(jvm_api, "_write_meta", lambda rows: "testbatch"),
-            mock.patch.object(jvm_api, "_run_gradle", self._fake_gradle),
+            mock.patch.object(jvm_exec, "_write_meta", lambda rows: "testbatch"),
+            mock.patch.object(jvm_exec, "_run_gradle", self._fake_gradle),
             mock.patch.object(jvm_api.settings_store, "load",
                               lambda: {"network": {"proxy": ""}, "jvm": {"app_repo": "X:/repo", "keyword": "我",
                                                "timeout": 25, "concurrency": 8,
@@ -121,7 +124,7 @@ class _Base(unittest.TestCase):
                 r = await jvm_api.jvm_run()
             if not r.get("job_id"):
                 return r
-            got = await jvm_api.run_jvm_job("testjob", _FakeStore(), submitted["payload"])
+            got = await jvm_exec.run_jvm_job("testjob", _FakeStore(), submitted["payload"])
             # 前端看到的是两份拼起来：`started` 来自请求（预检），其余来自任务结果
             return dict(r, **got)
 

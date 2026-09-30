@@ -23,6 +23,7 @@ import unittest
 from unittest import mock
 
 from backend.api import jvm as jvm_api
+from backend.jobs import jvm_exec
 from core.store import Store
 
 _DUMP = {"workingDir": "C:/repo", "classpath": "x", "maxHeapSize": "3g",
@@ -73,11 +74,11 @@ class JvmRunProgressTests(unittest.TestCase):
                 return {"code": 0, "cost_ms": 1, "error": ""}
         # runner 的阶段/进度更新走短连接（runner 自己的 Store）：必须落到这份
         # 临时库——落到真库的话 job 不存在、UPDATE 是 no-op，断言会恒 0
-        with mock.patch.object(jvm_api, "_run_gradle", gradle), \
-             mock.patch.object(jvm_api, "_write_meta", lambda rows: "testbatch"), \
+        with mock.patch.object(jvm_exec, "_run_gradle", gradle), \
+             mock.patch.object(jvm_exec, "_write_meta", lambda rows: "testbatch"), \
              mock.patch("core.jvm_health.store_checks", lambda *a, **kw: 0), \
-             mock.patch.object(jvm_api, "_PROGRESS_POLL_INTERVAL", 0.05), \
-             mock.patch.object(jvm_api, "execution_readiness",
+             mock.patch.object(jvm_exec, "_PROGRESS_POLL_INTERVAL", 0.05), \
+             mock.patch.object(jvm_exec, "execution_readiness",
                                lambda dump=None: {"ok": True}), \
              mock.patch("core.jvm_direct.load_dump", return_value=dict(_DUMP)), \
              mock.patch("core.jvm_validate_daemon.run", daemon), \
@@ -86,7 +87,7 @@ class JvmRunProgressTests(unittest.TestCase):
              mock.patch.object(jvm_api.runner, "Store",
                                lambda *a, **kw: Store(self.db)):
             return asyncio.run(
-                jvm_api.run_jvm_job("testjob", Store(self.db), payload))
+                jvm_exec.run_jvm_job("testjob", Store(self.db), payload))
 
     @staticmethod
     def _rows(out: pathlib.Path, urls: list) -> None:

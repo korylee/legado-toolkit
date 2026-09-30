@@ -28,6 +28,7 @@ import uuid
 from unittest import mock
 
 from backend.api import jvm as jvm_api
+from backend.jobs import jvm_exec
 from backend.schemas import JvmRunRequest
 from core import jvm_direct
 from core.loader import _normalize_url
@@ -49,17 +50,19 @@ class _Base(unittest.TestCase):
         self.gradle_result = 0
         self.no_output = False
         for p in (
-            mock.patch.object(jvm_api, "_AGSVC", self.probe / "appservice"),
+            mock.patch.object(jvm_exec, "_AGSVC", self.probe / "appservice"),
             mock.patch.object(jvm_api, "data_dir", lambda: self.probe / "data"),
+            mock.patch.object(jvm_exec, "data_dir", lambda: self.probe / "data"),
             mock.patch.object(jvm_api, "readiness", lambda repo, sdk="": {"ok": True, "checks": [], "runtime": {"app_repo": "X:/repo", "java_home": "X:/jdk", "android_sdk": "X:/sdk", "gradle_user_home": "X:/.gradle"}}),
             mock.patch.object(jvm_api, "execution_readiness", lambda dump=None: {"ok": True, "checks": [], "reason": "", "source_sig": "sig"}),
+            mock.patch.object(jvm_exec, "execution_readiness", lambda dump=None: {"ok": True, "checks": [], "reason": "", "source_sig": "sig"}),
             # 隔离真机状态：机器上可能有真实 runtime snapshot（准备态的产物），
             # 不隔离的话单条任务会走上真 daemon——这批测试原本依赖
             # 「data/ 里没有 dump」这个巧合，snapshot 一存在就整批变红。
             mock.patch.object(jvm_direct, "dump_path",
                               lambda: self.probe / "data" / "app_probe" / "test_jvm_env.json"),
-            mock.patch.object(jvm_api, "_write_meta", lambda rows: "testbatch"),
-            mock.patch.object(jvm_api, "_run_gradle", self._fake_gradle),
+            mock.patch.object(jvm_exec, "_write_meta", lambda rows: "testbatch"),
+            mock.patch.object(jvm_exec, "_run_gradle", self._fake_gradle),
             mock.patch.object(jvm_api.settings_store, "load",
                               lambda: {"network": {"proxy": ""}, "jvm": {"app_repo": "X:/repo", "keyword": "我",
                                                "timeout": 25, "concurrency": 8,
@@ -119,11 +122,11 @@ class _Base(unittest.TestCase):
             if run_job and r.get("job_id"):
                 # **传真的 store**：任务体要读一次「跑之前的 checks 快照」算变化，
                 # 传 None 会当场 AttributeError（生产里 runner 一定会给 store）
-                got = await jvm_api.run_jvm_job("testjob", Store(self.db), submitted["payload"])
+                got = await jvm_exec.run_jvm_job("testjob", Store(self.db), submitted["payload"])
                 return dict(r, **got)
             return r
 
-        with mock.patch.object(jvm_api, "Store", lambda *a, **kw: Store(self.db)),              mock.patch("core.jvm_health.store_checks", lambda *a, **kw: 0):
+        with mock.patch.object(jvm_api, "Store", lambda *a, **kw: Store(self.db)),              mock.patch.object(jvm_exec, "Store", lambda *a, **kw: Store(self.db)),              mock.patch("core.jvm_health.store_checks", lambda *a, **kw: 0):
             return asyncio.run(go())
 
     def _batch(self) -> list:
@@ -163,18 +166,18 @@ class ScopeTests(_Base):
                     "environment": {}, "jvmArgs": [], "systemProperties": {},
                     "javaHomeEnv": "C:/jdk"}), \
                  mock.patch("core.jvm_validate_daemon.run", side_effect=fake_daemon), \
-                 mock.patch.object(jvm_api, "execution_readiness", return_value={"ok": True}), \
-                 mock.patch.object(jvm_api, "_read_results", return_value=[]), \
-                 mock.patch.object(jvm_api, "_write_meta", return_value="legacy-batch"), \
+                 mock.patch.object(jvm_exec, "execution_readiness", return_value={"ok": True}), \
+                 mock.patch.object(jvm_exec, "_read_results", return_value=[]), \
+                 mock.patch.object(jvm_exec, "_write_meta", return_value="legacy-batch"), \
                  mock.patch("core.jvm_health.store_checks", return_value=0):
-                return await jvm_api.run_jvm_job("legacy-job", Store(self.db), payload)
+                return await jvm_exec.run_jvm_job("legacy-job", Store(self.db), payload)
 
         result = asyncio.run(go())
         self.assertEqual(result["execution_mode"], "validate_daemon")
         self.assertFalse(run_dir.exists())
 
     async def _cancelled_job(self, payload):
-        task = asyncio.create_task(jvm_api.run_jvm_job(
+        task = asyncio.create_task(jvm_exec.run_jvm_job(
             "cancel-job", Store(self.db), payload))
         started = payload["started"]
         for _ in range(100):
@@ -198,7 +201,7 @@ class ScopeTests(_Base):
         out_path = run_dir / "results.jsonl"
         source_file.write_text("[]", encoding="utf-8")
         args_file.write_text("file=%s\nout=%s\n" % (source_file, out_path), encoding="utf-8")
-        manifest = jvm_api._build_jvm_manifest(
+        manifest = jvm_exec._build_jvm_manifest(
             run_dir=run_dir, source_file=source_file, args_file=args_file,
             out_path=out_path, single=False, execution_plan="gradle",
             allow_gradle_fallback=True, runtime={"app_repo": "X:/repo"},
@@ -215,7 +218,7 @@ class ScopeTests(_Base):
             return {"exit": 1, "stdout": "", "stderr": "cancelled"}
 
         async def go():
-            with mock.patch.object(jvm_api, "_run_gradle", side_effect=blocking_gradle):
+            with mock.patch.object(jvm_exec, "_run_gradle", side_effect=blocking_gradle):
                 await self._cancelled_job(payload)
 
         asyncio.run(go())
@@ -250,11 +253,11 @@ class ScopeTests(_Base):
         # 过的 URL 与导出原文必须在这里统一）
         self.assertEqual(manifest["urls"], ["https://a.com"])
         self.assertIn("keyword", manifest["params"])
-        self.assertEqual(jvm_api._manifest_error(manifest), "")
+        self.assertEqual(jvm_exec._manifest_error(manifest), "")
 
         tampered = dict(manifest)
         tampered["out_path"] = tampered["out_path"] + ".changed"
-        self.assertIn("校验失败", jvm_api._manifest_error(tampered))
+        self.assertIn("校验失败", jvm_exec._manifest_error(tampered))
 
         malformed = dict(manifest)
         malformed.pop("args_file")
@@ -263,7 +266,7 @@ class ScopeTests(_Base):
         malformed["sha256"] = hashlib.sha256(
             json.dumps(body, ensure_ascii=False, sort_keys=True,
                        separators=(",", ":")).encode("utf-8")).hexdigest()
-        self.assertIn("结构不受支持", jvm_api._manifest_error(malformed))
+        self.assertIn("结构不受支持", jvm_exec._manifest_error(malformed))
 
     def test_queued_job_uses_runtime_snapshot_captured_at_submission(self) -> None:
         submitted = {}
@@ -301,7 +304,7 @@ class ScopeTests(_Base):
         with mock.patch.object(jvm_api, "readiness", side_effect=AssertionError(
                 "执行阶段不应重新检查环境")), \
              mock.patch("core.jvm_health.store_checks", lambda *a, **kw: 0):
-            result = asyncio.run(jvm_api.run_jvm_job(
+            result = asyncio.run(jvm_exec.run_jvm_job(
                 "queued-job", Store(self.db), submitted["payload"]))
 
         self.assertTrue(result["ok"])
@@ -479,13 +482,13 @@ class ResultShapeTests(_Base):
 
             with mock.patch.object(jvm_api.runner, "submit", side_effect=capture_submit):
                 r = await jvm_api.jvm_run(body)
-            return r, await jvm_api.run_jvm_job("testjob", Store(self.db), submitted["payload"])
+            return r, await jvm_exec.run_jvm_job("testjob", Store(self.db), submitted["payload"])
 
         # DNS 交叉验证要打桩：`store_checks` 默认会真去探测（测试不许联网）
         async def _fake_probe(host):
             return "answer", "1.2.3.4"
 
-        with mock.patch.object(jvm_api, "Store", lambda *a, **kw: Store(self.db)),                 mock.patch("core.dns_check.probe", _fake_probe):
+        with mock.patch.object(jvm_api, "Store", lambda *a, **kw: Store(self.db)),                 mock.patch.object(jvm_exec, "Store", lambda *a, **kw: Store(self.db)),                 mock.patch("core.dns_check.probe", _fake_probe):
             return asyncio.run(go())
 
     def test_result_carries_items_and_transitions(self) -> None:
@@ -571,8 +574,9 @@ class ResultShapeTests(_Base):
                            encoding="utf-8")
             return {"code": 0, "cost_ms": 3, "error": ""}
 
-        with mock.patch.object(jvm_api, "execution_readiness",
-                               side_effect=check_execution) as check, \
+        check = mock.Mock(side_effect=check_execution)
+        with mock.patch.object(jvm_api, "execution_readiness", new=check), \
+             mock.patch.object(jvm_exec, "execution_readiness", new=check), \
              mock.patch("core.jvm_direct.load_dump", return_value={
                  "workingDir": "C:/repo", "classpath": "x", "maxHeapSize": "3g",
                  "environment": {}, "jvmArgs": [], "systemProperties": {},
@@ -598,8 +602,9 @@ class ResultShapeTests(_Base):
         def check_execution(dump=None):
             return executable if dump is None else expired
 
-        with mock.patch.object(jvm_api, "execution_readiness",
-                               side_effect=check_execution), \
+        check = mock.Mock(side_effect=check_execution)
+        with mock.patch.object(jvm_api, "execution_readiness", new=check), \
+             mock.patch.object(jvm_exec, "execution_readiness", new=check), \
              mock.patch("core.jvm_direct.load_dump", return_value={
                  "workingDir": "C:/repo", "classpath": "x", "maxHeapSize": "3g",
                  "environment": {}, "jvmArgs": [], "systemProperties": {},
@@ -626,6 +631,7 @@ class ResultShapeTests(_Base):
         executable = {"ok": True, "checks": [], "reason": "", "source_sig": "sig"}
         with mock.patch.object(jvm_api, "readiness", return_value=incomplete), \
              mock.patch.object(jvm_api, "execution_readiness", return_value=executable), \
+             mock.patch.object(jvm_exec, "execution_readiness", return_value=executable), \
              mock.patch("core.jvm_direct.load_dump", return_value={
                  "workingDir": "C:/repo", "classpath": "x", "maxHeapSize": "3g",
                  "environment": {}, "jvmArgs": [], "systemProperties": {},
@@ -644,6 +650,7 @@ class ResultShapeTests(_Base):
         executable = {"ok": True, "checks": [], "reason": "", "source_sig": "sig"}
         with mock.patch.object(jvm_api, "readiness", return_value=incomplete), \
              mock.patch.object(jvm_api, "execution_readiness", return_value=executable), \
+             mock.patch.object(jvm_exec, "execution_readiness", return_value=executable), \
              mock.patch("core.jvm_direct.load_dump", return_value={
                  "workingDir": "C:/repo", "classpath": "x", "maxHeapSize": "3g",
                  "environment": {}, "jvmArgs": [], "systemProperties": {},
@@ -671,8 +678,7 @@ class ResultShapeTests(_Base):
 class ExportTests(_Base):
     """导出这一步本身。**这里曾经是个真缺陷**：`export_sources()` 给的是解析好的书源
     对象，而导出还在按「带 raw_json 的包装」读 → `d = None` → 任何有在用源的库都抛异常，
-    也就是说 `/api/jvm/run` 从来没在真库上跑通过（测试把这个函数整个打桩了，而历史上的
-    批量是走 CLI + 导出文件那条路）。"""
+    也就是说 `/api/jvm/run` 从来没在真库上跑通过（测试把这个函数整个打桩了）。"""
 
     def test_export_reads_the_view_directly(self) -> None:
         with Store(self.db) as st:
@@ -789,7 +795,7 @@ class ChunkExecutionTests(_Base):
             return self._fake_gradle(args_path=args_path, runtime=runtime)
 
         with mock.patch.object(jvm_api.settings_store, "load",
-                               lambda: dict(self._CHUNK_SETTINGS)),              mock.patch.object(jvm_api, "_run_gradle", side_effect=flaky_gradle):
+                               lambda: dict(self._CHUNK_SETTINGS)),              mock.patch.object(jvm_exec, "_run_gradle", side_effect=flaky_gradle):
             result = self._call()
         self.assertFalse(result["ok"])
         self.assertIn("第 2/2 块失败", result["reason"])
@@ -814,14 +820,15 @@ class ChunkExecutionTests(_Base):
 
         async def go():
             with mock.patch.object(jvm_api, "Store",
+                                   lambda *a, **kw: Store(self.db)),                  mock.patch.object(jvm_exec, "Store",
                                    lambda *a, **kw: Store(self.db)),                  mock.patch.object(jvm_api.runner, "submit",
                                    side_effect=capture_submit),                  mock.patch.object(jvm_api.settings_store, "load",
                                    lambda: dict(self._CHUNK_SETTINGS)),                  mock.patch("core.jvm_health.store_checks",
-                            lambda *a, **kw: 0),                  mock.patch.object(jvm_api, "_run_gradle",
+                            lambda *a, **kw: 0),                  mock.patch.object(jvm_exec, "_run_gradle",
                                    side_effect=flaky_gradle):
                 await jvm_api.jvm_run(
                     JvmRunRequest(urls=["https://a.com", "https://b.com"]))
-                return await jvm_api.run_jvm_job(
+                return await jvm_exec.run_jvm_job(
                     "resume-job", Store(self.db), submitted["payload"])
 
         asyncio.run(go())                     # 第一轮：第 2 块失败，目录保留
@@ -830,11 +837,12 @@ class ChunkExecutionTests(_Base):
 
         async def retry():
             with mock.patch.object(jvm_api, "Store",
+                                   lambda *a, **kw: Store(self.db)),                  mock.patch.object(jvm_exec, "Store",
                                    lambda *a, **kw: Store(self.db)),                  mock.patch.object(jvm_api.settings_store, "load",
                                    lambda: dict(self._CHUNK_SETTINGS)),                  mock.patch("core.jvm_health.store_checks",
-                            lambda *a, **kw: 0),                  mock.patch.object(jvm_api, "_run_gradle",
+                            lambda *a, **kw: 0),                  mock.patch.object(jvm_exec, "_run_gradle",
                                    side_effect=flaky_gradle):
-                return await jvm_api.run_jvm_job(
+                return await jvm_exec.run_jvm_job(
                     "resume-job-2", Store(self.db), saved_payload)
 
         result = asyncio.run(retry())
@@ -856,12 +864,12 @@ class GradleLogTests(unittest.TestCase):
         args_path = run_dir / "args.properties"
         args_path.write_text("file=x\n", encoding="utf-8")
         proc = mock.Mock(returncode=1, stdout="gradle 全量输出", stderr="boom")
-        with mock.patch.object(jvm_api, "_launcher",
+        with mock.patch.object(jvm_exec, "_launcher",
                                return_value=root / "appservice" / "legado-gradle.bat"), \
-             mock.patch.object(jvm_api, "_AGSVC", root / "appservice"), \
-             mock.patch.object(jvm_api, "data_dir", lambda: root), \
-             mock.patch.object(jvm_api.subprocess, "run", return_value=proc):
-            result = jvm_api._run_gradle(args_path=args_path, runtime={
+             mock.patch.object(jvm_exec, "_AGSVC", root / "appservice"), \
+             mock.patch.object(jvm_exec, "data_dir", lambda: root), \
+             mock.patch.object(jvm_exec.subprocess, "run", return_value=proc):
+            result = jvm_exec._run_gradle(args_path=args_path, runtime={
                 "app_repo": "X:/repo", "java_home": "X:/jdk", "android_sdk": "X:/sdk",
                 "gradle_user_home": "X:/.gradle"})
         self.assertEqual(result["exit"], 1)

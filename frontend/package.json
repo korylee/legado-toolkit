@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview --host"
+    "preview": "vite preview --host",
+    "test": "node --test src/utils/*.test.js"
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.1",
