@@ -137,6 +137,8 @@ def _evidence_refs(raw: Any, *, layer: str) -> list[dict[str, Any]]:
         str(item.get("kind", "")), str(item.get("source", "")),
         int(item.get("line", 0) or 0), str(item.get("why", "")),
     ))
+    for index, item in enumerate(out, 1):
+        item["id"] = "evidence-%03d" % index
     return out
 
 

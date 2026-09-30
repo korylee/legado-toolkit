@@ -25,6 +25,7 @@ class AgentContextTests(unittest.TestCase):
         self.assertEqual(context["facts"]["stats"]["links"], 12)
         self.assertTrue(context["facts"]["has_wanted"])
         self.assertEqual(context["evidence_refs"][0]["line"], 3)
+        self.assertEqual(context["evidence_refs"][0]["id"], "evidence-001")
         self.assertEqual(context["candidates"][0]["rule"], ".books .item")
         self.assertEqual(context["gaps"], [])
 

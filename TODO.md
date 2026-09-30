@@ -224,15 +224,6 @@
 - agent-evidence-budget
 指针：core/page_layer.py，frontend/src/utils/debugNextAction.js，frontend/src/components/DebugWorkbench.vue，backend/api/rules.py，lessons §七十三 / §八十
 
-### 条目：agent-action-schema · 固定 AgentProposal 动作协议
-状态：todo
-依赖：agent-context
-优先级：P1
-背景：自然语言建议无法可靠驱动现有调试链，需要统一的 `action / layer / reason_code / proposal / verification / evidence_refs` 结构。
-约束：动作限定为 `suggest_rule`、`run_jvm_debug`、`run_app_debug`、`inspect_runtime`、`suggest_api_rule`、`ask_user`、`stop_unsupported`；Proposal 只能写受控规则字段或策略字段；`verification.required` 必须为真；模型输出非 JSON、未知动作或越权字段必须显式返回错误原因并拒绝应用。
-验收：L1-L5 各有合法样例和非法样例；前端只消费协议字段不解析模型散文；未知动作不会触发网络、推送 App 或改写源；Proposal 能关联到已有证据行。
-指针：backend/schemas.py，backend/api/rules.py，frontend/src/utils/debugNextAction.js
-
 ### 条目：agent-layer-router · 按 L1-L5 选择本地动作与 AI 场景
 状态：todo
 依赖：agent-action-schema
@@ -622,3 +613,12 @@
 约束：Layer 判定继续来自 `core/page_layer.py`；上下文只保留目标、事实、证据引用、候选、能力、运行时/网络形状和明确缺口；敏感值只保留类型、长度和哈希，完整 HTML、脚本、Cookie、密文和响应体不进入输出。
 验收：L1-L5、缺材料、输入顺序稳定性、JSON 形状和敏感信息泄露均有测试；全量 Python 测试通过。
 指针：core/agent_context.py，tests/test_agent_context.py，tests/test_page_layer.py，lessons §七十三 / §八十
+
+### 条目：agent-action-schema · 固定 AgentProposal 动作协议
+状态：done
+依赖：agent-context
+优先级：P1
+背景：新增严格的 `AgentProposal` 协议校验，统一动作、Layer、原因码、Proposal、verification 和证据引用；协议只验证建议，不执行动作。
+约束：动作限定为七种受控 action；Proposal 字段按动作白名单校验；`verification.required` 必须为真；未知动作、非法 JSON、越权字段、无效 Layer 和不存在的证据引用都显式拒绝；不触发网络、App 或源保存。
+验收：L1-L5、七种动作、非法 JSON、未知动作、越权字段、验证要求、策略字段和证据引用均有测试；AgentContext 生成的稳定证据 ID 可被 Proposal 精确引用。
+指针：core/agent_actions.py，core/agent_context.py，tests/test_agent_actions.py，tests/test_agent_context.py，lessons §七十三 / §八十
