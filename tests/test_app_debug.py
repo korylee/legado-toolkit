@@ -423,7 +423,7 @@ class TestEmptyAndError(unittest.TestCase):
         self.assertEqual(step["reason"], "")
 
     def test_short_content_is_kept_in_full(self):
-        """正文全文照收，不做任何长度截断（与 verify_chain 的正文口径一致）。"""
+        """正文全文照收，不做任何长度截断（与判定链的正文口径一致）。"""
         long_text = "正文" * 1500        # 3000 字符
         step = build_steps(["︾开始解析正文页", "└" + long_text,
                             "︽正文页解析完成"])[0]
@@ -434,8 +434,8 @@ class TestEmptyAndError(unittest.TestCase):
 # ------------------------------------------------------------------ 形状
 
 class TestStepShape(unittest.TestCase):
-    def test_steps_have_same_keys_as_verify_chain(self):
-        """与 verify_chain 的 steps[] 同形——抽屉与卡片读的就是这些键。"""
+    def test_steps_have_the_judgement_keys(self):
+        """与判定链的 steps[] 同形（口径在 `quality.Judgement.as_step_dict`）——抽屉与卡片读的就是这些键。"""
         step = build_steps(SAMPLE)[0]
         for key in ("name", "ok", "detail", "verdict", "has_notes", "notes",
                     "reason", "shape", "evidence", "rule_error", "url",
@@ -462,7 +462,7 @@ class TestFetchPages(unittest.TestCase):
     def _steps(self):
         return build_steps(SAMPLE)
 
-    def test_pages_have_verify_chain_shape(self):
+    def test_pages_have_the_judgement_shape(self):
         steps = self._steps()
         with patch("core.app_debug.fetch_ex", side_effect=fake_fetch):
             pages = fetch_debug_pages(steps)
@@ -726,7 +726,7 @@ class TestWebSocketClient(unittest.TestCase):
 
 class TestRunAppDebug(unittest.TestCase):
     def test_success_shape_and_pages(self):
-        """run_app_debug 端到端：形状与 verify_chain 一致 + 抓到页面。"""
+        """run_app_debug 端到端：形状与判定链一致 + 抓到页面。"""
         server = FakeDebugServer(SAMPLE)
         try:
             with patch("core.app_debug.fetch_ex", side_effect=fake_fetch):
@@ -812,7 +812,7 @@ class TestQualityNewPageShared(unittest.TestCase):
 #   M6  ``_ENTRY_RE`` 的 ``(?:问)?`` 去掉（只认「访」不认「访问」）
 #       → 1 条变红：test_explore_entry_event_alone_still_names_the_segment
 #   M7  ``MAX_PAGES`` 3 → 4
-#       → 2 条变红：test_pages_have_verify_chain_shape、
+#       → 2 条变红：test_pages_have_the_judgement_shape、
 #         test_explore_chain_keeps_four_steps_to_three_pages（上限两个方向都有用例守）
 
 class EnginePagesTests(unittest.TestCase):

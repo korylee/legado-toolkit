@@ -301,10 +301,9 @@ class FetchBehaviorTests(CacheIsolatedTestCase):
 
 
 class RateLimitTests(CacheIsolatedTestCase):
-    """fetch 侧的限速：源声明了 concurrentRate，每条抓取链路都得遵守。
+    """fetch 侧的限速：源声明了 concurrentRate，本模块这条抓取路就得遵守。
 
-    checker 走异步 aiohttp、其余三条（全链路试跑 / 连 App 调试补抓 / 快速新增源）
-    走本模块。**两条链路必须用同一份解析**——复制一份到自己模块里就是第二个口径。
+    **间隔解析只有一份**（`quality.rate_interval_ms`）——复制到别的模块就是第二个口径。
     """
 
     def setUp(self):
@@ -605,10 +604,9 @@ class PageCacheTests(CacheIsolatedTestCase):
 #        → test_app_debug.test_cache_mode_reaches_fetch 红
 #  M11 fetch_debug_pages 不再单独接 CacheMiss（并与抓取失败合流）
 #        → test_app_debug.test_cache_miss_is_noted_as_such 红
-#  M12 verify_chain 调 _new_page 时不传 fetched_at / cached
-#        → test_verify_chain.test_pages_carry_the_html_source 红
-#  M13 quality.new_page 不把这两个字段写进页面字典
-#        → test_verify_chain.test_pages_carry_the_html_source 红
+#  M12 quality.new_page 不把 fetched_at / cached 写进页面字典
+#        → test_app_debug.TestFetchPages.test_pages_have_the_judgement_shape 红
+#          （用例断言页面字典必带这两个键）
 #
 #  **没覆盖的**：
 #    - ``_rate_lock`` 与 ``_page_cache_lock`` 的并发正确性：本文件的用例都是单线程的，

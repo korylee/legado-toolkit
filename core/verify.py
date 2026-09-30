@@ -6,10 +6,10 @@
 设计要点（原设计文档已随实现完成删除，要点保留在此）：
 - 判定底线对齐 Legado 的调试（只判「非空 / 不报错」），见 core/quality.py
 - 证据含**提取值全文**，对齐 BookContent.kt:194-205 的「正文长度或全文」
-- steps[].ok 与 all_ok 保持旧语义（仅 fail → False），三个消费方零改动
-- 返回体带 ``local_approx: True``：本引擎是**离线回放**，结果只是粗略参考，
-  与 App 的真实行为可能有偏差——只有「连 App 调试」（core/app_debug.py）
-  才等同于 App 的结果。详见 ``verify_chain._done`` 里的注释
+- 返回体是**离线回放**的结论，只作粗略参考，与 App 的真实行为可能有偏差——
+  只有「连 App 调试」（core/app_debug.py）才等同于 App 的结果
+- 判定口径的唯一一份在 ``core.quality``（``Judgement.as_step_dict``）：本模块只
+  负责取值与拼装，不另写一份映射
 """
 
 from core import quality as Q
@@ -41,8 +41,7 @@ def replay_step(html: str, rule: str, step: str, source_type: int = 0) -> dict:
 
     改完一条规则想知道「它在这份页面上现在取到什么」，重跑整条链（含联网搜索）
     太慢；而试跑结果里本来就存着每页 HTML（``pages[].html``），拿它直接重放即可。
-    判定口径与 ``verify_chain`` 完全一致：同样走 ``quality.judge_*`` 与
-    ``Judgement.as_step_dict``，不存在第二份映射。
+    判定口径只有一份：``quality.judge_*`` + ``Judgement.as_step_dict``，这里不另写映射。
 
     只对**本地试跑**有意义：App 调试的 pages 是我们自己补抓的（App 只推文本，
     不给 HTML），不代表 App 所见。所以别拿它的结论去否定 App 的判定。
@@ -64,26 +63,21 @@ def replay_step(html: str, rule: str, step: str, source_type: int = 0) -> dict:
 def strip_evidence(verify_result):
     """剥掉试跑结果里的大体积证据字段，**只留判定结论**。
 
-    三处消费方都需要它，原因各不相同但都是「留不住」：
-      - ``backend/api/ops.py``：结果会写进 SQLite 的 ``result_json`` 并经 SSE 推送
-        （``jobs/runner.py:51`` / ``api/jobs.py:47``），几 MB 会撑爆 jobs 表与推送流
-      - ``core/repair/loop.py``：``before`` / ``out["after"]`` / ``history[]``（最多 3 轮）
-        各持一份完整结果，``repair_many`` 还用 ``asyncio.gather`` 把全部结果留在内存里
-        ——百源级修复就是数百 MB 常驻
-      - 将来任何把试跑结果落库/落历史的地方
+    消费方是 ``core.jvm_debug.verify_generated``：结果会写进 SQLite 的 ``result_json``
+    并经 SSE 推送（``jobs/runner.py:51`` / ``api/jobs.py:47``），几 MB 会撑爆 jobs 表
+    与推送流；CLI 那条路只打印，剥掉也无损——一份行为，两处都安全。
 
-    **放在这里而不是某个消费方里**：证据的形状是在本模块定义的，而且消费方有三个，
-    抄在某一条消费路径上，下一个人就得再抄一份——那正是本次改造反复在消灭的
-    「同一件事写两处」。
+    **放在这里而不是消费方里**：证据的形状是在本模块定义的；抄在某一条消费路径上，
+    下一个人就得再抄一份——那正是本次改造反复在消灭的「同一件事写两处」。
 
     保留 ``verdict`` / ``reason`` / ``notes`` / ``has_notes`` / ``evidence`` / ``ok`` /
     ``all_ok`` / 其余标量字段；**清空 ``steps[].values``、``steps[].matched_html``，
     并把 ``pages`` 整份置空**（页面列表本身就是证据，留着没有判定价值）。
 
-    **返回新对象，不改动入参**——``loop.py`` 会同时持有剥离前后两份，就地改写会把
-    另一份也一起改掉（``tests/test_strip_evidence.py`` 有测试守这条）。
+    **返回新对象，不改动入参**：纯函数，调用方可能同时持有剥离前后两份
+    （``tests/test_strip_evidence.py`` 钉住）。
 
-    注意：``verify_chain`` 产出的每一步都必然带这两个键（口径在
+    注意：引擎产出的每一步都必然带这两个键（口径在
     ``quality.Judgement.as_step_dict``），所以正常情况下两个分支等价；这里按
     「键存在才清」写，是为了不给外部注入的合成结果凭空添键。
     """

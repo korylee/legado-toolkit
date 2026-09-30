@@ -179,9 +179,8 @@ class ListStepEmptyRuleTests(unittest.TestCase):
     """空规则 = **源的配置错误** → fail；规则回放不了 = 能力边界 → unknown。
 
     这两件事曾被 `_extract` 的 "空规则" 哨兵压进同一条通道，后果是
-    `bookList` 为空的源被判 unknown → `all_ok=True` →
-    `core/repair/loop.py` 认为「已经修好了」，AI 修复循环永远不去碰它。
-    """
+    `bookList` 为空的源被判 unknown → `all_ok=True` → 判定链认为「已经修好了」，
+    这类源再也不会被判出来。"""
 
     def test_search_empty_rule_is_fail(self):
         self.assertEqual(Q.judge_list_step("search", [], rule="").verdict,

@@ -168,13 +168,13 @@
 
 ### 条目：syntax-gap · 本地回放的语法缺口
 状态：open
-依赖：ai-verify
+依赖：无
 优先级：P2
-背景：本地回放**已不在校验与调试链路上**，还在用它的只剩 AI 修复那条链
-  （`core/repair/*`）——在 `ai-verify` 拍板之前，下面这张缺口表只是
-  「本地验不了」的账，不是待办。
-约束：只有**还留在 AI 修复链上**的语义才急，动手前先确认它在不在那条路径上；
-  别为了「让本地能验」把 webView 去掉——去掉就真的读不了。
+背景：本地回放**已不在校验与调试链路上**，剩下的两个读者都不判定源：`preselect` 的免费初筛
+  （`core/repair/suggest.py`）与前端 `/rules/replay-step` 的投影退路。所以下面这张缺口表
+  是「本地验不了」的账，不是待办。
+约束：只有当某个缺口挡了初筛或投影时才急（初筛遇到不支持的语法时如实标「只能连 App 试」
+  即可，不因此判源坏）；别为了「让本地能验」把 webView 去掉——去掉就真的读不了。
 子项：
 - syntax-bang · 排除索引 `li!0` / `dd!0:1:2`：`findIndexSet` 里 `.` 与 `!` 语义相反，只实现了点式（最大一块）
 - syntax-fallback · 执行期兜底的「选择器解析不了」：样例（URL 模板、JSONPath 片段、碎片）先逐个归类再实现
@@ -224,7 +224,7 @@
 
 ### 条目：agent-layer-orchestration · 按 Layer 编排受限调试 Agent
 状态：open
-依赖：ai-verify
+依赖：无
 优先级：P1
 背景：当前项目已经有 `core/page_layer.py` 的 L1-L4 判定、`debugNextAction.js` 的下一步动作、`/rules/suggest-rule` 的 AI 提议，以及 JVM/App 两条真实引擎通道；缺的是把它们按 Layer 串成一个小上下文、有限动作、逐步验证的 Agent。第一目标是因地制宜支持口袋漫画的 L3 动态正文，不建设通用逆向平台。
 约束：Agent 只输出结构化动作和受控提议，不直接改源、不自行联网、不判定成功、不猜密钥；L1 优先走本地候选，L2/L3 优先转 App/JVM 实测，L4 只消费已观测接口摘要，L5 只提示登录上下文；所有提议必须经过 `replay-step`、`jvm-debug` 或 `app-debug` 验证；上下文只传本地压缩摘要，完整 HTML/脚本/事件流按需取证；AI 调用必须由用户显式触发，免费 dry-run 不发模型请求。
@@ -292,22 +292,32 @@
 验收：完整 HTML/脚本不会默认进入模型请求；超出预算时界面显示具体原因和手动入口；同一失败不会自动循环调用；脱敏与截断有单测覆盖。
 指针：backend/api/rules.py，core/js_hints.py，frontend/src/components/DebugWorkbench.vue
 
----
-
-## 3 · 待决策
-
-### 条目：ai-verify · 十-7 AI 提议验收换真引擎
+### 条目：arch-thin · jvm.py 执行引擎拆层与前端瘦身
 状态：todo
 依赖：无
 优先级：P2
-背景：AGENTS #3 已按 2026-09-29 拍板改写（校验与生成验证由本机引擎完成，AI 提议的
-  候选由回放器初筛）。本条剩最后一环：`core/repair/suggest.py` 的 `replay_step` 换成
-  跑一次本机引擎；`dry_run` 免费的 `preselect`（用 `replayer.parse_rule` /
-  `extract_all`）要单独设计。
-约束：换引擎只动修复循环的验收那一步；`dry_run` 的候选初筛仍走回放器——那是筛选
-  不是验收（lessons §七十三）。
-验收：`replay_step` 换成真引擎后验收结论与今天一致或更好。
-指针：lessons §二十六 / §七十三 / §八十，AGENTS.md #3，core/repair/suggest.py
+背景：2026-09-30 盘点出的三个维护面，收口成一条：
+  ① `backend/api/jvm.py`（1221 行）里 manifest 写盘、Gradle 拉起、分块执行、
+  tail 线程这些执行引擎和 HTTP 端点同层，引擎没法被 jobs 页 / CLI 复用；
+  ② 前端 `DebugWorkbench.vue`（1773 行）与 `SourcesView.vue`（1197 行）没有
+  拆分计划（`SourceEditDialog` 已由 ux-debug-editor 覆盖，不在此列）；
+  ③ `frontend/src/utils/*.test.js` 存在但 `package.json` 没有 test 入口，
+  前端断言不可发现也不可持续跑。
+约束：
+  ① 拆层只挪位置不改行为，执行逻辑落 `backend/jobs/`，靠现有用例钉住；时机与
+  agent-* 批次正相关——先拆再加，别在 API 模块里继续堆 agent 链。
+  ② DebugWorkbench 的增量（agent-workbench 的建议卡、证据区）走独立组件，
+  不在主文件续写；SourcesView 的筛选条在做 ux-chip-jump 时顺手拆。
+  ③ 前端测试入口从简（node --test 聚合或 vitest 择一），跑法写进 README
+  已有的测试段，不另开文档。
+验收：jvm.py 端点只剩 HTTP 编排、执行引擎可独立调用且全量用例绿；`package.json`
+  有 test 入口、全部前端断言一键可跑且与 tests/test_frontend_utils 同一跑法；
+  两个大组件的后续增量有独立组件可落。
+指针：backend/api/jvm.py，backend/jobs/runner.py，frontend/src/components/DebugWorkbench.vue，frontend/src/views/SourcesView.vue，frontend/package.json
+
+---
+
+## 3 · 待决策
 
 ### 条目：s5a-a2 · A2 之后可评估：跑批不再剥 webView 选项
 状态：blocked
@@ -627,3 +637,16 @@
 约束：偏好不可用时静默降级；默认值、存储键和 URL 归一化由同一纯函数模块及测试钉住。
 验收：同一源再次打开可直接复跑，首屏保留开始调试和关键词；本机环境正常时不常驻展开明细；App 通道继续走原有 IP、预检和推送路径。
 指针：frontend/src/utils/debugPreferences.js，frontend/src/utils/debugPreferences.test.js，frontend/src/views/DebugWorkbenchView.vue，frontend/src/composables/useDebugSession.js，lessons §六十八
+
+### 条目：ai-verify · AI 提议的验收提供方收口
+状态：done
+依赖：无
+优先级：P2
+背景：2026-09-30 收口（ac7e57e）：按调用图退场 CLI 批量修复循环——它 file-in/file-out 回写
+  JSON、绕开管理库，且验收那一步早断在对已删符号 verify_chain 的惰性 import 上。没有给它接
+  真引擎：AI 提议只剩调试工作台一条路（`/rules/suggest-rule` 免费初筛 + `/rules/verify-candidate`
+  引擎验收），`preselect` 的回放器初筛按原样保留。机制 lessons §十 / §八十 / §八十五。
+约束：验收提供方不按入口宣布完成，按调用图收尾（lessons §八十）；回放器只留在不花钱的初筛
+  与前端投影上。
+验收：`cli repair` 入口与执行体均已删除、core 对 services 的惰性 import 归零；定向用例全绿。
+指针：ac7e57e，lessons §十 / §八十 / §八十五，core/repair/

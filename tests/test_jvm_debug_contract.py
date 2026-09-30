@@ -82,7 +82,7 @@ class TestSplitSegmentsEatsIt(unittest.TestCase):
         self.assertEqual([s["name"] for s in steps],
                          ["search", "bookUrl", "toc", "content"])
 
-    def test_steps_have_the_verify_chain_shape(self):
+    def test_steps_have_the_judgement_shape(self):
         steps = build_steps(load_events())
         for s in steps:
             for key in ("name", "verdict", "values", "url", "page_id",
