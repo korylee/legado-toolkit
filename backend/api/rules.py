@@ -3,7 +3,7 @@
 
 import asyncio
 
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, HTTPException
 
@@ -19,6 +19,42 @@ from backend.schemas import (
 )
 
 router = APIRouter()
+
+
+def _debug_cache_or_400(cache: Any) -> str:
+    """调试入口共用的缓存策略校验（原来三处各写一遍）。
+
+    枚举严格比，**不静默退回默认**：用户选了「忽略缓存重抓」却因为拼错而
+    每次都联网，界面上分辨不出来。
+    """
+    from core.fetch import CACHE_MODES
+
+    cache = str(cache or "")
+    if cache not in CACHE_MODES:
+        raise HTTPException(400, "未知的缓存策略：%s（只能是 %s）"
+                                 % (cache, " / ".join(CACHE_MODES)))
+    return cache
+
+
+def _debug_timeout_or_400(timeout: Optional[int]) -> int:
+    """调试预算：**不传就吃设置里的 debug.timeout**（AGENTS #8：默认值只在
+    settings_store 一处；写死 60 曾与桥的渲染上限同值、互相掐死）。显式传值
+    越界直接 400，不静默夹——夹了用户就不知道自己设的数没生效。"""
+    from core import settings_store
+
+    timeout = timeout if timeout is not None else settings_store.debug_timeout()
+    lo, hi = settings_store.LIMITS["debug_timeout"]
+    if not lo <= int(timeout) <= hi:
+        raise HTTPException(400, "调试预算须在 %d～%d 秒（收到 %s）" % (lo, hi, timeout))
+    return int(timeout)
+
+
+def _require_source_url(source: Dict[str, Any]) -> str:
+    """bookSourceUrl 非空检查；返回 strip 过的**原文**（App 侧拿它精确匹配 tag）。"""
+    tag = str((source or {}).get("bookSourceUrl", "") or "").strip()
+    if not tag:
+        raise HTTPException(400, "缺少 bookSourceUrl")
+    return tag
 
 
 @router.get("/meta")
@@ -65,26 +101,14 @@ async def jvm_debug(body: JvmDebugRequest):
     后端请求进入共享的 JVM lane，按提交顺序等待；命令行等不经过后端 lane 的调用仍
     由 `core.jvm_debug.RUN_LOCK` 做非阻塞保护。
     """
-    from core.fetch import CACHE_MODES
     from core.jvm_debug import run_jvm_debug
     from core import settings_store
     from core.jvm_env import readiness
 
-    # 与 /app-debug 同一条纪律：枚举严格比，**不静默退回默认**——用户选了
-    # 「忽略缓存重抓」却因为拼错而每次都联网，界面上分辨不出来
-    cache = str(body.cache or "")
-    if cache not in CACHE_MODES:
-        raise HTTPException(400, "未知的缓存策略：%s（只能是 %s）"
-                                 % (cache, " / ".join(CACHE_MODES)))
+    cache = _debug_cache_or_400(body.cache)
     if int(body.timeout or 0) <= 0 and body.timeout is not None:
         raise HTTPException(400, "timeout 必须是正数")
-    # 预算口径：**不传就吃设置里的 debug.timeout**（AGENTS #8：默认值只在
-    # settings_store 一处；写死 60 曾与桥的渲染上限同值、互相掐死，教训见该键注释）。
-    # 显式传值越界直接 400，不静默夹——夹了用户就不知道自己设的数没生效
-    timeout = body.timeout if body.timeout is not None else settings_store.debug_timeout()
-    lo, hi = settings_store.LIMITS["debug_timeout"]
-    if not lo <= int(timeout) <= hi:
-        raise HTTPException(400, "调试预算须在 %d～%d 秒（收到 %s）" % (lo, hi, timeout))
+    timeout = _debug_timeout_or_400(body.timeout)
     # 代理：走**全局设置**（`network.proxy`）——它同时用于这次调试与我们的补抓。
     # 界面上配了代理却只走一半（我们走、App 不走）是查不出来的不一致：两边都「正常」，
     # 只有用户能看出网络出口不一样（十-3）
@@ -97,18 +121,13 @@ async def jvm_debug(body: JvmDebugRequest):
     key = _debug_key(body, dict(body.source or {}), keyword)
     # JVM 与批量校验共用一条 lane。常驻 daemon 本身也只能串行处理请求；后来的
     # 调试请求按**优先级**排队（debug 档先于批量档）等待，而不是拿不到
-    # `RUN_LOCK` 后直接返回 busy。
-    async with runner.acquire_lane("jvm", kind="debug"):
-        work = asyncio.create_task(asyncio.to_thread(
-            run_jvm_debug, dict(body.source or {}), key,
-            int(timeout), body.cookie or "", cache, resolve_proxy(),
-            readiness_result=readiness_result,
-        ))
-        try:
-            return await asyncio.shield(work)
-        except asyncio.CancelledError:
-            await asyncio.shield(work)
-            raise
+    # `RUN_LOCK` 后直接返回 busy。取消语义（断开也要等引擎跑完）收在
+    # `run_in_lane` 一处。
+    return await runner.run_in_lane(
+        "jvm", "debug", run_jvm_debug, dict(body.source or {}), key,
+        timeout, body.cookie or "", cache, resolve_proxy(),
+        readiness_result=readiness_result,
+    )
 
 
 @router.post("/app-debug")
@@ -124,24 +143,14 @@ async def app_debug(body: AppDebugRequest):
     规范化（尤其不要 ``rstrip("/")`` / ``lower()``）。
     """
     from core.app_debug import run_app_debug
-    from core.fetch import CACHE_MODES
     from core import settings_store
 
     source = dict(body.source or {})
-    tag = str(source.get("bookSourceUrl", "") or "").strip()
-    if not tag:
-        raise HTTPException(400, "缺少 bookSourceUrl")
+    tag = _require_source_url(source)
     host = str(body.host or "").strip()
     if not host:
         raise HTTPException(400, "缺少 App 的 IP（App 通知栏里有）")
-    # 严格按枚举比，**不做大小写/空白归一**：这个值来自我们自己的前端，
-    # 对不上就是 bug，宽松一点只会让枚举多出第二份（更松的）定义。取值不合法
-    # 一律 400，**不退回默认**——用户选了「只补解析不重抓」却因为拼错而每次都在
-    # 联网，界面上分辨不出来
-    cache = str(body.cache or "")
-    if cache not in CACHE_MODES:
-        raise HTTPException(400, "未知的缓存策略：%s（只能是 %s）"
-                                 % (body.cache, " / ".join(CACHE_MODES)))
+    cache = _debug_cache_or_400(body.cache)
     # key 在推送**之前**拼好：入参不合法就快速 400——不能先把源推进 App
     # 才发现 key 拼不出来（推送会改 App 里的数据，失败要留给真正的失败）
     jvm_conf = settings_store.load().get("jvm", {})
@@ -183,8 +192,7 @@ async def app_preflight(body: AppHostRequest):
     from core.app_debug import preflight
 
     source = dict(body.source or {})
-    if not str(source.get("bookSourceUrl", "") or "").strip():
-        raise HTTPException(400, "缺少 bookSourceUrl")
+    _require_source_url(source)
     return await asyncio.to_thread(
         preflight, str(body.host or "").strip(), source, body.port or None)
 
@@ -216,26 +224,15 @@ async def verify_candidate_rule(body: CandidateVerifyRequest):
     状态，让前端显示原因而不是把它当成规则失败。
     """
     from core import settings_store
-    from core.fetch import CACHE_MODES
     from core.jvm_debug import run_jvm_debug
     from core.jvm_env import readiness
     from core.repair.suggest import verify_candidate
 
-    timeout = (body.timeout if body.timeout is not None
-               else settings_store.debug_timeout())
-    lo, hi = settings_store.LIMITS["debug_timeout"]
-    if not lo <= int(timeout) <= hi:
-        raise HTTPException(400, "调试预算须在 %d～%d 秒（收到 %s）" %
-                            (lo, hi, timeout))
-
-    cache = str(body.cache or "")
-    if cache not in CACHE_MODES:
-        raise HTTPException(400, "未知的缓存策略：%s（只能是 %s）" %
-                            (cache, " / ".join(CACHE_MODES)))
+    timeout = _debug_timeout_or_400(body.timeout)
+    cache = _debug_cache_or_400(body.cache)
 
     source = dict(body.source or {})
-    if not str(source.get("bookSourceUrl", "") or "").strip():
-        raise HTTPException(400, "缺少 bookSourceUrl")
+    _require_source_url(source)
 
     jvm_conf = settings_store.load().get("jvm", {})
     readiness_result = readiness(
@@ -247,16 +244,15 @@ async def verify_candidate_rule(body: CandidateVerifyRequest):
                               cookie=body.cookie or "", cache=cache, proxy=proxy,
                               readiness_result=readiness_result)
 
-    async with runner.acquire_lane("jvm", kind="debug"):
-        try:
-            return await asyncio.to_thread(
-                verify_candidate, source, body.field, body.rule,
-                body.target, body.query, int(timeout), run_candidate)
-        except ValueError as exc:
-            raise HTTPException(400, str(exc))
-        except Exception as exc:
-            raise HTTPException(400, "候选引擎验收失败：%s：%s" %
-                                (type(exc).__name__, exc))
+    try:
+        return await runner.run_in_lane(
+            "jvm", "debug", verify_candidate, source, body.field, body.rule,
+            body.target, body.query, timeout, run_candidate)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    except Exception as exc:
+        raise HTTPException(400, "候选引擎验收失败：%s：%s" %
+                            (type(exc).__name__, exc))
 
 
 @router.post("/suggest-rule")

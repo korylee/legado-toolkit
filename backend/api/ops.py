@@ -80,14 +80,8 @@ async def run_add_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
             # 结果体与设备/引擎调试**同形状**（steps / pages / all_ok），所以前端那套
             # 三态渲染与「有疑点」引导零改动就能吃。
             from core.jvm_debug import verify_generated
-            async with runner.acquire_lane("jvm"):
-                work = asyncio.create_task(
-                    asyncio.to_thread(verify_generated, source, keyword, detail_url))
-                try:
-                    v = await asyncio.shield(work)
-                except asyncio.CancelledError:
-                    await asyncio.shield(work)
-                    raise
+            v = await runner.run_in_lane("jvm", "batch", verify_generated,
+                                         source, keyword, detail_url)
         else:
             v = {"steps": [], "all_ok": None, "skipped": True}
         st.update_job(job_id, progress=3)

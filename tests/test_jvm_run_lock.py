@@ -31,10 +31,19 @@ from core import jvm_debug, jvm_direct
 
 
 class _FakeStore:
-    """挡住 `Store()`——测试**不许开真管理库**（那是用户的数据）。"""
+    """挡住 `Store()`——测试**不许开真管理库**（那是用户的数据）。
+
+    生产代码统一走 `with Store()`，替身跟上同一协议。
+    """
 
     def __init__(self, *a, **kw) -> None:
         pass
+
+    def __enter__(self) -> "_FakeStore":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
 
     def checks_map(self):
         # 任务体要读一次「跑之前的结论快照」算变化（十-2）。这条测试只管锁的

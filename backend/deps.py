@@ -10,8 +10,5 @@ from core.store import Store
 
 
 def get_store():
-    st = Store()
-    try:
+    with Store() as st:
         yield st
-    finally:
-        st.close()

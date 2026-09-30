@@ -63,8 +63,7 @@ def jvm_readiness():
     return readiness(conf.get("app_repo", ""), conf.get("android_sdk_dir", ""))
 
 
-@router.post("/pick-app-repo")
-def pick_app_repo():
+def _pick_directory(title: str):
     """打开本机原生目录选择器；浏览器 file input 无法提供可用的本机路径。"""
     try:
         import tkinter as tk
@@ -74,35 +73,23 @@ def pick_app_repo():
         root.withdraw()
         root.attributes("-topmost", True)
         try:
-            selected = filedialog.askdirectory(
-                title="选择 Legado App 源码仓库目录", mustexist=True)
+            selected = filedialog.askdirectory(title=title, mustexist=True)
         finally:
             root.destroy()
     except Exception as e:
         raise HTTPException(503, "无法打开本机目录选择器：%s；也可以直接输入目录路径" % e)
     return {"path": str(Path(selected).resolve()) if selected else "",
             "cancelled": not bool(selected)}
+
+
+@router.post("/pick-app-repo")
+def pick_app_repo():
+    return _pick_directory("选择 Legado App 源码仓库目录")
 
 
 @router.post("/pick-android-sdk")
 def pick_android_sdk():
-    """打开本机原生目录选择器，选择 Android SDK 根目录。"""
-    try:
-        import tkinter as tk
-        from tkinter import filedialog
-
-        root = tk.Tk()
-        root.withdraw()
-        root.attributes("-topmost", True)
-        try:
-            selected = filedialog.askdirectory(
-                title="选择 Android SDK 根目录", mustexist=True)
-        finally:
-            root.destroy()
-    except Exception as e:
-        raise HTTPException(503, "无法打开本机目录选择器：%s；也可以直接输入目录路径" % e)
-    return {"path": str(Path(selected).resolve()) if selected else "",
-            "cancelled": not bool(selected)}
+    return _pick_directory("选择 Android SDK 根目录")
 
 
 @router.post("/run")
@@ -118,11 +105,10 @@ async def jvm_run(body: Optional[JvmRunRequest] = None):
 
     # 请求先快照输入，真正执行由 `runner` 的 JVM lane 按提交顺序排队。
     # 不能在这里抢 `RUN_LOCK`：否则多个请求仍会在 HTTP 层直接失败，而不是进入队列。
-    st = Store()
-    run_dir = data_dir() / "app_probe" / "runs" / ("batch-" + uuid4().hex)
-    src_file = _export_sources_file(st, want_urls, want_filter,
-                                    dest_path=run_dir / "sources.json")
-    st.close()
+    with Store() as st:
+        run_dir = data_dir() / "app_probe" / "runs" / ("batch-" + uuid4().hex)
+        src_file = _export_sources_file(st, want_urls, want_filter,
+                                        dest_path=run_dir / "sources.json")
     rows = json.loads(src_file.read_text(encoding="utf-8"))
     if want_urls and not rows:
         _cleanup_run_dir(run_dir)
@@ -240,11 +226,8 @@ def jvm_results():
     这里**不再自己实现一遍**：列表回填读的是同一张表，两处各写一次就会漂
     （lessons §二十三 的「同一件事两个实现」已经栽过两次）。
     """
-    st = Store()
-    try:
+    with Store() as st:
         latest = st.latest_jvm_conclusions()
-    finally:
-        st.close()
     dist = Counter(d.get("state") for d in latest.values())
     stage_dist = Counter(d.get("stage") for d in latest.values())
     batches = sorted({str(d.get("_batch") or "") for d in latest.values()}, reverse=True)

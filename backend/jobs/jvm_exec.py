@@ -110,11 +110,8 @@ def _build_jvm_manifest(*, run_dir: Path, source_file: Path, args_file: Path,
 
 def _job_retry_of(job_id: str) -> str:
     """读任务的 retry_of（jobs 表事实源）；manifest 信封只做记录。"""
-    st = Store()
-    try:
+    with Store() as st:
         row = st.get_job(job_id) or {}
-    finally:
-        st.close()
     return str(row.get("retry_of") or "")
 
 
@@ -212,8 +209,8 @@ def _write_args(keyword: str, timeout: int, concurrency: int, limit: int,
                 out_path: Path, source_file: Path, depth: str = "search",
                 args_path: Optional[Path] = None) -> None:
     """把跑批参数写进启动器的参数文件（Launcher 的唯一参数入口）。"""
-    repo = settings_store.load().get("jvm", {}).get("app_repo", "").strip()
     st_conf = settings_store.load().get("jvm", {})
+    repo = st_conf.get("app_repo", "").strip()
     if not repo:
         raise HTTPException(400, "JVM 校验未配置：设置里缺少 App 源码目录")
     lines = [
@@ -427,10 +424,8 @@ def _read_results(path: Path) -> List[Dict[str, Any]]:
 
 def _write_meta(rows: List[Dict[str, Any]]) -> str:
     """结论写 meta（jvm_check:<batch>:<url>），幂等。返回 batch id。"""
-    from core.store import Store
     batch = time.strftime("%Y%m%d_%H%M%S")
-    st = Store()
-    try:
+    with Store() as st:
         for r in rows:
             url = _normalize_url(str(r.get("url", "") or ""))
             if not url:
@@ -439,8 +434,6 @@ def _write_meta(rows: List[Dict[str, Any]]) -> str:
                 "INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)",
                 ("jvm_check:%s:%s" % (batch, url), json.dumps(r, ensure_ascii=False)))
         st.conn.commit()
-    finally:
-        st.close()
     return batch
 
 

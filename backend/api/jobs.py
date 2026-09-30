@@ -189,9 +189,8 @@ async def job_events(job_id: str):
         # Store **建一次**就用整条流。放进循环里的话，每 0.5 秒要重跑一遍
         # `Store.__init__`——建连接 + PRAGMA + `_init_schema()`（CREATE TABLE
         # IF NOT EXISTS 外加逐列 ALTER 补列），为一个 `SELECT` 付一次建库的价。
-        # 客户端断开时生成器被关，finally 里照常收连接
-        st = runner.Store()
-        try:
+        # 客户端断开时生成器被关，with 块照常收连接
+        with runner.Store() as st:
             while True:
                 job = st.get_job(job_id)
                 if not job:
@@ -204,8 +203,6 @@ async def job_events(job_id: str):
                 if job.get("status") in ("done", "failed", "cancelled"):
                     return
                 await asyncio.sleep(0.5)
-        finally:
-            st.close()
 
     return StreamingResponse(gen(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache",

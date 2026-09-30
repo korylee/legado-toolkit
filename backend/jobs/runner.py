@@ -151,6 +151,23 @@ async def acquire_lane(name: str, kind: str = "batch",
         lane.release()
 
 
+async def run_in_lane(name: str, kind: str, fn: Callable, *args, **kwargs):
+    """在 lane 内跑一个同步阻塞函数，返回其结果。
+
+    客户端断开（刷新/关页）会取消 HTTP 协程；这里用 shield 顶住第一次取消、
+    把工作**等完**才放 lane——引擎调用不许被半路掐死（没有可恢复的中间态），
+    lane 也只能跟着真正跑完的那次调用走。调试入口共用这一段（原在
+    ``api/rules.py`` 两处与 ``api/ops.py`` 一处各抄一遍）。
+    """
+    async with acquire_lane(name, kind=kind):
+        work = asyncio.create_task(asyncio.to_thread(fn, *args, **kwargs))
+        try:
+            return await asyncio.shield(work)
+        except asyncio.CancelledError:
+            await asyncio.shield(work)
+            raise
+
+
 def register(kind: str):
     def deco(fn):
         HANDLERS[kind] = fn
@@ -165,12 +182,9 @@ def submit(kind: str, payload: Optional[Dict[str, Any]] = None,
         raise ValueError("未知任务类型: %s（可用: %s）" % (kind, ", ".join(sorted(HANDLERS))))
     job_id = uuid.uuid4().hex[:12]
     payload = payload or {}
-    st = Store()
-    try:
+    with Store() as st:
         st.create_job(job_id, kind, total=int(payload.get("total", 0) or 0),
                       payload=payload, retry_of=retry_of)
-    finally:
-        st.close()
     TASKS[job_id] = asyncio.create_task(_run(job_id, kind, payload, lane))
     return job_id
 
@@ -181,56 +195,49 @@ def update_phase(job_id: str, phase: str) -> None:
     JVM 的真正执行段在工作线程里，不能复用 async handler 持有的 Store 连接；
     这里短开独立连接，保证阶段在阻塞执行期间也能被 SSE 读到。
     """
-    st = Store()
-    try:
+    with Store() as st:
         st.update_job(job_id, phase=phase)
-    finally:
-        st.close()
 
 
 def update_progress(job_id: str, progress: int) -> None:
     """把进度写入任务表；短连接的理由同 update_phase。"""
-    st = Store()
-    try:
+    with Store() as st:
         st.update_job(job_id, progress=progress)
-    finally:
-        st.close()
 
 
 async def _run(job_id: str, kind: str, payload: Dict[str, Any],
                lane: Optional[str] = None) -> None:
-    st = Store()
     # jvm_run 的 lane 由任务体自己持有（run_jvm_job）：批量按块交还许可重排队，
     # 块边界在 handler 内部，runner 在外层持锁会让「块间让位」失效。
     lane_obj = _lane(lane) if (lane and kind != "jvm_run") else None
     acquired = False
-    try:
-        if kind == "jvm_run":
-            update_phase(job_id, "waiting_readiness")
-        if lane_obj is not None:
-            await lane_obj.acquire("batch", job_id)
-            acquired = True
-        if kind == "jvm_run":
-            manifest = payload.get("manifest") or {}
-            single = (manifest.get("single") if isinstance(manifest, dict)
-                      and "single" in manifest else payload.get("single"))
-            update_phase(job_id, "starting_worker" if single
-                         else "starting_gradle")
-        st.update_job(job_id, status="running")
-        result = await HANDLERS[kind](job_id, st, payload)
-        st.update_job(job_id, status="done", result=result or {})
-    except asyncio.CancelledError:
-        st.update_job(job_id, status="cancelled")
-        raise
-    except Exception as exc:
-        st.update_job(job_id, status="failed",
-                      result={"error": "%s: %s" % (type(exc).__name__, exc),
-                              "trace": traceback.format_exc()[-2000:]})
-    finally:
-        if acquired:
-            lane_obj.release()
-        st.close()
-        TASKS.pop(job_id, None)
+    with Store() as st:
+        try:
+            if kind == "jvm_run":
+                update_phase(job_id, "waiting_readiness")
+            if lane_obj is not None:
+                await lane_obj.acquire("batch", job_id)
+                acquired = True
+            if kind == "jvm_run":
+                manifest = payload.get("manifest") or {}
+                single = (manifest.get("single") if isinstance(manifest, dict)
+                          and "single" in manifest else payload.get("single"))
+                update_phase(job_id, "starting_worker" if single
+                             else "starting_gradle")
+            st.update_job(job_id, status="running")
+            result = await HANDLERS[kind](job_id, st, payload)
+            st.update_job(job_id, status="done", result=result or {})
+        except asyncio.CancelledError:
+            st.update_job(job_id, status="cancelled")
+            raise
+        except Exception as exc:
+            st.update_job(job_id, status="failed",
+                          result={"error": "%s: %s" % (type(exc).__name__, exc),
+                                  "trace": traceback.format_exc()[-2000:]})
+        finally:
+            if acquired:
+                lane_obj.release()
+            TASKS.pop(job_id, None)
 
 
 def recover_orphans() -> int:
@@ -245,11 +252,8 @@ def recover_orphans() -> int:
     **不静默**：收掉几条要说出来，否则「重启后任务列表里那条变红了」在日志里
     没有任何痕迹。判据与假定见 ``Store.fail_orphan_jobs``。
     """
-    st = Store()
-    try:
+    with Store() as st:
         n = st.fail_orphan_jobs()
-    finally:
-        st.close()
     if n:
         print("警告: 上次进程结束时 %d 个任务没写终态，已标为 failed" % n, flush=True)
     return n
@@ -257,11 +261,8 @@ def recover_orphans() -> int:
 
 def sweep_expired() -> int:
     """清理已过期的终态任务，供启动和后台巡检共用。"""
-    st = Store()
-    try:
+    with Store() as st:
         return st.sweep_jobs()
-    finally:
-        st.close()
 
 
 async def start_job_sweeper() -> None:
@@ -300,14 +301,11 @@ def cancel(job_id: str) -> bool:
     t = TASKS.get(job_id)
     if not t:
         return False
-    st = Store()
-    try:
+    with Store() as st:
         job = st.get_job(job_id)
         if not job or job.get("status") in ("done", "failed", "cancelled"):
             return False
         st.update_job(job_id, status="cancel_requested", phase="cancel_requested")
-    finally:
-        st.close()
     t.cancel()
     return True
 
