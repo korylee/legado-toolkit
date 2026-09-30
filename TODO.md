@@ -117,15 +117,6 @@
 验收：三个子项全部落地后，抽屉里每个段的「命中源码」都走引擎，没有投影退路。
 指针：lessons §七十三 / §七十五
 
-### 条目：ux-pick · 前端暴露 `pick`：换一条重试
-状态：todo
-依赖：无
-优先级：P2
-背景：搜索结果多条时选第 N 条重试。后端 `pick` 参数已支持，Legado 固定取第 0 条。
-约束：key 由我们拼装，用 App 那边已有的 `pick` 语义，别新造一套。
-验收：前端有一个「换一条」入口，点了之后能拿到另一条的结果。
-指针：core/jvm_debug.run_jvm_debug，Debug.kt
-
 ### 条目：ux-chip-jump · 点击摘要里的变化数跳到对应筛选
 状态：todo
 依赖：无
@@ -194,21 +185,6 @@
 验收：每行语义能在本地回放跑通或有明确归因，带正反例测试。
 指针：lessons §二十三 / §四十四 / §四十九 / §六十，core/rules/replayer.py
 
-### 条目：webview-content · webView 型正文（本地与 JVM 都验不了）
-状态：todo
-依赖：无
-优先级：P1
-背景：（单独排：等真靶子在手）这一条不是「语法回放不了」，是「**取数**拿不到」——正文本身就是 `params`
-  加密 + `xhr_mode`，图片地址只在解密后的 JS 对象里；漫画鱼章节页就是该形态，静态 HTML
-  没有图片，运行时图片还会变成 `blob:` URL。
-约束：**别把 `content_ok=None` 当成源有问题**；别为了「让本地能验」把 webView
-  选项去掉。调试工作台要明确标出 L2/L3，静态网页视图不能框选时给出「使用本机引擎 / 连
-  App 调试」动作；运行时 DOM / 命中片段的来源必须标明，不能把静态补抓冒充 App 页面。
-验收：调试工作台对这类源能拿到运行时正文或明确给出不可判定原因；若能取得运行时 DOM，
-  命中源码与框选高亮使用同一份材料；跑批那条路要么同样能验，要么结论里明确标「这类源跑批
-  不可信」。
-指针：lessons §四十九 / §六十 / §七十五，appservice/test/io/legado/app/service/ShadowBackstageWebView.kt
-
 ### 条目：strengthen-contract · 用契约测试钉住那个隐式约定
 状态：todo
 依赖：无
@@ -221,32 +197,20 @@
 指针：lessons §七十八，tests/test_jvm_debug_contract.py
 
 
-### 条目：ux-debug-flow · 调试与规则验证闭环
-状态：todo
-依赖：无
-优先级：P1
-背景：调试工作台、证据摘要、DOM 候选和动作层级共同服务同一条用户流程：定位当前步骤、判断材料是否可信、选择规则、应用并用真实引擎验证。原先拆成多个条目会让同一闭环的完成条件分散。
-约束：保留 `useDebugSession`、`steps`、`activeStep`、`diffRows` 作为唯一状态来源；首屏先展示当前步骤、结论、证据来源和推荐动作；候选必须按搜索/目录/正文/媒体意图生成，并显示示例；规则候选只能提议，最终以真实引擎验证；每个步骤只有一个推荐主动作，应用、重调和连 App 验证按状态合并；详细命中数、重复率、稳定性、事件流和整页源码属于可展开诊断；移动端退化为横向步骤导航；重跑保留旧结果和差异。
-验收：用户进入步骤后无需长距离滚动即可知道卡在哪里、材料能否作为依据以及下一步做什么；候选可直接应用并验证，结果能与前一轮对比；App 实测、本机引擎、补抓页面和本地投影不混淆；搜索、目录、正文、媒体四类字段均有意图化候选；fail、unknown、stale、pass+notes 的主动作稳定；桌面和窄屏均无主动作被挤走；相关纯函数和组件测试通过。
-指针：frontend/src/components/DebugWorkbench.vue，frontend/src/utils/debugNextAction.js，frontend/src/utils/debugEvidence.js，frontend/src/utils/selector.js，frontend/src/utils/debugCompare.js
-
 ### 条目：ux-debug-editor · 调试页承接编辑与保存闭环
 状态：todo
 依赖：ux-debug-flow
 优先级：P1
 背景：已有源的规则编辑、源级配置、证据、重跑和保存应在独立调试页完成；弹窗只承担新建、快速生成、快速编辑和摘要。
 约束：当前步骤规则在工作台编辑；基本信息、类型、标签、请求、发现和原始 JSON 放入源设置抽屉；`session.source` 是唯一编辑事实；区分应用到会话、验证当前规则和保存落库；保存保留标签、锁定状态、脏状态和另存为语义；刷新或离开前明确提示未保存修改。
+  实施计划：
+  1. 盘点 `DebugWorkbenchView`、`DebugWorkbench`、`SourceEditDialog` 和 `useDebugSession` 的现有读写入口，列出弹窗仍持有的长期状态。
+  2. 以 `session.source` 为唯一草稿，将当前步骤规则编辑、源设置抽屉和证据重跑全部接到同一份草稿；区分“应用到会话”“验证当前规则”“保存落库”。
+  3. 把基本信息、类型、标签、请求、发现和原始 JSON 收进源设置抽屉，保留锁定状态、标签和另存为语义，并删除弹窗的第二套长期规则状态。
+  4. 补齐保存、源 URL 变化、刷新、返回和离开前的脏状态提示；明确新 URL 是更新、另存为还是取消。
+  5. 用已有源覆盖规则编辑、源设置、重跑对比、保存、另存为和离开提示；补纯函数/组件测试后再从 TODO 移入已完成。
 验收：已有源从列表进入调试页后，不返回弹窗即可修改规则和源级配置、重跑、对比并保存；保存结果与原编辑路径逐字段一致；刷新、返回、源 URL 变化和另存为都有明确行为；弹窗不维护第二套长期规则状态。
-指针：frontend/src/views/DebugWorkbenchView.vue，frontend/src/components/DebugWorkbench.vue，frontend/src/components/SourceEditDialog.vue，frontend/src/composables/useDebugSession.js
-
-### 条目：ux-debug-config · 调试入口状态记忆
-状态：todo
-依赖：无
-优先级：P1
-背景：调试入口已经完成层级简化，但同一源重复调试仍需重新填写目标和关键词。
-约束：按归一化源 URL 记住最近目标、关键词、通道和缓存档；不保存规则、cookie 或登录态；不得改变 `debugKeyOf` 和 App 分派语义；环境检查成功时只显示状态标签，失败才展开原因。
-验收：同一源第二次打开时目标和关键词可直接复跑；首屏可见开始调试和上次关键词；本机环境正常时不常驻展开明细；连 App 仍能就地完成 IP、预检和推送；有纯函数测试钉住记忆键和默认值。
-指针：frontend/src/views/DebugWorkbenchView.vue，frontend/src/composables/useDebugSession.js
+指针：frontend/src/views/DebugWorkbenchView.vue，frontend/src/components/DebugWorkbench.vue，frontend/src/components/SourceEditDialog.vue，frontend/src/composables/useDebugSession.js，lessons §六十八 / §七十八
 
 ### 条目：ux-debug-reading · 调试高级信息与响应式阅读体验
 状态：todo
@@ -301,14 +265,14 @@
 验收：同一输入在无模型配置时仍能完成可确定动作；L1 不因未配置模型而阻塞；L2/L3 能导向对应引擎；L4/L5 的建议不会伪装成已验证结论；动作原因能显示给用户。
 指针：core/page_layer.py，frontend/src/utils/debugNextAction.js，frontend/src/utils/debugOutlets.js
 
-### 条目：agent-pocket-comic · 口袋漫画 L3 专项策略
+### 条目：agent-pocket-comic · 口袋漫画 L3 WebView 正文专项策略
 状态：todo
 依赖：agent-layer-router, agent-action-schema
 优先级：P1
-背景：口袋漫画正文页的图片地址在 WebView 执行后的 `params.chapter_images`，图片签名会过期，目录选错还会导致重复章节；第一版应验证运行时数据，不应让用户配置 AES 或复制旧图片地址。
-约束：入口要求用户选择具体章节；Agent 只生成 `requires_webview / runtime_field / content_mode` 策略；本机/App 实测确认 `params` 已为对象、`chapter_images` 非空且图片可访问后，才生成 ES5 `webJs + content + imageStyle`；每次调试重新获取图片地址；章节与图片失败原因不得压成“解密失败”。
-验收：选定一章能显示页面、WebView、运行时字段、图片数量和可访问性；成功时生成源草稿正文规则并由 App 实测复验；params 仍为字符串、图片为空、签名过期、目录地址不具体时分别给出对应下一步；不在源中硬编码站点 AES 或图片 URL。
-指针：skills/legado-book-source/SKILL.md，core/js_hints.py，tests/test_page_layer.py，data/app_probe/source.json
+背景：口袋漫画正文页的图片地址在 WebView 执行后的 `params.chapter_images`，静态 HTML 没有图片，运行时图片还可能变成 `blob:` URL；图片签名会过期，目录选错还会导致重复章节。第一版应验证运行时数据，不应让用户配置 AES 或复制旧图片地址。
+约束：入口要求用户选择具体章节；Agent 只生成 `requires_webview / runtime_field / content_mode` 策略；本机/App 实测确认 `params` 已为对象、`chapter_images` 非空且图片可访问后，才生成 ES5 `webJs + content + imageStyle`；调试工作台明确标出 L2/L3，静态网页视图不能框选时给出「使用本机引擎 / 连 App 调试」动作；运行时 DOM、命中片段和框选高亮必须来自同一份运行时材料，不能把静态补抓冒充 App 页面；每次调试重新获取图片地址；跑批不能可靠覆盖这类源时必须明确标注；章节与图片失败原因不得压成“解密失败”。
+验收：选定一章能显示页面、WebView、运行时字段、图片数量和可访问性；成功时生成源草稿正文规则并由 App 实测复验；params 仍为字符串、图片为空、签名过期、目录地址不具体、静态页面无运行时材料时分别给出对应下一步；若取得运行时 DOM，命中源码与框选高亮使用同一份材料；跑批对这类源要么同样能验，要么结论明确标「这类源跑批不可信」；不在源中硬编码站点 AES 或图片 URL。
+指针：skills/legado-book-source/SKILL.md，core/js_hints.py，tests/test_page_layer.py，data/app_probe/source.json，lessons §四十九 / §六十 / §七十五
 
 ### 条目：agent-workbench · 在现有调试工作台承载 Agent 建议
 状态：todo
@@ -535,7 +499,7 @@
   `navigationFailure` 判 CDP 命令级错误立即带原因返回；`ShadowBackstageWebView.resolveAgainstTag`
   在导航前按源 URL 补全相对地址。实测同 key 75.5s fail → 常驻复用 2.8s（渲染本体 0.9s）。
 约束：只判命令级 error，不把 `result.errorText` 判进来（ERR_ABORTED 会误杀马上被 JS
-  重定向的正常页）；不动上游 `Debug.kt` 的分派语义；webView 取数能力归 webview-content。
+  重定向的正常页）；不动上游 `Debug.kt` 的分派语义；webView 取数能力归 agent-pocket-comic。
 验收：8 条 Kotlin 测试（WebViewNavigationTest）；细节看 git log（18b79ab）。
 指针：appservice/test/io/legado/app/service/BrowserBridge.kt，ShadowBackstageWebView.kt，WebViewNavigationTest.kt
 
@@ -645,3 +609,21 @@
 验收：scope 44 用例钉开关回归/daemon 成功/busy 回落不杀/code≠0 回落/超时缩放；
   settings_store 钉默认 on + 显式 false 生效；全量绿；变异 M1/M2 红。
 指针：backend/api/jvm.py，core/jvm_validate_daemon.py，core/settings_store.py，lessons §六十五 / §六十六
+
+### 条目：ux-debug-flow · 调试与规则验证闭环
+状态：done
+依赖：无
+优先级：P1
+背景：工作台已提供步骤状态、证据来源、意图化候选、唯一主动作、真实引擎验证和重跑对比；实现细节与历史交付见工作台组件及纯函数测试。
+约束：`useDebugSession`、步骤结果和差异保持单一事实来源；本机/App/补抓材料分开标识；候选只能提议，最终由真实引擎验证。
+验收：步骤首屏可见结论、原因、证据和下一步；搜索/目录/正文/媒体候选带示例；fail/unknown/stale/pass+notes 主动作稳定；桌面与窄屏可用；相关纯函数断言通过。
+指针：frontend/src/components/DebugWorkbench.vue，frontend/src/utils/debugNextAction.js，frontend/src/utils/debugEvidence.js，frontend/src/utils/debugCandidate.js，frontend/src/utils/debugCompare.js，lessons §七十三 / §七十八
+
+### 条目：ux-debug-config · 调试入口状态记忆
+状态：done
+依赖：无
+优先级：P1
+背景：按归一化源 URL 记住最近目标、关键词、通道和缓存档，不保存规则、Cookie 或登录态；入口与会话仍共用原有调试分派语义。
+约束：偏好不可用时静默降级；默认值、存储键和 URL 归一化由同一纯函数模块及测试钉住。
+验收：同一源再次打开可直接复跑，首屏保留开始调试和关键词；本机环境正常时不常驻展开明细；App 通道继续走原有 IP、预检和推送路径。
+指针：frontend/src/utils/debugPreferences.js，frontend/src/utils/debugPreferences.test.js，frontend/src/views/DebugWorkbenchView.vue，frontend/src/composables/useDebugSession.js，lessons §六十八
