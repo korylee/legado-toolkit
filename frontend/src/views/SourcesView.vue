@@ -299,7 +299,7 @@ const healthCount = (key) => {
 // 却把这一行越摊越长——用户的原话是「太多太杂」。空档位在**筛选下拉里照旧全给**
 // （那是能力清单，不是现状概览），所以按档下钻、确认「确实一条都没有」仍然做得到。
 const activeHealthOptions = computed(
-  () => HEALTH_OPTIONS.filter((h) => healthCount(h.value) > 0));
+  () => HEALTH_OPTIONS.value.filter((h) => healthCount(h.value) > 0));
 
 async function loadStats() {
   try { stats.value = await getStats(); } catch (e) { stats.value = null; }
