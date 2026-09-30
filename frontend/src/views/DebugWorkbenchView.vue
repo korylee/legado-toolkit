@@ -1,18 +1,18 @@
 <!-- 调试工作台页面：#/debug/:url。运行态与结果全在 useDebugSession（单例）。 -->
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from "vue";
-import { useRoute, useRouter } from "vue-router";
+import { ref, computed, watch, onMounted, onUnmounted } from "vue";
+import { useRoute, useRouter, onBeforeRouteLeave } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import DebugWorkbench from "../components/DebugWorkbench.vue";
 import SourceFields from "../components/SourceFields.vue";
 import { useDebugSession, DEBUG_TARGETS, DEBUG_CACHE_MODES, STEP_TARGETS } from "../composables/useDebugSession";
-import { getDetail, saveSource } from "../api/sources";
-import { ensureTagMeta, splitSystemUser, sourceTypes } from "../utils/tags";
+import { getDetail, saveSource, sourceExists } from "../api/sources";
+import { ensureTagMeta, splitSystemUser } from "../utils/tags";
 
 const route = useRoute();
 const router = useRouter();
 const {
-  source, sourceDirty, markSourceSaved, setSource, updateSourceField, result, running, elapsed, budget,
+  source, sourceDirty, setSource, updateSourceField, clearPreflight, result, running, elapsed, budget,
   channel, target, query, cacheMode, host,
   env, envLoading, envTitle,
   preflightState,
@@ -23,9 +23,10 @@ const loading = ref(false);
 const settingsOpen = ref(false);
 const rawOpen = ref(false);
 const settingsJson = ref("");
-const settingsTags = ref("");
 const userTags = ref([]);
 const sysLocked = ref(false);
+const loadedUrl = ref("");
+const saveAsMode = ref(false);
 
 const name = computed(() => (source.value || {}).bookSourceName || "（无名）");
 const url = computed(() => (source.value || {}).bookSourceUrl || "");
@@ -41,6 +42,12 @@ const initialStep = computed(() => String(route.query.step || ""));
 const debugHint = computed(() => target.value === "explore" && !hasExploreConfig.value
   ? "这个源没配 exploreUrl，请填一个发现页 URL" : currentTarget.value.hint);
 
+watch(source, (next) => {
+  if (settingsOpen.value && !rawOpen.value) {
+    settingsJson.value = JSON.stringify(next || {}, null, 2);
+  }
+}, { deep: true });
+
 onMounted(async () => {
   loadEnvironment();
   const urlParam = decodeURIComponent(route.params.url || "");
@@ -48,6 +55,8 @@ onMounted(async () => {
   if (handoff) {
     try { await ensureTagMeta(); } catch (e) { /* 使用现有会话源继续 */ }
     userTags.value = splitSystemUser(source.value.bookSourceGroup || "").user;
+    loadedUrl.value = String(source.value.bookSourceUrl || "");
+    saveAsMode.value = false;
   }
   // URL 参数存 query 原文（不再回拼 key——拼装在后端 core/debug_keys），
   // 刷新后输入框从这里恢复
@@ -61,6 +70,8 @@ onMounted(async () => {
     const parsed = splitSystemUser(d.source.bookSourceGroup || "");
     userTags.value = parsed.user;
     sysLocked.value = !!d.system_tags_locked;
+    loadedUrl.value = String(d.source.bookSourceUrl || "");
+    saveAsMode.value = false;
   } catch (e) {
     ElMessage.error("加载源失败：" + e.message);
   } finally {
@@ -82,20 +93,21 @@ async function debugRun() {
 
 function openSettings() {
   settingsJson.value = JSON.stringify(source.value || {}, null, 2);
-  settingsTags.value = userTags.value.join(", ");
   rawOpen.value = false;
   settingsOpen.value = true;
 }
 
 function applySourceUpdate(next) {
-  const previous = source.value || {};
-  for (const [field, value] of Object.entries(next || {})) {
-    if (previous[field] !== value) updateSourceField(field, value);
-  }
+  if (!next || typeof next !== "object") return;
+  const previousUrl = String((source.value || {}).bookSourceUrl || "").trim();
+  const nextSource = JSON.parse(JSON.stringify(next));
+  setSource(nextSource, { saved: false });
+  const nextUrl = String(nextSource.bookSourceUrl || "").trim();
+  if (nextUrl !== previousUrl) clearPreflight();
 }
 
 function onApplyRawSettings(parsed) {
-  setSource(parsed, { saved: false });
+  applySourceUpdate(parsed);
   userTags.value = splitSystemUser(parsed.bookSourceGroup || "").user;
   settingsJson.value = JSON.stringify(parsed, null, 2);
   ElMessage.success("已应用 JSON 到当前会话");
@@ -105,17 +117,18 @@ function applyRawSettings() {
   try {
     const parsed = JSON.parse(settingsJson.value);
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("必须是 JSON 对象");
-    setSource(parsed);
+    applySourceUpdate(parsed);
+    userTags.value = splitSystemUser(parsed.bookSourceGroup || "").user;
     ElMessage.success("已应用 JSON 到当前会话");
   } catch (e) {
     ElMessage.error("JSON 无法应用：" + e.message);
   }
 }
 
-function applySettingsTags() {
-  userTags.value = settingsTags.value.split(",").map((x) => x.trim()).filter(Boolean);
+function toggleRawSettings() {
+  rawOpen.value = !rawOpen.value;
+  if (rawOpen.value) settingsJson.value = JSON.stringify(source.value || {}, null, 2);
 }
-
 function rerunFromStep(stepName) {
   const step = ((result.value || {}).steps || []).find((s) => s.name === stepName) || {};
   if (stepName === "search") return debugRun();   // 搜索段重跑 = 整链入口
@@ -132,16 +145,56 @@ function onApplyRule({ field, rule }) {
 }
 function gotoEditor() { window.scrollTo({ top: 0, behavior: "smooth" }); }
 
+function startSaveAs() {
+  if (!source.value || !loadedUrl.value) return;
+  saveAsMode.value = true;
+  applySourceUpdate({ ...source.value, bookSourceUrl: "" });
+  ElMessage.info("已切换为另存模式，请填写新的源地址");
+}
+
+function cancelSaveAs() {
+  if (!saveAsMode.value) return;
+  applySourceUpdate({ ...source.value, bookSourceUrl: loadedUrl.value });
+  saveAsMode.value = false;
+  ElMessage.info("已取消另存模式");
+}
+
 async function save() {
   if (!source.value) return;
   const s = JSON.parse(JSON.stringify(source.value));
   s.bookSourceType = Number(s.bookSourceType) || 0;
   if (![0, 1, 2, 3].includes(s.bookSourceType)) s.bookSourceType = 0;
+  s.bookSourceUrl = String(s.bookSourceUrl || "").trim();
   if (!String(s.bookSourceName || "").trim()) return ElMessage.warning("名称不能为空");
+  if (!s.bookSourceUrl) return ElMessage.warning("源地址不能为空");
+  if (saveAsMode.value && s.bookSourceUrl === loadedUrl.value) {
+    return ElMessage.warning("另存为必须使用不同的源地址");
+  }
+  if (saveAsMode.value) {
+    try {
+      const exists = await sourceExists(s.bookSourceUrl);
+      if (exists.exists) {
+        await ElMessageBox.confirm(
+          `源地址已存在（源名：${exists.name || "（无名）"}），继续将覆盖其全部规则。`,
+          "确认另存", { type: "warning", confirmButtonText: "覆盖保存", cancelButtonText: "取消" },
+        );
+      }
+    } catch (e) {
+      if (e !== "cancel" && e !== "close" && e?.action !== "cancel" && e?.action !== "close") {
+        ElMessage.error("检查源地址失败：" + (e.message || e));
+      }
+      return;
+    }
+  }
   try {
     await saveSource(s, userTags.value, sysLocked.value);
-    markSourceSaved();
+    setSource(s);
+    loadedUrl.value = s.bookSourceUrl;
+    saveAsMode.value = false;
     ElMessage.success("已保存");
+    if (route.params.url !== encodeURIComponent(s.bookSourceUrl)) {
+      await router.replace({ name: "debug", params: { url: encodeURIComponent(s.bookSourceUrl) }, query: route.query });
+    }
   } catch (e) { ElMessage.error("保存失败：" + e.message); }
 }
 
@@ -152,14 +205,20 @@ function onBeforeUnload(e) {
 }
 
 async function leaveWorkbench() {
-  if (!sourceDirty.value) return router.push({ name: "sources" });
+  return router.push({ name: "sources" });
+}
+
+onBeforeRouteLeave(async () => {
+  if (!sourceDirty.value) return true;
   try {
     await ElMessageBox.confirm("当前有未保存修改，确定要离开吗？", "未保存", {
       confirmButtonText: "丢弃修改", cancelButtonText: "继续编辑", type: "warning",
     });
-    router.push({ name: "sources" });
-  } catch (e) { /* 用户继续编辑 */ }
-}
+    return true;
+  } catch (e) {
+    return false;
+  }
+});
 
 function onKeydown(e) { if (e.key === "Escape" && running.value) cancelRun(); }
 onMounted(() => {
@@ -182,7 +241,9 @@ onMounted(() => {
       <div class="wb-head-actions">
         <el-tag v-if="sourceDirty" size="small" type="warning">有未保存修改</el-tag><el-tag v-else-if="source" size="small" :type="running ? 'warning' : 'info'">{{ running ? '调试进行中' : '编辑工作台' }}</el-tag>
         <el-button size="small" @click="openSettings">源设置</el-button>
-        <el-button size="small" type="primary" @click="save">保存</el-button>
+        <el-button v-if="saveAsMode" size="small" @click="cancelSaveAs">取消另存</el-button>
+         <el-button v-else-if="source" size="small" @click="startSaveAs">另存为</el-button>
+         <el-button size="small" type="primary" @click="save">{{ saveAsMode ? "保存为新源" : "保存" }}</el-button>
       </div>
     </header>
 
@@ -212,8 +273,16 @@ onMounted(() => {
     <!-- 规则四段与源类型由工作台从 source 自己派生，这里只传 source 一份 -->
     <DebugWorkbench class="wb-body" :initial-step="initialStep" :source="source || {}" @apply-rule="onApplyRule" @rerun-from="rerunFromStep" @goto="gotoEditor" />
     <el-drawer v-model="settingsOpen" title="源设置" size="min(520px, 92vw)" append-to-body>
-      <SourceFields v-if="source" :source="source" v-model:user-tags="userTags" @update:source="applySourceUpdate" />
-      <el-empty v-else description="源尚未加载" :image-size="60" />       <el-button v-if="source" class="raw-entry" size="small" link type="info" @click="rawOpen = !rawOpen">
+      <SourceFields v-if="source" :source="source" :is-new="saveAsMode" v-model:user-tags="userTags" @update:source="applySourceUpdate">
+         <template #editor-fields>
+           <el-form-item label="源启用"><el-switch :model-value="source.enabled !== false" @update:model-value="applySourceUpdate({ ...source, enabled: $event })" /></el-form-item>
+           <el-form-item label="搜索 URL"><el-input :model-value="source.searchUrl || ''" @update:model-value="applySourceUpdate({ ...source, searchUrl: $event })" /></el-form-item>
+           <el-form-item label="请求头"><el-input :model-value="source.header || ''" type="textarea" :rows="3" @update:model-value="applySourceUpdate({ ...source, header: $event })" /></el-form-item>
+           <el-form-item label="字符集"><el-input :model-value="source.charset || ''" @update:model-value="applySourceUpdate({ ...source, charset: $event })" /></el-form-item>
+           <el-form-item label="源备注"><el-input :model-value="source.bookSourceComment || ''" type="textarea" :rows="3" @update:model-value="applySourceUpdate({ ...source, bookSourceComment: $event })" /></el-form-item>
+         </template>
+       </SourceFields>
+      <el-empty v-else description="源尚未加载" :image-size="60" />       <el-button v-if="source" class="raw-entry" size="small" link type="info" @click="toggleRawSettings">
          {{ rawOpen ? "收起原始 JSON" : "编辑原始 JSON" }}
        </el-button>
        <div v-if="rawOpen && source" class="raw-panel">

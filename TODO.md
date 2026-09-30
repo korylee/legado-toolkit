@@ -197,21 +197,6 @@
 指针：lessons §七十八，tests/test_jvm_debug_contract.py
 
 
-### 条目：ux-debug-editor · 调试页承接编辑与保存闭环
-状态：todo
-依赖：ux-debug-flow
-优先级：P1
-背景：已有源的规则编辑、源级配置、证据、重跑和保存应在独立调试页完成；弹窗只承担新建、快速生成、快速编辑和摘要。
-约束：当前步骤规则在工作台编辑；基本信息、类型、标签、请求、发现和原始 JSON 放入源设置抽屉；`session.source` 是唯一编辑事实；区分应用到会话、验证当前规则和保存落库；保存保留标签、锁定状态、脏状态和另存为语义；刷新或离开前明确提示未保存修改。
-  实施计划：
-  1. 盘点 `DebugWorkbenchView`、`DebugWorkbench`、`SourceEditDialog` 和 `useDebugSession` 的现有读写入口，列出弹窗仍持有的长期状态。
-  2. 以 `session.source` 为唯一草稿，将当前步骤规则编辑、源设置抽屉和证据重跑全部接到同一份草稿；区分“应用到会话”“验证当前规则”“保存落库”。
-  3. 把基本信息、类型、标签、请求、发现和原始 JSON 收进源设置抽屉，保留锁定状态、标签和另存为语义，并删除弹窗的第二套长期规则状态。
-  4. 补齐保存、源 URL 变化、刷新、返回和离开前的脏状态提示；明确新 URL 是更新、另存为还是取消。
-  5. 用已有源覆盖规则编辑、源设置、重跑对比、保存、另存为和离开提示；补纯函数/组件测试后再从 TODO 移入已完成。
-验收：已有源从列表进入调试页后，不返回弹窗即可修改规则和源级配置、重跑、对比并保存；保存结果与原编辑路径逐字段一致；刷新、返回、源 URL 变化和另存为都有明确行为；弹窗不维护第二套长期规则状态。
-指针：frontend/src/views/DebugWorkbenchView.vue，frontend/src/components/DebugWorkbench.vue，frontend/src/components/SourceEditDialog.vue，frontend/src/composables/useDebugSession.js，lessons §六十八 / §七十八
-
 ### 条目：ux-debug-reading · 调试高级信息与响应式阅读体验
 状态：todo
 依赖：ux-debug-flow
@@ -650,3 +635,12 @@
   与前端投影上。
 验收：`cli repair` 入口与执行体均已删除、core 对 services 的惰性 import 归零；定向用例全绿。
 指针：ac7e57e，lessons §十 / §八十 / §八十五，core/repair/
+
+### 条目：ux-debug-editor · 调试页承接编辑与保存闭环
+状态：done
+依赖：ux-debug-flow
+优先级：P1
+背景：独立调试页现在以 `useDebugSession.source` 作为唯一草稿，可编辑源级配置、规则、证据并保存；源设置抽屉支持结构化字段和原始 JSON。
+约束：结构化编辑与原始 JSON 都只改会话草稿；已有源 URL 默认只读，另存为清空并校验新 URL；保存、另存为、刷新和路由离开都保留脏状态边界，不静默覆盖原源。
+验收：已有源无需返回弹窗即可修改规则和源级配置、重跑、对比并保存；另存为会检查地址冲突并切换到新源路由；浏览器返回、返回列表和刷新均有未保存保护；前端构建与相关纯函数测试通过。
+指针：frontend/src/views/DebugWorkbenchView.vue，frontend/src/components/SourceFields.vue，frontend/src/composables/useDebugSession.js，pnpm run build，lessons §六十八 / §七十八
