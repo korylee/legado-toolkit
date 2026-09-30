@@ -37,7 +37,7 @@ SYSTEM_TAGS = SYSTEM_TYPE_TAGS | SYSTEM_STATUS_TAGS | SYSTEM_QUALITY_TAGS
 #: 就地换名即可，不需要（也不该）重新推断状态。
 #:
 #: 两个用途：
-#:   - `Store.migrate_health_tiers_once`：把存量 `sources.group_name` 里的旧词换掉。
+#:   - 存量 `sources.group_name` 的旧词已在当前管理库外部完成换名。
 #:     不换的话前端 `splitSystemUser` 认不出（它拿的是新词表）→ 旧词会以
 #:     **用户标签**的身份出现在标签列里，可编辑、可导出。
 #:   - `_is_legacy_system_segment`：旧分组里的这些词不许漏成用户标签。

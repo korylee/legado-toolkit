@@ -1,10 +1,5 @@
 # -*- coding: utf-8 -*-
 """两条校验路的结果形状必须**一模一样**（十-2：单条校验切引擎）。
-
-前端读 items / transitions 的是**同一段代码**（`parseCheckResult` /
-`applyCheckResults`）——一条源点「校验」走的是本地引擎还是本机引擎，界面上不该
-看得出来。两处各写一份形状就会漂，而漂的表现是「某几条源校验完列表不更新」：
-不报错、只是那一格永远不变（lessons §五、§二十三）。
 """
 
 from __future__ import annotations

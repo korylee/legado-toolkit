@@ -24,7 +24,6 @@ export const HEALTH_OPTIONS = computed(() =>
 //: 结论是**谁判的**（`checks.engine`）。取值定义在 core/models.Engine，这里是
 //: 显示层副本（没有中文词表要对，只有取值要对齐）；新增取值时两处一起改。
 export const ENGINE_LABELS = {
-  local: "本地引擎",
   jvm: "本机引擎",
   device: "真机",
 };

@@ -64,11 +64,8 @@ PRAGMAS = (
     "PRAGMA temp_store=MEMORY",
 )
 
-#: `sources` 的表结构。**只有这一份**：建表（`DDL` 列表）与
-#: `migrate_sources_url_scope_once` 的重建都引用它——抄两份必然漂移。
-#:
-#: `source_url` **故意不带表级 UNIQUE**：唯一性由 `idx_sources_live_url` 这个
-#: 部分唯一索引表达（只约束在用的行）。差别见迁移方法的注释。
+#: `sources` 的表结构。**只有这一份**：建表（`DDL` 列表）直接使用它，
+#: source_url 唯一性由当前索引表达，差别见 AGENTS #9。
 SOURCES_DDL = """CREATE TABLE IF NOT EXISTS sources (
         id           INTEGER PRIMARY KEY,
         source_url   TEXT NOT NULL,
@@ -91,11 +88,7 @@ DDL = [
     "CREATE INDEX IF NOT EXISTS idx_sources_type  ON sources(source_type)",
     "CREATE INDEX IF NOT EXISTS idx_sources_group ON sources(group_name)",
     "CREATE INDEX IF NOT EXISTS idx_sources_name  ON sources(name)",
-    # 「在用」的源每个 URL 至多一行；回收站可以留同一 URL 的多个历史版本。
-    # 原来是表级 UNIQUE(source_url)，那会把回收站和在用的逼到同一个位置上——
-    # 删除只是原地打标记、没有腾出 URL，于是「删了再导入」必然撞车判冲突。
-    # 为什么「在用」的唯一性必须保住、迁移怎么做，见
-    # `Store.migrate_sources_url_scope_once` 的注释。
+    # 在用 URL 的唯一性由部分索引保证，回收站可保留历史版本；规则见 AGENTS #9。
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_sources_live_url "
     "ON sources(source_url) WHERE deleted_at = ''",
     """CREATE TABLE IF NOT EXISTS checks (
@@ -1441,8 +1434,7 @@ class Store:
 
         返回 ``{"restored": n, "blocked": [{id, url, name}, ...]}``。
 
-        粒度必须是行 id：同一个 URL 在回收站里可以有多份历史版本（见
-        ``migrate_sources_url_scope_once``），按 URL 恢复会含糊——恢复哪一份？
+        粒度必须是行 id：同一个 URL 在回收站里可以有多份历史版本，按 URL 恢复会含糊——恢复哪一份？
 
         **已有在用版本时拒绝，而不是顶替**：在用唯一性由部分唯一索引保证，
         硬恢复会撞约束；更重要的是顶替会把用户看不见的那行悄悄换掉。被挡下的行

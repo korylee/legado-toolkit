@@ -104,7 +104,7 @@ class ImportBody(BaseModel):
     #:   "overwrite" 用导入的覆盖在用的那行（用户标签不会被清掉：
     #:               upsert 的 DO UPDATE 不含 user_tags）
     #: 注意**回收站里的同 URL 历史版本与此无关**——它们不在用，不构成冲突，
-    #: 导入会直接新建一行在用的。见 Store.migrate_sources_url_scope_once。
+    #: 导入会直接新建一行在用的。
     conflict_strategy: str = "keep"
 
 

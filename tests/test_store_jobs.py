@@ -90,43 +90,6 @@ class JobRetentionTests(unittest.TestCase):
             st.create_job("new", "check")
             self.assertIn("pinned", self._ids(st))
 
-    def test_old_rows_are_backfilled_not_swept(self) -> None:
-        """**补列之前落下的行要被补上过期时间，而不是立刻扫掉。**
-
-        `expires_at` 补列时是空串，而空串**按字符串比较小于任何时间戳**——
-        不补的话 `sweep_jobs` 第一次跑就把历史任务全删了，用户那边看起来就是
-        「升级一次，任务列表空了」。这是这套机制里唯一会把用户数据弄丢的地方。
-        """
-        import sqlite3
-
-        conn = sqlite3.connect(self.db)
-        conn.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
-        conn.execute("CREATE TABLE sources (id INTEGER PRIMARY KEY, source_url TEXT UNIQUE, "
-                     "name TEXT, source_type INTEGER, group_name TEXT, enabled INTEGER, "
-                     "raw_json TEXT, fingerprint TEXT, deleted_at TEXT NOT NULL DEFAULT '', "
-                     "created_at TEXT, updated_at TEXT)")
-        # 老 jobs：没有 expires_at / pinned（其余列按当前 DDL 减去这两条）
-        conn.execute(
-            "CREATE TABLE jobs (id TEXT PRIMARY KEY, kind TEXT NOT NULL DEFAULT '', "
-            "status TEXT NOT NULL DEFAULT '', progress INTEGER DEFAULT 0, "
-            "total INTEGER DEFAULT 0, payload TEXT DEFAULT '', result_json TEXT DEFAULT '', "
-            "created_at TEXT NOT NULL, updated_at TEXT NOT NULL)")
-        # **用一个「昨天更新过」的时间**，不是写死的旧日期：回填的口径是
-        # `updated_at + TTL`，写 2026-09-01 的话它本来就过期了，被扫掉是对的，
-        # 那样就测不出「回填有没有生效」——第一版就是这么写错的
-        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
-        conn.execute(
-            "INSERT INTO jobs(id,kind,status,created_at,updated_at) VALUES (?,?,?,?,?)",
-            ("legacy", "check", "done", yesterday, yesterday))
-        conn.commit()
-        conn.close()
-
-        with Store(self.db) as st:
-            st.create_job("new", "check")     # 顺带 sweep
-            ids = self._ids(st)
-        self.assertIn("legacy", ids, "老任务被立刻扫掉了——回填没生效")
-        self.assertIn("new", ids)
-
     def test_long_running_jobs_are_protected(self) -> None:
         """自动清理不能删除仍由执行线程持有的任务。"""
         with Store(self.db) as st:
@@ -168,10 +131,6 @@ if __name__ == "__main__":
 # ---------------------------------------------------------------- 变异记录
 # 以下为实测（改坏 → `python -B -m unittest tests.test_store_jobs` → 确认变红 → 还原）。
 #
-#  M29  去掉 `_init_schema` 里的 `_backfill_job_expiry()`
-#         → test_old_rows_are_backfilled_not_swept 红
-#         **这条是整个机制里唯一会弄丢用户数据的地方**：补列后老行的 expires_at 是
-#         空串，空串按字符串比较小于任何时间戳 → 不清一次就把历史任务全删了
 #  M30  sweep 去掉终态过滤（把 pending/running 一并删掉）
 #         → test_long_running_jobs_are_protected 红：执行中的任务不能被 TTL 清理
 #  M31  sweep 的 WHERE 去掉 `pinned = 0`

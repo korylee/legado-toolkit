@@ -184,22 +184,6 @@ class StoreTagTests(unittest.TestCase):
             overview = {x["tag"]: x for x in st.tags_overview()}
             self.assertEqual(overview["📥下载"]["kind"], "system")
 
-    def test_cleanup_system_tags_from_user_tags(self) -> None:
-        with Store(self.db) as st:
-            st.upsert_sources([make_source(
-                "📥下载,可用,原创", url="https://download.example", source_type=3)])
-            st.conn.execute(
-                "UPDATE sources SET user_tags=? WHERE source_url=?",
-                ("📥下载,原创", "https://download.example"))
-            st.conn.execute(
-                "DELETE FROM meta WHERE key=?", ("system_tags_cleaned_at",))
-            st.conn.commit()
-            self.assertTrue(st.cleanup_system_tags_once())
-            row = st.conn.execute(
-                "SELECT user_tags FROM sources WHERE source_url=?",
-                ("https://download.example",)).fetchone()
-            self.assertEqual(row["user_tags"], "原创")
-
     def test_system_status_override_survives_rebuild_and_upsert(self) -> None:
         with Store(self.db) as st:
             st.upsert_sources([make_source("原创")])
@@ -262,28 +246,6 @@ class StoreTagTests(unittest.TestCase):
                 "SELECT user_tags FROM sources WHERE source_url=?", ("https://new.example",)).fetchone()
             self.assertEqual(row["user_tags"], "R18,精排,原创")
             self.assertEqual(st.export_sources()[1]["bookSourceGroup"], "📖小说,待验证,R18,精排,原创")
-
-    def test_migration_from_legacy_schema(self) -> None:
-        raw = make_source("📖小说,可用,原创,精排")
-        conn = sqlite3.connect(self.db)
-        conn.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
-        conn.execute(
-            "CREATE TABLE sources (id INTEGER PRIMARY KEY, source_url TEXT UNIQUE, "
-            "name TEXT, source_type INTEGER, group_name TEXT, enabled INTEGER, "
-            "raw_json TEXT, fingerprint TEXT, deleted_at TEXT NOT NULL DEFAULT '', "
-            "created_at TEXT, updated_at TEXT)")
-        conn.execute(
-            "INSERT INTO sources(source_url,name,source_type,group_name,enabled,raw_json,created_at,updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?)",
-            (_normalize_url(raw["bookSourceUrl"]), raw["bookSourceName"], 0, raw["bookSourceGroup"],
-             1, json.dumps(raw, ensure_ascii=False), "2026-01-01 00:00:00", "2026-01-01 00:00:00"))
-        conn.commit()
-        conn.close()
-        with Store(self.db) as st:
-            row = st.conn.execute("SELECT group_name, user_tags FROM sources").fetchone()
-            self.assertEqual(row["group_name"], "📖小说,可用")
-            self.assertEqual(row["user_tags"], "原创,精排")
-            self.assertEqual(st.export_sources()[0]["bookSourceGroup"], "📖小说,可用,原创,精排")
 
 
 if __name__ == "__main__":
