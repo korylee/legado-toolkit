@@ -223,15 +223,6 @@
 - agent-evidence-budget
 指针：core/page_layer.py，frontend/src/utils/debugNextAction.js，frontend/src/components/DebugWorkbench.vue，backend/api/rules.py，lessons §七十三 / §八十
 
-### 条目：agent-context · 生成按 Layer 压缩的 AgentContext
-状态：todo
-依赖：agent-layer-orchestration
-优先级：P1
-背景：模型不应接收完整 HTML、外部 bundle、Cookie 和全量事件流；需要从现有页面判定、证据、候选规则、运行态和网络事件生成小型上下文。
-约束：L1 只带目标、统计、证据引用和候选；L2 带容器统计与可用引擎；L3 带加密痕迹、运行时对象类型/键/数量；L4 带接口方法、状态码、JSON 形状和候选路径；L5 带登录事实与会话能力；敏感值只传类型、长度、哈希或脱敏样本；缺材料时通过有限取证动作补充，不把整页塞回模型。
-验收：每个 L1-L5 输入都能生成稳定 JSON 摘要；相同调试结果生成的上下文字段和顺序稳定；上下文不包含 Cookie、密钥、完整密文和完整响应；缺少材料时返回明确缺口而不是空结论。
-指针：core/page_layer.py，frontend/src/components/DebugWorkbench.vue，backend/api/rules.py
-
 ### 条目：agent-action-schema · 固定 AgentProposal 动作协议
 状态：todo
 依赖：agent-context
@@ -644,3 +635,12 @@
 约束：结构化编辑与原始 JSON 都只改会话草稿；已有源 URL 默认只读，另存为清空并校验新 URL；保存、另存为、刷新和路由离开都保留脏状态边界，不静默覆盖原源。
 验收：已有源无需返回弹窗即可修改规则和源级配置、重跑、对比并保存；另存为会检查地址冲突并切换到新源路由；浏览器返回、返回列表和刷新均有未保存保护；前端构建与相关纯函数测试通过。
 指针：frontend/src/views/DebugWorkbenchView.vue，frontend/src/components/SourceFields.vue，frontend/src/composables/useDebugSession.js，pnpm run build，lessons §六十八 / §七十八
+
+### 条目：agent-context · 生成按 Layer 压缩的 AgentContext
+状态：done
+依赖：agent-layer-orchestration
+优先级：P1
+背景：新增纯函数上下文构造器，以规范化调试快照生成稳定、按 Layer 裁剪且已脱敏的 Agent 输入；不接模型、不联网、不触发调试执行。
+约束：Layer 判定继续来自 `core/page_layer.py`；上下文只保留目标、事实、证据引用、候选、能力、运行时/网络形状和明确缺口；敏感值只保留类型、长度和哈希，完整 HTML、脚本、Cookie、密文和响应体不进入输出。
+验收：L1-L5、缺材料、输入顺序稳定性、JSON 形状和敏感信息泄露均有测试；全量 Python 测试通过。
+指针：core/agent_context.py，tests/test_agent_context.py，tests/test_page_layer.py，lessons §七十三 / §八十
