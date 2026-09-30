@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""本机引擎结论 → checks 口径（core/jvm_health）：失败分因、五档、星级、谁判的。
+"""本机引擎结论 → checks 口径（core/jvm_health）：失败分因、五档、谁判的。
 
 用例里的异常串**全是从真库抄的**（`meta` 表 `jvm_check:` 的 `reason` / `root`）。
 手编的串测不出「顺序判错」这一类错——`Socket closed` 与 `Connection reset` 只差

@@ -146,7 +146,7 @@ class DnsHealthMappingTests(unittest.TestCase):
 
 
 class ClassifyDnsTests(unittest.TestCase):
-    """`AsyncChecker._classify_dns`：判定结果 → (健康态, 文案)，以及按域名缓存。
+    """`dns_verdict_text`：DNS 判定结果 → (健康态, 文案)。
 
     判定对了、映射错了，用户看到的还是错的结论（比如"域名已注销"配上 `GFW` 这个
     健康态）——所以这一层单独测。
@@ -159,8 +159,7 @@ class ClassifyDnsTests(unittest.TestCase):
         dns_check.probe = self._orig
 
     def _run(self, verdict: str):
-        """执行体（AsyncChecker）已随本地校验链退场（十-4）；这里直接测**判词本体**
-        `dns_verdict_text`——执行体只是它的调用者，映射才是要守的东西。"""
+        """直接测**判词本体** `dns_verdict_text`——映射才是要守的东西。"""
         from core.checker import dns_verdict_text
         import asyncio
 

@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
-"""生成之后的验证：**两条路共用同一份**（`core.jvm_debug.verify_generated`）。
+"""生成之后的验证：**两条入口共用同一份**（`core.jvm_debug.verify_generated`）。
 
-原来 CLI（`services.add_source.run_add`）跑的是本地回放器、Web（`backend/api/ops.py`）
-跑的是真引擎——同一件事两份实现，结论必然漂。这一条盯的就是「只剩一份，而且 CLI 也走它」，
-外加引擎不可用时**不推翻生成结果**（原因要走到用户眼前，AGENTS #4）。
+生成（`services.add_source.run_add`）与 Web（`backend/api/ops.py`）都必须走这同一份，
+不能各自实现——同一件事两份实现，结论必然漂。外加引擎不可用时**不推翻生成结果**
+（原因要走到用户眼前，AGENTS #4）。
 """
 from __future__ import annotations
 
@@ -26,11 +26,11 @@ def _fake_fetch(html):
     return go
 
 
-class CliVerificationTests(unittest.TestCase):
-    """CLI：验证走本机引擎，且没验成时不带走生成结果。"""
+class GenerateVerificationTests(unittest.TestCase):
+    """快速生成：验证走本机引擎，且没验成时不带走生成结果。"""
 
     def setUp(self) -> None:
-        self.root = pathlib.Path(tempfile.mkdtemp(prefix="cli_verify_"))
+        self.root = pathlib.Path(tempfile.mkdtemp(prefix="gen_verify_"))
         self.out = self.root / "gen.json"
         self.html = FIXTURE.read_text(encoding="utf-8")
 
@@ -48,7 +48,7 @@ class CliVerificationTests(unittest.TestCase):
                           probe=False, verify=verify, interactive=False, **kw)
             return out, buf.getvalue()
 
-    def test_the_cli_verification_is_the_engine_one(self):
+    def test_the_generation_verification_is_the_engine_one(self):
         engine = {"source": "jvm", "all_ok": True,
                   "steps": [{"name": "search", "ok": True, "detail": "2 条结果"}]}
         out, printed = self._run(engine)
@@ -56,7 +56,7 @@ class CliVerificationTests(unittest.TestCase):
         self.assertIn("本机引擎", printed, "标签要跟着来源走（本地回放那句已经不该出现）")
         self.assertIn("search", printed)
         self.assertIn("全链路通过", printed)
-        self.assertNotIn("离线回放", printed, "CLI 不该再报「本地粗略验证」")
+        self.assertNotIn("离线回放", printed, "不该再报「本地粗略验证」")
 
     def test_no_verify_flag_skips_it_entirely(self):
         with mock.patch("services.add_source.verify_generated") as engine:

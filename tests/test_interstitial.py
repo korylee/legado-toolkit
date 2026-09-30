@@ -130,7 +130,7 @@ class ContentRulePairedWithWebviewTests(unittest.TestCase):
 
 
 class HumanGateTests(unittest.TestCase):
-    """`human_gate`：人就在屏幕前时（CLI / 交互式生成）——把窗口开给他，过完**机器接着走**。
+    """`human_gate`：人就在屏幕前时（交互式生成）——把窗口开给他，过完**机器接着走**。
 
     上游同形：`SourceVerificationHelp.startBrowser` + `refetchAfterSuccess`（人工过完 →
     重取同一个地址）。区别只在**谁开窗口**：那边是 App 内置浏览器，这边是桥那个 profile。

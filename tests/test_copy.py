@@ -61,8 +61,9 @@ class CopyOkMarkerTests(unittest.TestCase):
             f.write('Y = "本地回放"\n')
             path = pathlib.Path(f.name)
         try:
-            self.assertTrue(has_copy_ok(path, 1, 1))
-            self.assertFalse(has_copy_ok(path, 2, 2))
+            lines = path.read_text(encoding="utf-8").splitlines()
+            self.assertTrue(has_copy_ok(lines, 1, 1))
+            self.assertFalse(has_copy_ok(lines, 2, 2))
         finally:
             path.unlink()
 

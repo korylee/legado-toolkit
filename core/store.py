@@ -224,10 +224,9 @@ class Store:
         ("user_tags", "TEXT NOT NULL DEFAULT ''"),
         ("system_tags_locked", "INTEGER NOT NULL DEFAULT 0"),
     ], "checks": [
-        # 缓存版本 8 起：这条缓存是"带着搜索探测"写下的吗？默认 0 = 没验过搜索，
-        # 于是开着搜索探测的用户会把旧缓存整体重验一遍（正是 v8 想要的）。判定见
-        # checker.is_cache_item_valid 的 min_search。**不落这一列等于没修**：
-        # item 里写了但读回来恒为 None，所有 OK 源的缓存永远不复用
+        # 缓存版本 8 起的结论行轴：这行结论是"带着搜索探测"写下的吗？口径归
+        # `core/checker` 的 `CACHE_VERSION`。**不落这一列等于没修**：
+        # item 里写了但没建列，读回来恒为 None，新旧口径在库里分不出来
         ("search_probed", "INTEGER DEFAULT 0"),
         # 结论**是谁判的**（core/models.Engine：'' / local / jvm / device）。撤掉本地
         # 引擎之后，存量行是本地判的、新行是本机引擎判的——两种证据等级的判据强度不同
@@ -439,8 +438,6 @@ class Store:
           - ``backend/api/sources.py`` 的 `save_source` 也用默认值，但它**紧接着**就调
             `set_user_tags([url], body.user_tags)` 整组覆盖——那条链路是「用户在界面上
             明确勾的标签」，不该被这里的白名单管，所以覆盖是对的
-          - ``core/store_migrate.py`` 用默认值，而那时库是空的 →
-            `allow_unknown` 必为 True，根本走不到过滤那一支
 
         这条是**已决**的（2026-09-17），不再有后续动作——原来这里写着「见 TODO.md」，
         而那条待办在整理时按惯例删掉了（已完成的事项不留），指针就悬空了。

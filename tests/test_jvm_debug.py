@@ -3,11 +3,9 @@
 
 **不跑 Gradle、不联网**：把「拉 Gradle」与「补抓页面」两步换成假的，只钉组装与降级
 那部分逻辑——参数文件怎么写、结果怎么从 NDJSON/侧车拼出来、出错时怎么说。
-Gradle 那条链本身由 CLI 验收（A1–A3 的判据，见 `data/app_probe/echo_server.py` 那套）。
 
-为什么值得单独钉：这条链现在有**两个消费方**（CLI 与界面），拼装逻辑合在一处
-（`core/jvm_debug`）就要有东西守着它——`steps`/`events` 的形状一变，前端抽屉与列表
-两处都跟着坏，而那种坏看起来像前端 bug。
+为什么值得单独钉：这条链的拼装逻辑合在一处（`core/jvm_debug`）就要有东西守着它——
+`steps`/`events` 的形状一变，前端抽屉与列表两处都跟着坏，而那种坏看起来像前端 bug。
 """
 
 from __future__ import annotations
