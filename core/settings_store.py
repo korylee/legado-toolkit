@@ -404,11 +404,12 @@ def debug_timeout() -> int:
 def batch_via_daemon() -> bool:
     """批量块执行是否优先走常驻 validate daemon（``jvm.batch_via_daemon``）。
 
-    **唯一入口**（``backend/api/jvm.py`` 的 ``_chunk_work`` 调它）：探测不过或执行
-    失败一律回落 Gradle 并保留原因——回落是**说出来的降级**，不是静默替换。
-    默认 on（2026-09-30 拍板豁免实测，依据见 DEFAULTS 注释）；置 false 即回退
-    到纯 Gradle 路径。``load()`` 已逐键回落 DEFAULTS，这里不能再 ``or`` 一遍——
-    那会把用户显式存下的 false 吞掉，回退开关失效。
+    **唯一入口**（``backend/jobs/jvm_exec.py`` 调它：批前 ``prepare`` 一次 +
+    块级只读探测）：探测不过或执行失败一律回落 Gradle 并保留原因——回落是
+    **说出来的降级**，不是静默替换。默认 on（2026-09-30 拍板豁免实测，依据见
+    DEFAULTS 注释）；置 false 即回退到纯 Gradle 路径（连批前准备都不做）。
+    ``load()`` 已逐键回落 DEFAULTS，这里不能再 ``or`` 一遍——那会把用户显式
+    存下的 false 吞掉，回退开关失效。
     """
     return bool(load().get("jvm", {}).get("batch_via_daemon",
                                           DEFAULTS["jvm"]["batch_via_daemon"]))

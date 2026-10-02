@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import socket
 import subprocess
@@ -182,6 +183,31 @@ def _stop_port(port: int) -> None:
         time.sleep(0.2)
 
 
+def _pid_alive(pid: int) -> bool:
+    """进程还活着吗。判「死」用 pid，不用端口行为——实测（Windows，2026-10-02）
+    对已关闭端口的 connect 抛的是超时而不是拒绝连接，端口行为分不出死活。
+    Windows 走 OpenProcess（只查状态、不杀）；POSIX 走 ``kill(pid, 0)``。
+    """
+    pid = int(pid)
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        import ctypes
+
+        handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
+        if not handle:  # PROCESS_QUERY_LIMITED_INFORMATION
+            return False
+        ctypes.windll.kernel32.CloseHandle(handle)
+        return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # 活着，只是没权限发信号
+    return True
+
+
 def stop() -> bool:
     global _PROC
     with _LOCK:
@@ -263,7 +289,8 @@ def probe(dump: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     与 ``ensure`` 的差别是**绝不杀进程、绝不重启**：ping 不通可能只是 daemon
     正忙于别人的请求（daemon 串行，忙时 ping 排队到超时），探测方不持有互斥，
     杀掉会伤及在跑的 op。调用方（批量块）拿 None 就回落 Gradle——daemon 的
-    死活由持有互斥的单条路径（ensure）或下一批任务顺带恢复。
+    死活由批量开跑前的 ``prepare``（先分类再行动）或单条路径的 ``ensure``
+    恢复，探测本身绝不杀。
     """
     info = _read_info()
     port = int(info.get("port") or 0)
@@ -273,6 +300,51 @@ def probe(dump: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if got and got.get("sig") == source_sig(dump):
         return info
     return None
+
+
+def prepare(dump: Dict[str, Any],
+            boot_timeout: int = DEFAULT_BOOT_TIMEOUT) -> Dict[str, Any]:
+    """批量开跑前的一次性 daemon 准备：能复用就复用，该重启才重启。
+
+    与 ``ensure`` 的差别是**先分类再行动**——``ensure`` 对「ping 不通」一律
+    清掉重启，而 ping 不通可能只是 daemon 正串行忙别人的 op（见 ``probe``）。
+    返回 ``{"outcome": ..., "info"?/, "reason"?}``，outcome 四档，**永不抛**：
+
+    - ``ready``   热着且签名匹配：原样复用，不动任何进程。
+    - ``started`` 原本没在跑（info 缺失 / pid 已死）或版本不符（ping 通 =
+                  正向确认是我们的 daemon 且此刻空闲 → 优雅停旧起新）。
+    - ``busy``    进程还活着但 ping 没应答：忙或探测不确定——**不杀、不启**，
+                  调用方按块回落 Gradle。
+    - ``failed``  启动尝试失败，reason 保留 ``ValidateDaemonError`` 原文。
+
+    判「死」的唯一依据是 info 里的 pid 已不在（``_pid_alive``）；其余一律不杀。
+    """
+    try:
+        info = _read_info()
+        port = int(info.get("port") or 0)
+        if port:
+            got = ping(port, timeout=1.0)
+            if got:
+                if got.get("sig") == source_sig(dump):
+                    return {"outcome": "ready", "info": info}
+                # ping 通 = 此刻空闲且身份已确认（kind=="validate"），优雅停旧
+                # 起新；ensure 在这条路上走不到它的杀分支
+                return {"outcome": "started",
+                        "info": ensure(dump, boot_timeout=boot_timeout)}
+            pid = int(info.get("pid") or 0)
+            if pid > 0 and _pid_alive(pid):
+                return {"outcome": "busy",
+                        "reason": ("Validate daemon 进程还在（pid=%d）但 ping 没应答"
+                                   "（正忙或探测不确定），本批不准备也不杀" % pid)}
+            if pid <= 0:
+                return {"outcome": "busy",
+                        "reason": ("Validate daemon 的 info 没有 pid，无法判死活，"
+                                   "本批不准备也不杀")}
+        # info 缺失，或 pid 已死（info 是残骸）→ 此刻 ensure 的清理只碰得到死进程
+        return {"outcome": "started",
+                "info": ensure(dump, boot_timeout=boot_timeout)}
+    except ValidateDaemonError as exc:
+        return {"outcome": "failed", "reason": str(exc)}
 
 
 def run(dump: Dict[str, Any], args_file: str, timeout_slack: int = 30,
