@@ -35,15 +35,6 @@
 阻塞于：先统计重复提交率；没有数据证明收益前不实现。
 指针：backend/jobs/runner.py，backend/api/jvm.py，core/jvm_debug.py，AGENTS.md #5b，lessons §五十三 / §七十八
 
-### 条目：jvm-batch-cost-calibration · 用有限真实样本校准批量耗时提示
-状态：todo
-依赖：jvm-batch-daemon-cold-start, jvm-batch-observability
-优先级：P2
-背景：现有耗时提示来自历史全量/抽样数据，未区分 daemon 冷启动、热复用与 Gradle 回退；性能收益应按实际执行模式核验。
-约束：只用用户选定的小样本覆盖单块与跨块，不为测量频繁重跑全量或增加不必要站点请求；记录环境、源数、深度、块数、冷/热状态和各块 cost。
-验收：报告冷启动与热复用路径、Gradle 回退占比及耗时差异；据此校准或保留现有耗时提示，并说明样本局限。
-指针：frontend/src/components/CheckJvmForm.vue，frontend/src/utils/jvmDepth.js，backend/jobs/jvm_exec.py，lessons §四十七 / §六十六
-
 ### 条目：proj-3-drop · 前端摘掉本地投影
 状态：todo
 依赖：proj-3-bookurl, proj-3-attr
@@ -453,6 +444,23 @@
 
 > 已交付的事项只在这里留一行指针——**机制看 lessons，细节看 `git log`**（AGENTS #10）。
 > 这一区只允许 `状态：done`。
+
+### 条目：jvm-batch-cost-calibration · 用有限真实样本校准批量耗时提示
+状态：done
+依赖：无
+优先级：P2
+背景：2026-10-02 交付：12 源（✅可用，快中慢三段各 4）× 7 轮实测——Gradle 每块
+  固定开销约 17 秒（同形块跨模式差分 16.3–17.2s 三次一致）、daemon 冷启动 prepare
+  约 7 秒（历史锚 10.7s）、热复用起停约 0、块间约 1.3 秒；并发 8 下 6→12 源 wall
+  不变（小批耗时随最慢站点而非源数）。两处提示按数校准：CheckJvmForm 范围提示改
+  三态起停口径，jvmDepth 全量行标注历史实测口径（与新数不可加折算）。daemon 开关
+  经此测量拨 on 并保留（用户拍板）。
+约束：只用小样本（66 次搜索）；全量与 toc/content 深度未重测，估算行不动；提示
+  仍是静态文案，不做前端动态计算；测量脚本用完即删。
+验收：样本局限如实入档（搜索档、单一网络、站点跨轮复用有暖缓存效应）；全量
+  1020 绿、文案机检过、build 过。
+指针：frontend/src/components/CheckJvmForm.vue，frontend/src/utils/jvmDepth.js，
+  lessons §四十七
 
 ### 条目：jvm-batch-timeline · 任务详情改执行时间线：骨架事件流 + 失败源明细
 状态：done

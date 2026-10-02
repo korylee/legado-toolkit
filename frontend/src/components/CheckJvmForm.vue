@@ -83,7 +83,8 @@ async function runReadiness() {
 }
 
 const costText = computed(() => props.scope !== "all"
-  ? "起停约十几秒，外加每源约 0.3 秒（按全量实测折算）" : depthCost(run.value.depth));
+  ? "引擎起停：热复用约 1 秒，首次冷启动另加 7~11 秒；若回退 Gradle 每块多约 17 秒；小批耗时随站点速度（12 源实测）"
+  : depthCost(run.value.depth));
 
 onMounted(load);
 defineExpose({ reload: load, params: () => ({ ...run.value }) });
