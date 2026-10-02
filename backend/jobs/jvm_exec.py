@@ -422,6 +422,50 @@ def _read_results(path: Path) -> List[Dict[str, Any]]:
     return [json.loads(l) for l in text.splitlines() if l.strip()]
 
 
+_EVENT_LOCK = threading.Lock()
+_EVENT_TAIL_CAP = 500
+
+
+def _append_event(run_dir: Optional[Path], kind: str, **fields: Any) -> None:
+    """骨架事件追加到运行目录 ``events.jsonl``（jvm-batch-timeline）。
+
+    **行号即游标**（消费端按行号增量读，见 backend/api/job_timeline），所以
+    一行一条、坏行也占号；模块锁防块线程与任务协程交错写。
+    事件是辅助证据：写不进去（OSError）不拦校验本身，也不算源失败。
+    """
+    if run_dir is None:
+        return
+    record = {"ts": round(time.time(), 3), "kind": kind, **fields}
+    with _EVENT_LOCK:
+        try:
+            with open(run_dir / "events.jsonl", "a", encoding="utf-8") as f:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except OSError:
+            pass
+
+
+def _read_events_tail(run_dir: Optional[Path]) -> List[Dict[str, Any]]:
+    """终态合并用：读事件尾部（cap 后仍按原始行号编 seq），进 result 长存——
+    成功会清运行目录，时间线在合并后就靠 result_json。"""
+    if run_dir is None:
+        return []
+    try:
+        lines = (run_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    lines = [l for l in lines if l.strip()]
+    out: List[Dict[str, Any]] = []
+    start = max(len(lines) - _EVENT_TAIL_CAP, 0)
+    for idx, line in enumerate(lines[start:], start=start + 1):
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(ev, dict):
+            out.append(ev)
+    return out
+
+
 def _write_meta(rows: List[Dict[str, Any]]) -> str:
     """结论写 meta（jvm_check:<batch>:<url>），幂等。返回 batch id。"""
     batch = time.strftime("%Y%m%d_%H%M%S")
@@ -551,7 +595,13 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
             if run_dir is not None and has_manifest:
                 _write_run_manifest(run_dir, manifest, job_id)
                 _persist_runtime_snapshot(run_dir)
-            return _execute_single(tail_stop, tail)
+            _append_event(run_dir, "single_started")
+            result = _execute_single(tail_stop, tail)
+            # 终态事件在读尾合并之前落盘，才能进 result["events"]
+            _append_event(run_dir, "done" if result.get("ok") else "failed",
+                          reason=str(result.get("reason") or "")[:300])
+            result["events"] = _read_events_tail(run_dir)
+            return result
         finally:
             # 早退路径（如 daemon 失败不回退）也从这里停轮询；set/join 可重入，
             # 成功路径上已经停过一次
@@ -841,6 +891,9 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
         if run_dir is not None and has_manifest:
             _write_run_manifest(run_dir, manifest, job_id)
             _persist_runtime_snapshot(run_dir)
+        batch_t0 = time.monotonic()
+        _append_event(run_dir, "batch_started", chunks=len(chunks),
+                      sources=len(rows_all))
         job_runner.update_phase(job_id, "starting_gradle")
         # **上一版结论的快照必须在落库之前读**：跑完再读，每条源都是 old == new，
         # 「这次变了什么」会永远答「没变」（与单条同规矩，理由见 ops.run_check_job）
@@ -872,6 +925,7 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
                 all_rows.extend(rows)
                 base_done += len(rows)
                 job_runner.update_progress(job_id, base_done)
+                _append_event(run_dir, "resumed", index=idx, count=len(rows))
                 chunk_reports.append({"index": idx, "ok": True,
                                       "count": len(rows), "resumed": True})
                 continue
@@ -898,7 +952,12 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
             # 忙（端口有人听、ping 没应答）一律不杀。
             if use_daemon and chunk_args is not None and not daemon_prepare:
                 job_runner.update_phase(job_id, "starting_daemon")
+                _prepare_t0 = time.monotonic()
                 daemon_prepare = await run_in_threadpool(_prepare_daemon)
+                _append_event(run_dir, "prepare",
+                              outcome=str(daemon_prepare.get("outcome") or ""),
+                              reason=str(daemon_prepare.get("reason") or ""),
+                              cost_sec=round(time.monotonic() - _prepare_t0, 1))
                 if daemon_prepare.get("outcome") in ("busy", "failed"):
                     daemon_retry_waiting = True
                     daemon_retry_reason = str(daemon_prepare.get("reason") or
@@ -918,6 +977,8 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
                              if use_daemon and not daemon_allowed else "")
             if retry_this_chunk:
                 daemon_retry_available = False
+            _append_event(run_dir, "chunk_started", index=idx,
+                          total=len(chunks), count=len(chunk_rows))
             work = asyncio.create_task(run_in_threadpool(
                 _chunk_work, idx, len(chunks), chunk_dir, chunk_args,
                 chunk_out, base_done, batch, tail_stop, tail,
@@ -932,6 +993,13 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
                 abort_reason = "用户取消，剩余块未启动"
                 break
             chunk_reports.append(report)
+            _append_event(run_dir,
+                          "chunk_done" if report.get("ok") else "chunk_failed",
+                          index=idx, mode=str(report.get("execution_mode") or ""),
+                          count=int(report.get("count") or 0),
+                          cost_sec=report.get("cost_sec"),
+                          reason=(str(report.get("reason") or "")[:300]
+                                  if not report.get("ok") else ""))
             if daemon_retry_waiting:
                 # 忙/失败后只在下一块重试一次，**有意不逐块重试**：每次 probe 都要
                 # 付满 1 秒超时，忙着的 daemon 不会因为多探几次就空闲
@@ -939,6 +1007,7 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
                 daemon_retry_available = True
             if retry_this_chunk and report.get("execution_mode") == "validate_daemon":
                 daemon_recovered = True
+                _append_event(run_dir, "recovered", index=idx)
             if cancelled.is_set():
                 abort_reason = abort_reason or "用户取消，剩余块未启动"
                 break
@@ -953,9 +1022,17 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
 
         if cancelled.is_set():
             # 批量取消**保留**运行目录：已完成块的 DONE/results 是重试恢复的依据
+            _append_event(run_dir, "cancelled")
             from core.jvm_debug import prune_stale_run_dirs
             prune_stale_run_dirs(root=data_dir() / "app_probe" / "runs")
             raise asyncio.CancelledError()
+
+        # 终态事件必须在读尾合并**之前**落盘，才能进 result["events"]
+        if abort_reason:
+            _append_event(run_dir, "failed", reason=abort_reason)
+        else:
+            _append_event(run_dir, "done", count=len(all_rows),
+                          cost_sec=round(time.monotonic() - batch_t0, 1))
 
         names = {_normalize_url(str(r.get("url") or "")): str(r.get("name") or "")
                  for r in all_rows}
@@ -993,6 +1070,7 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
                 "outcome": str(daemon_prepare.get("outcome") or "failed"),
                 "reason": str(daemon_prepare.get("reason") or ""),
             }
+        result["events"] = _read_events_tail(run_dir)
         if abort_reason:
             result["reason"] = abort_reason
         # 成功清现场；失败/取消保留——已完成块的 DONE/results 是重试恢复的依据

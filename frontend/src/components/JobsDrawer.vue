@@ -2,9 +2,10 @@
 import { ref, computed, watch, onMounted, onUnmounted } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { api, subscribeJob } from "../api/client";
-import { describeChanges, healthLabel } from "../utils/health";
+import { healthLabel } from "../utils/health";
 import { jobPhaseLabel, daemonPrepareLabel } from "../utils/jobs";
 import { useJobs } from "../composables/useJobs";
+import JobTimeline from "./JobTimeline.vue";
 
 // 「任务」抽屉：替代已删掉的「任务」页。
 // 打开时拉一次历史（GET /api/jobs），再对还没跑完的任务挂 SSE 实时进度。
@@ -87,41 +88,15 @@ const activeJobId = ref("");
 const detailLoading = ref(false);
 const selectedJob = computed(() => jobs.value.find((j) => j.id === activeJobId.value) || null);
 const selectedDetail = computed(() => details.value[activeJobId.value] || null);
-const executionFilter = ref("all");
-const chunkReports = computed(() => (selectedDetail.value?.chunk_reports || []).filter(
-  (chunk) => executionFilter.value === "all"
-    || (executionFilter.value === "issue" && (chunk.ok === false || chunk.execution_mode === "gradle" || chunk.daemon_failure))
-    || (executionFilter.value === "gradle" && chunk.execution_mode === "gradle"),
-));
-const chunkStats = computed(() => {
-  const reports = selectedDetail.value?.chunk_reports || [];
-  return {
-    total: selectedDetail.value?.chunk_report_total || reports.length,
-    done: reports.filter((chunk) => chunk.ok === true).length,
-    daemon: reports.filter((chunk) => chunk.execution_mode === "validate_daemon").length,
-    gradle: reports.filter((chunk) => chunk.execution_mode === "gradle").length,
-    failed: reports.filter((chunk) => chunk.ok === false).length,
-  };
-});
-const executionModeShort = (mode) => mode === "validate_daemon" ? "daemon" : mode === "gradle" ? "Gradle" : "未确定";
-const chunkIsIssue = (chunk) => chunk.ok === false || chunk.execution_mode === "gradle" || !!chunk.daemon_failure;
-const chunkHeadline = (chunk) => {
-  if (chunk.ok === false) return chunk.reason || "本块执行失败";
-  if (chunk.daemon_failure) return chunk.daemon_failure;
-  if (chunk.execution_mode === "gradle") return "本块回退 Gradle 执行";
-  return "Validate daemon 请求完成，结果已写入";
-};
-const chunkLog = (chunk) => {
-  if (!chunk.gradle) return "";
-  return chunk.gradle.stderr || chunk.gradle.stdout || "";
-};
-const summaryLines = (s) => {
-  if (!s) return [];
-  const lines = ["本次校验 " + s.checked + " 条：新校验 " + s.fetched + " 条、复用缓存 " + s.cached + " 条"];
-  if (s.first_checked) lines.push("其中 " + s.first_checked + " 条首次有结论");
-  const changes = describeChanges(s.changed);
-  lines.push(changes.length ? "相对上次变化：" + changes.join("、") : "相对上次：无状态变化");
-  return lines;
+// 摘要压成一行（用户拍板）：块级过程已由执行时间线呈现，这里只答
+// 「通过多少、没通过多少、相对上次变没变」；变化明细区保留（哪几条变了）
+const summaryOneLine = (s) => {
+  if (!s) return "";
+  const ok = Number((s.dist || {}).ok || 0);
+  const fail = Number(s.checked || 0) - ok;
+  const change = Number(s.changed_total || 0);
+  return "通过 " + ok + " · 未通过 " + fail
+    + (change ? " · 相对上次变化 " + change + " 条" : " · 相对上次无变化");
 };
 
 async function loadDetail(row) {
@@ -321,9 +296,16 @@ defineExpose({ refresh: load });
              <el-descriptions-item v-if="selectedJob.retry_of" label="来源任务">{{ selectedJob.retry_of }}</el-descriptions-item>
           </el-descriptions>
 
+          <JobTimeline
+            v-if="selectedJob.kind === 'jvm_run'"
+            :job-id="selectedJob.id"
+            :status="selectedJob.status"
+            :chunk-reports="selectedDetail ? (selectedDetail.chunk_reports || []) : []"
+          />
+
           <template v-if="selectedDetail">
             <template v-if="selectedDetail.summary">
-              <div v-for="(line, i) in summaryLines(selectedDetail.summary)" :key="'line' + i" class="detail-line">{{ line }}</div>
+              <div class="detail-line">{{ summaryOneLine(selectedDetail.summary) }}</div>
               <div v-for="(w, i) in selectedDetail.summary.warnings" :key="'warn' + i" class="detail-warn">{{ w }}</div>
               <div v-if="selectedDetail.summary.changed_items.length" class="detail-changes">
                 <div class="muted detail-section-title">
@@ -337,112 +319,6 @@ defineExpose({ refresh: load });
                 </div>
               </div>
             </template>
-                         <!--
-               <div class="detail-execution-toolbar">
-                 <div>
-                   <div class="muted detail-section-title">执行记录</div>
-                   <div class="detail-execution-stats muted">{{ chunkStats.done }} / {{ chunkStats.total }} 块完成 · daemon {{ chunkStats.daemon }} · Gradle {{ chunkStats.gradle }}<span v-if="chunkStats.failed"> · {{ chunkStats.failed }} 块失败</span></div>
-                 </div>
-                 <el-radio-group v-model="executionFilter" size="small">
-                   <el-radio-button label="all">全部</el-radio-button>
-                   <el-radio-button label="issue">仅异常</el-radio-button>
-                   <el-radio-button label="gradle">仅 Gradle</el-radio-button>
-                 </el-radio-group>
-               </div>
-               <div v-for="(chunk, i) in chunkReports" :key="'record' + i" class="detail-record" :class="{ 'is-issue': chunkIsIssue(chunk) }">
-                    <div class="detail-record-summary">
-                   <span class="detail-record-mark">{{ chunk.ok === false ? "✕" : chunkIsIssue(chunk) ? "⚠" : "✓" }}</span>
-                   <span>第 {{ (chunk.index ?? i) + 1 }} 块</span>
-                   <span class="detail-record-mode">{{ executionModeShort(chunk.execution_mode) }}</span>
-                   <span v-if="chunk.count != null" class="muted">{{ chunk.count }} 条</span>
-                   <span v-if="chunk.cost_sec != null" class="muted">{{ chunk.cost_sec }} 秒</span>
-                 </div>
-                 </div>
-                  <div class="detail-record-body">
-                   <div class="detail-record-headline">{{ chunkHeadline(chunk) }}</div>
-                   <div v-if="chunk.gradle && chunk.gradle.exit != null" class="muted detail-record-meta">退出码：{{ chunk.gradle.exit }}</div>
-                   <pre v-if="chunkLog(chunk)" class="detail-chunk-log">{{ chunkLog(chunk) }}</pre>
-                   <div v-else class="muted detail-record-meta">没有可展示的执行日志</div>
-                 </div>
-               </div>
-               </div>
-                  </div>
-                </div>
-                <div v-if="!chunkReports.length" class="muted detail-empty">没有符合当前筛选的执行记录</div>
-               <div v-if="selectedDetail.chunk_reports_truncated" class="muted detail-record-note">仅展示前 {{ selectedDetail.chunk_reports.length }} / {{ selectedDetail.chunk_report_total }} 条记录</div>
-             </div><!-- legacy chunk markup
-
-               <div class="detail-execution-toolbar">
-                  <div>
-                    <div class="muted detail-section-title">执行记录</div>
-                    <div class="detail-execution-stats muted">
-                      {{ chunkStats.done }} / {{ chunkStats.total }} 块完成 · daemon {{ chunkStats.daemon }} · Gradle {{ chunkStats.gradle }}<span v-if="chunkStats.failed"> · {{ chunkStats.failed }} 块失败</span>
-                    </div>
-                  </div>
-                  <el-radio-group v-model="executionFilter" size="small">
-                    <el-radio-button label="all">全部</el-radio-button>
-                    <el-radio-button label="issue">仅异常</el-radio-button>
-                    <el-radio-button label="gradle">仅 Gradle</el-radio-button>
-                  </el-radio-group>
-                </div>
-               <div v-for="(chunk, i) in chunkReports" :key="'record' + i" class="detail-record" :class="{ 'is-issue': chunkIsIssue(chunk) }">
-                    <div class="detail-record-summary">
-                      <span class="detail-record-mark">{{ chunk.ok === false ? "✕" : chunkIsIssue(chunk) ? "⚠" : "✓" }}</span>
-                      <span>第 {{ (chunk.index ?? i) + 1 }} 块</span>
-                      <span class="detail-record-mode">{{ executionModeShort(chunk.execution_mode) }}</span>
-                      <span v-if="chunk.count != null" class="muted">{{ chunk.count }} 条</span>
-                      <span v-if="chunk.cost_sec != null" class="muted">{{ chunk.cost_sec }} 秒</span>
-                    </div>
-                    </div>
-                  <div class="detail-record-body">
-                      <div class="detail-record-headline">{{ chunkHeadline(chunk) }}</div>
-                      <div class="detail-record-legacy">
-
-                   <span>第 {{ (chunk.index ?? i) + 1 }} 块</span>
-                   <span class="muted"></span>
-                   <span v-if="chunk.cost_sec != null" class="muted">{{ chunk.cost_sec }} 秒</span>
-                   <span v-if="chunk.count != null" class="muted">{{ chunk.count }} 条</span>
-                 </div>
-                 <div v-if="chunk.daemon_failure" class="detail-warn">回退：{{ chunk.daemon_failure }}</div>
-                 <div v-if="chunk.reason" class="detail-warn">原因：{{ chunk.reason }}</div>
-                 <pre v-if="chunk.gradle && (chunk.gradle.stderr || chunk.gradle.stdout)" class="detail-chunk-log">{{ chunk.gradle.stderr || chunk.gradle.stdout }}</pre>
-                      <div v-else class="muted detail-record-meta">没有可展示的执行日志</div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-               </div>
-             </div>
---><div v-if="selectedDetail.chunk_reports && selectedDetail.chunk_reports.length" class="detail-execution">
-             <div class="detail-execution-toolbar">
-               <div>
-                 <div class="muted detail-section-title">执行记录</div>
-                 <div class="detail-execution-stats muted">{{ chunkStats.done }} / {{ chunkStats.total }} 块完成 · daemon {{ chunkStats.daemon }} · Gradle {{ chunkStats.gradle }}<span v-if="chunkStats.failed"> · {{ chunkStats.failed }} 块失败</span></div>
-               </div>
-               <el-radio-group v-model="executionFilter" size="small">
-                 <el-radio-button label="all">全部</el-radio-button>
-                 <el-radio-button label="issue">仅异常</el-radio-button>
-                 <el-radio-button label="gradle">仅 Gradle</el-radio-button>
-               </el-radio-group>
-             </div>
-             <div v-for="(chunk, i) in chunkReports" :key="'record-final' + i" class="detail-record" :class="{ 'is-issue': chunkIsIssue(chunk) }">
-               <div class="detail-record-summary">
-                 <span class="detail-record-mark">{{ chunk.ok === false ? "✕" : chunkIsIssue(chunk) ? "⚠" : "✓" }}</span>
-                 <span>第 {{ (chunk.index ?? i) + 1 }} 块</span>
-                 <span class="detail-record-mode">{{ executionModeShort(chunk.execution_mode) }}</span>
-                 <span v-if="chunk.count != null" class="muted">{{ chunk.count }} 条</span>
-                 <span v-if="chunk.cost_sec != null" class="muted">{{ chunk.cost_sec }} 秒</span>
-               </div>
-               <div class="detail-record-body">
-                 <div class="detail-record-headline">{{ chunkHeadline(chunk) }}</div>
-                 <div v-if="chunk.gradle && chunk.gradle.exit != null" class="muted detail-record-meta">退出码：{{ chunk.gradle.exit }}</div>
-                 <pre v-if="chunkLog(chunk)" class="detail-chunk-log">{{ chunkLog(chunk) }}</pre>
-                 <div v-else class="muted detail-record-meta">没有可展示的执行日志</div>
-               </div>
-             </div>
-             <div v-if="!chunkReports.length" class="muted detail-empty">没有符合当前筛选的执行记录</div>
-             <div v-if="selectedDetail.chunk_reports_truncated" class="muted detail-record-note">仅展示前 {{ selectedDetail.chunk_reports.length }} / {{ selectedDetail.chunk_report_total }} 条记录</div>
-           </div>
            <div v-if="selectedDetail.error" class="detail-warn">{{ selectedDetail.error }}</div>
             <div v-if="selectedDetail.result !== null && selectedDetail.result !== undefined" class="detail-result">
               <div class="muted detail-section-title">任务结果</div>
@@ -590,39 +466,6 @@ defineExpose({ refresh: load });
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.detail-execution { margin-top: 12px; }
-.detail-execution-toolbar {
-  display: flex; align-items: flex-end; justify-content: space-between; gap: 10px;
-  margin-bottom: 8px; flex-wrap: wrap;
-}
-.detail-execution-toolbar .detail-section-title { margin: 0 0 2px; }
-.detail-execution-stats { font-size: 12px; }
-.detail-record {
-  margin-top: 7px; border: 1px solid var(--el-border-color-extra-light);
-  border-radius: 7px; background: var(--el-fill-color-light);
-}
-.detail-record.is-issue { border-color: var(--el-color-warning-light-5); }
-.detail-record-summary {
-  display: flex; align-items: center; gap: 7px; padding: 8px 10px;
-  cursor: default; font-size: 12px; list-style: none;
-}
-.detail-record-mark { width: 16px; font-weight: 700; text-align: center; color: var(--el-color-success); }
-.detail-record.is-issue .detail-record-mark { color: var(--el-color-warning); }
-.detail-record-mode { font-weight: 600; color: var(--el-text-color-primary); }
-.detail-record-body { padding: 0 10px 9px 33px; }
-.detail-record-headline { line-height: 1.6; color: var(--el-text-color-regular); }
-.detail-record-meta { margin-top: 4px; font-size: 12px; }
-.detail-record-note { margin-top: 8px; font-size: 12px; }
-.detail-record-legacy { display: none; }
-.detail-chunk {
-  margin-top: 8px;
-  padding: 8px;
-  border: 1px solid var(--el-border-color-extra-light);
-  border-radius: 6px;
-  background: var(--el-fill-color-light);
-}
-.detail-chunk-head { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; line-height: 1.7; font-size: 12px; }
-.detail-chunk-log { max-height: 140px; overflow: auto; margin: 6px 0 0; padding: 6px; white-space: pre-wrap; font-size: 11px; }
 .detail-result pre {
   max-height: 320px; overflow: auto; padding: 10px;
   background: var(--el-fill-color-light); border-radius: 4px; white-space: pre-wrap;

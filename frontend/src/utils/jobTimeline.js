@@ -1,0 +1,50 @@
+// 执行时间线的事件文案（jvm-batch-timeline）——**唯一的一份**。
+//
+// 后端给的是骨架事件（ts + kind + 字段），这里负责说成人话：主行不出现
+// daemon/Gradle 术语（引擎层细节留给失败块展开的日志），也不编造后端没给的
+// 数字（比如预计剩余时间）。tone: info | warn | error，前端据此上色。
+
+export function formatTimelineEvent(ev) {
+  if (!ev || !ev.kind) return { text: "", tone: "info" };
+  const n = ev.index != null ? Number(ev.index) + 1 : null;
+  const at = (suffix) => (n != null ? `第 ${n} 块` + suffix : suffix);
+  const sec = (v) => (v != null ? `${v} 秒` : "");
+  switch (ev.kind) {
+    case "batch_started":
+      return { text: `开始校验：${ev.sources ?? "?"} 条源，分 ${ev.chunks ?? "?"} 块`, tone: "info" };
+    case "single_started":
+      return { text: "开始校验（单条）", tone: "info" };
+    case "prepare": {
+      if (ev.outcome === "ready") return { text: "校验引擎已就绪（热复用）", tone: "info" };
+      if (ev.outcome === "started") return { text: `校验引擎已就绪（首次启动 ${sec(ev.cost_sec)}）`, tone: "info" };
+      if (ev.outcome === "busy") return { text: `校验引擎忙，本批未准备${ev.reason ? "：" + ev.reason : ""}`, tone: "warn" };
+      return { text: `校验引擎启动失败${ev.reason ? "：" + ev.reason : ""}`, tone: "error" };
+    }
+    case "recovered":
+      return { text: "校验引擎恢复，后续块重新使用", tone: "info" };
+    case "chunk_started":
+      return { text: at(` 开始（${ev.count ?? "?"} 条）`), tone: "info" };
+    case "resumed":
+      return { text: at(" 上次已完成，本次不重跑"), tone: "info" };
+    case "chunk_done":
+      return { text: at(` 完成：${ev.count ?? "?"} 条${ev.cost_sec != null ? " · " + sec(ev.cost_sec) : ""}`), tone: "info" };
+    case "chunk_failed":
+      return { text: at(` 失败${ev.reason ? "：" + ev.reason : ""}`), tone: "error" };
+    case "done":
+      return { text: `校验完成：共 ${ev.count ?? "?"} 条${ev.cost_sec != null ? " · " + sec(ev.cost_sec) : ""}`, tone: "info" };
+    case "failed":
+      return { text: `校验中止${ev.reason ? "：" + ev.reason : ""}`, tone: "error" };
+    case "cancelled":
+      return { text: "已取消，剩余块未启动", tone: "warn" };
+    default:
+      return { text: String(ev.kind), tone: "info" };
+  }
+}
+
+// 失败源一行：名字优先，理由收尾——「哪条源、为什么」一眼可读
+export function formatFailureLine(item) {
+  if (!item) return { title: "", detail: "" };
+  const who = item.name || item.url || "（无名）";
+  const state = item.state && item.state !== "ok" ? `（${item.state}）` : "";
+  return { title: who, detail: `${state}${item.reason || ""}`.trim() };
+}

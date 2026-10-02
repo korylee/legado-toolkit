@@ -116,6 +116,7 @@ def _job_detail(job: Dict[str, Any]) -> Dict[str, Any]:
                 "cached": parsed.get("cached", 0),
                 "fetched": parsed.get("fetched", 0),
                 "first_checked": transitions.get("first_checked", 0),
+                "dist": (parsed.get("dist") if isinstance(parsed.get("dist"), dict) else {}),
                 "changed": changed,
                 "changed_total": sum(v for v in changed.values() if isinstance(v, (int, float))),
                 "changed_items": changed_items,

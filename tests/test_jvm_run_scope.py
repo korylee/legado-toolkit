@@ -1195,5 +1195,165 @@ class BatchDaemonTests(_Base):
         self.assertEqual(len([c for c in r2["chunk_reports"] if c.get("resumed")]), 2)
 
 
+class EventTimelineTests(_Base):
+    """骨架事件流（jvm-batch-timeline 生产者）：events.jsonl 的行序与终态合并。
+
+    行号即游标，**消费契约**钉在 tests.test_job_timeline；这里钉生产侧：
+    什么节点必须出现什么事件、恢复/中止/忙重试批的形状、result["events"]
+    有界合并。事件是辅助证据，所以全部走 daemon 关/桩的快路径。
+    """
+
+    _QUIET = {"network": {"proxy": ""},
+              "jvm": {"app_repo": "X:/repo", "keyword": "我", "timeout": 25,
+                      "concurrency": 8, "limit": 2, "depth": "search",
+                      "chunk_size": 1, "batch_via_daemon": False}}
+
+    _BUSY3 = {"network": {"proxy": ""},
+              "jvm": {"app_repo": "X:/repo", "keyword": "我", "timeout": 25,
+                      "concurrency": 8, "limit": 3, "depth": "search",
+                      "chunk_size": 1, "batch_via_daemon": True}}
+
+    _DUMP = {"workingDir": "C:/repo", "classpath": "x", "maxHeapSize": "3g",
+             "environment": {}, "jvmArgs": [], "systemProperties": {},
+             "javaHomeEnv": "C:/jdk"}
+
+    def _run_batch(self, settings=None, urls=None):
+        import contextlib
+
+        submitted = {}
+
+        def capture(kind, payload, lane=None):
+            submitted["payload"] = payload
+            return "ev-job"
+
+        async def go():
+            with contextlib.ExitStack() as stk:
+                for p in (mock.patch.object(jvm_api, "Store",
+                                            lambda *a, **kw: Store(self.db)),
+                          mock.patch.object(jvm_api.runner, "submit",
+                                            side_effect=capture),
+                          mock.patch("core.jvm_health.store_checks",
+                                     lambda *a, **kw: 0)):
+                    stk.enter_context(p)
+                if settings is not None:
+                    stk.enter_context(mock.patch.object(
+                        jvm_api.settings_store, "load",
+                        lambda: dict(settings)))
+                await jvm_api.jvm_run(
+                    JvmRunRequest(urls=urls if urls is not None else []))
+                result = await jvm_exec.run_jvm_job("ev-job", Store(self.db),
+                                                    submitted["payload"])
+            return submitted["payload"], result
+
+        return asyncio.run(go())
+
+    @staticmethod
+    def _kinds(run_dir) -> list:
+        text = (pathlib.Path(run_dir) / "events.jsonl").read_text(
+            encoding="utf-8")
+        return [json.loads(l)["kind"] for l in text.splitlines() if l.strip()]
+
+    def test_batch_event_sequence_and_terminal_merge(self) -> None:
+        """成功批清运行目录，时间线靠 result["events"] 长存（合并的意义）。"""
+        _payload, result = self._run_batch(self._QUIET)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual([e["kind"] for e in result["events"]],
+                         ["batch_started", "chunk_started", "chunk_done",
+                          "chunk_started", "chunk_done", "done"])
+
+    def test_prepare_and_recovered_events_on_busy_retry(self) -> None:
+        """忙批：prepare(busy) → 首块 Gradle → 重试块 daemon + recovered → 余块 daemon。"""
+
+        def fake_run(_dump, args_file, socket_timeout=None):
+            args = pathlib.Path(args_file).read_text(encoding="utf-8")
+            out = pathlib.Path(next(line.split("=", 1)[1] for line in args.splitlines()
+                                    if line.startswith("out=")))
+            out.write_text(json.dumps({"url": "https://a.com", "state": "ok"}),
+                           encoding="utf-8")
+            return {"code": 0, "cost_ms": 3, "error": ""}
+
+        with mock.patch("core.jvm_direct.load_dump", return_value=self._DUMP), \
+             mock.patch("core.jvm_validate_daemon.prepare",
+                        return_value={"outcome": "busy", "reason": "daemon 忙"}), \
+             mock.patch("core.jvm_validate_daemon.probe",
+                        return_value={"pid": 7, "port": 7777, "sig": "s"}), \
+             mock.patch("core.jvm_validate_daemon.run", side_effect=fake_run):
+            _payload, result = self._run_batch(self._BUSY3)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual([e["kind"] for e in result["events"]],
+                         ["batch_started", "prepare", "chunk_started", "chunk_done",
+                          "chunk_started", "chunk_done", "recovered",
+                          "chunk_started", "chunk_done", "done"])
+        self.assertEqual(result["daemon_chunks"], 2)
+        self.assertEqual(result["gradle_chunks"], 1)
+
+    def test_resume_and_abort_events(self) -> None:
+        """中止批以 failed 收尾；恢复批以 resumed 开场、done 收尾。"""
+        import contextlib
+
+        gradle_calls = {"n": 0}
+
+        def flaky_gradle(args_path=None, runtime=None):
+            gradle_calls["n"] += 1
+            if gradle_calls["n"] == 2:
+                return {"exit": 1, "stdout": "", "stderr": "boom"}
+            return self._fake_gradle(args_path=args_path, runtime=runtime)
+
+        submitted = {}
+
+        def capture(kind, payload, lane=None):
+            submitted["payload"] = payload
+            return "ev-job"
+
+        def patches():
+            return [mock.patch.object(jvm_api, "Store",
+                                      lambda *a, **kw: Store(self.db)),
+                    mock.patch.object(jvm_api.runner, "submit",
+                                      side_effect=capture),
+                    mock.patch.object(jvm_api.settings_store, "load",
+                                      lambda: dict(self._QUIET)),
+                    mock.patch("core.jvm_health.store_checks",
+                               lambda *a, **kw: 0),
+                    mock.patch.object(jvm_exec, "_run_gradle",
+                                      side_effect=flaky_gradle)]
+
+        with contextlib.ExitStack() as stk:
+            for p in patches():
+                stk.enter_context(p)
+            asyncio.run(jvm_api.jvm_run(
+                JvmRunRequest(urls=["https://a.com", "https://b.com"])))
+            r1 = asyncio.run(jvm_exec.run_jvm_job(
+                "ev-job", Store(self.db), submitted["payload"]))
+        run_dir = submitted["payload"]["manifest"]["run_dir"]
+        self.assertEqual(self._kinds(run_dir),
+                         ["batch_started", "chunk_started", "chunk_done",
+                          "chunk_started", "chunk_failed", "failed"])
+        self.assertFalse(r1["ok"])
+
+        with contextlib.ExitStack() as stk:
+            for p in patches():
+                stk.enter_context(p)
+            r2 = asyncio.run(jvm_exec.run_jvm_job(
+                "ev-job-2", Store(self.db), submitted["payload"]))
+        self.assertTrue(r2["ok"], r2)
+        # 事件文件跨轮**追加**：恢复批的时间线包含上一轮的完整历史，
+        # resumed 行标记了两次运行的边界（成功后目录清场，断言走合并结果）
+        self.assertEqual([e["kind"] for e in r2["events"]],
+                         ["batch_started", "chunk_started", "chunk_done",
+                          "chunk_started", "chunk_failed", "failed",
+                          "batch_started", "resumed", "chunk_started",
+                          "chunk_done", "done"])
+
+    def test_events_tail_merge_is_bounded(self) -> None:
+        run_dir = self.probe / "data" / "app_probe" / "runs" / "ev-cap"
+        run_dir.mkdir(parents=True)
+        with (run_dir / "events.jsonl").open("a", encoding="utf-8") as f:
+            for i in range(5):
+                f.write(json.dumps({"kind": "e%d" % i}) + "\n")
+        with mock.patch.object(jvm_exec, "_EVENT_TAIL_CAP", 3):
+            got = jvm_exec._read_events_tail(run_dir)
+        self.assertEqual([e["kind"] for e in got], ["e2", "e3", "e4"])
+
+
 if __name__ == "__main__":
     unittest.main()
