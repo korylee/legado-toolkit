@@ -574,10 +574,6 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
                         str(params.get("depth") or "search"), args_path=args_path)
 
     cancelled = threading.Event()
-    # 灰度开关（jvm-batch-daemon）：每个 job 读一次，块级线程里不再碰设置；
-    # 块级只**只读探测** daemon（不杀不启），失败回落 Gradle 并带原因
-    from core import settings_store
-    use_daemon = settings_store.batch_via_daemon()
 
     def _single_work() -> Dict[str, Any]:
         RUN_LOCK.acquire()
@@ -748,24 +744,18 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
         from backend.jobs import runner as job_runner
 
         RUN_LOCK.acquire()
-        # 块墙钟（jvm-batch-daemon 批次 2 的基线数据）：没有每块耗时，
-        # 「daemon 省了多少启动」就只能靠猜（lessons §四十七：性能结论必须实测）
+        # 块墙钟：每块耗时随环境变化，不能把推演当作性能结论。
         started = time.monotonic()
         try:
             if has_manifest and chunk_dir is not None:
                 _write_run_manifest(chunk_dir, manifest, job_id,
                                     chunk="%d/%d" % (idx + 1, total))
-            # 块级 daemon 路径（jvm-batch-daemon，灰度开关）：与单条同形——省掉
-            # 每块一次 Gradle+JVM 冷启动。与单条的差别在探测：**只读探测，绝不
-            # 杀进程**（probe 见 core.jvm_validate_daemon）——探测方不持有互斥，
-            # daemon 忙着别人的请求时 ping 不通不等于死，杀了会伤及在跑的 op；
-            # 探测不过/执行失败一律回落 Gradle，并把原因带到块报告里（AGENTS #4：
-            # 回落要说出来，不能装成源失败）。
-            daemon_failure = (daemon_reason if use_daemon and not daemon_allowed else "")
+            # 块级 daemon 路径：与单条同形——省掉每块一次 Gradle+JVM 冷启动。
+            daemon_failure = (daemon_reason if not daemon_allowed else "")
             daemon_response: Dict[str, Any] = {}
             gradle: Dict[str, Any] = {}
             daemon_mode = False
-            if daemon_allowed and use_daemon and chunk_args is not None:
+            if daemon_allowed and chunk_args is not None:
                 try:
                     from core import jvm_validate_daemon, jvm_direct
 
@@ -860,12 +850,7 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
             return False
 
     def _prepare_daemon() -> Dict[str, Any]:
-        """批量开跑前的 daemon 准备（jvm-batch-daemon-cold-start，每批至多一次）。
-
-        分类与「不误杀」边界都在 core.jvm_validate_daemon.prepare 里收口；
-        这里只兜底：准备动作炸了也不能带走整批，转成 failed 带原因，
-        块级按现状回落 Gradle。
-        """
+        """批量开跑前准备 daemon；准备失败转成 failed，块级回落 Gradle。"""
         try:
             from core import jvm_direct, jvm_validate_daemon
 
@@ -945,12 +930,9 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
                             args_path=chunk_args)
             else:
                 chunk_out, chunk_args = out_path, args_path
-            # 冷启动准备（jvm-batch-daemon-cold-start）：每批至多一次，放在第一个
-            # 待跑块前——全部块 DONE 的重试批一次都不准备。块级仍只读探测（上面
-            # _chunk_work 里的 probe 原样保留，是 daemon 中途死掉/变忙的安全网）；
-            # 「不误杀」的边界在 core.prepare 收口：确认没在跑才允许 ensure/start，
-            # 忙（端口有人听、ping 没应答）一律不杀。
-            if use_daemon and chunk_args is not None and not daemon_prepare:
+            # daemon 准备放在第一个待跑块前；全部块 DONE 的重试批一次都不准备。
+            # 块级仍只读探测，是 daemon 中途死掉或变忙时的安全网。
+            if chunk_args is not None and not daemon_prepare:
                 job_runner.update_phase(job_id, "starting_daemon")
                 _prepare_t0 = time.monotonic()
                 daemon_prepare = await run_in_threadpool(_prepare_daemon)
@@ -969,12 +951,11 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
                       len(chunk_rows), base_done), daemon=True)
             tail.start()
             retry_this_chunk = daemon_retry_available
-            daemon_allowed = (use_daemon and
-                              (daemon_recovered or
-                               daemon_prepare.get("outcome") in ("ready", "started") or
-                               retry_this_chunk))
+            daemon_allowed = (daemon_recovered or
+                              daemon_prepare.get("outcome") in ("ready", "started") or
+                              retry_this_chunk)
             daemon_reason = (daemon_retry_reason
-                             if use_daemon and not daemon_allowed else "")
+                             if not daemon_allowed else "")
             if retry_this_chunk:
                 daemon_retry_available = False
             _append_event(run_dir, "chunk_started", index=idx,
@@ -1040,9 +1021,7 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
         items = check_items_from_checks(
             {u: fresh[u] for u in names if u in fresh}, names=names)
         dist = Counter(r.get("state") for r in all_rows)
-        # 块级执行方式统计（jvm-batch-daemon 灰度观察用）。汇总的 execution_mode
-        # 只有在**全部**块都走了 daemon 时才改标——混合时保留历史值，差额写进
-        # execution_note（前端词表不扩，信息也不静默）
+        # 块级执行方式统计。混合时保留历史值，差额写进 execution_note。
         daemon_blocks = sum(1 for r in chunk_reports
                             if r.get("execution_mode") == "validate_daemon")
         gradle_blocks = sum(1 for r in chunk_reports
@@ -1064,8 +1043,7 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
             "daemon_chunks": daemon_blocks, "gradle_chunks": gradle_blocks,
         })
         if daemon_prepare:
-            # 只投影有界两键：pid/port 这类易变值不进结果（呈现归
-            # jvm-batch-observability）；开关关 / 全部块恢复时本键缺席
+            # 仅投影有界两键：pid/port 等易变值不进结果。
             result["daemon_prepare"] = {
                 "outcome": str(daemon_prepare.get("outcome") or "failed"),
                 "reason": str(daemon_prepare.get("reason") or ""),

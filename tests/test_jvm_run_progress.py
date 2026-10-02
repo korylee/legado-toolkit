@@ -73,7 +73,8 @@ class JvmRunProgressTests(unittest.TestCase):
             def daemon(dump, args_file):
                 return {"code": 0, "cost_ms": 1, "error": ""}
         # runner 的阶段/进度更新走短连接（runner 自己的 Store）：必须落到这份
-        # 临时库——落到真库的话 job 不存在、UPDATE 是 no-op，断言会恒 0
+        # 临时库——落到真库的话 job 不存在、UPDATE 是 no-op，断言会恒 0。
+        # prepare 判失败 + probe 恒 None：批量块确定走 Gradle
         with mock.patch.object(jvm_exec, "_run_gradle", gradle), \
              mock.patch.object(jvm_exec, "_write_meta", lambda rows: "testbatch"), \
              mock.patch("core.jvm_health.store_checks", lambda *a, **kw: 0), \
@@ -82,8 +83,10 @@ class JvmRunProgressTests(unittest.TestCase):
                                lambda dump=None: {"ok": True}), \
              mock.patch("core.jvm_direct.load_dump", return_value=dict(_DUMP)), \
              mock.patch("core.jvm_validate_daemon.run", daemon), \
-             mock.patch("core.settings_store.batch_via_daemon",
-                        return_value=False), \
+             mock.patch("core.jvm_validate_daemon.prepare",
+                        return_value={"outcome": "failed",
+                                      "reason": "测试不启 daemon"}), \
+             mock.patch("core.jvm_validate_daemon.probe", return_value=None), \
              mock.patch.object(jvm_api.runner, "Store",
                                lambda *a, **kw: Store(self.db)):
             return asyncio.run(

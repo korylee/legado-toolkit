@@ -87,8 +87,7 @@ class _Base(unittest.TestCase):
             mock.patch.object(jvm_api.settings_store, "load",
                               lambda: {"network": {"proxy": ""}, "jvm": {"app_repo": "X:/repo", "keyword": "我",
                                                "timeout": 25, "concurrency": 8,
-                                               "limit": 2, "depth": "search",
-                                               "batch_via_daemon": False}}),
+                                               "limit": 2, "depth": "search"}}),
         ):
             p.start()
             self.addCleanup(p.stop)
