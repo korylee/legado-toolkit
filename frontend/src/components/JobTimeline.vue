@@ -28,6 +28,9 @@ let cursor = 0;
 let isDone = false;
 let timer = null;
 let lastKey = "";
+let pollInFlight = false;
+let pollPending = false;
+let pollGeneration = 0;
 
 const hhmmss = (ts) => {
   if (!ts) return "--:--:--";
@@ -60,8 +63,17 @@ function stopPolling() {
 }
 
 async function pull() {
+  if (!props.jobId) return;
+  if (pollInFlight) {
+    pollPending = true;
+    return;
+  }
+  const generation = pollGeneration;
+  const jobId = props.jobId;
+  pollInFlight = true;
   try {
-    const data = await api.get(`/jobs/${props.jobId}/timeline?after=${cursor}`);
+    const data = await api.get(`/jobs/${jobId}/timeline?after=${cursor}`);
+    if (generation !== pollGeneration || jobId !== props.jobId) return;
     pollError.value = "";
     if (Array.isArray(data.events) && data.events.length) {
       lines.value = lines.value.concat(
@@ -78,13 +90,21 @@ async function pull() {
     }
     scrollFollow();
   } catch (e) {
+    if (generation !== pollGeneration || jobId !== props.jobId) return;
     // 单次轮询失败不终止跟随：下一轮重试；连续失败才提示（后端可能重启了）
     pollError.value = pollError.value === "" ? "1" : pollError.value + "1";
     if (pollError.value.length >= 3) pollError.value = "err";
+  } finally {
+    pollInFlight = false;
+    if (pollPending && !isDone) {
+      pollPending = false;
+      void pull();
+    }
   }
 }
 
 function start() {
+  pollGeneration += 1;
   const key = `${props.jobId}|${props.status}`;
   if (key === lastKey) return;
   // 同一任务由轮询自然收尾（done 已停表）就不重置重来——终态的那几行
@@ -95,6 +115,7 @@ function start() {
   }
   lastKey = key;
   stopPolling();
+  pollPending = false;
   lines.value = [];
   failures.value = { total: 0, truncated: false, items: [] };
   failuresOpen.value = false;

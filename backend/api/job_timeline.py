@@ -39,19 +39,39 @@ def _iter_json_lines(path: pathlib.Path) -> List[str]:
     return [line for line in text.splitlines() if line.strip()]
 
 
-def _events_after(path: pathlib.Path, after: int) -> Tuple[List[Dict[str, Any]], int]:
-    """读 ``events.jsonl`` 第 after 行之后的事件。返回 (事件, 总行数)。
+def _event_lines(path: pathlib.Path) -> List[str]:
+    """Read event lines without dropping blank or unterminated lines."""
+    try:
+        return path.read_text(encoding="utf-8").splitlines(keepends=True)
+    except OSError:
+        return []
 
-    行号即游标：**坏行也占一个行号**（跳过不解析），否则游标会在坏行处
-    打转、客户端反复重取同一段。首次打开大文件时按 ``_EVENT_PAGE_CAP``
-    分页，游标只前进已返回的行数，不丢中间行。
+
+def _events_after(path: pathlib.Path, after: int) -> Tuple[List[Dict[str, Any]], int]:
+    """Read at most one page after the line cursor.
+
+    The returned cursor is the last line actually scanned, not the file length;
+    this is required when a large event file is paged. An incomplete final line
+    is held for the next poll instead of being skipped permanently.
     """
-    lines = _iter_json_lines(path)
+    lines = _event_lines(path)
     events: List[Dict[str, Any]] = []
-    for idx, line in enumerate(lines, start=1):
-        if idx <= after:
+    cursor = max(int(after or 0), 0)
+    for idx, raw in enumerate(lines, start=1):
+        if idx <= cursor:
+            continue
+        line = raw.strip()
+        is_partial_tail = idx == len(lines) and raw and not raw.endswith(("\n", "\r"))
+        if is_partial_tail and line:
+            try:
+                json.loads(line)
+            except ValueError:
+                break
+        cursor = idx
+        if not line:
             continue
         if len(events) >= _EVENT_PAGE_CAP:
+            cursor = idx - 1
             break
         try:
             ev = json.loads(line)
@@ -60,7 +80,7 @@ def _events_after(path: pathlib.Path, after: int) -> Tuple[List[Dict[str, Any]],
         if isinstance(ev, dict):
             ev["seq"] = idx
             events.append(ev)
-    return events, len(lines)
+    return events, cursor
 
 
 def _failure_item(row: Dict[str, Any], state: str, reason: str,
@@ -188,6 +208,13 @@ def job_timeline(job_id: str, after: int = 0, st: Store = Depends(get_store)):
         out["events"] = events
         out["cursor"] = cursor
         out["failures"] = _failures_from_result(parsed)
+        if status == "cancelled" and not events:
+            run_dir = _run_dir_of(job)
+            events, cursor = _events_after(run_dir / "events.jsonl", after)
+            out["events"] = events
+            out["cursor"] = cursor
+            if run_dir.is_dir():
+                out["failures"] = _failures_from_files(run_dir)
         return out
     run_dir = _run_dir_of(job)
     events, cursor = _events_after(run_dir / "events.jsonl", after)

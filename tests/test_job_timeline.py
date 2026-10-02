@@ -64,6 +64,30 @@ class JobTimelineTests(unittest.TestCase):
         empty = job_timeline.job_timeline("j1", 3, st=st)
         self.assertEqual(empty["events"], [])
 
+    def test_large_event_file_pages_without_skipping(self) -> None:
+        self._append_events(*({"kind": "e%d" % i} for i in range(600)))
+        st = self._store_with_job()
+        with mock.patch.object(job_timeline, "_EVENT_PAGE_CAP", 500):
+            first = job_timeline.job_timeline("j1", 0, st=st)
+            second = job_timeline.job_timeline("j1", first["cursor"], st=st)
+        self.assertEqual(len(first["events"]), 500)
+        self.assertEqual(first["cursor"], 500)
+        self.assertEqual([e["kind"] for e in second["events"]],
+                         ["e%d" % i for i in range(500, 600)])
+        self.assertEqual(second["cursor"], 600)
+
+    def test_incomplete_tail_waits_for_next_poll(self) -> None:
+        path = self.run_dir / "events.jsonl"
+        path.write_text(json.dumps({"kind": "complete"}) + "\n"
+                        + '{"kind":"partial"', encoding="utf-8")
+        st = self._store_with_job()
+        first = job_timeline.job_timeline("j1", 0, st=st)
+        self.assertEqual([e["kind"] for e in first["events"]], ["complete"])
+        self.assertEqual(first["cursor"], 1)
+        path.write_text(path.read_text(encoding="utf-8") + "}\n", encoding="utf-8")
+        second = job_timeline.job_timeline("j1", first["cursor"], st=st)
+        self.assertEqual([e["kind"] for e in second["events"]], ["partial"])
+        self.assertEqual(second["cursor"], 2)
     def test_broken_line_keeps_its_slot_and_is_skipped(self) -> None:
         """坏行也占一个行号（跳过不解析）——否则游标会在坏行处打转，
         客户端反复重取同一段。"""
@@ -142,6 +166,14 @@ class JobTimelineTests(unittest.TestCase):
                          [{"url": "https://b.com", "name": "乙", "state": "auth",
                            "reason": "站点要求登录", "stage": "", "chunk": ""}])
 
+    def test_cancelled_job_falls_back_to_retained_events(self) -> None:
+        self._append_events({"kind": "batch_started", "chunks": 2},
+                            {"kind": "cancelled"})
+        st = self._store_with_job(status="cancelled", result={})
+        got = job_timeline.job_timeline("j1", 0, st=st)
+        self.assertTrue(got["done"])
+        self.assertEqual([e["kind"] for e in got["events"]],
+                         ["batch_started", "cancelled"])
     def test_non_jvm_run_is_done_with_empty_timeline(self) -> None:
         st = self._store_with_job(kind="add", status="running")
         got = job_timeline.job_timeline("j1", 0, st=st)
