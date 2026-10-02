@@ -71,6 +71,9 @@ description: 在受限 agent 沙箱里安全写文件、改代码的传输通道
   `dsh-python-tempfile-shim` 正是修这个的：给**经过插件 shell executor 的受限命令**注入
   `sitecustomize`，让 `os.mkdir` 忽略 mode。**判断它有没有生效只看一处**：`python -c "import os; print(os.mkdir)"` ——
   打出 `<built-in function mkdir>` 就是没生效（此时 `PYTHONPATH` 也是空的）。
+- **被拒的操作不会立刻失败，而是各自等到超时**：于是「全量很慢」与「倒出一片假红」是同一个
+  原因。实测（2026-10-03：当时 1040 条）无沙箱 21.2 秒、2 条失败，受限模式下要一两分钟。
+  **首选对策是用同一条命令申请一次更宽权限重跑**；下面的绕行配方用于不方便申请权限时。
 
 **跑全量测试的绕行配方**（已验证：82 errors → 0）。先 patch `tempfile` 的建目录，再 discover：
 
@@ -95,12 +98,17 @@ description: 在受限 agent 沙箱里安全写文件、改代码的传输通道
     tempfile.TemporaryDirectory._mkdtemp = staticmethod(_patched_mkdtemp)
     unittest.TextTestRunner().run(unittest.TestLoader().discover("tests", top_level_dir="."))
 
-**唯一允许的残留失败**是 `tests.test_frontend_utils`：`node --test` 要为每个测试文件 spawn
-子进程，本沙箱拦 spawn（`EPERM`），与代码无关。单独验证：
+**沙箱导致的残留失败**目前只有 `tests.test_frontend_utils`：`node --test` 要为每个测试文件
+spawn 子进程，本沙箱拦 spawn（`EPERM`），与代码无关。单独验证：
 
     node --test --experimental-test-isolation=none frontend/src/utils/*.test.js
 
-→ 这几条都是 harness 属性、不是本仓知识：换环境先重测（bash 那条同理，见 §一）。
+**残留失败要逐条判归属，别照单当成「沙箱正常」**：实测（2026-10-03）还有另一类红是用例
+没 stub 环境相关的调用（`tests/test_jvm_run_scope.py` 的两条时间线断言依赖本机是否存在可用
+dump），那属于**测试脆**、不属于沙箱；判据是失败信息指向被测代码，而不是 `EPERM` /
+`PermissionError`。
+
+→ 这几条是 harness 属性、不是本仓知识（换环境先重测，bash 那条同理见 §一）；判归属的规矩已提炼为 AGENTS #6 末句。
 
 ## 五、可复用的应用器
 

@@ -22,7 +22,7 @@
 import { ref, computed, watch, nextTick, onMounted } from "vue";
 import { ElMessage } from "element-plus";
 
-import { replayStep, ruleCandidates, suggestRule, verifyCandidate } from "../api/rules";
+import { agentPlan, replayStep, ruleCandidates, suggestRule, verifyCandidate } from "../api/rules";
 import { getLLMStatus } from "../api/llm";
 // 步骤名 → 中文的**唯一**一份（编辑弹窗共用），别再在本组件里写第二份
 import { FIELD_OF_STEP, STEP_LABELS } from "../utils/steps";
@@ -34,14 +34,16 @@ import { compareRuns, statusLabel } from "../utils/debugCompare";
 import { formatHtml } from "../utils/htmlView";
 // 定层（九-1）：先定层再写规则——判据与证据行都在纯函数里，这里只负责把「这一步要什么」传进去
 import { classifyLayer } from "../utils/layers";
-import { debugOutletFor } from "../utils/debugOutlets";
-import { nextDebugAction } from "../utils/debugNextAction";
+// 五格决策：**首屏的判据只有这一份**（现状 / 解决 / 取证 / AI 补足）。原来这里的
+// `diagnosis` / `aiLayerBlock` 与 `debugOutlets` / `debugNextAction` / `debugEvidence`
+// 各判一遍，同一件事说三遍、动作互相覆盖——现在收敛进 `buildDecision`。
+import { buildDecision, decisionLines } from "../utils/debugDecision";
 // 点选（九-2a）：元素 → 候选选择器 + 实测三个数。**只是提议**，验收仍走真引擎
 import { parseDoc, previewCss, selectorCandidates } from "../utils/selector";
 import { assessRuleQuality } from "../utils/ruleQuality";
-import { buildStepSummary } from "../utils/debugEvidence";
 import { candidateView } from "../utils/debugCandidate";
 import DebugCandidateCard from "./DebugCandidateCard.vue";
+import StepDecision from "./StepDecision.vue";
 
 const props = defineProps({
   initialStep: { type: String, default: "" },
@@ -145,13 +147,6 @@ const diffSummary = computed(() => {
 function diffOf(name) {
   return diffBy.value[name];
 }
-//: 只有「本机无法判定」才给真机出口。明确 fail 仍指向规则证据，不能把所有 L2+
-//: 失败都归因给环境；判据集中在纯函数里，避免模板继续长出第二套分类。
-const debugOutlet = computed(() => debugOutletFor({
-  channel: debugChannel.value,
-  verdict: (current.value || {}).verdict,
-  layer: (layer.value || {}).layer,
-}));
 function switchToApp() {
   debugChannel.value = "app";
   emit("rerunFrom", (current.value || {}).name);
@@ -161,11 +156,11 @@ function diffTagType(status) {
 }
 //: 失败步骤「直达诊断区」：诊断块常驻抽屉上部，但可能在折叠线以下——
 //: 选中失败段时把它滚进视野（成功时不打扰，默认停在页签区）
-const diagnosisBox = ref(null);
+const decisionBox = ref(null);
 watch([result, activeStep], () => {
   if (!result.value) return;
   if ((current.value || {}).verdict === "fail") {
-    nextTick(() => diagnosisBox.value && diagnosisBox.value.scrollIntoView(
+    nextTick(() => decisionBox.value && decisionBox.value.scrollIntoView(
       { behavior: "smooth", block: "start" }));
   }
 });
@@ -201,13 +196,6 @@ function dotClass(s) {
   if (s.verdict === "unknown") return "unknown";
   return s.has_notes ? "warn" : "ok";
 }
-function tagType(s) {
-  if (!s) return "info";
-  if (s.verdict === "fail") return "danger";
-  if (s.verdict === "unknown") return "info";
-  return s.has_notes ? "warning" : "success";
-}
-
 // 搜索在**完整原文**上做（纯字符串扫描，结果不进 DOM），最多记 HIT_LIMIT 处
 const hitOffsets = computed(() => {
   const key = searchKey.value.trim();
@@ -317,52 +305,12 @@ function selectStep(name) {
   candidateVerifying.value = "";
 }
 
-//: 当前步骤的规则。编辑先落在抽屉草稿里，用户点“应用”后才回填父表单；
-//: 这样输入一个字符就能先看网页视图里的命中高亮，不会把半成品静默写入源。
-const draftRule = ref("");
-const currentRule = computed(() => draftRule.value);
-const ruleDirty = computed(() => {
+//: 当前步骤的规则：**只读镜像**源表单里那一份（可编辑的值在父组件手里）。
+//: 「网页视图」的命中高亮与规则质量诊断都读它，所以它必须跟着表单即时变。
+const currentRule = computed(() => {
   const name = (current.value || {}).name || "";
-  return draftRule.value !== String((rules.value || {})[name] || "");
+  return String((rules.value || {})[name] || "");
 });
-watch([current, rules], ([step, ruleMap]) => {
-  draftRule.value = (ruleMap || {})[(step || {}).name] || "";
-}, { immediate: true, deep: true });
-
-function applyDraftRule(replay = false) {
-  const field = FIELD_OF_STEP[(current.value || {}).name];
-  if (!field) return;
-  markStepStale((current.value || {}).name);
-  emit("applyRule", { field, rule: draftRule.value });
-  if (replay) doReplay();
-}
-
-const verifyAction = computed(() => {
-  if (running.value) return { label: "调试进行中", kind: "running", disabled: true };
-  if (currentNextAction.value && currentNextAction.value.kind === "app") {
-    return { label: "连 App 验证", kind: "app", disabled: false };
-  }
-  if (!canRerun.value) return { label: "先完成一次调试", kind: "disabled", disabled: true };
-  return { label: ruleDirty.value ? "应用并重调" : "重新调试本步", kind: "rerun", disabled: false };
-});
-
-function verifyCurrentRule(rule = draftRule.value) {
-  if (verifyAction.value.kind === "app") return switchToApp();
-  if (verifyAction.value.disabled) return;
-  const field = FIELD_OF_STEP[(current.value || {}).name];
-  if (!field) return;
-  if (rule !== draftRule.value) {
-    draftRule.value = rule;
-    emit("applyRule", { field, rule });
-  } else if (ruleDirty.value) {
-    emit("applyRule", { field, rule: draftRule.value });
-  }
-  emit("rerunFrom", (current.value || {}).name);
-}
-
-function resetDraftRule() {
-  draftRule.value = (rules.value || {})[(current.value || {}).name] || "";
-}
 //: 重放要同时满足：这一步对应一个页面的 HTML、这一步有规则可回放、
 //: 且这一步确实是一条规则步骤（explore 的规则结构不同，不给重放）
 const canReplay = computed(
@@ -478,12 +426,6 @@ const layer = computed(() => classifyLayer(
   // 这半（源声明 + 合并）留在前端，因为要对正在编辑的表单即时反应
   (currentPage.value || {}).page_layer || null, props.source || null,
   { step: (current.value || {}).name || "" }));
-const currentNextAction = computed(() => nextDebugAction(current.value, {
-  channel: channel.value,
-  layer: layer.value.layer || "",
-  stale: staleSteps.value.has((current.value || {}).name),
-  inWorkbench: true,
-}));
 //: 补抓页面上的节点统计。「你要的东西这页上到底有没有」全靠它——
 //: 没有的话，选择器改多少遍都取不到
 const pageStats = computed(() => (layer.value.page || {}).stats || null);
@@ -500,7 +442,9 @@ const candidates = ref([]);
 
 //: 候选面板只对 **L1**（或判不出层）开着：对 L2–L5，这份 HTML 上的选择器能选中、
 //: 但**选中的不是数据**（假证据）——那正是「找出来的不符合预期」的根因（TODO §九）。
-//: 判不出来（没有页面 / 没有目标定义）时照旧给，那是 L1 的正常情况
+//: 判不出来（没有页面 / 没有目标定义）时照旧给，那是 L1 的正常情况。
+//: **这是材料闸门、不是动作判据**：它只决定「摆不摆这份材料」，动作仍由后端计划给；
+//: 同一份闸门也管交给判据的候选——不然 L2–L5 上的假证据会被判成「用候选规则」。
 const candidatesUsable = computed(() => !layer.value.layer || layer.value.layer === "L1");
 
 //: 竞态保护：换页/换步后，迟到的旧响应不得覆盖新结论（序号不匹配就丢弃）
@@ -774,24 +718,6 @@ function qualityTagType(q) {
   return { good: "success", usable: "warning", weak: "warning", bad: "danger" }[q.key] || "info";
 }
 
-const evidenceSummary = computed(() => buildStepSummary({
-  channel: channel.value,
-  step: current.value || {},
-  page: currentPage.value,
-  replay: replayResult.value,
-  layer: layer.value,
-  quality: ruleQuality.value,
-  stale: staleSteps.value.has((current.value || {}).name),
-  action: currentNextAction.value,
-}));
-
-//: 步骤卡片的状态色：**过期优先于结论**——规则改过之后，旧结论已经不作数，
-//: 卡片该说的第一件事是「先重验」，不是它上一轮碰巧过了
-const stepStatusKey = computed(() => {
-  if (evidenceSummary.value.stale) return "stale";
-  return { pass: "pass", fail: "fail" }[evidenceSummary.value.verdict] || "unknown";
-});
-
 function onFrameClick(ev) {
   const doc = frameDoc();
   const el = ev.target;
@@ -841,7 +767,6 @@ const canSuggest = computed(() => !!currentPage.value && !!aiField.value);
 //: 默认 true（拉到之前按可用算）：默认 false 会让按钮先灰一下，比晚一步发现更糟。
 //: 拉取失败也维持 true——点了后端会给明确文案，比误禁用强。
 const llmReady = ref(true);
-const canAskAI = computed(() => canSuggest.value && llmReady.value);
 
 async function refreshLLMStatus() {
   try {
@@ -894,7 +819,7 @@ function suggestBody(step) {
     app_values: appValues.value,
     candidates: candidates.value.map((c) => c.rule),
     enabled_cookie_jar: !!props.enabledCookieJar,
-    diagnosis: diagnosis.value.map((d) => d.why + "（" + d.todo + "）"),
+    diagnosis: decisionLines(decision.value),
   };
 }
 
@@ -939,14 +864,77 @@ async function askAI() {
 //: 模型看到的不是 App 看到的那份（App 带登录态），提了也验不了、也修不对
 const loginWall = computed(() => !!(preselRes.value || {}).login_wall);
 
-//: **层不是 L1 时不给 AI 提议**（九-3）。理由不是"省钱"，是**材料不对**：模型看到的是
-//: 我们抓的原文，而 L2–L5 的数据要渲染 / 解密后才有（实测那类章节页原文只有一段 base64
-//: 和一个空容器）——它会**在错材料上生成**，而 `dry_run=false` 还是花钱动作。
-//: 判据直接用九-1 的层（同一个结论只有一处，别在这儿另判一遍）。
-const aiLayerBlock = computed(() => {
-  const l = layer.value;
-  return l && l.layer && l.layer !== "L1" ? l.info.name : "";
-});
+// —— 五格决策：**判据在后端一处**（`core/agent_plan`：缺口唯一、fix 与 probe 分栏、
+//    AI 只认合格材料），这里只提交**观测到的事实**。取不到计划时不自作判据：两套判据
+//    正是这条链路要消掉的东西，那时只渲染现状与证据并说明接口不可用。
+const plan = ref(null);
+let planSeq = 0;          // 竞态保护：换步骤后迟到的旧响应不得覆盖新结论
+
+function planBody() {
+  const s = current.value || {};
+  const finished = staleSteps.value.has(s.name);
+  return {
+    layer: layer.value.layer || "",
+    target: { step: s.name || "", want: (want.value || {}).kind || "",
+              rule_empty: !currentRule.value.trim() },
+    step: {
+      verdict: s.verdict || "", reason: s.reason || "", detail: s.detail || "",
+      rule_error: s.rule_error || "", stale: finished,
+      page_id: s.page_id || "", url: s.url || "",
+      values_count: (s.values || []).length,
+    },
+    page: {
+      present: !!currentPage.value,
+      stats: pageStats.value || {},
+      has_wanted: hasWanted.value === undefined ? null : hasWanted.value,
+      evidence: layer.value.evidence || [],
+    },
+    channel: channel.value,
+    replay: {
+      present: !!replayResult.value,
+      values_count: ((replayResult.value || {}).values || []).length,
+      rule_error: (replayResult.value || {}).rule_error || "",
+    },
+    signals: {
+      login_wall: loginWall.value,
+      llm_ready: llmReady.value,
+      can_suggest: canSuggest.value,
+    },
+    candidates: candidatesUsable.value
+      ? candidates.value.map((c) => ({ rule: c.rule || "" }))
+      : [],
+    capabilities: { jvm_debug: true, app_debug: true },
+    model_available: canSuggest.value && llmReady.value && !loginWall.value,
+  };
+}
+
+async function refreshPlan() {
+  const seq = ++planSeq;
+  try {
+    const out = await agentPlan(planBody());
+    if (seq === planSeq) plan.value = out;
+  } catch (e) {
+    if (seq === planSeq) plan.value = null;
+  }
+}
+
+// 免费、不发模型请求、不落库，所以换步骤/换页面/换规则/换回放结论都可以自动刷
+watch([result, activeStep, currentPage, currentRule, replayResult, candidates,
+       preselRes, llmReady], refreshPlan, { immediate: true });
+
+//: 这一步的**五格视图模型**：判据来自上面的 `plan`，句子与按钮词由 `debugDecision` 出
+const decision = computed(() => buildDecision({
+  plan: plan.value,
+  step: current.value || {},
+  want: want.value,
+  channel: channel.value,
+  page: currentPage.value,
+  layer: layer.value,
+  stats: pageStats.value,
+  replay: replayResult.value,
+  quality: ruleQuality.value,
+  stale: staleSteps.value.has((current.value || {}).name),
+}));
 
 // 换步骤 / 换页面就自动跑那趟**免费的**（程序先挑 + 登录墙判断）。它不发模型请求，
 // 所以可以自动跑；付费的那趟只有 askAI 里有，且只由按钮点击触发
@@ -954,61 +942,6 @@ watch([result, activeStep, currentPage], () => {
   preselRes.value = null;
   aiRes.value = null;
   runPreselect();
-});
-
-const diagnosis = computed(() => {
-  const out = [];
-  const s = current.value || {};
-  const w = want.value;
-  const label = (w && w.label) || s.name || "";
-  const push = (level, why, todo) => out.push({ level, why, todo });
-  if (!s.name) return out;
-
-  if (!s.page_id) {
-    push("warn", "App 没为这一步记录页面", "只能看 App 事件流，本地调试不了这一步");
-  } else if (!s.url) {
-    push("warn", "App 没有请求这一步的页面，也没有可用的章节链接",
-         s.name === "content"
-           ? "正文规则为空时，App 会拿章节链接当正文，不请求新页面。"
-             + "连章节链接都没有，说明上一步没走通，先看前面几步"
-           : "先确认这一步的规则是否为空，补上后重新调试");
-  } else if (!currentPage.value) {
-    const note = (s.notes || []).find((n) => String(n).includes("页面抓取失败"));
-    push("warn", note || "这一步的页面没抓回来", "没有页面就无法本地复盘，先按 App 的结果判断");
-  } else if (hasWanted.value === false) {
-    const st = pageStats.value || {};
-    push("warn",
-         "这一页没有「" + label + "」这类节点。链接 " + st.links + " 个，图片 "
-         + st.images + " 个，其中带 src 的只有 " + st.imagesWithSrc + " 个",
-         "改选择器没用，内容多半由 JS 生成，本地取不到。"
-         + "改用 webView + webJs，或 @js: 直接调接口");
-  }
-
-  if (!currentRule.value.trim()) {
-    push("warn", "这条源没配「" + label + "」规则",
-         s.name === "content" && sourceType.value === 0
-           ? (currentPage.value
-               ? "正文页已按章节链接抓回来。直接在下面看整页源码或选候选规则，"
-                 + "改完点「重新调试本步」只验这一步"
-               : "小说源没配正文规则时，App 会把章节链接当正文。必须补一条")
-           : "补一条规则后重新调试");
-  } else if (replayResult.value && replayResult.value.rule_error) {
-    push("info", "规则不支持本地调试：" + replayResult.value.rule_error,
-         "只能连 App 调试。本地跑不了 JS、模板和 xpath");
-  } else if (replayResult.value) {
-    const vals = replayResult.value.values || [];
-    if (!vals.length) {
-      const st = pageStats.value || {};
-      push("warn", "规则在这份页面上一条都没选中",
-           w && w.kind === "link"
-             ? "页面里有 " + st.links + " 个链接，可对照「整页源码」里的真实 class/id 改选择器"
-             : "对照「整页源码」里的真实 class/id 改选择器");
-    } else if (s.verdict === "fail") {
-      push("info", "取到了 " + vals.length + " 条，但判定不达标：" + (s.detail || ""),
-           "问题在取到的内容而不是选择器，别在这里反复改选择器");
-    }
-  }
-  return out;
 });
 
 async function doReplay() {
@@ -1036,17 +969,24 @@ function focusRunEntry() {
   window.scrollTo({ top: 0, behavior: "smooth" });
 }
 
-function runCurrentNextAction() {
-  const action = currentNextAction.value;
+//: 五格决策给的动作 → 现有事件。**不新造动作通道**：改源走 gotoRuleField、
+//: 重验走 rerunFrom、用候选走 useCandidate（AGENTS #3：验收只走真引擎）
+function onDecisionFix(fix) {
   const step = current.value;
-  if (!action || !step) return;
-  if (action.kind === "app") return switchToApp();
-  if (action.kind === "workbench") return gotoRuleField(step);
-  if (action.kind === "rerun") return emit("rerunFrom", step.name);
-  if (action.kind === "diagnosis") {
-    return nextTick(() => diagnosisBox.value && diagnosisBox.value.scrollIntoView(
-      { behavior: "smooth", block: "start" }));
-  }
+  if (!fix || !step) return;
+  if (fix.kind === "rerun") return emit("rerunFrom", step.name);
+  if (fix.kind === "run_debug") return focusRunEntry();
+  if (fix.kind === "apply_candidate") return useCandidate(fix.candidate);
+  return gotoRuleField(step);
+}
+
+//: 取证：换通道再观测一次。**它不是解决方案**，只是把材料取回来交给上面的「解决」
+function onDecisionProbe() {
+  switchToApp();
+}
+
+function onDecisionGotoBasic() {
+  emit("goto", "basic");
 }
 
 function loadMore() {
@@ -1125,121 +1065,28 @@ function copyPage() {
           </div>
         </aside>
         <section class="debug-step-main">
-      <!-- 定层横幅（九-1）：**先定层，再写规则**：它改变的是下一步做什么 -->
-      <div v-if="isEngineResult && (layer.layer || layer.unsure)" class="layer-banner">
-        <el-tag v-if="layer.layer" size="small"
-                :type="layer.layer === 'L1' ? 'success' : 'warning'">{{ layer.info.name }}</el-tag>
-        <el-tag v-else size="small" type="info">未定层</el-tag>
-        <span class="layer-action">{{ layer.info ? layer.info.action : layer.unsure }}</span>
-        <ul v-if="layer.evidence.length" class="layer-ev">
-          <li v-for="(e, i) in layer.evidence" :key="i">
-            <span class="layer-why">{{ e.why }}</span>
-            <span v-if="e.line" class="muted">（原文第 {{ e.line }} 行）</span>
-            <span class="muted"> · {{ e.note }}</span>
-            <code class="layer-snippet">{{ e.snippet }}</code>
-          </li>
-        </ul>
-      </div>
-
       <!-- 与上次相比（ux-debug-loop）：重跑不清场，差异摆在一眼能看见的地方 -->
       <p v-if="diffSummary" class="muted" style="margin: 6px 0 0">{{ diffSummary }}</p>
 
-      <!-- 当前步骤卡片：这一步的**视觉中心**——结论、原因、证据等级和唯一主动作都在
-           这里，详细材料（规则编辑、候选、事件流、整页源码）在它下面。
-           左侧色条按状态走：**过期优先于结论**（改过规则之后，旧结论已不作数） -->
-      <section v-if="current" class="step-card" :class="'is-' + stepStatusKey">
-        <div class="step-card-top">
-          <b class="step-card-title">{{ STEP_LABELS[current.name] || current.name }}</b>
-          <el-tag size="small" :type="tagType(current)">{{ evidenceSummary.verdictLabel }}</el-tag>
-          <el-tag v-if="evidenceSummary.stale" size="small" type="warning">已过期</el-tag>
-          <span class="mono muted step-card-url" :title="current.url">{{ current.url }}</span>
-        </div>
-        <p v-if="evidenceSummary.reason" class="step-card-reason">{{ evidenceSummary.reason }}</p>
-        <div class="step-card-evidence">
-          <b>证据来源</b>
-          <el-tag v-for="source in evidenceSummary.sources" :key="source.key"
-                  size="small" :type="source.type">{{ source.label }}<template v-if="source.trust === 'authoritative'">（可验收）</template><template v-else-if="source.trust === 'projection'">（辅助）</template></el-tag>
-          <span v-if="evidenceSummary.boundaries.length" class="muted step-card-boundary">
-            可信边界：{{ evidenceSummary.boundaries.join("；") }}
-          </span>
-        </div>
-        <div class="step-card-actions">
-          <el-button v-if="evidenceSummary.action" size="small" type="primary"
-                     @click="runCurrentNextAction">{{ evidenceSummary.action.label }}</el-button>
-          <!-- 从这一步让引擎重跑：搜索/发现是整链，详情=详情→目录→正文，目录=目录→正文，
-               正文=只正文（App 的分段 key，零入侵）。它是**次动作**，主动作在上面那颗 -->
-          <el-tooltip placement="top" :disabled="!current.url && current.name !== 'search'"
-                      :content="isAppResult
+      <!-- 五格决策卡：现状 / 解决 / 取证 / AI 补足 + 折叠的证据。
+           判据只有 `utils/debugDecision.js` 一份，本组件只渲染并把动作分派回现有事件 -->
+      <div ref="decisionBox">
+        <StepDecision :decision="decision" :step="current || {}"
+                      :step-label="STEP_LABELS[(current || {}).name] || (current || {}).name || ''"
+                      :show-rerun="isEngineResult && !!current && !FIELD_OF_STEP[current.name]"
+                      :can-rerun="canRerun" :rerunning="rerunning"
+                      :rerun-tooltip="isAppResult
                         ? '让 App 从这一步重新调试：目录会连正文一起跑，正文只跑正文。规则改过会先问你是否推送。'
-                        : '让本机引擎从这一步重新调试：目录会连正文一起跑，正文只跑正文。'">
-            <span>
-              <el-button v-if="isEngineResult && !FIELD_OF_STEP[current.name]" size="small" plain :loading="rerunning"
-                         :disabled="rerunning || !canRerun"
-                         @click="emit('rerunFrom', current.name)">重新调试本步</el-button>
-            </span>
-          </el-tooltip>
-        </div>
-      </section>
-
-      <div v-if="current && FIELD_OF_STEP[current.name]" class="rule-editor">
-        <div class="rule-editor-head">
-          <b>当前步骤规则</b>
-          <span class="muted">编辑后可立即看网页视图命中高亮；应用仍只是草稿，不会自动保存。</span>
-        </div>
-        <el-input v-model="draftRule" type="textarea" :rows="2"
-                  class="rule-editor-input" spellcheck="false"
-                  placeholder="输入 Legado 规则，例如 .media-content .title@href" />
-        <div class="toolbar rule-editor-actions">
-          <el-button size="small" @click="resetDraftRule">撤销编辑</el-button>
-          <el-button size="small" @click="applyDraftRule(false)">应用但不验证</el-button>
-          <el-button size="small" type="primary" plain
-                     :disabled="verifyAction.disabled"
-                      :loading="rerunning" @click="verifyCurrentRule()">
-            {{ verifyAction.label }}
-          </el-button>
-        </div>
-      </div>
-
-      <p v-if="current && current.reason" class="debug-reason">{{ current.reason }}</p>
-      <p v-if="current && current.rule_error" class="debug-reason">
-        规则无法离线回放：{{ current.rule_error }}
-      </p>
-      <ul v-if="current && current.notes && current.notes.length" class="debug-notes">
-        <li v-for="(n, i) in current.notes" :key="i">
-          {{ n }}
-          <el-button v-if="n.indexOf('bookSourceType') >= 0" size="small" link
-                     type="primary" @click="emit('goto', 'basic')">
-            去改类型
-          </el-button>
-        </li>
-      </ul>
-
-      <!-- 诊断（第 0 层）：**取不到有好几种成因，动作完全不同**，混成一句「失败」
-           用户只能瞎试。这里先说清是哪一种、下一步该改什么 -->
-      <div v-if="diagnosis.length || debugOutlet" ref="diagnosisBox" class="diagnosis">
-        <div v-for="(d, i) in diagnosis" :key="i" class="diag-line">
-          <el-tag size="small" :type="d.level === 'warn' ? 'warning' : 'info'">
-            {{ d.level === "warn" ? "问题" : "提示" }}
-          </el-tag>
-          <span class="why">{{ d.why }}</span>
-          <span class="muted todo">{{ d.todo }}</span>
-        </div>
-        <!-- unknown-outlet：动态页本机引擎取不到数据时，出口是现成的连 App 通道
-             （真机 WebView 与网络出口），不新造第三条验证路径 -->
-        <div v-if="debugOutlet" class="diag-line">
-          <el-tag size="small" type="warning">提示</el-tag>
-          <span class="why">{{ debugOutlet.reason }}</span>
-        </div>
+                        : '让本机引擎从这一步重新调试：目录会连正文一起跑，正文只跑正文。'"
+                      :ai-loading="aiLoading"
+                      @fix="onDecisionFix" @probe="onDecisionProbe" @ai="askAI"
+                      @rerun="emit('rerunFrom', (current || {}).name)"
+                      @goto-basic="onDecisionGotoBasic" />
       </div>
 
       <!-- 第 1 层：**在页面上找目标**。候选取自我们补抓的那份 HTML（纯前端算，
            不调模型、不发请求），每条都标出「选到几条 + 前几个值」——不给样本等于
            让用户再猜一次。「用这条」只填表单，验证走「重新调试本步」（App 引擎） -->
-      <div v-if="candidates.length && !candidatesUsable" class="cand-note">
-        这一页判到了 <b>{{ layer.info.name }}</b>——候选是在**我们补抓的原文**上算的，
-        而数据要渲染 / 解密后才有，所以这里不摆候选（能选中，选中的不是数据）。
-        下一步：{{ layer.info.action }}。
-      </div>
       <div v-if="candidates.length && candidatesUsable" class="candidates">
         <div class="cand-head">
           <b>在页面上找「{{ (want && want.label) || "目标" }}」</b>
@@ -1276,35 +1123,10 @@ function copyPage() {
         <div class="cand-head">
           <b>候选规则</b>
           <span class="muted">（先自动挑，挑不出来再问 AI）</span>
-          <span class="grow" />
-          <!-- 显示的是**这一步**、这一页不是登录墙、**且配了模型**时才给点 -->
-          <el-button size="small" type="primary" plain :loading="aiLoading"
-                     :disabled="!canAskAI || loginWall || !!aiLayerBlock" @click="askAI">
-            让 AI 提规则
-          </el-button>
         </div>
-        <!-- 判到了 L2–L5：数据要渲染 / 解密后才有，AI 看到的只是原文——先说清楚，
-             别让用户点完才发现「提了也验不了」。**独立于下面那条链**（理由同上） -->
-        <p v-if="aiLayerBlock" class="muted" style="margin: 4px 0 0">
-          这一页判到了 <b>{{ aiLayerBlock }}</b>：{{ layer.info.action }}。数据要渲染 / 解密后
-          才有，AI 看到的只是我们抓的原文——所以这里不给它提规则（提了也验不了）。
-        </p>
-        <!-- 没配模型：只说明**按钮**为什么点不了。
-             **必须独立于下面那条 v-if / v-else-if 链**——插进链里会把「程序挑的」
-             结果一起藏掉，而程序挑候选不依赖模型，那恰恰是没配模型的人唯一能用的 -->
-        <p v-if="canSuggest && !loginWall && !llmReady" class="muted"
-           style="margin: 4px 0 0">
-          没配模型，无法使用 AI 提议。到「设置 → 模型」添加。
-        </p>
-        <p v-if="!canSuggest" class="muted" style="margin: 4px 0 0">
-          这一步没抓到页面
-        </p>
-        <!-- 登录墙：模型看到的是登录页，不是 App 那份（App 带登录态）——先说清楚，
-             别让用户点完才发现「提了也验不了」 -->
-        <el-alert v-else-if="loginWall" type="warning" :closable="false" show-icon
-                  style="margin: 6px 0 0"
-                  title="登录页：抓到的内容与 App 不同，改规则请用「连 App 调试」" />
-        <p v-else-if="preselLoading" class="muted" style="margin: 4px 0 0">正在自动挑…</p>
+        <!-- AI 的入口在决策卡里（材料不合格时整块不渲染）；这里是两种材料的落点：
+             程序先挑的那趟免费，模型那趟只有用户点了才有 -->
+        <p v-if="preselLoading" class="muted" style="margin: 4px 0 0">正在自动挑…</p>
         <!-- 程序挑出来了：直接把结论和依据摆出来 -->
         <template v-else-if="preselRes && preselRes.preselect && preselRes.preselect.picked">
           <DebugCandidateCard :card="candidateCard(preselRes.preselect.picked)"
@@ -1561,8 +1383,6 @@ function copyPage() {
   --debug-candidate-border: #d9ecff;
   --debug-ai-bg: #f7f4ff;
   --debug-ai-border: #e2d9ff;
-  --debug-diagnosis-bg: #fff9f0;
-  --debug-diagnosis-border: #faecd8;
 }
 
 .candidates {
@@ -1585,16 +1405,6 @@ function copyPage() {
 .cand-head { margin-bottom: 4px; }
 .cand-head-hint { margin-left: 4px; }
 .val-open { margin-left: 6px; font-size: 12px; }
-.diagnosis {
-  margin: var(--app-space-2) 0;
-  padding: var(--app-space-2) 10px;
-  background: var(--debug-diagnosis-bg);
-  border: 1px solid var(--debug-diagnosis-border);
-  border-radius: var(--app-radius-sm);
-}
-.diag-line { display: flex; align-items: baseline; gap: 6px; padding: 2px 0; }
-.diag-line .why { flex: 0 1 auto; }
-.diag-line .todo { flex: 1 1 auto; min-width: 0; }
 .debug-workspace { display: flex; gap: 14px; align-items: flex-start; }
 .debug-step-panel {
   flex: 0 0 190px;
@@ -1626,44 +1436,6 @@ function copyPage() {
 }
 .debug-step-tab-label { min-width: 0; flex: 1 1 auto; }
 .debug-step-main { min-width: 0; flex: 1 1 auto; }
-/* 当前步骤卡片：**视觉中心**。比周边面板高一档（白底 + 阴影 + 状态色条），
-   详细材料一律留在它下面，避免规则和候选在首屏与结论抢位置 */
-.step-card {
-  margin: 0 0 var(--app-space-3);
-  padding: var(--app-space-3);
-  background: var(--app-surface);
-  border: 1px solid var(--app-border-light);
-  border-left: 3px solid var(--app-status-unknown);
-  border-radius: var(--app-radius-md);
-  box-shadow: 0 1px 2px rgb(0 0 0 / 4%);
-}
-.step-card.is-pass { border-left-color: var(--app-status-pass); }
-.step-card.is-fail { border-left-color: var(--app-status-fail); }
-.step-card.is-unknown { border-left-color: var(--app-status-unknown); }
-.step-card.is-stale { border-left-color: var(--app-status-warning); }
-.step-card-top { display: flex; align-items: center; flex-wrap: wrap; gap: var(--app-space-2); }
-.step-card-title { font-size: 15px; }
-.step-card-url { flex: 1 1 200px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.step-card-reason { margin: var(--app-space-2) 0 0; line-height: 1.6; }
-.step-card-evidence {
-  display: flex; align-items: center; flex-wrap: wrap; gap: 6px;
-  margin-top: var(--app-space-2); font-size: 12px;
-}
-.step-card-boundary { flex: 1 1 100%; line-height: 1.5; }
-.step-card-actions { display: flex; flex-wrap: wrap; gap: var(--app-space-2); margin-top: var(--app-space-3); }
-.rule-editor {
-  margin: var(--app-space-2) 0 10px;
-  padding: var(--app-space-2) 10px;
-  background: var(--debug-candidate-bg);
-  border: 1px solid var(--debug-candidate-border);
-  border-radius: var(--app-radius-sm);
-}
-.rule-editor-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px; }
-.rule-editor-input :deep(textarea) {
-  font-family: Consolas, Monaco, monospace;
-  font-size: 12px;
-}
-.rule-editor-actions { margin-top: 6px; }
 /* 原样渲染：App 给的行首已带对齐的 [mm:ss.SSS]，再叠一层我们自己量的耗时
    就是两套时间戳，反而更难读。pre-wrap 保住行内空格 */
 .debug-event {
@@ -1672,8 +1444,6 @@ function copyPage() {
   line-height: 1.6;
   white-space: pre-wrap; word-break: break-all;
 }
-.debug-reason { color: var(--app-status-fail); margin: var(--app-space-1) 0; }
-.debug-notes { color: var(--app-status-warning); margin: var(--app-space-1) 0; padding-left: 18px; line-height: 1.7; }
 .debug-evidence {
   display: flex; gap: 14px; flex-wrap: wrap;
   color: var(--app-text-muted); font-size: 12px; margin-bottom: var(--app-space-2);
@@ -1707,59 +1477,20 @@ function copyPage() {
   }
   .debug-step-tab { flex: 0 0 auto; width: auto; min-width: 86px; }
   .debug-step-tab-label { flex: 0 0 auto; }
-  /* 窄屏：结论与 URL 各占整行，主动作整行可触摸——头部不再是「一行挤五项」 */
-  .step-card { padding: var(--app-space-2); }
-  .step-card-url { flex: 1 1 100%; }
-  .step-card-reason { overflow-wrap: anywhere; }
-  .step-card-actions .el-button { flex: 1 1 auto; }
   /* 候选标题那句提示在窄屏另起一行：跟在标题后面换行只会剩一个孤字（「擎)」） */
   .cand-head-hint { display: block; margin: 2px 0 0; }
 }
 </style>
 
-<!-- 抽屉里**我们自己的元素**虽然带 data-v-*（scoped 也能中），但这两块都按 AGENTS #15
-     写在**不带 scoped** 的块里、用前缀限定：定层横幅是 `.layer-`，点选页签是 `.pick-`。
-     理由：它们与「抽屉/弹窗内部结构」属于同一类维护面，放一起省得下次又找错地方 -->
+<!-- 抽屉里我们自己的元素按 AGENTS #15 写在**不带 scoped** 的块里、用前缀限定：
+     这里是 `.pick-`（点选页签那个 iframe）。跨组件共用的才上 frontend/src/styles.css -->
 <style>
-.layer-banner {
-  margin: 0 0 10px;
-  padding: var(--app-space-2) 10px;
-  border: 1px solid var(--app-border-light);
-  border-left: 3px solid var(--app-status-warning);
-  border-radius: var(--app-radius-sm);
-  background: var(--debug-surface-muted);
-  font-size: 13px;
-  line-height: 1.6;
-}
-.layer-banner .layer-action { margin-left: 6px; }
-.layer-banner .layer-ev {
-  margin: 6px 0 0;
-  padding-left: 18px;
-  color: var(--app-text-secondary);
-}
-.layer-banner .layer-ev li { margin: 2px 0; }
-.layer-banner .layer-why { font-weight: 600; }
-.layer-banner .layer-snippet {
-  display: block;
-  margin-top: 2px;
-  color: var(--app-text-muted);
-  word-break: break-all;
-}
 .pick-frame {
   width: 100%;
   height: 58vh;
   border: 1px solid var(--app-border-light);
   border-radius: var(--app-radius-sm);
   background: var(--app-surface);      /* 页面大多假设白底 */
-}
-.cand-note {
-  margin: 0 0 10px;
-  padding: var(--app-space-2) 10px;
-  border-left: 3px solid var(--app-status-warning);
-  border-radius: var(--app-radius-sm);
-  background: var(--debug-surface-muted);
-  font-size: 13px;
-  line-height: 1.6;
 }
 </style>
 

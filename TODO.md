@@ -242,10 +242,10 @@
 
 ### 条目：ux-debug-reading · 调试高级信息与响应式阅读体验
 状态：todo
-依赖：ux-debug-flow
-优先级：P2
+依赖：无
+优先级：P1
 背景：运行态、事件流、整页源码、语法速查和详细 AI 信息对熟悉用户有用，但不应挤走首次调试所需的结论和动作。
-约束：默认层只展示结论、原因、主动作、核心值和证据来源；高级材料可展开；运行态继续消费 `useDebugSession`，固定显示等待、预算和取消状态；移动端保持当前步骤、结论和主动作在首屏；不复制运行态或结果状态。
+约束：默认层只展示结论、原因、主动作、核心值和证据来源；高级材料可展开；**「哪一个是 gap、谁是主动作」的口径见 AGENTS #24，本条只管呈现**；运行态继续消费 `useDebugSession`，固定显示等待、预算和取消状态；移动端保持当前步骤、结论和主动作在首屏；不复制运行态或结果状态。
 验收：滚动到证据区仍能找到运行态；取消等待与后端任务状态文案明确；展开高级信息后原有材料仍可用；窄屏下步骤、结论、来源和主动作可触摸访问且无横向页面溢出。
 指针：frontend/src/components/DebugWorkbench.vue，frontend/src/views/DebugWorkbenchView.vue，frontend/src/composables/useDebugSession.js
 
@@ -255,7 +255,7 @@
 依赖：无
 优先级：P1
 背景：当前项目已经有 `core/page_layer.py` 的 L1-L4 判定、`debugNextAction.js` 的下一步动作、`/rules/suggest-rule` 的 AI 提议，以及 JVM/App 两条真实引擎通道；缺的是把它们按 Layer 串成一个小上下文、有限动作、逐步验证的 Agent。第一目标是因地制宜支持口袋漫画的 L3 动态正文，不建设通用逆向平台。
-约束：Agent 只输出结构化动作和受控提议，不直接改源、不自行联网、不判定成功、不猜密钥；L1 优先走本地候选，L2/L3 优先转 App/JVM 实测，L4 只消费已观测接口摘要，L5 只提示登录上下文；所有提议必须经过 `replay-step`、`jvm-debug` 或 `app-debug` 验证；上下文只传本地压缩摘要，完整 HTML/脚本/事件流按需取证；AI 调用必须由用户显式触发，免费 dry-run 不发模型请求。
+约束：Agent 只输出结构化动作和受控提议，不直接改源、不自行联网、不判定成功、不猜密钥；L1 优先走本地候选，L2/L3 优先转 App/JVM 实测，L4 只消费已观测接口摘要，L5 只提示登录上下文；所有提议必须经过 `replay-step`、`jvm-debug` 或 `app-debug` 验证；上下文只传本地压缩摘要，完整 HTML/脚本/事件流按需取证；AI 调用必须由用户显式触发，免费 dry-run 不发模型请求；动作与提议的结构按 AGENTS #24 的五格合同来，不另设计一套。
 验收：对 L1 静态页、L2 空容器、L3 口袋漫画正文、L4 接口页、L5 登录提示各有一条结构化动作链；Agent 输出不能绕过真实引擎；口袋漫画能从选定章节得到 `webView + webJs + content` 草稿并通过图片数量与可访问性验证；未知、缺证据和验证失败均保留具体原因。
 子项：
 - agent-context
@@ -266,32 +266,14 @@
 - agent-evidence-budget
 指针：core/page_layer.py，frontend/src/utils/debugNextAction.js，frontend/src/components/DebugWorkbench.vue，backend/api/rules.py，lessons §七十三 / §八十
 
-### 条目：agent-layer-router · 按 L1-L5 选择本地动作与 AI 场景
-状态：todo
-依赖：agent-action-schema
-优先级：P1
-背景：明显场景应由确定性代码处理，不能每一步都调用模型；Agent 只处理本地规则无法收敛的解释、候选和缺口。
-约束：L1 先用候选选择器与回放；L2 先建议运行时引擎；L3 不从密文猜算法，优先运行时对象和 App 实测；L4 只从网络证据生成接口候选；L5 把登录词作为事实并请求会话选择；Layer 判定继续唯一来自 `core/page_layer.py`，前端只渲染后端结果。
-验收：同一输入在无模型配置时仍能完成可确定动作；L1 不因未配置模型而阻塞；L2/L3 能导向对应引擎；L4/L5 的建议不会伪装成已验证结论；动作原因能显示给用户。
-指针：core/page_layer.py，frontend/src/utils/debugNextAction.js，frontend/src/utils/debugOutlets.js
-
 ### 条目：agent-pocket-comic · 口袋漫画 L3 WebView 正文专项策略
 状态：todo
 依赖：agent-layer-router, agent-action-schema
 优先级：P1
 背景：口袋漫画正文页的图片地址在 WebView 执行后的 `params.chapter_images`，静态 HTML 没有图片，运行时图片还可能变成 `blob:` URL；图片签名会过期，目录选错还会导致重复章节。第一版应验证运行时数据，不应让用户配置 AES 或复制旧图片地址。
-约束：入口要求用户选择具体章节；Agent 只生成 `requires_webview / runtime_field / content_mode` 策略；本机/App 实测确认 `params` 已为对象、`chapter_images` 非空且图片可访问后，才生成 ES5 `webJs + content + imageStyle`；调试工作台明确标出 L2/L3，静态网页视图不能框选时给出「使用本机引擎 / 连 App 调试」动作；运行时 DOM、命中片段和框选高亮必须来自同一份运行时材料，不能把静态补抓冒充 App 页面；每次调试重新获取图片地址；跑批不能可靠覆盖这类源时必须明确标注；章节与图片失败原因不得压成“解密失败”。
+约束：入口要求用户选择具体章节；Agent 只生成 `requires_webview / runtime_field / content_mode` 策略；本机/App 实测确认 `params` 已为对象、`chapter_images` 非空且图片可访问后，才生成 ES5 `webJs + content + imageStyle`；调试工作台明确标出 L2/L3，静态网页视图不能框选时给出**取证**动作（「用本机引擎 / 连 App 取运行时材料」），不许写成解决方案（口径见 AGENTS #24）；运行时 DOM、命中片段和框选高亮必须来自同一份运行时材料，不能把静态补抓冒充 App 页面；每次调试重新获取图片地址；跑批不能可靠覆盖这类源时必须明确标注；章节与图片失败原因不得压成“解密失败”。
 验收：选定一章能显示页面、WebView、运行时字段、图片数量和可访问性；成功时生成源草稿正文规则并由 App 实测复验；params 仍为字符串、图片为空、签名过期、目录地址不具体、静态页面无运行时材料时分别给出对应下一步；若取得运行时 DOM，命中源码与框选高亮使用同一份材料；跑批对这类源要么同样能验，要么结论明确标「这类源跑批不可信」；不在源中硬编码站点 AES 或图片 URL。
 指针：skills/legado-book-source/SKILL.md，core/js_hints.py，tests/test_page_layer.py，data/app_probe/source.json，lessons §四十九 / §六十 / §七十五
-
-### 条目：agent-workbench · 在现有调试工作台承载 Agent 建议
-状态：todo
-依赖：agent-action-schema, agent-layer-router
-优先级：P1
-背景：不新增聊天页；现有 `DebugWorkbench` 已有步骤、证据、结果、重跑和规则应用入口，只需增加按当前步骤显示的“下一步建议”卡片。
-约束：默认只显示当前 Layer、已确认事实、一个主动作和证据入口；AI 推测、本机验证、App 实测、用户确认分开标识；应用 Proposal 前必须经过 schema 校验；任何自动调用 AI、自动推送 App 和自动保存源都禁止；移动端首屏保留失败原因与主动作；建议卡与证据区以独立组件落地，不在 DebugWorkbench 主文件续写。
-验收：L1-L5 都能在工作台看到唯一主动作；口袋漫画成功时可从建议卡应用正文策略并重跑；失败时可直达对应证据或引擎重试；未配置模型时仍能看到确定性动作；现有重跑、对比、取消和证据展示不回归。
-指针：frontend/src/components/DebugWorkbench.vue，frontend/src/views/DebugWorkbenchView.vue，frontend/src/composables/useDebugSession.js
 
 ### 条目：agent-evidence-budget · 限制 Agent 取证范围与调用次数
 状态：todo

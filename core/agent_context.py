@@ -290,15 +290,31 @@ def build_agent_context(snapshot: Mapping[str, Any] | None) -> dict[str, Any]:
         "step": _text(target_raw.get("step"), 32),
         "want": _text(target_raw.get("want"), 32),
     }
+    if isinstance(target_raw.get("chapter_selected"), bool):
+        target["chapter_selected"] = target_raw["chapter_selected"]
+    #: 「这一步的规则是不是空的」是**事实**，也是五格判据里的全局前置
+    #: （规则没写，换通道也读不出东西），所以必须原样带出去
+    if isinstance(target_raw.get("rule_empty"), bool):
+        target["rule_empty"] = target_raw["rule_empty"]
     step_raw = snapshot.get("step")
     step_raw = step_raw if isinstance(step_raw, Mapping) else {}
     step = {}
-    for key, limit in (("verdict", 24), ("reason", 180)):
+    for key, limit in (("verdict", 24), ("reason", 180), ("detail", 180),
+                       ("rule_error", 120)):
         value = _redact(step_raw.get(key), key=key, limit=limit)
         if value not in ("", None):
             step[key] = value
     if isinstance(step_raw.get("stale"), bool):
         step["stale"] = step_raw["stale"]
+    #: 页面事实只带**形状**：`page_id` 空着也是事实（App 没为这一步记页面），
+    #: URL 只带「有没有」——判「App 有没有请求这一步」用不着那个地址本身
+    if "page_id" in step_raw:
+        step["page_id"] = _text(step_raw.get("page_id"), 40)
+    if "url" in step_raw:
+        step["has_url"] = bool(str(step_raw.get("url") or "").strip())
+    values_count = step_raw.get("values_count")
+    if isinstance(values_count, (int, float)) and not isinstance(values_count, bool):
+        step["values_count"] = max(0, int(values_count))
     page = snapshot.get("page")
     page = page if isinstance(page, Mapping) else {}
     runtime = _runtime(snapshot.get("runtime"))
@@ -338,11 +354,37 @@ def build_agent_context(snapshot: Mapping[str, Any] | None) -> dict[str, Any]:
     if not layer:
         _add_gap(gaps, "layer_missing", "没有有效的页面 Layer 判定", "page_layer")
     gaps.sort(key=lambda item: item["code"])
+    #: 这一步**有没有页面**：`page` 本身不进上下文（只进摘要），所以这一格要单独带
+    page_present = (bool(page.get("present")) if "present" in page else bool(page))
+    #: 「这一页有没有目标」按层无关的方式带出去：它是页面事实，不是某一层的分支产物
+    has_wanted = page.get("has_wanted") if isinstance(page.get("has_wanted"), bool) else None
+    channel = _text(snapshot.get("channel"), 16)
+    replay_raw = snapshot.get("replay")
+    replay_raw = replay_raw if isinstance(replay_raw, Mapping) else {}
+    replay: dict[str, Any] = {}
+    if isinstance(replay_raw.get("present"), bool):
+        replay["present"] = replay_raw["present"]
+    values_count = replay_raw.get("values_count")
+    if isinstance(values_count, (int, float)) and not isinstance(values_count, bool):
+        replay["values_count"] = max(0, int(values_count))
+    replay_error = _text(replay_raw.get("rule_error"), 120)
+    if replay_error:
+        replay["rule_error"] = replay_error
+    signals_raw = snapshot.get("signals")
+    signals_raw = signals_raw if isinstance(signals_raw, Mapping) else {}
+    signals = {key: bool(signals_raw[key])
+               for key in ("login_wall", "llm_ready", "can_suggest")
+               if key in signals_raw}
     context: dict[str, Any] = {
         "schema_version": 1,
         "layer": layer,
         "target": target,
         "step": step,
+        "channel": channel,
+        "page_present": page_present,
+        "has_wanted": has_wanted,
+        "replay": replay,
+        "signals": signals,
         "facts": facts,
         "evidence_refs": _evidence_refs(page.get("evidence"), layer=layer),
         "candidates": _candidates(snapshot.get("candidates")),

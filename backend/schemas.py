@@ -398,3 +398,24 @@ class MergeUndoIn(BaseModel):
     restore_urls: List[str] = Field(default_factory=list)
     tags_added: List[str] = Field(default_factory=list)
     prev_comment: str = ""
+
+
+class AgentPlanRequest(BaseModel):
+    """首屏五格决策（现状 / 解决 / 取证 / AI 补足）的输入：**前端已观测到的事实**。
+
+    判据一份在 `core/agent_plan`；这里只转交事实，不收也不产文案——中文句子在前端按
+    缺口码取词（`frontend/src/utils/debugDecision.js`，机检扫的是那份）。
+    """
+
+    layer: str = ""
+    target: Dict[str, Any] = Field(default_factory=dict)
+    step: Dict[str, Any] = Field(default_factory=dict)
+    page: Dict[str, Any] = Field(default_factory=dict)
+    channel: str = ""
+    replay: Dict[str, Any] = Field(default_factory=dict)
+    signals: Dict[str, Any] = Field(default_factory=dict)
+    candidates: List[Dict[str, Any]] = Field(default_factory=list)
+    capabilities: Dict[str, bool] = Field(default_factory=dict)
+    runtime: Dict[str, Any] = Field(default_factory=dict)
+    network: List[Dict[str, Any]] = Field(default_factory=list)
+    model_available: bool = False

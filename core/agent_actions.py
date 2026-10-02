@@ -16,6 +16,7 @@ from core.agent_context import LAYERS
 
 ACTIONS = (
     "suggest_rule",
+    "edit_rule",
     "run_jvm_debug",
     "run_app_debug",
     "inspect_runtime",
@@ -25,6 +26,7 @@ ACTIONS = (
 )
 REASON_CODES = (
     "candidate_available",
+    "rule_missing",
     "needs_runtime",
     "needs_jvm_debug",
     "needs_app_debug",
@@ -40,6 +42,7 @@ _TOP_LEVEL = {"action", "layer", "reason_code", "proposal", "verification", "evi
 _VERIFICATION_FIELDS = {"required", "method"}
 _ACTION_FIELDS = {
     "suggest_rule": {"field", "rule", "strategy"},
+    "edit_rule": {"field"},
     "run_jvm_debug": {"target", "query"},
     "run_app_debug": {"target", "query"},
     "inspect_runtime": {"runtime_field", "scope"},

@@ -13,13 +13,18 @@
 // 合并在 `classifyLayer` 里按「下一步动作」的优先级做一次（L5 → L3 → L4 → L2 → L1），
 // 证据行两边拼起来——每条结论都要能指回原文或源里的那一行。
 
-/** 五档：名字 + 下一步动作（界面上直接照着说）。 */
+/** 五档：名字 + 下一步动作（界面上直接照着说）+ 按钮词（`fix` 要短，`action` 是说明）。
+ *
+ *  两套词都在这一张表里：判据（后端 `core/agent_plan`）只给「按哪一层修」，
+ *  按钮上写什么由这里出——同一个结论不在两处各写一份。 */
 export const LAYER_INFO = {
-  L1: { name: "L1 静态直出", action: "直接写选择器" },
-  L2: { name: "L2 JS 壳", action: "换能跑 JS 的通道 + webJs" },
-  L3: { name: "L3 加密负载", action: "用 webJs 读页面里的全局对象（别自己实现解密）" },
-  L4: { name: "L4 接口取数", action: "抓接口 + JSONPath" },
-  L5: { name: "L5 需登录 / 被墙", action: "先解决登录态（浏览器 profile 预热或连 App）" },
+  L1: { name: "L1 静态直出", action: "直接写选择器", fix: "改选择器" },
+  L2: { name: "L2 JS 壳", action: "换能跑 JS 的通道 + webJs", fix: "声明 webView + webJs" },
+  L3: { name: "L3 加密负载", action: "用 webJs 读页面里的全局对象（别自己实现解密）",
+        fix: "声明 webJs 读全局对象" },
+  L4: { name: "L4 接口取数", action: "抓接口 + JSONPath", fix: "写接口规则 + JSONPath" },
+  L5: { name: "L5 需登录 / 被墙", action: "先解决登录态（浏览器 profile 预热或连 App）",
+        fix: "配置登录 / 会话" },
 };
 
 //: 源里带 webView 标记的判据（URL 规则的选项 `,{"webView":true}`）。

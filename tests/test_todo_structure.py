@@ -44,7 +44,6 @@ SECTIONS = (
     ("## 1 · 排队", ("todo", "doing", "blocked")),
     ("## 2 · 按需", ("todo", "doing", "blocked", "open")),
     ("## 3 · 待决策", ("open", "blocked", "todo")),
-    ("## 已完成", ("done",)),
 )
 
 #: P0 闸门：只数「现在做」区里的活跃条目（父 open 与 done 都不算）。
@@ -262,7 +261,7 @@ class TodoStructureTests(unittest.TestCase):
         """本仓除个别 Windows 脚本外全是 LF；TODO.md 尤其不能翻成 CRLF。"""
         self.assertEqual(0, TODO.read_bytes().count(b"\r\n"), "TODO.md 被翻成了 CRLF")
 
-    def test_all_five_sections_are_present(self):
+    def test_all_four_sections_are_present(self):
         seen = [l.rstrip() for l in self.text.split(chr(10)) if l.startswith("## ")]
         self.assertEqual([name for name, _ in SECTIONS], seen)
 

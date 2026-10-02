@@ -29,6 +29,7 @@ class AgentActionSchemaTests(unittest.TestCase):
     def test_all_actions_have_a_strict_valid_shape(self):
         proposals = {
             "suggest_rule": {"field": "ruleSearch.bookList", "rule": ".item"},
+            "edit_rule": {"field": "ruleContent.content"},
             "run_jvm_debug": {"target": "search", "query": "关键词"},
             "run_app_debug": {"target": "content"},
             "inspect_runtime": {"runtime_field": "params.chapter_images"},
@@ -41,6 +42,7 @@ class AgentActionSchemaTests(unittest.TestCase):
         }
         reasons = {
             "suggest_rule": "candidate_available",
+            "edit_rule": "rule_missing",
             "run_jvm_debug": "needs_jvm_debug",
             "run_app_debug": "needs_app_debug",
             "inspect_runtime": "needs_runtime",

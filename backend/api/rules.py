@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException
 
 from backend.jobs import runner
 from backend.schemas import (
+    AgentPlanRequest,
     AppDebugRequest,
     AppHostRequest,
     CandidatesRequest,
@@ -321,3 +322,17 @@ async def replay_rule_step(body: ReplayStepRequest):
             replay_step, body.html, body.rule, body.step, body.source_type)
     except Exception as e:
         raise HTTPException(400, "重放失败: %s: %s" % (type(e).__name__, e))
+
+
+@router.post("/agent-plan")
+async def agent_plan(body: AgentPlanRequest):
+    """首屏五格决策：现状 / 解决 / 取证 / AI 补足。
+
+    判据一份在 `core/agent_plan`（缺口唯一、fix 与 probe 分栏、AI 只认合格材料）；
+    这里只把前端**观测到的事实**转成上下文——不发请求、不落库、不调用模型。
+    """
+    from core.agent_context import build_agent_context
+    from core.agent_plan import build_plan
+
+    context = build_agent_context(body.model_dump())
+    return build_plan(context, model_available=body.model_available)

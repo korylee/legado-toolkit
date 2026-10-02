@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+import os
+import re
 import unittest
 
 from core.page_layer import (WANT_LINK, WANT_LIST, WANT_MEDIA, WANT_TEXT,
@@ -126,6 +128,36 @@ class ClassifyTests(unittest.TestCase):
         for want in (WANT_LIST, WANT_LINK, WANT_TEXT, WANT_MEDIA):
             with self.subTest(want=want):
                 self.assertIsNotNone(has_wanted(page_stats(STATIC), want))
+
+
+class FrontendStatKeyParityTests(unittest.TestCase):
+    """界面读页面统计用的键名，必须真的存在于 `page_stats()` 的输出里。
+
+    为什么钉这条：键名唯一一份在 `core/page_layer.page_stats`（AGENTS #7/#8），而消费点在
+    前端——首屏改造后是 `frontend/src/utils/debugDecision.js`，统计字段被拼进「现状」那句，
+    读法可能是 `ps.<键>`，也可能是 `<对象>.stats.<键>`，**两种都要扫**。
+    实测曾经在组件里把 `images_with_src` 读成 `imagesWithSrc`，界面上就显示
+    「带 src 的只有 undefined 个」——不报错、不进日志（AGENTS #12：读字段前先确认它存在）。
+    **扫不到任何预期键就说明读取点又搬家了**，这条闸门会空转成假绿。
+    """
+
+    FRONTEND = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "frontend", "src", "utils", "debugDecision.js")
+    #: 必须扫到这些键：扫不到就说明读取点搬走了
+    EXPECTED = {"links", "images", "images_with_src"}
+    #: 两种合法的读取写法：`ps.<键>` 与 `<对象>.stats.<键>`
+    READ_RE = re.compile(r"(?:\bps|\.stats)\.([A-Za-z_][A-Za-z0-9_]*)")
+
+    def test_frontend_reads_only_backend_stat_keys(self):
+        with open(self.FRONTEND, encoding="utf-8") as handle:
+            source = handle.read()
+        used = set(self.READ_RE.findall(source))
+        available = set(page_stats(""))
+        unknown = used - available
+        self.assertFalse(unknown, "界面读了 page_stats 里没有的键：%s（可用：%s）"
+                         % (sorted(unknown), sorted(available)))
+        self.assertTrue(self.EXPECTED <= used,
+                        "没扫到预期的统计键读取（变量改名了？）：%s" % sorted(self.EXPECTED - used))
 
 
 if __name__ == "__main__":

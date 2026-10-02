@@ -90,3 +90,9 @@ export const rulesMeta = () => api.get("/rules/meta");
 // 结论**（页面上确实没有），不是失败。
 export const ruleCandidates = (html, kind, limit = 6) =>
   api.post("/rules/candidates", { html, kind, limit });
+
+// 首屏五格决策（现状 / 解决 / 取证 / AI 补足）。判据的唯一一份在 `core/agent_plan`：
+// 缺口唯一、fix 与 probe 分栏、AI 只认合格材料。这里**只提交观测到的事实**，
+// 返回的 `gap` / `fix` / `probe` / `ai` 直接渲染（中文句子在前端按码取词）。
+// 它不发请求、不落库、不调用模型，所以换步骤/换页面时可以自动调。
+export const agentPlan = (facts) => api.post("/rules/agent-plan", facts);

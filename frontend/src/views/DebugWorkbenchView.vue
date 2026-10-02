@@ -239,7 +239,7 @@ onMounted(() => {
         <div class="wb-source"><b>{{ name }}</b><span class="mono muted wb-source-url" :title="url">{{ url }}</span></div>
       </div>
       <div class="wb-head-actions">
-        <el-tag v-if="sourceDirty" size="small" type="warning">有未保存修改</el-tag><el-tag v-else-if="source" size="small" :type="running ? 'warning' : 'info'">{{ running ? '调试进行中' : '编辑工作台' }}</el-tag>
+        <el-tag v-if="sourceDirty" size="small" type="warning">有未保存修改</el-tag><el-tag v-else-if="source" size="small" :type="running ? 'warning' : 'info'">{{ running ? '调试进行中' : '编辑' }}</el-tag>
         <el-button size="small" @click="openSettings">源设置</el-button>
         <el-button v-if="saveAsMode" size="small" @click="cancelSaveAs">取消另存</el-button>
          <el-button v-else-if="source" size="small" @click="startSaveAs">另存为</el-button>
@@ -248,12 +248,12 @@ onMounted(() => {
     </header>
 
     <section class="wb-entry wb-panel">
-      <div class="wb-panel-title"><div><b>开始调试</b><span class="muted wb-panel-subtitle">选择一个入口，结果会在下面按步骤展开</span></div><el-tag v-if="env" size="small" :type="env.ok ? 'success' : 'warning'">{{ envLoading ? '正在检查环境…' : envTitle }}</el-tag></div>
+      <div class="wb-panel-title"><div><b>调试</b><span class="muted wb-panel-subtitle">选择入口并查看调试结果</span></div><el-tag v-if="env" size="small" :type="env.ok ? 'success' : 'warning'">{{ envLoading ? '正在检查环境…' : envTitle }}</el-tag></div>
       <div class="wb-primary-row">
-        <el-select v-model="target" size="small" class="wb-target" aria-label="调试目标"><el-option v-for="t in DEBUG_TARGETS" :key="t.value" :value="t.value" :label="'目标：' + t.label" /></el-select>
-        <el-input v-model="query" size="small" class="wb-query" :placeholder="debugHint" @keyup.enter="debugRun()" />
-        <el-button size="small" type="primary" :loading="running" @click="debugRun()">开始调试</el-button>
-        <el-button v-if="running" size="small" @click="cancelRun">取消等待</el-button>
+        <el-select v-model="target" class="wb-target" aria-label="调试目标"><el-option v-for="t in DEBUG_TARGETS" :key="t.value" :value="t.value" :label="'目标：' + t.label" /></el-select>
+        <el-input v-model="query" class="wb-query" :placeholder="debugHint" @keyup.enter="debugRun()" />
+        <el-button type="primary" :loading="running" @click="debugRun()">调试</el-button>
+        <el-button v-if="running" @click="cancelRun">取消等待</el-button>
       </div>
       <div class="wb-secondary-row" :class="{ 'is-hidden': entryCompact }">
         <span class="muted wb-option-label">通道</span><el-radio-group v-model="channel" size="small"><el-radio-button value="jvm">本机引擎</el-radio-button><el-radio-button value="app">连 App</el-radio-button></el-radio-group>
@@ -303,7 +303,10 @@ onMounted(() => {
 .wb-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 16px; box-shadow: none; }
 .wb-head-main, .wb-head-actions, .wb-source { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .wb-source { gap: 8px; }.wb-source-url { max-width: min(48vw, 620px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.wb-head-actions { flex: 0 0 auto; }
-.wb-entry { margin-top: 12px; padding: 14px 16px; }.wb-panel-title, .wb-primary-row, .wb-secondary-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }.wb-panel-title { justify-content: space-between; gap: 12px; margin-bottom: 12px; }.wb-panel-subtitle { margin-left: 8px; }.wb-primary-row { flex-wrap: nowrap; }.wb-target { width: 126px; flex: 0 0 auto; }.wb-query { min-width: 160px; flex: 1 1 280px; }.wb-secondary-row { margin-top: 10px; }.wb-secondary-row.is-hidden { display: none; }.wb-options-summary { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 8px; }.wb-option-label { margin-left: 2px; }.wb-cache { width: 112px; }.wb-host { width: 210px; }.wb-budget, .wb-elapsed { margin-left: 4px; }.wb-preflight { margin: 8px 0 0; }.wb-body { margin-top: 14px; }
+/* 调试入口主行：输入框与选择框的高度来自两处不同声明——`.el-input` 靠 `--el-input-height`
+   同时决定行高与内层高度，`.el-select` 只由 wrapper 的 min-height 决定。两边都得钉住同一个量，
+   只给两个 wrapper 设 min-height 就是对不齐（窄屏那条全局 min-height 也会被 size 掉）。 */
+.wb-entry { margin-top: 12px; padding: 14px 16px; }.wb-panel-title, .wb-primary-row, .wb-secondary-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }.wb-panel-title { justify-content: space-between; gap: 12px; margin-bottom: 12px; }.wb-panel-subtitle { margin-left: 8px; }.wb-primary-row { flex-wrap: nowrap; }.wb-target { width: 126px; flex: 0 0 auto; }.wb-query { min-width: 160px; flex: 1 1 280px; }.wb-primary-row .wb-target, .wb-primary-row .wb-query, .wb-primary-row .el-button { height: var(--app-touch-size); box-sizing: border-box; }.wb-primary-row .wb-query { --el-input-height: var(--app-touch-size); }.wb-primary-row :deep(.el-select__wrapper) { height: var(--app-touch-size); min-height: var(--app-touch-size); box-sizing: border-box; }.wb-secondary-row { margin-top: 10px; }.wb-secondary-row.is-hidden { display: none; }.wb-options-summary { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 8px; }.wb-option-label { margin-left: 2px; }.wb-cache { width: 112px; }.wb-host { width: 210px; }.wb-budget, .wb-elapsed { margin-left: 4px; }.wb-preflight { margin: 8px 0 0; }.wb-body { margin-top: 14px; }
 @media (max-width: 720px) {
   .workbench-page { padding: 10px 10px 24px; }
   .wb-head { display: block; padding: 10px 12px; }
