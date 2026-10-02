@@ -7,7 +7,7 @@ import { Search, Plus, Upload, Download, Delete, Filter, Refresh, Monitor, Magic
 import { listSources, listSourceUrls, listGroups, patchTags, deleteSources, listTags, getStats } from "../api/sources";
 import { api, subscribeJob } from "../api/client";
 import { jvmRun } from "../api/jvm.js";
-import { jobFailReason } from "../utils/jobs";
+import { jobFailReason, jobPhaseLabel } from "../utils/jobs";
 import { ensureTagMeta } from "../utils/tags";
 import { HEALTH_OPTIONS, describeChanges, engineLabel, healthLabel } from "../utils/health";
 // 一行的显示事实（健康/深度/标签/逐段结论）都在 utils/sourceRow.js——移动卡片与
@@ -76,9 +76,12 @@ function checkOne(row) { checkSources([row.source_url]); }
 
 //: 总数优先用后端报的（提交列表与"全量"的实际条数可能不同，比如回收站/禁用的源）
 const checkStatusText = computed(() => {
-  // 本机引擎跑批：一次同步调用、没有逐条进度（后端跑完才返回），所以只报状态不报分数
-  // ——编一个假进度比不报更糟（用户会盯着一个不动的数字）
-  if (jvmRunning.value) return "正在用本机引擎跑批：" + jvmRunScope.value;
+  // 本机引擎跑批同样通过 job SSE 报实际完成数；阶段与任务抽屉使用同一词表。
+  if (jvmRunning.value) {
+    return "正在用本机引擎跑批：" + jvmRunScope.value + " · 已完成 "
+      + Math.min(jvmProgress.value, jvmTotal.value || jvmProgress.value) + " / "
+      + (jvmTotal.value || "?") + " 条 · " + jobPhaseLabel(jvmPhase.value);
+  }
   const n = checkTotal.value || (checkingAll.value ? 0 : checkingUrls.value.size);
   // 全量校验是十几分钟的长任务，**带上跑动中的计数**：只有「正在校验全部 3861 条」
   // 这句时，跑与没跑、跑到哪了在界面上完全看不出来（原话是"进度没更新"）。
@@ -195,13 +198,12 @@ function startPendingCheck() {
   runJvmBatch();
 }
 
-//: 本机引擎跑批：一次同步调用（后端起 appservice 子进程，跑完才返回），没有逐条进度。
-//: **不做成 job**：它是「一条命令跑完一批」，与本地那套 SSE 进度不是一回事；
-//: 界面上只给一句「正在跑」+ 完成的落库条数。
+//: JVM 跑批由后端 job 执行；SSE 的 progress/total 是结果文件已完成的真实源数。
 const jvmRunning = ref(false);
-//: 跑动中的状态条要写清**这次跑的是哪些、多少条**——同一句话糊过去的话，
-//: 「我明明只选了 20 条」这种疑问在跑动期间无法自证
 const jvmRunScope = ref("");
+const jvmProgress = ref(0);
+const jvmTotal = ref(0);
+const jvmPhase = ref("queued");
 //: 跑批任务的 SSE 句柄（关掉订阅用；任务本身在后端跑，关页面也不会丢）
 let stopJvm = null;
 
@@ -219,6 +221,9 @@ async function runJvmBatch() {
                                         group: query.group, tag: query.tag }, params }
       : { params };
   jvmRunning.value = true;
+  jvmProgress.value = 0;
+  jvmTotal.value = 0;
+  jvmPhase.value = "queued";
   try {
     const r = await jvmRun(payload);
     if (!r.started) {
@@ -232,16 +237,27 @@ async function runJvmBatch() {
     // 跑了 3 条，是设置页时代最难发现的一处截断
     jvmRunScope.value = (scope === "selected" ? "勾选的" : scope === "filtered" ? "当前筛选的" : "全部在用源")
       + "（" + (r.count || 0) + " 条）";
-    upsertJob({ id: r.job_id, status: "pending" });   // 徽标立刻反映：不等第一帧 SSE
+    jvmTotal.value = r.count || 0;
+    upsertJob({ id: r.job_id, status: "pending", progress: 0, total: jvmTotal.value,
+                phase: "queued", kind: "jvm_run" });   // 徽标立刻反映：不等第一帧 SSE
     // 跑批是分钟级的：**提交任务 + 订阅**（与本地校验同一条链路）。原来是一个挂到
     // 跑完的长请求——关掉页面/刷新就白等；结论照落库，但界面不知道它跑完了
     if (stopJvm) stopJvm();
     stopJvm = subscribeJob(
       r.job_id,
-      // 跑批没有逐条进度（一次 Gradle 调用跑一批），**不编假进度**：只报状态。
-      // 帧仍然 upsert 进 useJobs——徽标不依赖它显示进度，只认「在不在跑」
-      (data) => upsertJob(data),
+      (data) => {
+        if (!data) return;
+        upsertJob(data);
+        if (typeof data.progress === "number") jvmProgress.value = data.progress;
+        if (typeof data.total === "number" && data.total > 0) jvmTotal.value = data.total;
+        if (data.phase) jvmPhase.value = data.phase;
+      },
       async (data) => {
+        if (data) {
+          if (typeof data.progress === "number") jvmProgress.value = data.progress;
+          if (typeof data.total === "number" && data.total > 0) jvmTotal.value = data.total;
+          if (data.phase) jvmPhase.value = data.phase;
+        }
         jvmRunning.value = false;
         upsertJob(data);   // 终态（或 unknown）都把它从「在跑」里摘掉
         let res = {};

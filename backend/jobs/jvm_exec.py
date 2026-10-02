@@ -692,7 +692,9 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
                     chunk_args: Optional[Path], chunk_out: Path,
                     base_done: int, batch: str,
                     tail_stop: threading.Event, tail: threading.Thread,
-                    chunk_sources: int = 0) -> Dict[str, Any]:
+                    chunk_sources: int = 0,
+                    daemon_allowed: bool = True,
+                    daemon_reason: str = "") -> Dict[str, Any]:
         from backend.jobs import runner as job_runner
 
         RUN_LOCK.acquire()
@@ -709,11 +711,11 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
             # daemon 忙着别人的请求时 ping 不通不等于死，杀了会伤及在跑的 op；
             # 探测不过/执行失败一律回落 Gradle，并把原因带到块报告里（AGENTS #4：
             # 回落要说出来，不能装成源失败）。
-            daemon_failure = ""
+            daemon_failure = (daemon_reason if use_daemon and not daemon_allowed else "")
             daemon_response: Dict[str, Any] = {}
             gradle: Dict[str, Any] = {}
             daemon_mode = False
-            if use_daemon and chunk_args is not None:
+            if daemon_allowed and use_daemon and chunk_args is not None:
                 try:
                     from core import jvm_validate_daemon, jvm_direct
 
@@ -849,6 +851,10 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
         base_done = 0
         abort_reason = ""
         daemon_prepare: Dict[str, Any] = {}
+        daemon_retry_waiting = False
+        daemon_retry_available = False
+        daemon_recovered = False
+        daemon_retry_reason = ""
         for idx, chunk_rows in enumerate(chunks):
             if idx > 0:
                 # 块间交还 lane：排队者（调试等）按优先级插队，本批随后重新取许可。
@@ -893,16 +899,29 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
             if use_daemon and chunk_args is not None and not daemon_prepare:
                 job_runner.update_phase(job_id, "starting_daemon")
                 daemon_prepare = await run_in_threadpool(_prepare_daemon)
+                if daemon_prepare.get("outcome") in ("busy", "failed"):
+                    daemon_retry_waiting = True
+                    daemon_retry_reason = str(daemon_prepare.get("reason") or
+                                              "daemon 批次准备未就绪")
             tail_stop = threading.Event()
             tail = threading.Thread(
                 target=_tail_progress, name="jvm-progress-tail",
                 args=(job_id, chunk_out, tail_stop, _PROGRESS_POLL_INTERVAL,
                       len(chunk_rows), base_done), daemon=True)
             tail.start()
+            retry_this_chunk = daemon_retry_available
+            daemon_allowed = (use_daemon and
+                              (daemon_recovered or
+                               daemon_prepare.get("outcome") in ("ready", "started") or
+                               retry_this_chunk))
+            daemon_reason = (daemon_retry_reason
+                             if use_daemon and not daemon_allowed else "")
+            if retry_this_chunk:
+                daemon_retry_available = False
             work = asyncio.create_task(run_in_threadpool(
                 _chunk_work, idx, len(chunks), chunk_dir, chunk_args,
                 chunk_out, base_done, batch, tail_stop, tail,
-                len(chunk_rows)))
+                len(chunk_rows), daemon_allowed, daemon_reason))
             try:
                 report = await asyncio.shield(work)
             except asyncio.CancelledError:
@@ -913,6 +932,13 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
                 abort_reason = "用户取消，剩余块未启动"
                 break
             chunk_reports.append(report)
+            if daemon_retry_waiting:
+                # 忙/失败后只在下一块重试一次，**有意不逐块重试**：每次 probe 都要
+                # 付满 1 秒超时，忙着的 daemon 不会因为多探几次就空闲
+                daemon_retry_waiting = False
+                daemon_retry_available = True
+            if retry_this_chunk and report.get("execution_mode") == "validate_daemon":
+                daemon_recovered = True
             if cancelled.is_set():
                 abort_reason = abort_reason or "用户取消，剩余块未启动"
                 break

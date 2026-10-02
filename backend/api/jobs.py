@@ -12,6 +12,68 @@ from backend.schemas import JobCreate
 
 router = APIRouter()
 
+#: 任务详情只返回有界的块级摘要；完整执行记录仍保留在结果/运行目录中。
+_JOB_DETAIL_CHUNK_LIMIT = 250
+_JOB_DETAIL_LOG_LIMIT = 4000
+_JOB_DETAIL_TEXT_LIMIT = 1200
+
+
+def _bounded_text(value: Any, limit: int = _JOB_DETAIL_TEXT_LIMIT) -> str:
+    """有界文本（**保头**）：原因/定性类字段的话要点在开头，超长截掉尾部。"""
+    if not isinstance(value, str):
+        return ""
+    text = value.strip()
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "…"
+
+
+def _tail_text(value: Any, limit: int) -> str:
+    """有界文本（**保尾**）：日志的报错在末尾，超长截掉头部。"""
+    if not isinstance(value, str):
+        return ""
+    text = value.strip()
+    if len(text) <= limit:
+        return text
+    return "…" + text[-limit:]
+
+
+def _chunk_detail_reports(parsed: Dict[str, Any]) -> Dict[str, Any]:
+    """从 JVM 跑批结果里挑出详情面板实际消费的有限字段。"""
+    reports = parsed.get("chunk_reports")
+    if not isinstance(reports, list):
+        return {"chunk_reports": [], "chunk_report_total": 0,
+                "chunk_reports_truncated": False}
+
+    projected = []
+    for report in reports[:_JOB_DETAIL_CHUNK_LIMIT]:
+        if not isinstance(report, dict):
+            continue
+        item: Dict[str, Any] = {
+            "index": report.get("index") if isinstance(report.get("index"), int) else None,
+            "ok": report.get("ok") if isinstance(report.get("ok"), bool) else None,
+            "count": report.get("count") if isinstance(report.get("count"), (int, float)) else None,
+            "resumed": report.get("resumed") if isinstance(report.get("resumed"), bool) else None,
+            "execution_mode": _bounded_text(report.get("execution_mode"), 80),
+            "cost_sec": report.get("cost_sec") if isinstance(report.get("cost_sec"), (int, float)) else None,
+            "daemon_failure": _bounded_text(report.get("daemon_failure")),
+            "reason": _bounded_text(report.get("reason")),
+            "exit": report.get("exit") if isinstance(report.get("exit"), int) else None,
+        }
+        gradle = report.get("gradle")
+        if isinstance(gradle, dict):
+            item["gradle"] = {
+                "exit": gradle.get("exit") if isinstance(gradle.get("exit"), int) else None,
+                "stdout": _tail_text(gradle.get("stdout"), _JOB_DETAIL_LOG_LIMIT),
+                "stderr": _tail_text(gradle.get("stderr"), _JOB_DETAIL_LOG_LIMIT),
+            }
+        projected.append(item)
+    return {
+        "chunk_reports": projected,
+        "chunk_report_total": len(reports),
+        "chunk_reports_truncated": len(reports) > _JOB_DETAIL_CHUNK_LIMIT,
+    }
+
 
 def _job_detail(job: Dict[str, Any]) -> Dict[str, Any]:
     """把数据库任务行转换成前端唯一使用的明细形状。
@@ -64,7 +126,7 @@ def _job_detail(job: Dict[str, Any]) -> Dict[str, Any]:
                 ] if parsed.get("hit_downgrades") else []),
             }
 
-    return {
+    detail = {
         "id": job.get("id", ""),
         "kind": job.get("kind", ""),
         "retry_of": job.get("retry_of", ""),
@@ -82,6 +144,15 @@ def _job_detail(job: Dict[str, Any]) -> Dict[str, Any]:
         "error": error,
         "result": parsed if summary is None else None,
     }
+    if job.get("kind") == "jvm_run" and isinstance(parsed, dict):
+        detail.update(_chunk_detail_reports(parsed))
+        prepared = parsed.get("daemon_prepare")
+        if isinstance(prepared, dict):
+            detail["daemon_prepare"] = {
+                "outcome": _bounded_text(prepared.get("outcome"), 80),
+                "reason": _bounded_text(prepared.get("reason")),
+            }
+    return detail
 
 
 @router.post("", status_code=202)

@@ -958,7 +958,7 @@ class BatchDaemonTests(_Base):
         self.assertGreaterEqual(report.get("cost_sec", -1), 0)
 
     def test_batch_daemon_busy_falls_back_without_killing_it(self) -> None:
-        """prepare 判忙（不杀不启）→ 各块 probe 仍不过 → 回落 Gradle；
+        """prepare 判忙（不杀不启）→ 首块直接回落，下一块最多重试一次；
         批量层全程不触碰 ensure / start / _kill_proc。"""
         busy = {"outcome": "busy", "reason": "daemon 进程还在但 ping 没应答，本批不准备也不杀"}
         with mock.patch("core.settings_store.batch_via_daemon", return_value=True), \
@@ -970,7 +970,7 @@ class BatchDaemonTests(_Base):
              mock.patch("core.jvm_validate_daemon._kill_proc") as kill:
             result = self._call()
         prepare.assert_called_once()
-        probe.assert_called_once()
+        probe.assert_not_called()
         ensure.assert_not_called()
         start.assert_not_called()
         kill.assert_not_called()
@@ -982,6 +982,29 @@ class BatchDaemonTests(_Base):
         self.assertEqual(result["daemon_prepare"],
                          {"outcome": "busy", "reason": busy["reason"]})
 
+    def test_batch_busy_retries_once_then_reuses_recovered_daemon(self) -> None:
+        """批次初始忙：首块直接回落，下一块只重试一次；恢复后余块复用。"""
+        calls: dict = {}
+        busy = {"outcome": "busy", "reason": "daemon 忙，本批暂不准备"}
+        with mock.patch.object(jvm_api.settings_store, "load",
+                               lambda: dict(self._CHUNKED3)), \
+             mock.patch("core.jvm_direct.load_dump", return_value=self._DUMP), \
+             mock.patch("core.jvm_validate_daemon.prepare", return_value=busy), \
+             mock.patch("core.jvm_validate_daemon.probe",
+                        return_value={"pid": 7, "port": 7777, "sig": "s"}) as probe, \
+             mock.patch("core.jvm_validate_daemon.run",
+                        side_effect=self._fake_run_writing_results(calls)):
+            result = self._call()
+
+        self.assertTrue(result["ok"], result)
+        probe.assert_has_calls([mock.call(self._DUMP), mock.call(self._DUMP)])
+        self.assertEqual(probe.call_count, 2)
+        self.assertEqual(self.gradle_calls, 1)
+        self.assertEqual(result["daemon_chunks"], 2)
+        self.assertEqual(result["gradle_chunks"], 1)
+        self.assertEqual(result["chunk_reports"][0]["execution_mode"], "gradle")
+        self.assertEqual(result["chunk_reports"][1]["execution_mode"], "validate_daemon")
+        self.assertEqual(result["chunk_reports"][2]["execution_mode"], "validate_daemon")
     def test_batch_daemon_error_code_falls_back_with_reason(self) -> None:
         """daemon 应答 code!=0 → 回落 Gradle，原因逐字带到块报告；
         daemon 的半成品结果不得冒充结论。"""
