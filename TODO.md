@@ -18,7 +18,7 @@
 
 ## 0 · 现在做
 
-> 当前排期：引擎与调试执行链的基础设施已完成；后续调试体验以“入口降噪 → 工作台闭环 → 证据前置 → 编辑能力合入 → DOM 意图化生成”为主线。worker 线已收口：哨兵锁与批量 daemon 拉起均已交付（默认 on，回退开关 jvm.batch_via_daemon），专用 worker 与切换条目已删——隔离前提早被双 daemon 消化（lessons §六十五 / §六十六）。
+> 当前排期：引擎与调试执行链的基础设施已完成；后续调试体验以“入口降噪 → 工作台闭环 → 证据前置 → 编辑能力合入 → DOM 意图化生成”为主线。worker 的 lane、分块恢复、daemon 复用与冷启动批前准备、任务详情的块级证据与执行时间线均已交付（lessons §六十五 / §六十六）。
 > P0 的 unknown 出口与可执行提示已交付，当前前端待办集中在新调试页的视觉层级、编辑闭环和证据可信度。
 
 ---
@@ -34,6 +34,15 @@
 验收：只有在日志证明重复提交达到值得优化的数量后才实施；实施时完全相同的重复提交只产生一次 JVM 执行和一份底层结果，任一调用方都能收到同一结论及来源，任一合并键字段变化都会产生独立执行，旧结果不会静默复用。
 阻塞于：先统计重复提交率；没有数据证明收益前不实现。
 指针：backend/jobs/runner.py，backend/api/jvm.py，core/jvm_debug.py，AGENTS.md #5b，lessons §五十三 / §七十八
+
+### 条目：jvm-batch-cost-calibration · 用有限真实样本校准批量耗时提示
+状态：todo
+依赖：jvm-batch-daemon-cold-start, jvm-batch-observability
+优先级：P2
+背景：现有耗时提示来自历史全量/抽样数据，未区分 daemon 冷启动、热复用与 Gradle 回退；性能收益应按实际执行模式核验。
+约束：只用用户选定的小样本覆盖单块与跨块，不为测量频繁重跑全量或增加不必要站点请求；记录环境、源数、深度、块数、冷/热状态和各块 cost。
+验收：报告冷启动与热复用路径、Gradle 回退占比及耗时差异；据此校准或保留现有耗时提示，并说明样本局限。
+指针：frontend/src/components/CheckJvmForm.vue，frontend/src/utils/jvmDepth.js，backend/jobs/jvm_exec.py，lessons §四十七 / §六十六
 
 ### 条目：proj-3-drop · 前端摘掉本地投影
 状态：todo
@@ -156,16 +165,58 @@
 验收：B/C 档每组能看到并排的可用性对比。
 指针：lessons §三十四，core/dups.py
 
-### 条目：dup-keep · 合并重复源：「都留着并记住」（需持久化）
+### 条目：source-edges · 源关系边表：合并 / 换址 / 忽略记成一张账
 状态：todo
 依赖：无
 优先级：P2
-背景：「忽略这组」和「这组合并过」形状一样，都要持久化。
-约束：用**一张表** `dup_decisions(kind, key, decision, note, created_at)` 装，
-  **别塞 settings**——`POST /api/settings/reset` 会把它们**静默清掉**；「用户对
-  数据的决定」在本项目里一律存库，settings 只放可重置的参数。
-验收：忽略 / 已合并的决定在重启与 settings reset 后都还在。
-指针：lessons §三十四 / §十
+背景：Legado 拿 `bookSourceUrl` 当身份，整理动作其实都在回答「这几行 URL 是不是
+  同一个源、现在哪个地址算数」。用一张边表把**人确认过**的关系存下来（取代原
+  dup-keep，吸收其「忽略也要持久化」的诉求）：
+  `source_edges(from_url, to_url, kind, decided_at, note)`，kind = merged_into /
+  superseded_by / ignored。撤销 = 删一条边；行生命周期不动（软删 / 回收站照旧），
+  列表与导出按「没有出边的行 = 正典行」过滤。
+约束：边只由人点确认写入，机器测算的疑似关系不进表（AGENTS #11：派生关系要
+  可追溯）；**别塞 settings**——`POST /api/settings/reset` 会静默清掉，「用户对
+  数据的决定」一律存库；「在用 URL 唯一」不受影响（AGENTS #9）。换址替换
+  （superseded_by）是新动词：旧的下岗、用户标签跟到新条、继承关系留档。
+验收：三种动词各能写入并撤销一条边；重启与 settings reset 后边还在；列表与
+  导出正确过滤正典行，软删 / 回收站行为不变。
+指针：lessons §三十四 / §十，core/store.py，services/merge_sources.py
+
+### 条目：pair-probe · 同源裁定：任意两条源的成对比对
+状态：todo
+依赖：source-edges
+优先级：P2
+背景：整理源的五档（rules / mergeable / host / name / mirror）都是单键聚类的
+  线索，「这两条是不是同一个源」没有判定工具——同名不同域（换址转发）尤其
+  没人管。分工：候选靠人眼与现有分档，裁定靠引擎——同一个搜索词两边各跑一次，
+  diff 返回书目，结论落库可追溯，不是弹窗即焚。
+约束：列表页多选两条发起；两侧差异与比对结论要落库（复盘要能翻）；「同一个源」
+  的结论只能人点确认后写进 source-edges，机器不下结论（AGENTS #3 / #11）；
+  name / host / mirror 三档保持只读线索（可用性展示归 dup-bc），不为裁定再造
+  相似度分档。
+验收：任选两条源能发起比对、看到两侧结果差异与证据出处；确认后写入对应边；
+  比对记录重启后可查。
+指针：core/checker.py，core/dups.py，frontend/src/components/TidyDrawer.vue，lessons §三十四
+
+### 条目：import-preview-coalesce · 导入预演标出同站同指纹源
+状态：todo
+依赖：无
+优先级：P2
+背景：导入只拦同 URL；同站且行为指纹全等、URL 只差署名或端口写法的转发源仍会照单全收，之后才靠整理抽屉清理。
+约束：只提示同站 + 指纹全等的候选并默认建议归并；跨站同名照旧走人工；预演不静默合并或删除用户数据。
+验收：导入含署名转发源的批次，预演标出候选归并对；确认后不产生重复在用行，未确认时原导入行为不变。
+指针：backend/api/imports.py，core/dups.py，lessons §三十四
+
+### 条目：batch-fingerprint-coalesce · 批量校验按同站同指纹复用探测
+状态：blocked
+依赖：无
+优先级：P2
+背景：同站且行为指纹全等的转发源可共享一次探测，但现有批量按源逐条执行；共享结论必须能追溯来源，不能把一次失败静默扩散到整组。
+约束：先量同站同指纹组在实际批量中的占比，证明收益后再实现；仅组内指纹全等时复用，跨站同名不合并；每条结论标明共享来源，不复用旧批次结果；实现时开关纳入 settings_store，默认值与限幅只定义一处；与 `jvm-request-coalesce` 的完全重复请求统计分开评估。
+阻塞于：先统计真实批量中同站同指纹重复源的占比；没有数据证明收益前不实现。
+验收：评估报告给出重复组规模与可减少的请求数；若实施，同组只探测一次、每行结论均带来源，指纹或站点不同则独立执行，显式关闭开关时不共享探测。
+指针：backend/api/jvm.py，core/dups.py，AGENTS.md #5b，lessons §五十三
 
 ### 条目：syntax-gap · 本地回放的语法缺口
 状态：open
@@ -402,6 +453,49 @@
 
 > 已交付的事项只在这里留一行指针——**机制看 lessons，细节看 `git log`**（AGENTS #10）。
 > 这一区只允许 `状态：done`。
+
+### 条目：jvm-batch-timeline · 任务详情改执行时间线：骨架事件流 + 失败源明细
+状态：done
+依赖：无
+优先级：P1
+背景：2026-10-02 交付（e6ed210，端点消费侧 aa9d2dc）：执行线程把骨架事件追加到
+  运行目录 `events.jsonl`（行号即游标），`GET /api/jobs/{id}/timeline` 增量读 +
+  失败源明细；终态把有界事件并进 `result_json`（成功清场后时间线长存）；
+  前端 JobTimeline 等宽日志式渲染，运行中 2 秒轮询、终态即停，摘要压一行。
+约束：不进 SQLite / SSE 全量帧 / 第二条长连接；「正在校验某源」不做（引擎没
+  上报，不编假进度）；失败源 cap 500 带精确总数；恢复批时间线跨轮如实追加。
+验收：消费契约 8 条 + 生产者事件序 4 条（忙重试 recovered / 恢复批 resumed /
+  中止 failed），变异 M1/M2 红；真机冒烟时间线实时滚动、失败源带原因、一行摘要。
+指针：backend/api/job_timeline.py，backend/jobs/jvm_exec.py，
+  frontend/src/components/JobTimeline.vue，frontend/src/utils/jobTimeline.js，
+  tests/test_job_timeline.py，lessons §六十六
+
+### 条目：jvm-batch-observability · 任务详情呈现块级执行证据与真实进度
+状态：done
+依赖：无
+优先级：P1
+背景：2026-10-02 交付（51d1e8e，接手并行会话在途改动）：详情投影有界块级摘要
+  （250 块 / 4000 日志 / 1200 文本，原因保头、日志保尾）+ daemon_prepare；
+  SourcesView 跑批状态条带真实完成数与阶段；详情终态自动重拉。呈现形态同日
+  升级为执行时间线（jvm-batch-timeline），块级卡片面板未上线即被替代。
+约束：列表与 SSE 保持轻量；进度只用真实完成数，不推算假 ETA；历史非 JVM
+  任务详情形状不回归；daemon 忙/失败后下一块最多重试一次（有意不逐块重试）。
+验收：detail 投影 7 条 + busy 重试用例；真机抽屉核对进度、阶段与执行说明。
+指针：backend/api/jobs.py，backend/jobs/jvm_exec.py，tests/test_job_detail.py
+
+### 条目：jvm-batch-daemon-cold-start · 批量任务冷启动时准备并复用 Validate daemon
+状态：done
+依赖：无
+优先级：P1
+背景：2026-10-02 交付（602614d）：批量在第一个待跑块前经 `prepare` 至多准备一次
+  daemon——先分类再行动（ready/started/busy/failed），判「死」只用 info 里的 pid
+  （Windows 实测已关闭端口的 connect 抛超时而非拒绝，端口行为分不出死活）；
+  busy 不杀不启，块级只读 probe 原样保留作安全网。机制 lessons §六十六。
+约束：每批至多准备一次；忙/探测不确定绝不误杀；启动失败带原因回落 Gradle；
+  开关关与全部块 DONE 的恢复批一次都不准备。
+验收：协议层 + 批量层共 18 条用例钉住（变异 M1–M3 各自变红）；真机冒烟两轮 PASS：
+  残骸 info 冷启动整批 18.5s（含 JVM 直起）、热复用 2.2s，对照纯 Gradle 73.9s/26.6s。
+指针：core/jvm_validate_daemon.py，backend/jobs/jvm_exec.py，lessons §六十六
 
 ### 条目：debug-false-pass · 空 content 规则的假 pass 与段失败的下一步
 状态：done
