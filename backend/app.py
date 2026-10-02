@@ -14,8 +14,8 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from backend import netinfo
-from backend.api import (export, feed, imports, jvm, jobs, llm, ops, rules,
-                         settings, sources)
+from backend.api import (export, feed, imports, jvm, job_timeline, jobs, llm,
+                         ops, rules, settings, sources)
 from backend.jobs import runner
 from core.paths import data_path
 from core.plocks import ProcLock, read_owner
@@ -58,6 +58,7 @@ app = FastAPI(title="Legado 书源管理", version="0.1.0",
 
 app.include_router(sources.router, prefix="/api/sources", tags=["sources"])
 app.include_router(jobs.router, prefix="/api/jobs", tags=["jobs"])
+app.include_router(job_timeline.router, prefix="/api/jobs", tags=["jobs"])
 app.include_router(export.router, prefix="/api/export", tags=["export"])
 app.include_router(feed.router, prefix="/api/feed", tags=["feed"])
 app.include_router(imports.router, prefix="/api/import", tags=["import"])
