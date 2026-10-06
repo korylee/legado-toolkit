@@ -1,135 +1,105 @@
 <script setup>
+// 「任务中心」抽屉：**一屏列表 + 一个明细弹窗**。
+//
+// 它原来是一个主从布局（左表格 + 右详情面板），问题是那两半看的东西时效性不同：
+// 列表答「现在在跑什么、历史跑得怎么样」，详情答「这一次到底发生了什么」。
+// 挤在一个抽屉里时两边都难受——列表里在跑的任务进度是冻结的（只有被选中的那条会被
+// 轮询），而详情面板大半屏被 job_id / 执行方式这类八股字段占着。
+//
+// 现在：抽屉只做列表（默认「进行中 + 最近一个保留期」，可切全部），点行开
+// `TaskDetailDialog`——那个弹窗在跑时是进度条、结束后是结果明细，自带轮询。
+//
+// 列表的**结论摘要**（通过 / 未通过 / 相对上次变化）由后端投影给（见
+// `backend/api/jobs.py` 的 `_job_row`）：结果里有 items[:500]，不能进列表响应。
 import { ref, computed, watch, onMounted, onUnmounted } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { api, subscribeJob } from "../api/client";
-import { healthLabel } from "../utils/health";
-import { jobPhaseLabel, daemonPrepareLabel } from "../utils/jobs";
+import { api } from "../api/client";
+import {
+  jobCancelHint,
+  jobIsInFlight,
+  jobKindLabel,
+  jobPhaseLabel,
+  jobStatusLabel,
+  jobStatusType,
+} from "../utils/jobs";
 import { useJobs } from "../composables/useJobs";
-import JobTimeline from "./JobTimeline.vue";
+import { useMobile } from "../composables/useMobile";
+import TaskDetailDialog from "./TaskDetailDialog.vue";
 
-// 「任务」抽屉：替代已删掉的「任务」页。
-// 打开时拉一次历史（GET /api/jobs），再对还没跑完的任务挂 SSE 实时进度。
-// 原「任务」页那个「跑 ping 冒烟」按钮是调试用的，按需求不再搬运。
-// 「有几条在跑」不住在这里——它在 useJobs（统计条徽标与这份列表同源），
-// 每次列表或 SSE 变化顺手 upsert 即可。
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
-  //: 打开时自动选中哪一条任务（结果条上的「查看」用）。空串 = 不选中
-  focusJobId: { type: String, default: "" },
 });
 const emit = defineEmits(["update:modelValue"]);
-const { runningCount, upsertJob, removeJob } = useJobs();
 
 const visible = computed({
   get: () => props.modelValue,
   set: (v) => emit("update:modelValue", v),
 });
 
+const { active, activeJobs, upsertJob } = useJobs();
+
 const loading = ref(false);
 const jobs = ref([]);
-// job_id -> 取消订阅函数。取消函数不需要响应式，用普通对象存即可，ref 包一层是多余的
-const stops = {};
+//: 后端下发的列表条数上限；到顶时界面要说明还有更早的没显示
+const listLimit = ref(0);
+// 档位名里的「最近 N 天」由后端下发（= 任务的保留期），不在这里抄一份
+const recentDays = ref(0);
+//: 默认只给「进行中 + 最近一个保留期」。全部历史在任务多起来后首屏就是噪音
+const scope = ref("recent");
+const detailOpen = ref(false);
+const detailJobId = ref("");
+const isMobile = useMobile();
 
-const statusType = (s) => (s === "done" ? "success" : s === "failed" ? "danger" : "warning");
-const statusLabel = (s) => ({ pending: "排队中", running: "运行中", cancel_requested: "取消中", done: "已完成", failed: "失败", cancelled: "已取消" }[s] || s || "未知");
-const executionModeLabel = (m) => ({
-  validate_daemon: "常驻 Validate JVM",
-  gradle_fallback: "Gradle fallback",
-  unknown: "未确定",
-}[m] || m || "未确定");
-const terminal = (s) => ["done", "failed", "cancelled"].includes(s);
-const retryLabel = (s) => s === "done" ? "再次运行" : "重试";
-const retryable = (row) => terminal(row.status) && row.kind !== "jvm_run";
-const pct = (row) => (row.total ? Math.round((row.progress / row.total) * 100) : 0);
-const terminalCount = computed(
-  () => jobs.value.filter((j) => ["done", "failed", "cancelled"].includes(j.status)).length,
-);
+const STATUS_TYPES = ["running", "cancel_requested", "pending"];
 
-// SSE 推的是整份 job 记录，字段与 list_jobs 同形，直接合并回对应的行
-function mergeJob(data) {
-  if (!data || data.error) return;        // 任务不存在时后端推的是 {"error": ...}
-  upsertJob(data);                        // 先同步徽标：任务可能还不在列表里（见下）
-  const idx = jobs.value.findIndex((j) => j.id === data.id);
-  if (idx < 0) return;
-  const next = jobs.value.slice();
-  next[idx] = { ...next[idx], ...data };
-  jobs.value = next;
-  if (["done", "failed", "cancelled"].includes(data.status)) {
-    const nextDetails = { ...details.value };
-    delete nextDetails[data.id];
-    details.value = nextDetails;
-    if (activeJobId.value === data.id && idx >= 0) {
-      void loadDetail(next[idx]);
-    }
-  }
+//: 在跑的行要有实时进度：列表拿回来的是快照，而进度是提交页的 SSE 在推。
+//: 读同一份共享状态（useJobs）而不是自己再轮询一遍——否则同一件事两处各拉一次。
+function rowOf(row) {
+  const live = active.value.get(row.id);
+  return live ? { ...row, ...live } : row;
 }
 
-function watchJob(jobId) {
-  if (stops[jobId]) return;               // 已订阅过，别重复挂
-  stops[jobId] = subscribeJob(
-    jobId,
-    (data) => mergeJob(data),
-    (data) => {
-      delete stops[jobId];
-      mergeJob(data);
-      // **不弹「任务完成」的 toast**：那一行的状态标签本来就会实时变，
-      // 而校验任务的结果另有 SourcesView 的结果条——再来一条浮层只是噪音。
-      // status === "unknown" 是 SSE 重连到上限的兜底，mergeJob 会安全地忽略它
-    },
-  );
+const rows = computed(() => jobs.value.map(rowOf));
+const inFlightCount = computed(
+  () => rows.value.filter((r) => jobIsInFlight(r.status)).length);
+
+function pct(row) {
+  const total = Number(row.total || 0);
+  const progress = Number(row.progress || 0);
+  return total > 0 ? Math.min(100, Math.round((progress / total) * 100)) : 0;
 }
 
-// job_id -> 解析好的结果摘要（null = 拉过了但没有可展示的结果）。
-// **必须懒加载单条**：列表接口 list_jobs 不带 result_json（那玩意儿含 items[:500]，
-// 全量校验时一条上百 KB，50 条会把抽屉打开拖成几秒）。所以选中某一行时
-// 才去打 GET /api/jobs/{id}/detail——否则抽屉一关一开，刚看过的摘要就没了
-const details = ref({});
-const activeJobId = ref("");
-const detailLoading = ref(false);
-const selectedJob = computed(() => jobs.value.find((j) => j.id === activeJobId.value) || null);
-const selectedDetail = computed(() => details.value[activeJobId.value] || null);
-// 摘要压成一行（用户拍板）：块级过程已由执行时间线呈现，这里只答
-// 「通过多少、没通过多少、相对上次变没变」；变化明细区保留（哪几条变了）
-const summaryOneLine = (s) => {
+function summaryText(row) {
+  const s = row.summary;
   if (!s) return "";
-  const ok = Number((s.dist || {}).ok || 0);
-  const fail = Number(s.checked || 0) - ok;
-  const change = Number(s.changed_total || 0);
-  return "通过 " + ok + " · 未通过 " + fail
-    + (change ? " · 相对上次变化 " + change + " 条" : " · 相对上次无变化");
-};
-
-async function loadDetail(row) {
-    // 运行中打开时通常还没有 result_json，不能把“暂时没有结果”永久缓存；
-    // 任务终态后再次打开必须重新拉一次，才能看到最终结果。
-    const terminal = ["done", "failed", "cancelled"].includes(row.status);
-    if (terminal && row.id in details.value) {
-      return details.value[row.id];
-    }
-    try {
-        const detail = await api.get("/jobs/" + row.id + "/detail");
-        details.value = { ...details.value, [row.id]: detail };
-        return detail;
-    } catch (e) {
-        ElMessage.error("加载任务结果失败: " + e.message);
-        details.value = { ...details.value, [row.id]: null };
-        return null;
-    }
+  return `通过 ${s.ok} · 未通过 ${s.fail}`
+    + (s.changed_total ? ` · 变化 ${s.changed_total} 条` : "");
 }
 
-async function selectJob(row) {
-  activeJobId.value = row.id;
-  detailLoading.value = true;
+async function load() {
+  loading.value = true;
   try {
-    await loadDetail(row);
+    const page = await api.get("/jobs?scope=" + scope.value);
+    jobs.value = Array.isArray(page?.items) ? page.items : [];
+    //: 上限由后端下发（不在这里写 200）：界面要说明「只显示最近 N 条」
+    listLimit.value = Number(page?.limit || 0);
+    recentDays.value = Number(page?.recent_days || 0);
+    // **必须写回共享状态**：提交任务的页面刷新之后它的 SSE 就断了，没人再 upsert，
+    // 徽标和在跑条会一直空着（跑批是分钟级，刷新很常见）。列表是唯一还能拿到
+    // 「本页刷新前就在跑的 / 别处提交的」任务的来源。
+    for (const row of jobs.value) upsertJob(row);
+  } catch (e) {
+    ElMessage.error("加载任务失败：" + e.message);
   } finally {
-    detailLoading.value = false;
+    loading.value = false;
   }
 }
 
+// 取消：与明细弹窗同一句后果说明——跑批是**块级中止**，说成「立刻停止」会让人
+// 以为按钮失灵（详见 utils/jobs 的 jobCancelHint）
 async function cancelJob(row) {
   try {
-    await ElMessageBox.confirm("取消后任务不会继续推进，已产生的结果会保留。", "取消任务", {
+    await ElMessageBox.confirm(jobCancelHint(row.kind), "取消任务", {
       type: "warning", confirmButtonText: "取消任务", cancelButtonText: "返回",
     });
     await api.post("/jobs/" + row.id + "/cancel", {});
@@ -140,199 +110,139 @@ async function cancelJob(row) {
   }
 }
 
-async function deleteJob(row) {
-  try {
-    await ElMessageBox.confirm("删除后将移除任务记录和结果，不能恢复。", "删除任务", {
-      type: "warning", confirmButtonText: "删除", cancelButtonText: "返回",
-    });
-    await api.del("/jobs/" + row.id);
-    removeJob(row.id);
-    delete details.value[row.id];
-    if (activeJobId.value === row.id) activeJobId.value = "";
-    jobs.value = jobs.value.filter((j) => j.id !== row.id);
-    ElMessage.success("任务已删除");
-  } catch (e) {
-    if (e !== "cancel" && e !== "close") ElMessage.error("删除任务失败：" + e.message);
-  }
+function openDetail(row) {
+  detailJobId.value = row.id;
+  detailOpen.value = true;
 }
 
-async function retryJob(row) {
-  try {
-    await ElMessageBox.confirm(
-      row.status === "done" ? "将使用相同参数再运行一次，原任务会保留。" : "将使用相同参数重新提交，原任务会保留。",
-      row.status === "done" ? "再次运行" : "重试任务",
-      { type: "warning", confirmButtonText: row.status === "done" ? "再次运行" : "重试", cancelButtonText: "返回" },
-    );
-    const created = await api.post("/jobs/" + row.id + "/retry", {});
-    ElMessage.success("已创建新任务");
-    await load();
-    const next = jobs.value.find((j) => j.id === created.job_id);
-    if (next) await selectJob(next);
-  } catch (e) {
-    if (e !== "cancel" && e !== "close") ElMessage.error("提交重试失败：" + e.message);
-  }
+// 有在跑任务时把列表刷一遍：进度靠共享状态是活的，但**新出现的任务**（别处提交的）
+// 只有重拉才知道。没有在跑任务就完全不动
+let timer = null;
+function ensureTicker() {
+  if (timer) return;
+  timer = window.setInterval(() => {
+    if (visible.value && active.value.size) load();
+  }, 5000);
+}
+function stopTicker() {
+  if (timer) window.clearInterval(timer);
+  timer = null;
 }
 
-async function load() {
-  loading.value = true;
-  try {
-    const list = await api.get("/jobs");
-    jobs.value = list;
-    list.forEach(upsertJob);               // 徽标以这份列表为准（挂载/打开时同步）
-    // 只订阅没跑完的：已完成的任务一订阅就会立刻推终态，会误报「任务完成」提示
-    list.forEach((j) => {
-      if (j.status === "running" || j.status === "pending") watchJob(j.id);
-    });
-  } catch (e) {
-    ElMessage.error("加载任务失败: " + e.message);
-  } finally {
-    loading.value = false;
-  }
-}
+watch(scope, () => { if (visible.value) load(); });
 
-// 打开抽屉时自动选中 focusJobId 那条。**要等 load() 完**：列表还没数据时
-// 还找不到对应行，不能提前请求详情
-watch(() => [props.modelValue, props.focusJobId], async ([open, id]) => {
-  if (!open) return;
-  if (!loading.value) await load();
-  if (!id) return;
-  const row = jobs.value.find((j) => j.id === id);
-  if (row) await selectJob(row);
+// 打开抽屉时拉一次最新列表
+watch(() => props.modelValue, async (open) => {
+  if (open) await load();
 }, { immediate: true });
 
-// 挂载即拉一次：徽标要在没打开过抽屉时就正确，光靠「打开时拉」拿不到
-onMounted(load);
+// 提交任务的页面会 upsert 进共享状态，但列表快照要重拉。
+// **抽屉关着就不用拉**：那时没有读者，等在打开时那一次 load 里补（它本来就拉最新）
+watch(() => active.value.size, (n, prev) => {
+  if (visible.value && n !== prev) load();
+});
 
-onUnmounted(() => { Object.values(stops).forEach((f) => f && f()); });
+onMounted(() => { load(); ensureTicker(); });
+onUnmounted(stopTicker);
 
-// 父组件提交完任务后调一下，让徽标立刻反映新任务
+// 父组件提交完任务后调一下，让列表快照刷新
 defineExpose({ refresh: load });
 </script>
 
 <template>
-  <el-drawer v-model="visible" title="任务中心" direction="rtl" size="900px" class="jobs-drawer">
+  <el-drawer v-model="visible" title="任务中心" direction="rtl" size="min(960px, 96vw)"
+             class="jobs-drawer">
     <div class="jobs-toolbar">
-      <div class="toolbar-copy">
-        <span class="toolbar-title">任务记录</span>
-        <span class="muted">最近 50 条，运行中的任务会实时更新</span>
-      </div>
-      <div class="toolbar-stats">
-        <span class="stat-chip"><b>{{ jobs.length }}</b> 条记录</span>
-        <span class="stat-chip active"><b>{{ runningCount }}</b> 进行中</span>
-        <span class="stat-chip"><b>{{ terminalCount }}</b> 已结束</span>
-      </div>
+      <el-radio-group v-model="scope" size="small">
+        <el-radio-button value="recent">{{
+          recentDays ? "进行中 + 最近 " + recentDays + " 天" : "进行中"
+        }}</el-radio-button>
+        <el-radio-button value="all">全部</el-radio-button>
+      </el-radio-group>
+      <span class="stat-chip active"><b>{{ inFlightCount }}</b> 进行中</span>
       <span class="grow" />
-      <el-button class="refresh-button" size="small" :loading="loading" @click="load">刷新列表</el-button>
+      <el-button size="small" :loading="loading" @click="load">刷新</el-button>
     </div>
 
-    <div class="jobs-layout">
-      <section class="job-list">
-        <div class="section-caption"><span>最近任务</span><span class="muted">点击任务查看右侧详情</span></div>
-        <el-table class="jobs-table" :data="jobs" v-loading="loading" border size="small"
-                  highlight-current-row @row-click="selectJob">
-          <el-table-column prop="id" label="job_id" width="120" />
-          <el-table-column prop="kind" label="类型" width="80" />
-          <el-table-column label="状态" width="88" align="center">
-            <template #default="{ row }">
-              <el-tag size="small" :type="statusType(row.status)">{{ statusLabel(row.status) }}</el-tag>
-            </template>
-          </el-table-column>
-              <el-table-column label="进度" min-width="130">
-            <template #default="{ row }">
-              <el-progress class="row-progress" :percentage="pct(row)" :stroke-width="7"
-                           :status="row.status === 'failed' ? 'exception' : undefined" />
-              <span class="muted">{{ row.progress }} / {{ row.total }}</span>
-            </template>
-              </el-table-column>
-              <el-table-column label="阶段" min-width="120">
-                <template #default="{ row }">{{ jobPhaseLabel(row.phase) }}</template>
-              </el-table-column>
-          <el-table-column prop="updated_at" label="更新时间" width="150" />
-          <el-table-column label="操作" width="150" fixed="right" align="center">
-            <template #default="{ row }">
-              <el-button link type="primary" size="small" @click.stop="selectJob(row)">明细</el-button>
-              <el-button v-if="row.status === 'pending' || row.status === 'running'"
-                         link type="warning" size="small" @click.stop="cancelJob(row)">取消</el-button>
-              <template v-else>
-                <el-button v-if="retryable(row)" link type="primary" size="small" @click.stop="retryJob(row)">{{ retryLabel(row.status) }}</el-button>
-                <el-button link type="danger" size="small" @click.stop="deleteJob(row)">删除</el-button>
-              </template>
-            </template>
-          </el-table-column>
-          <template #empty>
-            <el-empty description="还没有任务" :image-size="70" />
-          </template>
-        </el-table>
-      </section>
+    <div v-if="isMobile" class="job-cards" v-loading="loading">
+      <div v-for="row in rows" :key="row.id" class="job-card" @click="openDetail(row)">
+        <div class="job-card-head">
+          <el-tag size="small" :type="jobStatusType(row.status)">
+            {{ jobStatusLabel(row.status) }}
+          </el-tag>
+          <span class="job-card-kind">{{ jobKindLabel(row.kind) }}</span>
+          <span class="grow" />
+          <span class="muted">{{ row.created_at }}</span>
+        </div>
+        <el-progress v-if="row.total" :percentage="pct(row)" :stroke-width="7"
+                     :status="row.status === 'failed' ? 'exception' : undefined" />
+        <div class="job-card-foot">
+          <span class="muted">{{ row.progress }} / {{ row.total || "?" }}</span>
+          <span v-if="summaryText(row)">{{ summaryText(row) }}</span>
+          <span v-else-if="row.error" class="job-error" :title="row.error">{{ row.error }}</span>
+          <span v-else class="muted">{{ jobPhaseLabel(row.phase) }}</span>
+        </div>
+      </div>
+      <el-empty v-if="!loading && !rows.length" description="这段时间没有任务"
+                :image-size="70" />
+      <p v-if="listLimit && rows.length >= listLimit" class="muted jobs-cap">
+        只显示最近 {{ listLimit }} 条，更早的任务不在列表里。
+      </p>
+    </div>
 
-      <aside class="job-detail-panel" v-loading="detailLoading">
-        <template v-if="selectedJob">
-          <div class="detail-title">
-            <div>
-              <div class="detail-heading">任务明细</div>
-              <div class="muted detail-id">{{ selectedJob.id }}</div>
-            </div>
-            <el-tag size="small" :type="statusType(selectedJob.status)">{{ statusLabel(selectedJob.status) }}</el-tag>
-          </div>
-          <el-descriptions :column="1" border size="small">
-            <el-descriptions-item label="类型">{{ selectedJob.kind }}</el-descriptions-item>
-            <el-descriptions-item label="进度">{{ selectedJob.progress }} / {{ selectedJob.total }}</el-descriptions-item>
-            <el-descriptions-item label="阶段">{{ jobPhaseLabel(selectedJob.phase) }}</el-descriptions-item>
-            <el-descriptions-item label="创建时间">{{ selectedJob.created_at }}</el-descriptions-item>
-            <el-descriptions-item label="更新时间">{{ selectedJob.updated_at }}</el-descriptions-item>
-            <el-descriptions-item label="保留至">{{ selectedJob.expires_at || "服务端默认期限" }}</el-descriptions-item>
-            <el-descriptions-item v-if="selectedDetail && selectedDetail.execution_mode" label="执行方式">
-              {{ executionModeLabel(selectedDetail.execution_mode) }}
-            </el-descriptions-item>
-            <el-descriptions-item v-if="selectedDetail && selectedDetail.execution_note" label="执行说明">
-              {{ selectedDetail.execution_note }}
-            </el-descriptions-item>
-            <el-descriptions-item v-if="selectedDetail && selectedDetail.daemon_fallback_reason" label="回退原因">
-              {{ selectedDetail.daemon_fallback_reason }}
-            </el-descriptions-item>
-            <el-descriptions-item v-if="selectedDetail && selectedDetail.daemon_prepare" label="daemon 准备">
-               {{ daemonPrepareLabel(selectedDetail.daemon_prepare.outcome) }}<span v-if="selectedDetail.daemon_prepare.reason">：{{ selectedDetail.daemon_prepare.reason }}</span>
-             </el-descriptions-item>
-             <el-descriptions-item v-if="selectedJob.retry_of" label="来源任务">{{ selectedJob.retry_of }}</el-descriptions-item>
-          </el-descriptions>
-
-          <JobTimeline
-            v-if="selectedJob.kind === 'jvm_run'"
-            :job-id="selectedJob.id"
-            :status="selectedJob.status"
-            :chunk-reports="selectedDetail ? (selectedDetail.chunk_reports || []) : []"
-          />
-
-          <template v-if="selectedDetail">
-            <template v-if="selectedDetail.summary">
-              <div class="detail-line">{{ summaryOneLine(selectedDetail.summary) }}</div>
-              <div v-for="(w, i) in selectedDetail.summary.warnings" :key="'warn' + i" class="detail-warn">{{ w }}</div>
-              <div v-if="selectedDetail.summary.changed_items.length" class="detail-changes">
-                <div class="muted detail-section-title">
-                  状态变化（{{ selectedDetail.summary.changed_items.length }} / {{ selectedDetail.summary.changed_total }} 条）
-                </div>
-                <div v-for="(c, i) in selectedDetail.summary.changed_items" :key="'item' + i" class="detail-change">
-                  <span class="detail-name" :title="c.name">{{ c.name || "（无名）" }}</span>
-                  <span class="muted detail-url" :title="c.url">{{ c.url }}</span>
-                  <span class="muted">{{ healthLabel(c.from) }} → </span>
-                  <span :class="'to-' + c.to">{{ healthLabel(c.to) }}</span>
-                </div>
-              </div>
-            </template>
-           <div v-if="selectedDetail.error" class="detail-warn">{{ selectedDetail.error }}</div>
-            <div v-if="selectedDetail.result !== null && selectedDetail.result !== undefined" class="detail-result">
-              <div class="muted detail-section-title">任务结果</div>
-              <pre>{{ JSON.stringify(selectedDetail.result, null, 2) }}</pre>
-            </div>
-            <div v-if="!selectedDetail.summary && !selectedDetail.error && selectedDetail.result == null" class="muted detail-empty">
-              暂无可展示结果
-            </div>
-          </template>
-          <div v-else-if="!detailLoading" class="muted detail-empty">暂无任务结果</div>
+    <el-table v-else class="jobs-table" :data="rows" v-loading="loading" border size="small"
+              highlight-current-row @row-click="openDetail">
+      <el-table-column label="状态" width="90" align="center">
+        <template #default="{ row }">
+          <el-tag size="small" :type="jobStatusType(row.status)">
+            {{ jobStatusLabel(row.status) }}
+          </el-tag>
         </template>
-        <el-empty v-else description="选择任务查看明细" :image-size="90" />
-      </aside>
-    </div>
+      </el-table-column>
+      <el-table-column label="类型" width="130">
+        <template #default="{ row }">{{ jobKindLabel(row.kind) }}</template>
+      </el-table-column>
+      <el-table-column label="进度" min-width="150">
+        <template #default="{ row }">
+          <el-progress class="row-progress" :percentage="pct(row)" :stroke-width="7"
+                       :status="row.status === 'failed' ? 'exception' : undefined" />
+          <span class="muted">{{ row.progress }} / {{ row.total || "?" }}</span>
+        </template>
+      </el-table-column>
+      <el-table-column label="结论 / 原因" min-width="200">
+        <template #default="{ row }">
+          <span v-if="summaryText(row)">{{ summaryText(row) }}</span>
+          <!-- 失败原因要留在列表上：只说「失败」用户就得逐条点开弹窗才知道为什么 -->
+          <span v-else-if="row.error" class="job-error" :title="row.error">{{ row.error }}</span>
+          <span v-else class="muted">—</span>
+        </template>
+      </el-table-column>
+      <el-table-column label="阶段" min-width="120">
+        <template #default="{ row }">{{ jobPhaseLabel(row.phase) }}</template>
+      </el-table-column>
+      <el-table-column prop="created_at" label="提交时间" width="150" />
+      <el-table-column label="操作" width="140" fixed="right" align="center">
+        <template #default="{ row }">
+          <el-button link type="primary" size="small" @click.stop="openDetail(row)">
+            明细
+          </el-button>
+          <!-- 在跑的能就地取消：不必先点开弹窗（取消的后果说明在确认框里按类型给） -->
+          <el-button v-if="jobIsInFlight(row.status)" link type="warning" size="small"
+                     @click.stop="cancelJob(row)">
+            取消
+          </el-button>
+        </template>
+      </el-table-column>
+      <template #empty>
+        <el-empty description="这段时间没有任务" :image-size="70" />
+      </template>
+    </el-table>
+
+    <p v-if="listLimit && rows.length >= listLimit" class="muted jobs-cap">
+      只显示最近 {{ listLimit }} 条，更早的任务不在列表里。
+    </p>
+
+    <TaskDetailDialog v-model="detailOpen" :job-id="detailJobId" @changed="load" />
   </el-drawer>
 </template>
 
@@ -340,167 +250,53 @@ defineExpose({ refresh: load });
 .jobs-toolbar {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
   flex-wrap: wrap;
-  padding: 12px 14px;
-  border: 1px solid var(--el-border-color-lighter);
-  border-radius: 10px;
-  background: linear-gradient(135deg, var(--el-fill-color-blank), var(--el-fill-color-light));
-}
-.toolbar-copy {
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
-  min-width: 220px;
-}
-.toolbar-title { font-size: 15px; font-weight: 650; color: var(--el-text-color-primary); }
-.toolbar-stats { display: flex; gap: 6px; flex-wrap: wrap; }
-.stat-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 4px 8px;
-  border: 1px solid var(--el-border-color-lighter);
-  border-radius: 999px;
-  background: var(--el-fill-color-blank);
-  color: var(--el-text-color-secondary);
-  font-size: 12px;
-}
-.stat-chip b { color: var(--el-text-color-primary); font-weight: 650; }
-.stat-chip.active { border-color: var(--el-color-primary-light-7); color: var(--el-color-primary); }
-.stat-chip.active b { color: var(--el-color-primary); }
-.refresh-button { margin-left: auto; }
-.jobs-layout {
-  display: flex;
-  gap: 14px;
-  margin-top: 12px;
-  height: calc(100% - 62px);
-  min-height: 0;
-}
-.job-list {
-  flex: 1 1 56%;
-  min-width: 0;
-  min-height: 0;
-  overflow: hidden;
-  padding: 2px;
-}
-.section-caption {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  margin: 0 2px 8px;
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--el-text-color-primary);
-}
-.job-detail-panel {
-  flex: 1 1 44%;
-  min-width: 300px;
-  overflow-y: auto;
-  padding: 16px 16px 24px;
-  border: 1px solid var(--el-border-color-lighter);
-  border-radius: 10px;
-  background: var(--el-fill-color-blank);
-  box-shadow: 0 2px 10px rgb(0 0 0 / 3%);
-}
-.detail-title {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 10px;
   margin-bottom: 12px;
 }
-.detail-heading { font-size: 16px; font-weight: 650; letter-spacing: .01em; }
-.detail-id { margin-top: 3px; font-size: 12px; }
-.jobs-table :deep(.el-table__header-wrapper th) {
-  height: 38px;
-  background: var(--el-fill-color-light);
-  color: var(--el-text-color-secondary);
-  font-weight: 600;
+.jobs-toolbar .grow { flex: 1 1 auto; }
+.stat-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 3px 8px; border-radius: 999px; font-size: 12px;
+  border: 1px solid var(--el-color-primary-light-7);
+  color: var(--el-color-primary);
 }
-.jobs-table { height: calc(100% - 32px); }
-.jobs-table :deep(.el-table__body tr) { cursor: pointer; transition: background-color .15s ease; }
-.jobs-table :deep(.el-table__body tr:hover > td) { background: var(--el-fill-color-light); }
-.jobs-table :deep(.el-table__body tr.current-row > td) {
-  background: var(--el-color-primary-light-9);
-}
-.jobs-table :deep(.el-table__body tr.current-row td:first-child) {
-  box-shadow: inset 3px 0 0 var(--el-color-primary);
-}
+.stat-chip b { font-weight: 650; }
+.jobs-table { height: calc(100% - 52px); }
+.jobs-table :deep(.el-table__body tr) { cursor: pointer; }
 .jobs-table :deep(.el-button) { padding: 2px 3px; }
 .jobs-table :deep(.el-tag) { border-radius: 999px; }
-.row-progress :deep(.el-progress-bar__outer) { background: var(--el-fill-color); }
+.row-progress { margin-bottom: 2px; }
 .row-progress :deep(.el-progress__text) { display: none; }
-.detail-line { margin-top: 10px; line-height: 1.6; }
-.detail-warn { margin-top: 10px; color: var(--el-color-danger); line-height: 1.6; }
-.detail-section-title {
-  margin: 14px 0 6px;
-  font-size: 12px;
+.job-error {
+  color: var(--el-color-danger);
+  display: inline-block; max-width: 100%;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  vertical-align: bottom;
 }
-.detail-changes {
-  max-height: 300px;
-  overflow-y: auto;
-  margin-top: 12px;
-  border-top: 1px dashed var(--el-border-color-lighter);
-  padding-top: 6px;
+.jobs-cap { margin: 8px 2px 0; font-size: 12px; }
+
+.job-cards { height: calc(100% - 52px); overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
+.job-card {
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 8px;
+  padding: 10px 12px;
+  cursor: pointer;
 }
-.detail-change {
-  display: flex;
-  gap: 7px;
-  align-items: baseline;
-  line-height: 1.8;
-  font-size: 12px;
+.job-card-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.job-card-head .grow { flex: 1 1 auto; }
+.job-card-kind { font-size: 13px; font-weight: 600; }
+.job-card-foot {
+  display: flex; gap: 10px; flex-wrap: wrap;
+  margin-top: 6px; font-size: 12px;
 }
-.detail-name {
-  flex: 0 1 auto;
-  max-width: 150px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.detail-url {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.detail-result pre {
-  max-height: 320px; overflow: auto; padding: 10px;
-  background: var(--el-fill-color-light); border-radius: 4px; white-space: pre-wrap;
-}
-.detail-empty { padding: 28px 0; text-align: center; }
-.detail-title + :deep(.el-descriptions) { margin-bottom: 14px; }
-.job-detail-panel :deep(.el-descriptions__label) { width: 78px; }
-.job-detail-panel :deep(.el-descriptions__cell) { padding: 8px 10px; }
-.detail-change + .detail-change { border-top: 1px solid var(--el-border-color-extra-light); }
-/* 配色与列表页的 healthType 同口径：同一个状态在两处该长一样。 */
-.detail-change .to-ok { color: var(--el-color-success); }
-.detail-change .to-dead { color: var(--el-color-danger); }
-.detail-change .to-auth,
-.detail-change .to-cert { color: var(--el-color-warning); }
-.detail-change .to-gfw,
-.detail-change .to-pending { color: var(--el-color-info); }
 
 @media (max-width: 760px) {
-  .jobs-layout { display: block; height: calc(100% - 104px); }
-  .job-list { height: 46vh; max-height: 46vh; }
-  .jobs-table { height: 100% !important; }
-  .job-detail-panel {
-    min-width: 0;
-    margin-top: 14px;
-    padding: 14px 12px 20px;
-    border-top: 1px solid var(--el-border-color-lighter);
-    border-left: 0;
-  }
-  .toolbar-copy { min-width: 0; flex-direction: column; gap: 3px; }
-  .toolbar-stats { order: 3; width: 100%; }
-  .refresh-button { margin-left: auto; }
+  .jobs-table :deep(.el-table__body-wrapper) { font-size: 12px; }
 }
 </style>
 
 <style>
-/* el-drawer 会 teleport 到 body，抽屉本身不承担滚动；滚动交给表格和详情面板。 */
+/* el-drawer 会 teleport 到 body，抽屉本身不承担滚动；滚动交给表格。 */
 .jobs-drawer .el-drawer__body { overflow: hidden; }
 </style>

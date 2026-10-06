@@ -1,8 +1,7 @@
 // 执行时间线的事件文案（jvm-batch-timeline）——**唯一的一份**。
 //
-// 后端给的是骨架事件（ts + kind + 字段），这里负责说成人话：主行不出现
-// daemon/Gradle 术语（引擎层细节留给失败块展开的日志），也不编造后端没给的
-// 数字（比如预计剩余时间）。tone: info | warn | error，前端据此上色。
+// 后端给的是骨架事件（ts + kind + 字段），这里负责说成人话：主行只展示必要的执行方式
+// 与失败原因，不编造后端没给的数字（比如预计剩余时间）。tone: info | warn | error，前端据此上色。
 
 export function formatTimelineEvent(ev) {
   if (!ev || !ev.kind) return { text: "", tone: "info" };
@@ -22,14 +21,22 @@ export function formatTimelineEvent(ev) {
     }
     case "recovered":
       return { text: "校验引擎恢复，后续块重新使用", tone: "info" };
-    case "chunk_started":
+    case "chunk_started": {
       return { text: at(` 开始（${ev.count ?? "?"} 条）`), tone: "info" };
+    }
     case "resumed":
       return { text: at(" 上次已完成，本次不重跑"), tone: "info" };
-    case "chunk_done":
-      return { text: at(` 完成：${ev.count ?? "?"} 条${ev.cost_sec != null ? " · " + sec(ev.cost_sec) : ""}`), tone: "info" };
-    case "chunk_failed":
-      return { text: at(` 失败${ev.reason ? "：" + ev.reason : ""}`), tone: "error" };
+    case "chunk_stalled":
+      return { text: at(" 疑似卡在慢源（输出停滞），隔离重跑剩余源"), tone: "warn" };
+    case "chunk_done": {
+      const mode = ev.mode === "validate_daemon" ? "常驻引擎" : ev.mode === "gradle" ? "Gradle" : "";
+      const suffix = mode ? ` · ${mode}` : "";
+      return { text: at(` 完成：${ev.count ?? "?"} 条${ev.cost_sec != null ? " · " + sec(ev.cost_sec) : ""}${suffix}`), tone: "info" };
+    }
+    case "chunk_failed": {
+      const mode = ev.mode === "validate_daemon" ? "常驻引擎" : ev.mode === "gradle" ? "Gradle" : "";
+      return { text: at(` 失败${mode ? "（" + mode + "）" : ""}${ev.reason ? "：" + ev.reason : ""}`), tone: "error" };
+    }
     case "done":
       return { text: `校验完成：共 ${ev.count ?? "?"} 条${ev.cost_sec != null ? " · " + sec(ev.cost_sec) : ""}`, tone: "info" };
     case "failed":

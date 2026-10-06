@@ -2,16 +2,16 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { formatTimelineEvent, formatFailureLine } from "./jobTimeline.js";
 
-test("里程碑与块事件说人话，不带引擎术语", () => {
+test("里程碑与块事件说人话，并展示执行方式", () => {
   assert.equal(
     formatTimelineEvent({ kind: "batch_started", chunks: 3, sources: 75 }).text,
     "开始校验：75 条源，分 3 块");
   assert.equal(
-    formatTimelineEvent({ kind: "chunk_started", index: 2, count: 25 }).text,
+    formatTimelineEvent({ kind: "chunk_started", index: 2, count: 25, mode: "gradle" }).text,
     "第 3 块 开始（25 条）");
   assert.equal(
-    formatTimelineEvent({ kind: "chunk_done", index: 2, count: 25, cost_sec: 17.2 }).text,
-    "第 3 块 完成：25 条 · 17.2 秒");
+    formatTimelineEvent({ kind: "chunk_done", index: 2, count: 25, cost_sec: 17.2, mode: "validate_daemon" }).text,
+    "第 3 块 完成：25 条 · 17.2 秒 · 常驻引擎");
   assert.equal(
     formatTimelineEvent({ kind: "done", count: 75, cost_sec: 600 }).text,
     "校验完成：共 75 条 · 600 秒");

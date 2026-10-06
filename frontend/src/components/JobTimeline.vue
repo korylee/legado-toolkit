@@ -13,13 +13,13 @@ const props = defineProps({
   // 详情投影里的块级报告：失败块展开时取 Gradle 日志尾部作附件
   chunkReports: { type: Array, default: () => [] },
 });
+const emit = defineEmits(["state"]);
 
 const POLL_MS = 2000;
 const TERMINAL = ["done", "failed", "cancelled"];
 
 const lines = ref([]);
 const failures = ref({ total: 0, truncated: false, items: [] });
-const failuresOpen = ref(false);
 const expanded = ref("");
 const pollError = ref("");
 const following = ref(true);
@@ -75,6 +75,12 @@ async function pull() {
     const data = await api.get(`/jobs/${jobId}/timeline?after=${cursor}`);
     if (generation !== pollGeneration || jobId !== props.jobId) return;
     pollError.value = "";
+    emit("state", {
+      status: data.status,
+      phase: data.phase,
+      progress: data.progress,
+      total: data.total,
+    });
     if (Array.isArray(data.events) && data.events.length) {
       lines.value = lines.value.concat(
         data.events.map((ev) => ({
@@ -118,7 +124,6 @@ function start() {
   pollPending = false;
   lines.value = [];
   failures.value = { total: 0, truncated: false, items: [] };
-  failuresOpen.value = false;
   expanded.value = "";
   cursor = 0;
   isDone = false;
@@ -149,9 +154,6 @@ function onScroll() {
   <div class="job-timeline">
     <div class="job-timeline-head">
       <span class="muted detail-section-title">执行时间线</span>
-      <span v-if="failureTotal" class="job-timeline-fail-toggle" @click="failuresOpen = !failuresOpen">
-        失败源 {{ failureTotal }}{{ failuresOpen ? " ▲" : " ▼" }}
-      </span>
       <span v-if="!following" class="job-timeline-follow" @click="following = true; scrollFollow()">回到最新</span>
     </div>
     <div ref="listEl" class="job-timeline-list" @scroll="onScroll">
@@ -165,16 +167,16 @@ function onScroll() {
         >{{ expanded === String(line.seq) ? "收起日志" : "看日志" }}</span>
         <pre v-if="expanded === String(line.seq) && logOf(line.index)" class="job-timeline-log">{{ logOf(line.index) }}</pre>
       </div>
-      <div v-if="pollError === 'err'" class="muted job-timeline-note">时间线暂时取不到（任务仍在后台执行），会继续重试</div>
-      <div v-if="!lines.length" class="muted job-timeline-note">还没有执行记录</div>
-    </div>
-    <div v-if="failuresOpen" class="job-timeline-failures">
-      <div v-for="(item, i) in failures.items" :key="'f' + i" class="job-timeline-fail">
-        <span class="job-timeline-fail-mark">✕</span>
-        <span class="job-timeline-fail-title" :title="item.url">{{ formatFailureLine(item).title }}</span>
-        <span class="muted">{{ formatFailureLine(item).detail }}</span>
+      <div v-for="(item, i) in failures.items" :key="'failure' + i" class="job-timeline-line is-error">
+        <span class="job-timeline-ts">失败源</span>
+        <span class="job-timeline-text">✕ {{ formatFailureLine(item).title }}：{{ formatFailureLine(item).detail }}</span>
       </div>
-      <div v-if="notShown > 0" class="muted job-timeline-note">还有 {{ notShown }} 条失败未列出</div>
+      <div v-if="notShown > 0" class="job-timeline-line is-warn">
+        <span class="job-timeline-ts">{{ hhmmss() }}</span>
+        <span class="job-timeline-text">还有 {{ notShown }} 条失败源未显示</span>
+      </div>
+      <div v-if="pollError === 'err'" class="muted job-timeline-note">时间线暂时取不到（任务仍在后台执行），会继续重试</div>
+      <div v-if="!lines.length && !failures.items.length" class="muted job-timeline-note">还没有执行记录</div>
     </div>
   </div>
 </template>
@@ -184,11 +186,14 @@ function onScroll() {
    用组件名前缀写在无 Scoped 块（只此组件用，不上全局 styles.css） */
 .job-timeline { margin-top: 12px; }
 .job-timeline-head { display: flex; align-items: baseline; gap: 12px; }
-.job-timeline-fail-toggle, .job-timeline-follow, .job-timeline-log-toggle {
+.job-timeline-follow, .job-timeline-log-toggle {
   font-size: 12px; color: var(--el-color-primary); cursor: pointer; user-select: none;
 }
 .job-timeline-list {
-  margin-top: 6px; max-height: 320px; overflow: auto;
+  /* 52vh 而不是固定 320px：时间线是跑批弹窗里的**主内容**，压在 320px 里
+     一屏只能看十几行，用户读到的信息被滚动条藏掉大半（2026-10-05 用户反馈
+     「布局不能完整展示信息」）。vh 随窗口走，小窗口也不至于把弹窗撑爆 */
+  margin-top: 6px; max-height: 52vh; overflow: auto;
   padding: 6px 8px; border: 1px solid var(--el-border-color-extra-light);
   border-radius: 6px; background: var(--el-fill-color-lighter);
   font-family: var(--el-font-family-monospace, monospace); font-size: 12px;
@@ -204,8 +209,4 @@ function onScroll() {
   white-space: pre-wrap; font-size: 11px;
 }
 .job-timeline-note { font-size: 12px; padding: 4px 0; }
-.job-timeline-failures { margin-top: 6px; }
-.job-timeline-fail { line-height: 1.8; font-size: 12px; word-break: break-all; }
-.job-timeline-fail-mark { color: var(--el-color-danger); margin-right: 6px; }
-.job-timeline-fail-title { font-weight: 600; margin-right: 6px; }
 </style>

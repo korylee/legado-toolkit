@@ -16,19 +16,7 @@
         <el-input-number v-model="run.concurrency" :min="limits.jvm_concurrency?.[0]" :max="limits.jvm_concurrency?.[1]" />
       </el-form-item>
       <el-form-item label="校验深度"><el-select v-model="run.depth" style="width: 200px"><el-option v-for="d in depthOpts" :key="d.value" :value="d.value" :label="d.label" /></el-select></el-form-item>
-      <el-form-item label="条数上限">
-        <el-input-number v-model="run.limit" :min="limits.jvm_limit?.[0]" :max="limits.jvm_limit?.[1]" />
-        <span class="muted" style="margin-left: 6px">0 = 不限</span>
-      </el-form-item>
-      <el-form-item label="范围">
-        <template v-if="scope === 'selected'">勾选的 {{ scopeCount }} 条源</template>
-        <template v-else-if="scope === 'filtered'">当前筛选的 {{ scopeCount }} 条源</template>
-        <template v-else-if="run.limit > 0">{{ run.limit }} 条（不是全部！）</template>
-        <template v-else>全部在用源</template>
-      </el-form-item>
     </el-form>
-    <div class="muted hint">{{ depthHintText(run.depth) }}</div>
-    <div class="muted hint">预计耗时：{{ costText }}；跑批期间不要关闭后端。参数只作用于这一次。</div>
   </div>
 </template>
 
@@ -36,19 +24,15 @@
 import { ref, computed, onMounted } from "vue";
 import { getSettings } from "../api/settings";
 import { jvmReadiness } from "../api/jvm.js";
-import { depthCost, depthHintText, depthOptions } from "../utils/jvmDepth";
+import { depthOptions } from "../utils/jvmDepth";
 
-const props = defineProps({
-  scope: { type: String, default: "all" },
-  scopeCount: { type: Number, default: 0 },
-});
 const emit = defineEmits(["ready"]);
 const conf = ref(null);
 const limits = ref({});
 const depthOpts = computed(() => depthOptions(limits.value));
 // 关键词等默认值只在后端 settings_store（AGENTS #8）：这里初始为空，
 // 空值交上去由后端 coerce 落回默认——前端不再抄一份「我」
-const run = ref({ keyword: "", timeout: 25, concurrency: 8, depth: "search", limit: 0 });
+const run = ref({ keyword: "", timeout: 25, concurrency: 8, depth: "search" });
 const readiness = ref(null);
 const checking = ref(false);
 
@@ -69,7 +53,6 @@ async function load() {
       timeout: conf.value.timeout ?? s.defaults?.jvm?.timeout,
       concurrency: conf.value.concurrency ?? s.defaults?.jvm?.concurrency,
       depth: conf.value.depth || s.defaults?.jvm?.depth || "search",
-      limit: conf.value.limit ?? s.defaults?.jvm?.limit,
     };
   } catch (e) { /* 设置接口挂了就只跑自检，参数留空 */ }
   await runReadiness();
@@ -82,15 +65,10 @@ async function runReadiness() {
   finally { checking.value = false; emit("ready", !!readiness.value?.ok); }
 }
 
-const costText = computed(() => props.scope !== "all"
-  ? "引擎起停：热复用约 1 秒，首次冷启动另加 7~11 秒；若回退 Gradle 每块多约 17 秒；小批耗时随站点速度（12 源实测）"
-  : depthCost(run.value.depth));
-
 onMounted(load);
 defineExpose({ reload: load, params: () => ({ ...run.value }) });
 </script>
 
 <style scoped>
 .row { display: flex; align-items: center; gap: 6px; }
-.hint { font-size: 12px; margin-top: 2px; }
 </style>
