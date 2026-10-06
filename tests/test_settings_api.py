@@ -91,6 +91,23 @@ class PatchSemanticsTests(SettingsApiTestCase):
         self.assertEqual(_payload(S.load())["values"]["debug"]["timeout"],
                          S.LIMITS["debug_timeout"][1])
 
+    def test_run_params_are_not_patchable(self):
+        """跑批参数（keyword / timeout / concurrency / depth / limit）**不是设置**：
+        没有「改永久默认值」这个动作，它们的唯一作用面是跑批弹框里的本次参数。
+
+        所以 PATCH 里没有这几个字段——pydantic 忽略未声明的键，提交了也一个字都不落盘。
+        这条钉住的是「没人能通过设置接口改跑批参数」：以后再给它们加回字段，
+        这里会变红，得先回答「改永久默认值」这个动作到底要不要存在。
+        """
+        before = S.load()["jvm"]
+        patch_settings(SettingsPatch(**{"jvm": {"keyword": "斗破", "timeout": 99,
+                                                "concurrency": 3, "depth": "content"}}))
+        got = S.load()["jvm"]
+        self.assertEqual(got["keyword"], before["keyword"])
+        self.assertEqual(got["timeout"], before["timeout"])
+        self.assertEqual(got["concurrency"], before["concurrency"])
+        self.assertEqual(got["depth"], before["depth"])
+
 
 class ProxyValidationTests(SettingsApiTestCase):
     """代理只认 http://（十-3）：上游拿正则匹配，https 会让它抛异常——留着比丢掉更糟。"""

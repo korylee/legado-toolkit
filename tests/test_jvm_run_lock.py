@@ -87,7 +87,7 @@ class _Base(unittest.TestCase):
             mock.patch.object(jvm_api.settings_store, "load",
                               lambda: {"network": {"proxy": ""}, "jvm": {"app_repo": "X:/repo", "keyword": "我",
                                                "timeout": 25, "concurrency": 8,
-                                               "limit": 2, "depth": "search"}}),
+                                               "depth": "search"}}),
         ):
             p.start()
             self.addCleanup(p.stop)
@@ -101,7 +101,7 @@ class _Base(unittest.TestCase):
         f.write_text(json.dumps([{"bookSourceUrl": "https://a.com"}]), encoding="utf-8")
         return f
 
-    def _fake_gradle(self, args_path=None, runtime=None) -> int:
+    def _fake_gradle(self, args_path=None, runtime=None, **kwargs) -> int:
         self.gradle_calls += 1
         self.args_seen = pathlib.Path(args_path).read_text(encoding="utf-8")
         if self.fail_gradle:

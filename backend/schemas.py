@@ -112,25 +112,18 @@ class JvmRunRequest(BaseModel):
     """跑一批 JVM 校验（S5-A 第二期：支持只跑选中的几条）。
 
     `urls` 是**书源 URL 列表**（列表页勾选的那几条，前端给的是归一化过的 `source_url`）。
-    空 = 全部在用源（此时受设置里的「条数上限」约束）；**给了它就不再看条数上限**——
-    范围由选中的条数决定，否则会出现「选了 20 条只跑了 3 条」。
+    空 = 全部在用源；**给了它范围就由它的条数决定**——不会再有别的上限去截断它。
 
     **两侧都必须归一 URL 再比**（AGENTS #5 的坑）：前端给的是库里归一化过的值，而导出
     的是源 JSON 里的原文——不归一就一条都对不上，而且**不报错**（跑出一批空结论）。
     """
 
     urls: List[str] = Field(default_factory=list)
-    #: **本次跑批的参数覆盖**，只作用于这一次、**不写回全局设置**。
-    #: 只认 `JVM_RUN_PARAMS` 里那几项（关键词 / 超时 / 并发 / 挡位），值统一过
-    #: `settings_store.coerce` 收敛到合法区间——与本地那条路的 `check: {…}` 同一个
-    #: 形状与理由：区间与默认值只有 `settings_store` 一份定义（AGENTS #8），
-    #: 调用点传什么都不该绕过它。
-    params: Dict[str, Any] = Field(default_factory=dict)
     #: 当前筛选（列表页的查询条件，形状同 `POST /api/export` 的 `filter`）。
     #: **urls 优先**：勾选是明确意图，筛选是「这一屏里的」。
     #: 有它才做得到「只重跑待验证那批」——全量一次十几分钟，而站点是按 IP 认人的。
     filter: Dict[str, Any] = Field(default_factory=dict)
-    #: **本次跑批的参数**（keyword / timeout / concurrency / depth / limit）。
+    #: **本次跑批的参数**（keyword / timeout / concurrency / depth）。
     #: 与本地校验的 `check: {...}` 同形：只作用于这一次，**不写回全局设置**——
     #: 这些是"这次怎么跑"，不是"这台机器的配置"（配置只有环境目录那几项）。
     #: 每个键都过 `settings_store.coerce`，取值范围仍然只有后端那一份（AGENTS #8）。
@@ -306,18 +299,18 @@ class LLMProfilePatch(BaseModel):
 
 
 class JvmSettingsPatch(BaseModel):
-    """JVM 校验服务设置（core.settings_store.DEFAULTS["jvm"]）。同 CheckSettingsPatch
-    的约定：收敛全部交给 settings_store.coerce。"""
+    """JVM 校验服务的**环境**设置（core.settings_store.DEFAULTS["jvm"] 里的环境键）。
+    同 CheckSettingsPatch 的约定：收敛全部交给 settings_store.coerce。
+
+    **跑批那五个参数（keyword / timeout / concurrency / depth / limit）不在这里**：
+    它们由 `settings_store` 的常量定默认值与区间、由 `JVM_RUN_PARAMS` 允许本次覆盖，
+    没有「改永久默认值」这个动作——所以这里不设字段。Pydantic 默认忽略未声明的键，
+    提交 `{"jvm": {"keyword": …}}` 会被静默丢弃（等价于没传）；要改这次的搜索词就在
+    跑批弹框里改（`CheckJvmForm`），那才是它唯一的作用面。
+    """
 
     app_repo: Optional[str] = None
     android_sdk_dir: Optional[str] = None
-    keyword: Optional[str] = None
-    timeout: Optional[int] = None
-    concurrency: Optional[int] = None
-    limit: Optional[int] = None
-    #: 探测深度（search/toc/content）。取值与范围只在 settings_store.JVM_DEPTHS，
-    #: 这里只管收——收敛交给 coerce（同 CheckSettingsPatch 的约定）
-    depth: Optional[str] = None
 
 
 class NetworkSettingsPatch(BaseModel):

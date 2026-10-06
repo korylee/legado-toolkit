@@ -83,13 +83,19 @@ DEFAULTS: Dict[str, Dict[str, Any]] = {
         #: 一个值两处用，就按两处都能用的那个来（socks 值在这儿等于给 App 用、给我们炸）。
         "proxy": "",
     },
+    #: **跑批与调试的默认参数**，不是用户设置：没有 PATCH 入口（
+    #: `JvmSettingsPatch` 只收下面两个环境键），设置页也没有控件——它们存在的意义是
+    #: 「本次这一次跑什么」的种子与兜底。想改这一次就在跑批弹框里改
+    #: （`frontend/src/components/CheckJvmForm.vue`），那才是它们唯一的作用面；
+    #: 改这里的值等于改代码常量。
+    #: 默认值与区间仍然只有这一份（AGENTS #8）：`JVM_RUN_PARAMS` 的本次覆盖走
+    #: `coerce` 收敛，前端经 `GET /api/settings` 拿种子。
     "jvm": {
         "app_repo": "",
         "android_sdk_dir": "",
         "keyword": "我",
         "timeout": 25,
         "concurrency": 8,
-        "limit": 0,
         #: 默认停在**搜索**档：S1/S2 的历史结论就是这一档，深一档（目录+正文）
         #: 会让全量耗时成倍增长（搜索档实测 17 分钟 / 3774 条）。**默认值不许
         #: 静默改变既有行为的成本**——想验得更深由用户在设置里选，界面上会写清代价。
@@ -112,7 +118,6 @@ DEFAULTS: Dict[str, Dict[str, Any]] = {
 LIMITS: Dict[str, tuple] = {
     "jvm_timeout": (5, 120),
     "jvm_concurrency": (1, 32),
-    "jvm_limit": (0, 100000),
     "jvm_chunk_size": (5, 200),
     "debug_timeout": (30, 300),
     # 枚举型（与 probe_depth 同形）：前端据此渲染下拉，不在 JS 里再写一份
@@ -247,8 +252,6 @@ _SPECS: Dict[tuple, Any] = {
         v, DEFAULTS["jvm"]["timeout"], *LIMITS["jvm_timeout"]),
     ("jvm", "concurrency"): lambda v: _to_int(
         v, DEFAULTS["jvm"]["concurrency"], *LIMITS["jvm_concurrency"]),
-    ("jvm", "limit"): lambda v: _to_int(
-        v, DEFAULTS["jvm"]["limit"], *LIMITS["jvm_limit"]),
     ("jvm", "chunk_size"): lambda v: _to_int(
         v, DEFAULTS["jvm"]["chunk_size"], *LIMITS["jvm_chunk_size"]),
     ("jvm", "depth"): lambda v: (str(v).strip().lower()

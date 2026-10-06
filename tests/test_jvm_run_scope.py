@@ -8,7 +8,7 @@
    JVM 列没变」，谁也不报错。
 2. **一条都没匹配上要明说**：那种情况下开跑一次空批，界面上会说「完成：0 条结论已入库」，
    读起来像「这些源没问题」。
-3. **选了具体几条就不看条数上限**：否则「选了 20 条只跑了 3 条」是一次看不出来的截断。
+3. **范围给几条就导出几条**：勾选/筛选是范围的全部依据，没有另一个会静默截断它的上限。
 
 不跑 Gradle、不联网：`_export_sources_file` 用真的（它只读库 + 写一个临时 JSON），
 `_run_gradle` / `readiness` / `Store` 打桩。
@@ -66,7 +66,7 @@ class _Base(unittest.TestCase):
             mock.patch.object(jvm_api.settings_store, "load",
                               lambda: {"network": {"proxy": ""}, "jvm": {"app_repo": "X:/repo", "keyword": "我",
                                                "timeout": 25, "concurrency": 8,
-                                               "limit": 2, "depth": "search"}}),
+                                               "depth": "search"}}),
         ):
             p.start()
             self.addCleanup(p.stop)
@@ -76,7 +76,7 @@ class _Base(unittest.TestCase):
         self._put_source("https://b.com", "普通源")
         self._put_source("https://c.com/", "另一条")
 
-    def _fake_gradle(self, args_path=None, runtime=None) -> int:
+    def _fake_gradle(self, args_path=None, runtime=None, **kwargs) -> int:
         self.runtime_seen = runtime
         self.gradle_calls += 1
         self.args_seen = pathlib.Path(args_path).read_text(encoding="utf-8")
@@ -209,7 +209,7 @@ class ScopeTests(_Base):
         payload = {"prep": {"started": True}, "manifest": manifest,
                    **control}
 
-        def blocking_gradle(*, args_path=None, runtime=None):
+        def blocking_gradle(*, args_path=None, runtime=None, **kwargs):
             control["started"].set()
             control["release"].wait(2)
             return {"exit": 1, "stdout": "", "stderr": "cancelled"}
@@ -355,9 +355,9 @@ class ScopeTests(_Base):
         self.assertEqual(sorted(s["bookSourceUrl"] for s in self._batch()),
                          ["https://b.com", "https://c.com/"])
 
-    def test_selection_ignores_the_limit(self) -> None:
-        """设置里条数上限 = 2，但**选中 3 条就得跑 3 条**——
-        截断会静默：界面上只会看到「选了 3 条」而实际跑了 2 条。"""
+    def test_selection_is_exported_in_full(self) -> None:
+        """选中 3 条就导出 3 条：范围是唯一依据，没有任何上限参与（历史上这里被
+        「条数上限」静默截断过——界面上只会看到「选了 3 条」而实际跑了 2 条）。"""
         self._call(urls=["https://a.com", "https://b.com", "https://c.com"])
         self.assertEqual(len(self._batch()), 3)
         self.assertEqual(self.gradle_calls, 1)
@@ -368,11 +368,11 @@ class ScopeTests(_Base):
         self.assertIn("一条都没匹配上", r["reason"])
         self.assertEqual(self.gradle_calls, 0, "匹配不上就不该开跑（空批会被读成「都没问题」）")
 
-    def test_all_sources_still_honours_the_limit(self) -> None:
-        """不选（全量）时条数上限照旧生效——那是给「先跑几条看看」用的安全阀。"""
+    def test_all_sources_are_exported_in_full(self) -> None:
+        """全量导出的是库里全部在用源：没有「跑前 N 条」这个隐藏入口。"""
         r = self._call()
         self.assertTrue(r["started"])
-        self.assertEqual(len(self._batch()), 2, "limit=2")
+        self.assertEqual(len(self._batch()), 3)
 
     def test_normalized_selector_is_idempotent(self) -> None:
         """再跑一次归一（前端偶尔给已经归一的、也偶尔给原文）结果一样。"""
@@ -401,11 +401,11 @@ class FilterScopeTests(_Base):
         self.assertEqual(sorted(s["bookSourceUrl"] for s in self._batch()),
                          ["https://A.com/", "https://b.com", "https://c.com/"])
 
-    def test_filter_ignores_the_limit(self) -> None:
-        """与「选中」同一条：范围既然明确给了，再按条数上限截断就是一次看不出来的截断。"""
+    def test_filter_exports_every_match(self) -> None:
+        """筛选范围就是命中多少跑多少（不受分页、也没有别的上限）。"""
         self._mark_all("pending")
         self._call(filt={"health": "pending"})
-        self.assertEqual(len(self._batch()), 3, "limit=2 但筛选命中 3 条")
+        self.assertEqual(len(self._batch()), 3)
 
     def test_filter_by_keyword(self) -> None:
         self._call(filt={"q": "普通"})
@@ -420,12 +420,12 @@ class FilterScopeTests(_Base):
     def test_run_params_override_the_settings(self) -> None:
         """**本次参数覆盖设置**，而且只影响这一次。
 
-        设置里 `limit = 2`（`_Base` 的桩），这次传 `limit = 0` → 不该再截断。
-        这条正是"参数该长在动作旁边"的理由：留在设置页时，「全部在用源」会被一个
-        看不见的上限悄悄截成 2 条，界面上只显示「全部在用源」。
+        设置里 `depth = search`（`_Base` 的桩），这次传 `depth = content` → 这次跑深档。
+        这条正是"参数该长在动作旁边"的理由：留在设置页时，这一次想验深一层就得先去
+        改全局，跑完还得记得改回来。
         """
-        self._call(params={"limit": 0})
-        self.assertEqual(len(self._batch()), 3, "本次给了 0 就该跑全部")
+        self._call(params={"depth": "content"})
+        self.assertIn("depth=content", self.args_seen)
 
     def test_depth_param_reaches_the_args_file(self) -> None:
         """参数要真的落到给 JVM 的那份 `args.properties` 上——不落就是"填了没用"。"""
@@ -770,7 +770,7 @@ class ChunkExecutionTests(_Base):
 
     _CHUNK_SETTINGS = {"network": {"proxy": ""},
                        "jvm": {"app_repo": "X:/repo", "keyword": "我", "timeout": 25,
-                               "concurrency": 8, "limit": 2, "depth": "search",
+                               "concurrency": 8, "depth": "search",
                                "chunk_size": 1}}
 
     def test_batch_runs_one_gradle_call_per_chunk(self) -> None:
@@ -778,14 +778,14 @@ class ChunkExecutionTests(_Base):
                                lambda: dict(self._CHUNK_SETTINGS)):
             result = self._call()
         self.assertTrue(result["ok"], result)
-        self.assertEqual(self.gradle_calls, 2)
-        self.assertEqual(len(result["chunk_reports"]), 2)
-        self.assertEqual(result["count"], 2)
+        self.assertEqual(self.gradle_calls, 3)
+        self.assertEqual(len(result["chunk_reports"]), 3)
+        self.assertEqual(result["count"], 3)
 
     def test_chunk_failure_aborts_remaining_chunks(self) -> None:
         calls = {"n": 0}
 
-        def flaky_gradle(args_path=None, runtime=None):
+        def flaky_gradle(args_path=None, runtime=None, **kwargs):
             calls["n"] += 1
             if calls["n"] == 2:
                 return {"exit": 1, "stdout": "", "stderr": "boom"}
@@ -795,7 +795,7 @@ class ChunkExecutionTests(_Base):
                                lambda: dict(self._CHUNK_SETTINGS)),              mock.patch.object(jvm_exec, "_run_gradle", side_effect=flaky_gradle):
             result = self._call()
         self.assertFalse(result["ok"])
-        self.assertIn("第 2/2 块失败", result["reason"])
+        self.assertIn("第 2/3 块失败", result["reason"])
         self.assertEqual(calls["n"], 2)
         self.assertFalse(result["chunk_reports"][1]["ok"])
 
@@ -809,7 +809,7 @@ class ChunkExecutionTests(_Base):
 
         calls = {"n": 0}
 
-        def flaky_gradle(args_path=None, runtime=None):
+        def flaky_gradle(args_path=None, runtime=None, **kwargs):
             calls["n"] += 1
             if calls["n"] == 2:
                 return {"exit": 1, "stdout": "", "stderr": "boom"}
@@ -860,12 +860,13 @@ class GradleLogTests(unittest.TestCase):
         run_dir.mkdir(parents=True)
         args_path = run_dir / "args.properties"
         args_path.write_text("file=x\n", encoding="utf-8")
-        proc = mock.Mock(returncode=1, stdout="gradle 全量输出", stderr="boom")
+        proc = mock.Mock(returncode=1)
+        proc.communicate.return_value = ("gradle 全量输出", "boom")
         with mock.patch.object(jvm_exec, "_launcher",
                                return_value=root / "appservice" / "legado-gradle.bat"), \
              mock.patch.object(jvm_exec, "_AGSVC", root / "appservice"), \
              mock.patch.object(jvm_exec, "data_dir", lambda: root), \
-             mock.patch.object(jvm_exec.subprocess, "run", return_value=proc):
+             mock.patch.object(jvm_exec.subprocess, "Popen", return_value=proc):
             result = jvm_exec._run_gradle(args_path=args_path, runtime={
                 "app_repo": "X:/repo", "java_home": "X:/jdk", "android_sdk": "X:/sdk",
                 "gradle_user_home": "X:/.gradle"})
@@ -888,13 +889,8 @@ class BatchDaemonTests(_Base):
 
     _CHUNKED = {"network": {"proxy": ""},
                 "jvm": {"app_repo": "X:/repo", "keyword": "我", "timeout": 25,
-                        "concurrency": 8, "limit": 2, "depth": "search",
-                        "chunk_size": 1, }}
-
-    _CHUNKED3 = {"network": {"proxy": ""},
-                 "jvm": {"app_repo": "X:/repo", "keyword": "我", "timeout": 25,
-                         "concurrency": 8, "limit": 3, "depth": "search",
-                         "chunk_size": 1, }}
+                        "concurrency": 8, "depth": "search",
+                        "chunk_size": 1}}
 
     def _fake_run_writing_results(self, calls: list):
         def fake_run(_dump, args_file, socket_timeout=None):
@@ -965,7 +961,7 @@ class BatchDaemonTests(_Base):
         calls: dict = {}
         busy = {"outcome": "busy", "reason": "daemon 忙，本批暂不准备"}
         with mock.patch.object(jvm_api.settings_store, "load",
-                               lambda: dict(self._CHUNKED3)), \
+                               lambda: dict(self._CHUNKED)), \
             mock.patch("core.jvm_direct.load_dump", return_value=self._DUMP), \
             mock.patch("core.jvm_validate_daemon.prepare", return_value=busy), \
             mock.patch("core.jvm_validate_daemon.probe",
@@ -1012,7 +1008,7 @@ class BatchDaemonTests(_Base):
         一块都不落 Gradle。"""
         calls: dict = {}
         with mock.patch.object(jvm_api.settings_store, "load",
-                               lambda: dict(self._CHUNKED3)), \
+                               lambda: dict(self._CHUNKED)), \
             mock.patch("core.jvm_direct.load_dump", return_value=self._DUMP), \
             mock.patch("core.jvm_validate_daemon.prepare",
                         return_value={"outcome": "started",
@@ -1081,7 +1077,7 @@ class BatchDaemonTests(_Base):
                            encoding="utf-8")
             return {"code": 0, "cost_ms": 3, "error": ""}
 
-        def flaky_gradle(args_path=None, runtime=None):
+        def flaky_gradle(args_path=None, runtime=None, **kwargs):
             state["gradle"] += 1
             if state["gradle"] == 1:
                 return {"exit": 1, "stdout": "", "stderr": "boom"}
@@ -1180,13 +1176,13 @@ class EventTimelineTests(_Base):
 
     _QUIET = {"network": {"proxy": ""},
               "jvm": {"app_repo": "X:/repo", "keyword": "我", "timeout": 25,
-                      "concurrency": 8, "limit": 2, "depth": "search",
-                      "chunk_size": 1, }}
+                      "concurrency": 8, "depth": "search",
+                      "chunk_size": 1}}
 
     _BUSY3 = {"network": {"proxy": ""},
               "jvm": {"app_repo": "X:/repo", "keyword": "我", "timeout": 25,
-                      "concurrency": 8, "limit": 3, "depth": "search",
-                      "chunk_size": 1, }}
+                      "concurrency": 8, "depth": "search",
+                      "chunk_size": 1}}
 
     _DUMP = {"workingDir": "C:/repo", "classpath": "x", "maxHeapSize": "3g",
              "environment": {}, "jvmArgs": [], "systemProperties": {},
@@ -1233,8 +1229,9 @@ class EventTimelineTests(_Base):
         _payload, result = self._run_batch(self._QUIET)
         self.assertTrue(result["ok"], result)
         self.assertEqual([e["kind"] for e in result["events"]],
-                         ["batch_started", "chunk_started", "chunk_done",
-                          "chunk_started", "chunk_done", "done"])
+                         ["batch_started", "prepare", "chunk_started", "chunk_done",
+                          "chunk_started", "chunk_done", "chunk_started", "chunk_done",
+                          "done"])
 
     def test_prepare_and_recovered_events_on_busy_retry(self) -> None:
         """忙批：prepare(busy) → 首块 Gradle → 重试块 daemon + recovered → 余块 daemon。"""
@@ -1268,7 +1265,7 @@ class EventTimelineTests(_Base):
 
         gradle_calls = {"n": 0}
 
-        def flaky_gradle(args_path=None, runtime=None):
+        def flaky_gradle(args_path=None, runtime=None, **kwargs):
             gradle_calls["n"] += 1
             if gradle_calls["n"] == 2:
                 return {"exit": 1, "stdout": "", "stderr": "boom"}
@@ -1301,7 +1298,7 @@ class EventTimelineTests(_Base):
                 "ev-job", Store(self.db), submitted["payload"]))
         run_dir = submitted["payload"]["manifest"]["run_dir"]
         self.assertEqual(self._kinds(run_dir),
-                         ["batch_started", "chunk_started", "chunk_done",
+                         ["batch_started", "prepare", "chunk_started", "chunk_done",
                           "chunk_started", "chunk_failed", "failed"])
         self.assertFalse(r1["ok"])
 
@@ -1314,9 +1311,9 @@ class EventTimelineTests(_Base):
         # 事件文件跨轮**追加**：恢复批的时间线包含上一轮的完整历史，
         # resumed 行标记了两次运行的边界（成功后目录清场，断言走合并结果）
         self.assertEqual([e["kind"] for e in r2["events"]],
-                         ["batch_started", "chunk_started", "chunk_done",
+                         ["batch_started", "prepare", "chunk_started", "chunk_done",
                           "chunk_started", "chunk_failed", "failed",
-                          "batch_started", "resumed", "chunk_started",
+                          "batch_started", "resumed", "prepare", "chunk_started",
                           "chunk_done", "done"])
 
     def test_events_tail_merge_is_bounded(self) -> None:

@@ -102,7 +102,7 @@ class JvmRunProgressTests(unittest.TestCase):
         payload = self._payload()
         self._create_job(2)
 
-        def fake_gradle(args_path=None, runtime=None):
+        def fake_gradle(args_path=None, runtime=None, **kwargs):
             self._rows(pathlib.Path(payload["out_path"]),
                        ["https://a.com", "https://b.com"])
             return {"exit": 0, "stdout": "", "stderr": ""}
@@ -118,7 +118,7 @@ class JvmRunProgressTests(unittest.TestCase):
         payload = self._payload()
         self._create_job(2)
 
-        def fake_gradle(args_path=None, runtime=None):
+        def fake_gradle(args_path=None, runtime=None, **kwargs):
             self._rows(pathlib.Path(payload["out_path"]), ["https://a.com"])
             return {"exit": 0, "stdout": "", "stderr": ""}
 
@@ -130,7 +130,7 @@ class JvmRunProgressTests(unittest.TestCase):
         payload = self._payload()
         self._create_job(2)
 
-        def failing_gradle(args_path=None, runtime=None):
+        def failing_gradle(args_path=None, runtime=None, **kwargs):
             return {"exit": 1, "stdout": "", "stderr": "boom"}
 
         result = self._run(payload, gradle=failing_gradle)
@@ -155,7 +155,7 @@ class JvmRunProgressTests(unittest.TestCase):
         self._create_job(2)
         seen = {"mid": 0}
 
-        def slow_gradle(args_path=None, runtime=None):
+        def slow_gradle(args_path=None, runtime=None, **kwargs):
             out = pathlib.Path(payload["out_path"])
             self._rows(out, ["https://a.com"])
             # 等轮询把 1 写进任务表（间隔 0.05s，给足余量）再写第二条；

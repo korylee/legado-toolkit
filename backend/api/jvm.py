@@ -52,9 +52,7 @@ STATE_LABEL = {
 
 #: 允许**本次覆盖**的参数（白名单）。`app_repo` 是环境配置，不该被一次跑批改掉；
 #: 其余键走 `settings_store.coerce` 收敛（未知键丢弃、越界收到区间内）。
-#: `limit` 在里面：范围（勾选 / 筛选）优先，而"只跑前 N 条"只有它能表达——
-#: 设置页放开它的时候，界面上写着「全部在用源」而实际被截成 N 条，看不出来。
-JVM_RUN_PARAMS = ("keyword", "timeout", "concurrency", "depth", "limit")
+JVM_RUN_PARAMS = ("keyword", "timeout", "concurrency", "depth")
 
 
 @router.get("/readiness")
@@ -128,17 +126,8 @@ async def jvm_run(body: Optional[JvmRunRequest] = None):
             if got is not None:
                 eff[key] = got
 
-    limit = int(eff.get("limit", 0) or 0)
-    # **给了范围就不再看条数上限**：范围由选中/筛选决定，否则会出现
-    # 「选了 20 条只跑了 3 条」这种看不出来的截断
-    if limit > 0 and not want_urls and not want_filter:
-        rows = rows[:limit]
-        src_file.write_text(json.dumps(rows, ensure_ascii=False),
-                            encoding="utf-8", newline="\n")
-
     # 完整 readiness 是 Gradle/SDK 的准备态；单条请求可以只依赖已有的
-    # runtime snapshot + Validate daemon。必须在最终截断后再判断 single，
-    # 否则「全量 + limit=1」会误走批量规则。
+    # runtime snapshot + Validate daemon
     st_conf = readiness(conf.get("app_repo", ""), conf.get("android_sdk_dir", ""))
     single = len(rows) == 1
     exec_conf: Dict[str, Any] = {}
@@ -166,7 +155,7 @@ async def jvm_run(body: Optional[JvmRunRequest] = None):
     args_path = run_dir / "args.properties"
     try:
         _write_args(eff.get("keyword", "我"), int(eff.get("timeout", 25)),
-                    int(eff.get("concurrency", 8)), 0, out_path, src_file,
+                    int(eff.get("concurrency", 8)), out_path, src_file,
                     str(eff.get("depth", "search")), args_path=args_path)
     except Exception:
         _cleanup_run_dir(run_dir)

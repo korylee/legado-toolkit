@@ -20,7 +20,7 @@ import threading
 import time
 from collections import Counter
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import HTTPException
 from fastapi.concurrency import run_in_threadpool
@@ -205,7 +205,7 @@ def _manifest_error(manifest: Any) -> str:
     return ""
 
 
-def _write_args(keyword: str, timeout: int, concurrency: int, limit: int,
+def _write_args(keyword: str, timeout: int, concurrency: int,
                 out_path: Path, source_file: Path, depth: str = "search",
                 args_path: Optional[Path] = None) -> None:
     """把跑批参数写进启动器的参数文件（Launcher 的唯一参数入口）。"""
@@ -224,8 +224,6 @@ def _write_args(keyword: str, timeout: int, concurrency: int, limit: int,
         # 设置里选了什么就跑什么，跑批结论里的 stage 才与实际一致
         "depth=%s" % (depth or st_conf.get("depth", "search")),
     ]
-    if limit:
-        lines.append("limit=%d" % limit)
     # newline="\n" 是必须的：这是 **git 跟踪的文件**，而 write_text 在 Windows 上
     # 把 \n 翻成 \r\n——跑一次批工作区就脏一次（内容与 HEAD 逐字节相同，只差行尾，
     # git diff 连内容都不显示，只在 git add 时冒一句 warning）。同 agent-write-safety §三。
@@ -309,7 +307,8 @@ def _tail_process_output(value: Any, limit: int = 4000) -> str:
 
 
 def _run_gradle(timeout_min: int = 90, args_path: Optional[Path] = None,
-                runtime: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+                runtime: Optional[Dict[str, str]] = None,
+                stall_watch: Optional[Tuple[Path, float]] = None) -> Dict[str, Any]:
     """调启动器跑批（阻塞直到 Gradle 退出）。保留退出码和输出尾部。
 
     以前这里只返回整数。Gradle 在测试 JVM 启动前失败时，调用方只能知道结果文件
@@ -345,27 +344,53 @@ def _run_gradle(timeout_min: int = 90, args_path: Optional[Path] = None,
            # **必须显式告诉它参数文件在哪**：不给就退回「挨着启动器找」，那里没有，
            # 于是启动器打印一句「跳过」之后什么都不跑（一次看不出来的空跑）
            "LEGADO_APPSERVICE_ARGS": str(args_path or _args_file())})
+    proc = subprocess.Popen(
+        ["cmd", "/c", str(exe), ":app:testAppDebugUnitTest",
+         "--tests", "io.legado.app.service.ValidateServiceLauncher", "--rerun"],
+        cwd=str(_AGSVC), env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, errors="replace",
+    )
+    stop_watch = threading.Event()
+    watch_hit = {"stalled": False}
+    if stall_watch is not None:
+        watch_path, stall_sec = stall_watch
+
+        def _abort() -> None:
+            # cmd 只是壳：Gradle/JVM 是孙进程，/T 才杀得掉整棵树——
+            # 树一死管道 EOF，communicate 立刻返回
+            watch_hit["stalled"] = True
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                           capture_output=True)
+
+        threading.Thread(target=_watch_output_stall, daemon=True,
+                         args=(watch_path, stall_sec, stop_watch, _abort,
+                               _STALL_POLL_SEC)).start()
+    timed_out = False
     try:
-        proc = subprocess.run(
-            ["cmd", "/c", str(exe), ":app:testAppDebugUnitTest",
-             "--tests", "io.legado.app.service.ValidateServiceLauncher", "--rerun"],
-            cwd=str(_AGSVC), env=env, capture_output=True, text=True,
-            timeout=timeout_min * 60, errors="replace",
-        )
-        _write_run_logs(args_path, proc.stdout, proc.stderr)
-        return with_runtime_snapshot({
-            "exit": proc.returncode,
-            "stdout": _tail_process_output(proc.stdout),
-            "stderr": _tail_process_output(proc.stderr),
-        })
-    except subprocess.TimeoutExpired as exc:
-        _write_run_logs(args_path, exc.stdout, exc.stderr)
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout_min * 60)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            stdout, stderr = proc.communicate()
+            timed_out = True
+    finally:
+        stop_watch.set()
+    _write_run_logs(args_path, stdout, stderr)
+    if timed_out:
         return with_runtime_snapshot({
             "exit": None,
-            "stdout": _tail_process_output(exc.stdout),
-            "stderr": _tail_process_output(exc.stderr),
+            "stdout": _tail_process_output(stdout),
+            "stderr": _tail_process_output(stderr),
             "error": "Gradle 运行超过 %d 分钟" % timeout_min,
         })
+    result = {
+        "exit": proc.returncode,
+        "stdout": _tail_process_output(stdout),
+        "stderr": _tail_process_output(stderr),
+    }
+    if watch_hit["stalled"]:
+        result["stalled"] = True
+    return with_runtime_snapshot(result)
 
 
 def _normalize_gradle_result(raw: Any) -> Dict[str, Any]:
@@ -488,6 +513,98 @@ _PROGRESS_POLL_INTERVAL = 1.0
 #: Kotlin 侧对单次 op 时长没有上限，客户端等待是唯一护栏，没有它会挂死连接
 _DAEMON_SOCKET_TIMEOUT_CAP = 5400
 
+#: 块内输出停滞看门狗：results 文件这么久没长一行就断定引擎停摆，主动断掉。
+#: 3× 每源预算是给慢站留的余量（真要 60 秒/源的站不该被误伤），封顶 120 秒。
+_STALL_FACTOR = 3
+_STALL_CAP_SEC = 120
+#: 停滞采样间隔。文件大小是单调的，采样丢了中间态也没关系。
+_STALL_POLL_SEC = 5.0
+#: 隔离重跑（单源块）的 socket 等待 = 每源预算 + 这个余量。
+_REMEDIAL_WAIT_MARGIN_SEC = 30
+
+
+def _watch_output_stall(watch_path: Path, stall_sec: float, stop: threading.Event,
+                        abort, interval: float = _STALL_POLL_SEC,
+                        is_cancelled=None, why: Optional[Dict[str, bool]] = None) -> None:
+    """盯 results 文件：连续 ``stall_sec`` 秒一行都没长就触发一次 ``abort()``。
+
+    Kotlin 侧每写完一条源就 flush，文件不长了就是引擎停摆——不管是源挂死还是
+    引擎假死，客户端等满 socket 上限（最坏 11 分钟/块）不如现在就断（2026-10-05
+    实测：enmuku 一条源把块挂了 11 分钟，24 条已完成的结论干等着）。
+    文件还没出现时不算停滞（引擎可能在启动），那段的兜底是 socket 等待上限。
+    ``why`` 由调用方传入用于记录触发原因（stalled / cancelled）；``abort``
+    只应触发一次，触发后本线程退出。
+    """
+    last_size = -1
+    last_change = time.monotonic()
+    while not stop.wait(interval):
+        if is_cancelled is not None and is_cancelled():
+            if why is not None:
+                why["cancelled"] = True
+            abort()
+            return
+        try:
+            size = watch_path.stat().st_size
+        except OSError:
+            continue
+        if size != last_size:
+            last_size = size
+            last_change = time.monotonic()
+            continue
+        if time.monotonic() - last_change >= stall_sec:
+            if why is not None:
+                why["stalled"] = True
+            abort()
+            return
+
+
+def _remaining_sources(chunk_rows: List[Dict[str, Any]],
+                       results_path: Path) -> List[Dict[str, Any]]:
+    """块里还没落结论的源。**两侧都归一**（AGENTS #5）：sources.json 里是
+    ``bookSourceUrl`` 原文，results 行里是跑批写回的 url——不归一就全部对不上，
+    剩余源会被整块重跑一遍。"""
+    done = set()
+    try:
+        text = results_path.read_text(encoding="utf-8")
+    except OSError:
+        text = ""
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            # 半行：看门狗掐断时可能留下的残尾，跳过——已完成的源不能跟着重跑
+            continue
+        done.add(_normalize_url(str(row.get("url") or "")))
+    return [s for s in chunk_rows
+            if _normalize_url(str(s.get("bookSourceUrl") or s.get("url") or ""))
+            not in done]
+
+
+def _unresponsive_row(src: Dict[str, Any], depth: str, reason: str) -> Dict[str, Any]:
+    """隔离重跑里判死的源 → 结论行。state 用 ``timeout``（映射 ❓待验证）：
+    引擎没给出结论，不诬源为坏；原因写明无响应，用户可照着复查。"""
+    return {"url": str(src.get("bookSourceUrl") or src.get("url") or ""),
+            "name": str(src.get("bookSourceName") or src.get("name") or ""),
+            "state": "timeout", "stage": depth, "cost_ms": 0,
+            "reason": reason}
+
+
+def _merge_result_rows(base_path: Path, rows: List[Dict[str, Any]]) -> None:
+    """把隔离重跑的结论并回块的 results.jsonl（原有行原样保留）。
+
+    半行风险由 ``_read_results`` 兜（跳过残缺行）；合并后整文件重写，DONE 判据
+    （整读通过）才成立。"""
+    lines = []
+    try:
+        lines = [l for l in base_path.read_text(encoding="utf-8").splitlines() if l.strip()]
+    except OSError:
+        pass
+    lines.extend(json.dumps(r, ensure_ascii=False) for r in rows)
+    base_path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8",
+                         newline="\n")
+
 
 def _tail_progress(job_id: str, out_path: Path, stop: threading.Event,
                    interval: float, cap: int = 0, base: int = 0) -> None:
@@ -501,11 +618,15 @@ def _tail_progress(job_id: str, out_path: Path, stop: threading.Event,
     while not stop.wait(interval):
         try:
             with open(out_path, "rb") as fh:
-                done = base + fh.read().count(b"\n")
+                count = fh.read().count(b"\n")
         except OSError:
             continue
-        if cap and done > cap:
-            done = cap
+        # cap 钳的是**本块**的行数（防半行虚高），不是全局进度：钳在 done 上
+        # 会把每一块都压回本块条数——实测全量批 145 块永远显示 25/3616
+        # （2026-10-05 用户报告「进度和实际对不上」的根因）
+        if cap and count > cap:
+            count = cap
+        done = base + count
         if done:
             runner.update_progress(job_id, done)
 
@@ -569,7 +690,7 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
             params = (manifest.get("params") or {})
             _write_args(str(params.get("keyword") or "我"),
                         int(params.get("timeout") or 25),
-                        int(params.get("concurrency") or 8), 0,
+                        int(params.get("concurrency") or 8),
                         out_path, Path(source_file_value or (run_dir / "sources.json")),
                         str(params.get("depth") or "search"), args_path=args_path)
 
@@ -738,7 +859,7 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
                     chunk_args: Optional[Path], chunk_out: Path,
                     base_done: int, batch: str,
                     tail_stop: threading.Event, tail: threading.Thread,
-                    chunk_sources: int = 0,
+                    chunk_sources: int = 0, chunk_rows: Optional[List[Dict[str, Any]]] = None,
                     daemon_allowed: bool = True,
                     daemon_reason: str = "") -> Dict[str, Any]:
         from backend.jobs import runner as job_runner
@@ -746,6 +867,7 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
         RUN_LOCK.acquire()
         # 块墙钟：每块耗时随环境变化，不能把推演当作性能结论。
         started = time.monotonic()
+        per_source_budget = int(((manifest.get("params") or {}).get("timeout")) or 25)
         try:
             if has_manifest and chunk_dir is not None:
                 _write_run_manifest(chunk_dir, manifest, job_id,
@@ -755,6 +877,9 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
             daemon_response: Dict[str, Any] = {}
             gradle: Dict[str, Any] = {}
             daemon_mode = False
+            stalled = False
+            # 看门狗触发原因（stalled / cancelled）——except 里要读，必须在 try 外初始化
+            watch_why: Dict[str, bool] = {}
             if daemon_allowed and chunk_args is not None:
                 try:
                     from core import jvm_validate_daemon, jvm_direct
@@ -772,8 +897,20 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
                         chunk_args)["timeout"])
                     wait = min(per_source * max(chunk_sources, 1) + 60,
                                _DAEMON_SOCKET_TIMEOUT_CAP)
-                    daemon_response = jvm_validate_daemon.run(
-                        dump, str(chunk_args), socket_timeout=wait)
+                    # 输出停滞看门狗，与进度尾随共用 tail_stop：daemon 调用一结束
+                    # 就停表——读结果/落库阶段文件不动，不停表会误杀引擎
+                    watcher = threading.Thread(
+                        target=_watch_output_stall, daemon=True,
+                        args=(chunk_out, min(_STALL_FACTOR * per_source,
+                                             _STALL_CAP_SEC),
+                              tail_stop, jvm_validate_daemon.stop,
+                              _STALL_POLL_SEC, cancelled.is_set, watch_why))
+                    watcher.start()
+                    try:
+                        daemon_response = jvm_validate_daemon.run(
+                            dump, str(chunk_args), socket_timeout=wait)
+                    finally:
+                        tail_stop.set()
                     daemon_code = daemon_response.get("code")
                     if daemon_code != 0:
                         raise jvm_validate_daemon.ValidateDaemonError(
@@ -787,18 +924,61 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
                     daemon_mode = True
                 except Exception as exc:
                     daemon_failure = "常驻 Validate JVM 未完成：%s" % exc
-                    # 半成品结果不能留给读结果阶段当真结论
-                    try:
-                        chunk_out.unlink()
-                    except OSError:
-                        pass
+                    if cancelled.is_set():
+                        # 看门狗已掐断引擎调用，这里直接交还——不能再走回退，
+                        # 否则取消要陪 Gradle 再跑一轮
+                        return {"index": idx, "ok": False, "cancelled": True,
+                                "reason": "用户取消",
+                                "execution_mode": "validate_daemon",
+                                "daemon_failure": daemon_failure,
+                                "cost_sec": round(time.monotonic() - started, 1)}
+                    if watch_why.get("stalled"):
+                        # 半成品留着：里面是已完成源的结论，隔离阶段按行合并
+                        stalled = True
+                    else:
+                        # 半成品结果不能留给读结果阶段当真结论
+                        try:
+                            chunk_out.unlink()
+                        except OSError:
+                            pass
             if daemon_mode:
                 code = daemon_response.get("code")
             else:
                 job_runner.update_phase(job_id, "starting_gradle")
                 gradle = _normalize_gradle_result(
-                    _run_gradle(args_path=chunk_args, runtime=runtime))
+                    _run_gradle(args_path=chunk_args, runtime=runtime,
+                                stall_watch=(chunk_out, min(
+                                    _STALL_FACTOR * per_source_budget,
+                                    _STALL_CAP_SEC))))
                 code = gradle.get("exit")
+                if gradle.get("stalled"):
+                    stalled = True
+            if stalled and chunk_dir is not None and not cancelled.is_set():
+                # 看门狗触发：重启引擎，剩余源逐条隔离重跑，再挂的判死——
+                # 把「一条源挂死一块 11 分钟」压成「约 2 分钟、只付一次」
+                job_runner.update_phase(job_id, "isolating_stall")
+                _append_event(run_dir, "chunk_stalled", index=idx,
+                              mode=("validate_daemon" if daemon_mode else "gradle"),
+                              reason="块内输出停滞，疑似慢源挂住引擎")
+                iso = _isolate_stalled_chunk(
+                    chunk_rows=chunk_rows or [], chunk_dir=chunk_dir,
+                    chunk_out=chunk_out, base_done=base_done,
+                    job_id=job_id, job_runner=job_runner)
+                if iso.get("ok"):
+                    daemon_mode = True
+                    daemon_response = {"code": 0}
+                    daemon_failure = (daemon_failure + "；已隔离重跑剩余 %d 条"
+                                      "（判死 %d 条）"
+                                      % (iso.get("isolated", 0), iso.get("dead", 0)))
+                elif iso.get("cancelled"):
+                    return {"index": idx, "ok": False, "cancelled": True,
+                            "reason": "用户取消",
+                            "execution_mode": "validate_daemon",
+                            "daemon_failure": daemon_failure,
+                            "cost_sec": round(time.monotonic() - started, 1)}
+                else:
+                    daemon_failure = (daemon_failure + "；隔离重跑未完成："
+                                      + str(iso.get("note") or ""))
             snapshot_reason = _runtime_snapshot_failure_reason(gradle)
             if snapshot_reason:
                 return {"index": idx, "ok": False, "exit": code,
@@ -838,6 +1018,79 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
             tail_stop.set()
             tail.join(5)
             RUN_LOCK.release()
+
+    def _isolate_stalled_chunk(chunk_rows: List[Dict[str, Any]], chunk_dir: Path,
+                               chunk_out: Path, base_done: int,
+                               job_id: str, job_runner) -> Dict[str, Any]:
+        """看门狗触发后的隔离重跑：重启引擎，剩余源**逐条**喂（1 源 = 1 块），
+        socket 等待收紧到每源预算 + 余量；再挂的判死（state=timeout，原因写明
+        无响应）。一条挂死源的总代价从「挂满整块等待」压成约 2 分钟、只付一次。
+
+        daemon 是串行处理，挂死的 op 会占死队列——所以先 ``stop()`` 杀掉再
+        ``prepare()``，探活通过才继续。结论并回块的 results.jsonl（原有行保留），
+        后续读结果/落库/DONE 照常走。仅 manifest 路径可用（需要 per-chunk 目录）。
+        """
+        from core import jvm_direct
+        from core import jvm_validate_daemon
+
+        params = (manifest.get("params") or {})
+        keyword = str(params.get("keyword") or "我")
+        timeout = int(params.get("timeout") or 25)
+        concurrency = int(params.get("concurrency") or 8)
+        depth = str(params.get("depth") or "search")
+        try:
+            jvm_validate_daemon.stop()
+            prep = jvm_validate_daemon.prepare(jvm_direct.load_dump(warn_stale=False))
+            if prep.get("outcome") not in ("ready", "started"):
+                return {"ok": False,
+                        "note": "引擎重启未就绪：%s" % (prep.get("reason")
+                                                       or prep.get("outcome"))}
+            _append_event(run_dir, "prepare", outcome=str(prep.get("outcome") or ""),
+                          reason="隔离重跑前的引擎重启")
+        except Exception as exc:
+            return {"ok": False, "note": "引擎重启失败：%s" % exc}
+        remaining = _remaining_sources(chunk_rows, chunk_out)
+        done_before = len(chunk_rows) - len(remaining)
+        dump = jvm_direct.load_dump(warn_stale=False)
+        good: List[Dict[str, Any]] = []
+        dead: List[Dict[str, Any]] = []
+        for i, src in enumerate(remaining):
+            if cancelled.is_set():
+                return {"ok": False, "cancelled": True, "note": "用户取消，隔离中断"}
+            iso_dir = chunk_dir / ("isolate-%02d" % (i + 1))
+            iso_dir.mkdir(parents=True, exist_ok=True)
+            iso_src = iso_dir / "sources.json"
+            iso_out = iso_dir / "results.jsonl"
+            iso_args = iso_dir / "args.properties"
+            iso_src.write_text(json.dumps([src], ensure_ascii=False),
+                               encoding="utf-8", newline="\n")
+            _write_args(keyword, timeout, concurrency, iso_out, iso_src,
+                        depth, args_path=iso_args)
+            try:
+                resp = jvm_validate_daemon.run(
+                    dump, str(iso_args),
+                    socket_timeout=timeout + _REMEDIAL_WAIT_MARGIN_SEC)
+                if resp.get("code") == 0 and iso_out.exists():
+                    rows = _read_results(iso_out)
+                    good.extend(rows)
+                    if not rows:
+                        dead.append(_unresponsive_row(
+                            src, depth, "引擎返回成功但没有产出结果"))
+                else:
+                    dead.append(_unresponsive_row(
+                        src, depth, "引擎返回失败：%s"
+                        % str(resp.get("error") or ("code=%s" % resp.get("code")))))
+            except Exception:
+                # 单源 op 的等待就是每源预算 + 余量：到点判死，不二过——
+                # 看门狗已经给过整块一次机会了
+                if cancelled.is_set():
+                    return {"ok": False, "cancelled": True, "note": "用户取消，隔离中断"}
+                dead.append(_unresponsive_row(src, depth, "引擎对该源无响应，已按超时跳过"))
+            # 尾随线程已停（看门狗触发时停表），进度这里逐条显式推
+            job_runner.update_progress(job_id, base_done + done_before
+                                       + len(good) + len(dead))
+        _merge_result_rows(chunk_out, good + dead)
+        return {"ok": True, "isolated": len(remaining), "dead": len(dead)}
 
     def _chunk_completed(chunk_dir: Path) -> bool:
         """块完成判据（文件即状态）：DONE 标记在，且 results.jsonl 可整读。"""
@@ -879,7 +1132,7 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
         batch_t0 = time.monotonic()
         _append_event(run_dir, "batch_started", chunks=len(chunks),
                       sources=len(rows_all))
-        job_runner.update_phase(job_id, "starting_gradle")
+        job_runner.update_phase(job_id, "preparing_engine")
         # **上一版结论的快照必须在落库之前读**：跑完再读，每条源都是 old == new，
         # 「这次变了什么」会永远答「没变」（与单条同规矩，理由见 ops.run_check_job）
         prev_checks = st.checks_map()
@@ -924,7 +1177,7 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
                 params = (manifest.get("params") or {})
                 _write_args(str(params.get("keyword") or "我"),
                             int(params.get("timeout") or 25),
-                            int(params.get("concurrency") or 8), 0,
+                            int(params.get("concurrency") or 8),
                             chunk_out, chunk_src,
                             str(params.get("depth") or "search"),
                             args_path=chunk_args)
@@ -959,11 +1212,12 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
             if retry_this_chunk:
                 daemon_retry_available = False
             _append_event(run_dir, "chunk_started", index=idx,
-                          total=len(chunks), count=len(chunk_rows))
+                          total=len(chunks), count=len(chunk_rows),
+                          mode=("validate_daemon" if daemon_allowed else "gradle"))
             work = asyncio.create_task(run_in_threadpool(
                 _chunk_work, idx, len(chunks), chunk_dir, chunk_args,
                 chunk_out, base_done, batch, tail_stop, tail,
-                len(chunk_rows), daemon_allowed, daemon_reason))
+                len(chunk_rows), chunk_rows, daemon_allowed, daemon_reason))
             try:
                 report = await asyncio.shield(work)
             except asyncio.CancelledError:

@@ -54,6 +54,34 @@ _SCHEMA_LOCK = threading.Lock()
 
 #: 任务保留天数。过期由 `Store.sweep_jobs` 清理，对齐 exports 的 ttl_days=7
 JOBS_TTL_DAYS = 7
+
+#: 非终态（还占着执行槽）的任务状态。**唯一一份**：任务列表的「最近 N 天」窗口
+#: 只筛终态行（在跑的任务不管什么时候建的都要能看到），而「进行中」档位也是这组值——
+#: 各写一份就会漂成「档位含 cancel_requested、窗口不含」。
+ACTIVE_JOB_STATUSES = ("pending", "running", "cancel_requested")
+
+#: 任务的**轻量行**：状态/进度 + 从结果里抽出来的几个标量。
+#:
+#: 为什么不把 ``result_json`` 取出来再在 Python 里解析：列表最多 200 行，而一次全量
+#: 校验的结果带着 ``items[:500]``（一条上百 KB）——为了四个数把几十 MB 的 JSON 都解析
+#: 一遍，打开任务中心、每 5 秒的刷新都要付一次。``json_extract`` 让 SQLite 只把需要的
+#: 标量交出来；``result_changed`` 是 ``{档位: 条数}`` 那个小对象（只有它还需要求和）。
+#:
+#: 列表端点、单条轮询端点共用这一份；**详情**仍走 ``get_job``（它需要完整结果）。
+#:
+#: ``json_valid`` 那道守卫**不能省**：``json_extract`` 遇到无效 JSON 会直接抛
+#: ``malformed JSON``，一条写坏的结果就把整张任务列表带成 500（Python 侧解析时
+#: 是 try/except 兜住的，搬到 SQL 就必须显式补上）。
+_VALID_RESULT = "CASE WHEN json_valid(result_json) THEN result_json END"
+
+_JOB_LIGHT_COLUMNS = (
+    "id, kind, status, phase, progress, total, retry_of, expires_at,"
+    " created_at, updated_at,"
+    " json_extract(%s, '$.checked') AS result_checked,"
+    " json_extract(%s, '$.dist.ok') AS result_ok,"
+    " json_extract(%s, '$.transitions.changed') AS result_changed,"
+    " json_extract(%s, '$.error') AS result_error" % ((_VALID_RESULT,) * 4)
+)
 DB_NAME = "sources.sqlite3"
 
 PRAGMAS = (
@@ -1208,10 +1236,51 @@ class Store:
         row = self.conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
         return dict(row) if row else None
 
-    def list_jobs(self, limit: int = 50) -> List[Dict[str, Any]]:
-        return [dict(r) for r in self.conn.execute(
-            "SELECT id, kind, status, phase, progress, total, retry_of, expires_at, created_at, updated_at"
-            " FROM jobs ORDER BY created_at DESC LIMIT ?", (int(limit),))]
+    def list_jobs(self, limit: int = 200,
+                  statuses: Optional[Sequence[str]] = None,
+                  kind: str = "", recent_since: str = "") -> List[Dict[str, Any]]:
+        """按筛选条件取任务行（新的在前），最多 ``limit`` 条。
+
+        筛选条件全部由调用方给（见 ``backend/api/jobs.py``）：这里不做口径判断——
+        「最近几天算历史」这类窗口只在那一个地方定义，否则同一个数会长出两份。
+
+        ``recent_since`` 是**终态行的窗口**：在跑的任务不受它限制。对整表一刀切
+        ``created_at >=`` 会让一条建得早、还在跑的任务从列表里消失——而它正是这个
+        列表最该显示的（对应 API 层的「进行中 + 最近 N 天」）。
+
+        **返回轻量行**（``_JOB_LIGHT_COLUMNS``，不含 ``result_json``）：列表要显示结论
+        摘要，但为四个数解析上百 KB 的结果不值得——那几个标量由 ``json_extract`` 抽好。
+        """
+        where: List[str] = []
+        args: List[Any] = []
+        if statuses:
+            where.append("status IN (%s)" % ",".join("?" * len(statuses)))
+            args.extend(str(s) for s in statuses)
+        if kind:
+            where.append("kind = ?")
+            args.append(str(kind))
+        if recent_since:
+            marks = ",".join("?" * len(ACTIVE_JOB_STATUSES))
+            where.append("(created_at >= ? OR status IN (%s))" % marks)
+            args.append(str(recent_since))
+            args.extend(ACTIVE_JOB_STATUSES)
+        clause = (" WHERE " + " AND ".join(where)) if where else ""
+        rows = self.conn.execute(
+            "SELECT %s FROM jobs%s ORDER BY created_at DESC LIMIT ?"
+            % (_JOB_LIGHT_COLUMNS, clause),
+            args + [int(limit)]).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_job_summary(self, job_id: str) -> Optional[Dict[str, Any]]:
+        """单条任务的**轻量行**（列同 ``list_jobs``，不含 ``result_json``）。
+
+        明细弹窗在任务运行期间每 2 秒拉一次它。用 ``get_job`` 就会把完整结果
+        （``items[:500]``，上百 KB）每 2 秒传一遍——去看详情才需要那份。
+        """
+        row = self.conn.execute(
+            "SELECT %s FROM jobs WHERE id = ?" % _JOB_LIGHT_COLUMNS,
+            (job_id,)).fetchone()
+        return dict(row) if row else None
 
     def delete_job(self, job_id: str) -> bool:
         """删除一条已结束的任务，运行中的任务必须先取消。"""

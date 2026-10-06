@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 import asyncio
 import json
-from typing import Any, Dict
+import time
+from typing import Any, Dict, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
@@ -9,6 +10,7 @@ from fastapi.responses import StreamingResponse
 from backend.deps import get_store
 from backend.jobs import runner
 from backend.schemas import JobCreate
+from core.store import ACTIVE_JOB_STATUSES, JOBS_TTL_DAYS
 
 router = APIRouter()
 
@@ -75,6 +77,134 @@ def _chunk_detail_reports(parsed: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _num(value: Any) -> float:
+    return float(value) if isinstance(value, (int, float)) else 0.0
+
+
+def _check_summary(parsed: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """校验类结果的摘要（**唯一一份**）：详情面板与任务列表共用。
+
+    两处各写一遍时，列表里的「通过 / 未通过」和详情里的会对不上，而读者无从判断
+    该信哪一份。**什么算校验结果也由这里回答**（标志字段 ``checked`` 是不是数字）——
+    让调用方各判一次，就是同一件事长出两份判据。不是校验结果给 ``None``。
+    """
+    if not isinstance(parsed.get("checked"), (int, float)):
+        return None
+    transitions = parsed.get("transitions") or {}
+    if not isinstance(transitions, dict):
+        transitions = {}
+    changed = transitions.get("changed") or {}
+    if not isinstance(changed, dict):
+        changed = {}
+    changed_items = transitions.get("changed_items") or []
+    if not isinstance(changed_items, list):
+        changed_items = []
+    dist = parsed.get("dist") if isinstance(parsed.get("dist"), dict) else {}
+    checked = _num(parsed.get("checked"))
+    ok = _num(dist.get("ok"))
+    return {
+        "checked": parsed.get("checked", 0),
+        #: 通过 / 未通过在这里算好：详情与列表读同一份。让前端各减一次，
+        #: 「未通过」就会有两个可能的算法（checked-ok 还是 dist 里其余桶之和）。
+        "ok": int(ok),
+        "fail": int(max(checked - ok, 0)),
+        "cached": parsed.get("cached", 0),
+        "fetched": parsed.get("fetched", 0),
+        "first_checked": transitions.get("first_checked", 0),
+        "dist": dist,
+        "changed": changed,
+        "changed_total": sum(v for v in changed.values() if isinstance(v, (int, float))),
+        "changed_items": changed_items,
+        "warnings": ([
+            str(parsed["save_failures"]) + " 条结果没能写入管理库，列表状态不会更新"
+        ] if parsed.get("save_failures") else []) + ([
+            str(parsed["hit_downgrades"]) + " 个源无法核对命中状态，暂按「命中」计"
+        ] if parsed.get("hit_downgrades") else []),
+    }
+
+
+def _load_result(job: Dict[str, Any]) -> Any:
+    """把任务行里的 ``result_json`` 解成对象；解不出来给 ``None``。
+
+    「解不出来」不是「没有结果」——详情与列表都要能说清是哪一种，所以坏 JSON
+    单独走 ``_result_error``，不在这里静默成「没有结果」。
+    """
+    raw = job.get("result_json") or ""
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _result_error(job: Dict[str, Any], parsed: Any) -> str:
+    """任务失败的原因（**唯一一份**）：列表行与详情共用。
+
+    两处各写一遍时，列表说「失败」而详情说得出原因，用户就得点开每个失败任务去找。
+    坏 JSON 给一句固定说明：它同样是「为什么看不到结果」的答案。
+    """
+    if (job.get("result_json") or "") and parsed is None:
+        return "任务结果不是有效 JSON"
+    if isinstance(parsed, dict):
+        return _bounded_text(parsed.get("error"))
+    return ""
+
+
+def _changed_total(raw: Any) -> int:
+    """``transitions.changed`` 是 ``{档位: 条数}``，要求和。
+
+    ``json_extract`` 交出来的是那个**小对象**的文本（不是整个结果），所以这里解析的
+    代价与结果大小无关。
+    """
+    if not raw:
+        return 0
+    try:
+        changed = json.loads(raw) if isinstance(raw, str) else raw
+    except (TypeError, ValueError):
+        return 0
+    if not isinstance(changed, dict):
+        return 0
+    return int(sum(v for v in changed.values() if isinstance(v, (int, float))))
+
+
+def _job_row(job: Dict[str, Any]) -> Dict[str, Any]:
+    """任务**轻量行** → 界面行：结论摘要 + 失败原因，这里也不产出 ``result_json``。
+
+    入参必须是 ``Store`` 的轻量行（``_JOB_LIGHT_COLUMNS``）：那几个数由 SQLite 的
+    ``json_extract`` 抽好。**不要为「多拿一点信息」把它换回 ``get_job``**——全量校验
+    一条结果上百 KB（``items[:500]``），列表 200 行就是几十 MB 的解析，而这样的列表
+    打开一次、每 5 秒刷新一次都要付。
+    """
+    checked = job.get("result_checked")
+    summary = None
+    # 判据与 `_check_summary` 一致：`checked` 是**数字**才算校验结果
+    # （json_extract 对字符串会原样返回，不能只判「不是 None」）
+    if isinstance(checked, (int, float)):
+        ok = _num(job.get("result_ok"))
+        summary = {
+            "checked": int(_num(checked)),
+            "ok": int(ok),
+            "fail": int(max(_num(checked) - ok, 0)),
+            "changed_total": _changed_total(job.get("result_changed")),
+        }
+    return {
+        "id": job.get("id", ""),
+        "kind": job.get("kind", ""),
+        "status": job.get("status", ""),
+        "phase": job.get("phase", ""),
+        "progress": job.get("progress", 0),
+        "total": job.get("total", 0),
+        "retry_of": job.get("retry_of", ""),
+        "expires_at": job.get("expires_at", ""),
+        "created_at": job.get("created_at", ""),
+        "updated_at": job.get("updated_at", ""),
+        #: 失败/部分失败的原因。**要有界**：它可能是一整段 Gradle 报错
+        "error": _bounded_text(job.get("result_error")),
+        "summary": summary,
+    }
+
+
 def _job_detail(job: Dict[str, Any]) -> Dict[str, Any]:
     """把数据库任务行转换成前端唯一使用的明细形状。
 
@@ -82,50 +212,18 @@ def _job_detail(job: Dict[str, Any]) -> Dict[str, Any]:
     校验任务只下发摘要和变化明细，避免把 ``items[:500]`` 再复制进详情响应；
     其他任务保留结构化结果，方便查看生成/导入任务的实际返回值。
     """
-    parsed = None
-    parse_error = ""
-    raw = job.get("result_json") or ""
-    if raw:
-        try:
-            parsed = json.loads(raw)
-        except (TypeError, ValueError):
-            parse_error = "任务结果不是有效 JSON"
+    parsed = _load_result(job)
 
     summary = None
     execution_mode = ""
     execution_note = ""
     daemon_fallback_reason = ""
-    error = parse_error
+    error = _result_error(job, parsed)
     if isinstance(parsed, dict):
-        error = str(parsed.get("error") or "")
         execution_mode = str(parsed.get("execution_mode") or "")
         execution_note = str(parsed.get("execution_note") or "")
         daemon_fallback_reason = str(parsed.get("daemon_fallback_reason") or "")
-        if isinstance(parsed.get("checked"), (int, float)):
-            transitions = parsed.get("transitions") or {}
-            if not isinstance(transitions, dict):
-                transitions = {}
-            changed = transitions.get("changed") or {}
-            if not isinstance(changed, dict):
-                changed = {}
-            changed_items = transitions.get("changed_items") or []
-            if not isinstance(changed_items, list):
-                changed_items = []
-            summary = {
-                "checked": parsed.get("checked", 0),
-                "cached": parsed.get("cached", 0),
-                "fetched": parsed.get("fetched", 0),
-                "first_checked": transitions.get("first_checked", 0),
-                "dist": (parsed.get("dist") if isinstance(parsed.get("dist"), dict) else {}),
-                "changed": changed,
-                "changed_total": sum(v for v in changed.values() if isinstance(v, (int, float))),
-                "changed_items": changed_items,
-                "warnings": ([
-                    str(parsed["save_failures"]) + " 条结果没能写入管理库，列表状态不会更新"
-                ] if parsed.get("save_failures") else []) + ([
-                    str(parsed["hit_downgrades"]) + " 个源无法核对命中状态，暂按「命中」计"
-                ] if parsed.get("hit_downgrades") else []),
-            }
+        summary = _check_summary(parsed)
 
     detail = {
         "id": job.get("id", ""),
@@ -165,11 +263,54 @@ async def create_job(body: JobCreate):
     return {"job_id": job_id, "kind": body.kind, "events": "/api/jobs/%s/events" % job_id}
 
 
+#: 状态档位 → 库内状态。**只认档位名**：让前端传 `running` 这类原始字面量，
+#: 会让「进行中到底含不含 cancel_requested」在前后端各判一次，两边必然分叉。
+#: 「进行中」直接复用 store 的常量——它与列表默认窗口的 OR 分支必须是同一组值。
+_STATUS_SCOPES = {
+    "active": ACTIVE_JOB_STATUSES,
+    "done": ("done",),
+    "failed": ("failed",),
+    "cancelled": ("cancelled",),
+}
+
+#: 任务列表一次最多给多少条。**不暴露成查询参数**：列表要带结论摘要（服务端要解
+#: result_json），让 URL 决定一次解多少个大 JSON 没有意义；任务中心本来也不翻页。
+_LIST_LIMIT = 200
+
+#: 默认窗口 = 保留期。**必须是同一个数**：`JOBS_TTL_DAYS` 决定「过期即清」，
+#: 列表窗口决定「最近多少天算历史」；用两根轴会分叉成「列表里留着已经被清掉的」
+#: 或「刚跑完就没了的」。
+_RECENT_DAYS = JOBS_TTL_DAYS
+
+
 @router.get("")
-def list_jobs(st=Depends(get_store)):
-    # 历史任务列表（store.list_jobs 默认最近 50 条，按创建时间倒序）。
-    # 前端「任务」抽屉打开时拉一次，之后仍靠 SSE 订阅在跑的任务。
-    return st.list_jobs()
+def list_jobs(
+    scope: Literal["recent", "all"] = "recent",
+    status: Literal["", "active", "done", "failed", "cancelled"] = "",
+    kind: str = "",
+    st=Depends(get_store),
+):
+    """任务列表：筛选 + 每行结论摘要。
+
+    ``scope=recent``（默认）给「进行中 + 最近 ``JOBS_TTL_DAYS`` 天」——任务多起来以后
+    全部历史在首屏就是噪音；``scope=all`` 才是全量。筛选口径都在这里决定，前端只传档位名。
+
+    每行带 ``summary``（通过 / 未通过 / 检查数 / 相对上次变化），**不带 result_json**：
+    列表要能直接看出这次跑得好不好，而上百 KB 的结果不能进列表响应。
+    """
+    since = ""
+    if scope == "recent":
+        since = time.strftime(
+            "%Y-%m-%d %H:%M:%S",
+            time.localtime(time.time() - _RECENT_DAYS * 86400))
+    rows = st.list_jobs(
+        limit=_LIST_LIMIT,
+        statuses=_STATUS_SCOPES.get(status) or (),
+        kind=kind.strip(), recent_since=since)
+    return {"items": [_job_row(row) for row in rows], "limit": _LIST_LIMIT,
+            # 界面把窗口天数写进档位名（「进行中 + 最近 N 天」）：数字从这里走，
+            # 别在文案里再抄一份（JOBS_TTL_DAYS 改了标签跟着变）
+            "recent_days": (_RECENT_DAYS if scope == "recent" else 0)}
 
 
 @router.get("/lane")
@@ -198,10 +339,15 @@ def get_job_detail(job_id: str, st=Depends(get_store)):
 
 @router.get("/{job_id}")
 def get_job(job_id: str, st=Depends(get_store)):
-    job = st.get_job(job_id)
-    if not job:
+    """单条任务的**轻量**状态行（进度/阶段/结论摘要），不含 ``result_json``。
+
+    明细弹窗在任务运行期间每 2 秒拉一次这里——带上结果就是每 2 秒传上百 KB。
+    要看结果去 ``/{job_id}/detail``（用户主动点开才算一次，而且只拉一次）。
+    """
+    row = st.get_job_summary(job_id)
+    if not row:
         raise HTTPException(404, "任务不存在")
-    return job
+    return _job_row(row)
 
 
 @router.post("/{job_id}/retry", status_code=202)

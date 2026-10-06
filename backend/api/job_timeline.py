@@ -187,7 +187,11 @@ def job_timeline(job_id: str, after: int = 0, st: Store = Depends(get_store)):
     status = str(job.get("status") or "")
     done = status in _TERMINAL
     out: Dict[str, Any] = {
-        "job_id": job_id, "kind": kind, "status": status, "done": done,
+        "job_id": job_id, "kind": kind, "status": status,
+        "phase": str(job.get("phase") or ""),
+        "progress": job.get("progress") or 0,
+        "total": job.get("total") or 0,
+        "done": done,
         "cursor": max(int(after or 0), 0),
         "events": [],
         "failures": {"total": 0, "truncated": False, "items": []},
