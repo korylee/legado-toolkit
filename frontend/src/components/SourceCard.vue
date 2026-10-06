@@ -7,7 +7,7 @@
 // 它是**纯展示**：勾选、正在校验都由 props 进来，动作 emit 回去。卡片**不持有也不推断**
 // 勾选状态——手机上的勾选是跨页的显式 URL 列表（见 SourcesView 的 selected），
 // 所以它拿不到"这一行是不是选中"以外的任何信息。
-import { Refresh, EditPen, Delete } from "@element-plus/icons-vue";
+import { Refresh, EditPen, Delete, VideoPlay } from "@element-plus/icons-vue";
 import { engineLabel } from "../utils/health";
 import { depthClass, depthText, hasAnyTag, healthCell, tagCellsOf,
          typeLabel } from "../utils/sourceRow";
@@ -69,7 +69,9 @@ const toggle = () => emit("toggle", props.row);
       <!-- 编辑用笔，不用漏斗：漏斗是列表页那个「筛选」按钮的图标，
            同一个图标指两件事比换个图标糟得多 -->
       <el-button link :icon="EditPen" aria-label="编辑" @click.stop="emit('edit', row)" />
-      <el-button link aria-label="调试" @click.stop="emit('debug', row)">调试</el-button>
+      <el-tooltip content="调试" placement="left">
+        <el-button link :icon="VideoPlay" aria-label="调试" @click.stop="emit('debug', row)" />
+      </el-tooltip>
       <!-- 与表格操作栏同一组动作：卡片是移动端的等价物，少一个就会
            「手机上没有删除入口、只能先勾选再走批量条」 -->
       <el-button link type="danger" :icon="Delete" aria-label="移入回收站"

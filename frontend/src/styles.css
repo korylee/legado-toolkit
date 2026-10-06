@@ -117,6 +117,15 @@ body {
 .dot.unknown { background: var(--app-status-unknown); }
 .el-table .cell { word-break: break-all; }
 
+/* 语法速查浮层的内容容器：编辑弹窗与调试工作台**两处共用**该 class。
+   el-popover 的内容 teleport 到 body，组件里的 scoped 规则够不到它（AGENTS #15），
+   所以这条只能放全局。清单条目数量不定，必须自己滚，否则浮层会超出视口。 */
+.syntax-popover-body {
+  max-height: min(60vh, 480px);
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
 /* ================= 移动端（<=900px） ================= */
 @media (max-width: 900px) {
   .app-header { padding: 0 12px; gap: 8px; flex-basis: 48px; flex-grow: 0; }

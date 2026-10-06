@@ -1,14 +1,17 @@
 <script setup>
-import { ref, onMounted } from "vue";
+import { ref, onMounted, provide } from "vue";
 import { Setting } from "@element-plus/icons-vue";
 import { api } from "../api/client";
 import SettingsDrawer from "../components/SettingsDrawer.vue";
+import SourcesView from "../views/SourcesView.vue";
+import SourceWorkspaceDrawer from "../components/SourceWorkspaceDrawer.vue";
+import { createSourceWorkspace, SOURCE_WORKSPACE_KEY } from "../composables/useSourceWorkspace";
 
-// 「任务」「诊断」两个页面已并入书源页，导航只剩一项、侧栏与底部 Tab 都撤掉了。
-// header 保留设置入口和后端连通性提示；源数/校验数改由书源页的统计条自己拉，
-// 这里不再重复请求。
+// 「任务」「诊断」两个页面已并入书源页；应用保持单页面，调试通过覆盖层打开。
 const online = ref(true);
 const settingsVisible = ref(false);
+const workspace = createSourceWorkspace();
+provide(SOURCE_WORKSPACE_KEY, workspace);
 
 async function checkBackend() {
   try {
@@ -33,10 +36,11 @@ onMounted(checkBackend);
 
     <div class="app-body">
       <main class="app-main">
-        <router-view />
+        <SourcesView />
       </main>
     </div>
 
     <SettingsDrawer v-model="settingsVisible" />
+    <SourceWorkspaceDrawer />
   </div>
 </template>
