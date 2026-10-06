@@ -1,20 +1,16 @@
-// JVM 校验深度的文案与代价。**耗时是实测值不是估算**（lessons §四十七：性能结论必须实测）：
-// 搜索档全量 3774 条 17 分钟；目录/正文段每源多
+// JVM 校验深度的**选项文案**（下拉里那三行字）。实测资料留在这里当依据
+// （lessons §四十七：性能结论必须实测）：搜索档全量 3774 条 17 分钟；目录/正文段每源多
 // 2-4 个请求，实测 100 条抽样里正文段中位耗时 1.5s/源（p90 5.3s），且慢站会撞 App 自己的
 // 60s 读超时。
 //
-// **只有一处用它**（书源列表的校验弹框 → `CheckJvmForm.vue`，设置页没有挡位控件），
-// 但仍只留一份：文案与代价是**同一份口径**，将来加第二个入口不该顺手抄一遍（AGENTS #10）。
+// **耗时数字不进界面**：同一份代码换一批源、换台机器就不成立，而且「目录多几个请求」
+// 那句在「这一批要等多久」上没有可操作性——标签已经把「最快 / 最准」的权衡说完了。
+// 只有书源列表的校验弹框用这份（`CheckJvmForm.vue`）；将来加第二个入口也不该顺手抄一遍
+// （AGENTS #10）。
 const DEPTH_TEXT = {
-  search: { label: "搜索档（最快）", cost: "全量约 17 分钟（9-30 实测）" },
-  toc: { label: "搜索 + 目录", cost: "每源多 2 个请求，全量预计 30 分钟以上" },
-  content: { label: "搜索 + 目录 + 正文（最准）", cost: "每源再多 1 个请求，全量预计 1 小时以上" },
-};
-
-const DEPTH_HINT = {
-  search: "只看「搜得到吗」：最快，但验证不出目录/正文是否可用",
-  toc: "多验一层目录页能不能解析出章节（对「目录在独立页上」的源最有价值）",
-  content: "再抓一章正文——最接近「这本书我能读吗」，也最慢",
+  search: { label: "搜索档（最快）" },
+  toc: { label: "搜索 + 目录" },
+  content: { label: "搜索 + 目录 + 正文（最准）" },
 };
 
 /** 选项来自后端下发的枚举；后端没给（旧版）时退回三档默认文案，保证界面不空
@@ -22,16 +18,4 @@ const DEPTH_HINT = {
 export function depthOptions(limits) {
   const vals = (limits && limits.jvm_depth) || Object.keys(DEPTH_TEXT);
   return vals.map((v) => ({ value: v, label: (DEPTH_TEXT[v] || {}).label || v }));
-}
-
-export function depthLabel(value) {
-  return (DEPTH_TEXT[value] || {}).label || value;
-}
-
-export function depthHintText(value) {
-  return DEPTH_HINT[value] || "";
-}
-
-export function depthCost(value) {
-  return (DEPTH_TEXT[value] || {}).cost || "全量跑批";
 }

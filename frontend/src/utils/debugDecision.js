@@ -139,6 +139,18 @@ function aiView(plan) {
   };
 }
 
+function coreValueView(step) {
+  const values = Array.isArray(step.values) ? step.values : [];
+  const shown = values.map((value) => String(value == null ? "" : value).trim())
+    .filter(Boolean).slice(0, 2).map((value) => (
+      value.length > 180 ? value.slice(0, 180) + "…" : value
+    ));
+  return {
+    values: shown,
+    hint: shown.length ? "" : "本次通道未返回核心值",
+  };
+}
+
 /**
  * 组装首屏视图模型。
  *
@@ -152,6 +164,7 @@ export function buildDecision(input = {}) {
     quality = null, channel = "", page = null, replay = null, stale = false,
   } = input;
   const summary = buildStepSummary({ channel, step, page, replay, layer, quality, stale });
+  const coreValue = coreValueView(step);
   const layerKey = String((layer && layer.layer) || "");
   const notes = Array.isArray(step.notes) ? step.notes : [];
   const replayValues = (replay && replay.values) || [];
@@ -172,6 +185,8 @@ export function buildDecision(input = {}) {
   const gaps = (plan && plan.deferred_gaps) || [];
   return {
     want,
+    core_values: coreValue.values,
+    core_value_hint: coreValue.hint,
     layer: {
       key: layerKey,
       name: (layer && layer.info && layer.info.name) || "",

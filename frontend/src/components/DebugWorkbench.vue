@@ -1,6 +1,6 @@
-<!-- 调试工作台本体（第三期自 RuleDebugDrawer 抽出）：判定/诊断/证据/规则编辑。
+<!-- 调试工作台本体：判定/诊断/证据/规则编辑。
      运行态读 useDebugSession；编辑上下文（源/规则/类型）走 props——弹框与工作台
-     页面都挂它。旧壳 RuleDebugDrawer 只是 el-drawer 薄包装。 -->
+     页面都挂它。 -->
 <script setup>
 // 调试抽屉：把每一步的证据摊开。
 // 三个子页签：提取结果（全文）/ 命中源码 / 整页源码。
@@ -24,8 +24,9 @@ import { ElMessage } from "element-plus";
 
 import { agentPlan, replayStep, ruleCandidates, suggestRule, verifyCandidate } from "../api/rules";
 import { getLLMStatus } from "../api/llm";
-// 步骤名 → 中文的**唯一**一份（编辑弹窗共用），别再在本组件里写第二份
-import { FIELD_OF_STEP, STEP_LABELS } from "../utils/steps";
+// 步骤名 → 中文的**唯一**一份（编辑视图共用），别再在本组件里写第二份。
+// RULE_FIELD_DEFS 是规则字段的唯一词表（内联编辑框的标签/占位符也从它取）
+import { FIELD_OF_STEP, STEP_LABELS, RULE_FIELD_DEFS } from "../utils/steps";
 import { useDebugSession } from "../composables/useDebugSession";
 import { compareRuns, statusLabel } from "../utils/debugCompare";
 // 第 1 层「在页面上找目标」：候选规则由后端 core/candidates 在补抓的原文上算出来
@@ -44,6 +45,9 @@ import { assessRuleQuality } from "../utils/ruleQuality";
 import { candidateView } from "../utils/debugCandidate";
 import DebugCandidateCard from "./DebugCandidateCard.vue";
 import StepDecision from "./StepDecision.vue";
+// 语法速查清单（唯一一份，编辑弹框右列共用）：外壳各宿主自备
+import GrammarList from "./GrammarList.vue";
+import DebugTimeline from "./DebugTimeline.vue";
 
 const props = defineProps({
   initialStep: { type: String, default: "" },
@@ -60,15 +64,16 @@ const props = defineProps({
 });
 
 // 结果、在途、对比基线直接读**会话**（第二期收尾）：本组件不再经 props 接收
-// 运行态——弹框与工作台页面挂它，看到的是同一份
-const { result, compare, running, channel: debugChannel } = useDebugSession();
+// 运行态——弹框与工作台页面挂它，看到的是同一份。运行中的等待/预算/取消
+// 显示在下面那条 sticky 运行条里（唯一一份，入口卡不另设）
+const { result, compare, running, elapsed, budget, channel: debugChannel, cancelRun } = useDebugSession();
 const rerunning = running;
 const prevResult = computed(() => compare.value.prev);
 const emit = defineEmits(["update:modelValue", "goto", "rerunFrom", "applyRule"]);
 
 //: 规则四段与源类型都从 **source 自己**派生，宿主只传 source 一份（AGENTS #13：
-//: 算得出的不传）——历史上它们是两个独立 props，靠宿主记得传齐；工作台路由那次
-//: 迁移 `enabledCookieJar` 就漏传过。再要加派生输入，从这里出，别加 props。
+//: 算得出的不传）——历史上它们是两个独立 props，靠宿主记得传齐；现在由覆盖层
+//: 统一传 source。再要加派生输入，从这里出，别加 props。
 const sourceType = computed(() => Number((props.source || {}).bookSourceType) || 0);
 const rules = computed(() => {
   const s = props.source || {};
@@ -168,11 +173,6 @@ watch([result, activeStep], () => {
 const replaying = ref(false);
 const replayResult = ref(null);
 
-//: 失败步骤 → 该去哪个规则子页签改。搜索与详情链接都在「搜索」页签里
-//: （ruleSearch.bookList / bookUrl 是同一个表单的两项）
-const STEP_RULE_TAB = {
-  search: "search", bookUrl: "search", toc: "toc", content: "content",
-};
 const current = computed(
   () => steps.value.find((s) => s.name === activeStep.value) || steps.value[0] || null,
 );
@@ -305,17 +305,35 @@ function selectStep(name) {
   candidateVerifying.value = "";
 }
 
-//: 当前步骤的规则：**只读镜像**源表单里那一份（可编辑的值在父组件手里）。
-//: 「网页视图」的命中高亮与规则质量诊断都读它，所以它必须跟着表单即时变。
+//: 当前步骤的规则：**只读镜像**源草稿里那一份（可写入口在下面的内联编辑框，
+//: 经 applyRule 事件由宿主写回 workspace）。「网页视图」的命中高亮与规则质量
+//: 诊断都读它，所以它必须跟着草稿即时变。
 const currentRule = computed(() => {
   const name = (current.value || {}).name || "";
   return String((rules.value || {})[name] || "");
 });
+
+//: 内联规则编辑（决策卡正下方）：当前步骤对应的**唯一**规则字段，def 从
+//: RULE_FIELD_DEFS 取（标签/占位符同源）；explore 没有单字段对应，不渲染。
+//: 每次输入：标过期（这一步的旧结论不再作数）+ emit 给宿主写草稿——
+//: 「网页视图」的命中预览与规则质量读 currentRule，跟着即时重画
+const inlineDef = computed(
+  () =>
+    RULE_FIELD_DEFS.find(
+      (d) => d.step === ((current.value || {}).name || ""),
+    ) || null,
+);
+
+function onInlineRuleInput(value) {
+  const name = (current.value || {}).name || "";
+  markStepStale(name);
+  emit("applyRule", { field: (inlineDef.value || {}).field, rule: value });
+}
 //: 重放要同时满足：这一步对应一个页面的 HTML、这一步有规则可回放、
 //: 且这一步确实是一条规则步骤（explore 的规则结构不同，不给重放）
 const canReplay = computed(
   () => !!currentPage.value && !!currentRule.value
-    && !!STEP_RULE_TAB[(current.value || {}).name],
+    && !!FIELD_OF_STEP[(current.value || {}).name],
 );
 
 //: 「命中源码」要显示的那段 DOM。**两个来源，标签必须分清**：
@@ -959,10 +977,11 @@ async function doReplay() {
   }
 }
 
-// 从失败步骤直接送到对应的规则页签，省掉自己翻页签找字段
+// 从失败步骤直接送到「源设置」抽屉里对应的规则字段（字段路径是 FIELD_OF_STEP
+// 那份唯一词表；宿主按它开抽屉并滚动定位）
 function gotoRuleField(step) {
-  const ruleTab = STEP_RULE_TAB[(step || {}).name];
-  emit("goto", ruleTab ? { tab: "rules", ruleTab } : { tab: "basic" });
+  const field = FIELD_OF_STEP[(step || {}).name];
+  emit("goto", field ? { tab: "rules", field } : { tab: "basic" });
 }
 
 function focusRunEntry() {
@@ -1026,6 +1045,13 @@ function copyPage() {
 
 <template>
   <div class="debug-workbench">
+    <!-- 运行态的**固定显示**（ux-debug-reading）：等待/预算/取消收在这条 sticky 条里，
+         滚到证据区仍找得到；结束后整个消失，不占版面 -->
+    <div v-if="running" class="debug-runchip">
+      <span class="debug-runchip-text">已等待 {{ elapsed }} 秒<template v-if="budget"> / 预算 {{ budget }} 秒</template></span>
+      <el-button size="small" @click="cancelRun">取消等待</el-button>
+    </div>
+
     <!-- 来源必须写在标题旁：App 实测与本机引擎视觉完全一样，不标就分不清
          手里这份结果是在哪儿跑出来的 -->
     <div>
@@ -1042,8 +1068,10 @@ function copyPage() {
         重新调试搜索
       </el-button>
     </el-alert>
-    <el-alert v-if="result && result.error" type="error" :closable="false" show-icon
-              style="margin-bottom: 10px" :title="String(result.error)" />
+    <!-- 取消等待不是失败（cancelled 标记）：按提示色渲染，别把用户的主动操作画成红色错误 -->
+    <el-alert v-if="result && result.error" :type="result.cancelled ? 'warning' : 'error'"
+              :closable="false" show-icon style="margin-bottom: 10px"
+              :title="String(result.error)" />
     <el-empty v-if="!steps.length" description="没有调试结果；可先检查上面的原因或重新调试" :image-size="80" />
 
     <template v-else>
@@ -1082,6 +1110,18 @@ function copyPage() {
                       @fix="onDecisionFix" @probe="onDecisionProbe" @ai="askAI"
                       @rerun="emit('rerunFrom', (current || {}).name)"
                       @goto-basic="onDecisionGotoBasic" />
+      </div>
+
+      <!-- 本步规则（内联编辑，批次二）：改一个字符即入草稿——「网页视图」的命中
+           预览与规则质量跟着即时重算，本步的旧结论即时标过期；**验收仍走
+           「重新调试本步」的真引擎**，这里不提供第二种判定。候选「用这条」
+           写的就是同一个字段。explore 没有单字段对应，不渲染 -->
+      <div v-if="inlineDef" class="inline-rule" :data-rule-field="inlineDef.field">
+        <div class="inline-rule-label">{{ inlineDef.label }}</div>
+        <el-input :model-value="currentRule" type="textarea"
+                  :autosize="{ minRows: 2, maxRows: 8 }"
+                  :placeholder="inlineDef.placeholder"
+                  @update:model-value="onInlineRuleInput" />
       </div>
 
       <!-- 第 1 层：**在页面上找目标**。候选取自我们补抓的那份 HTML（纯前端算，
@@ -1181,7 +1221,7 @@ function copyPage() {
              在 App 结果下没有意义。只有本地回放的 values 才是真正取到的值 -->
         <el-tab-pane v-if="events.length" name="events">
           <template #label>调试事件 ({{ events.length }})</template>
-          <div v-for="(e, i) in events" :key="i" class="debug-event">{{ e.text }}</div>
+          <DebugTimeline :events="events" />
         </el-tab-pane>
 
         <el-tab-pane v-if="!isEngineResult" label="提取结果" name="values">
@@ -1241,6 +1281,14 @@ function copyPage() {
             <el-tag size="small" type="warning">{{ layer.info.name }}</el-tag>
             <span style="margin-left: 6px">这一页的 HTML 是补抓的：{{ layer.info.action }}。</span>
           </p>
+          <!-- 语法速查：写成按钮 + 浮层。它原来是一个裸 details，挂在这块取证面板的
+               最底部——面板本身已经很长，它在可视区外，等于没有。浮层内容自己滚 -->
+          <el-popover placement="bottom-end" :width="360" trigger="click">
+            <template #reference>
+              <el-button size="small" plain>语法速查</el-button>
+            </template>
+            <div class="syntax-popover-body"><GrammarList /></div>
+          </el-popover>
           <iframe ref="frameRef" class="pick-frame" :srcdoc="frameHtml"
                   sandbox="allow-same-origin" @load="onFrameLoad" />
           <p v-if="rulePreview" class="muted" style="margin: 6px 0 0">
@@ -1392,6 +1440,20 @@ function copyPage() {
   border: 1px solid var(--debug-candidate-border);
   border-radius: var(--app-radius-sm);
 }
+/* 内联规则框：编辑面用中性灰（它是「正在改的东西」，不是证据材料——
+   候选=确定性扫描、AI=模型提议的配色区分照旧） */
+.inline-rule {
+  margin: 0 0 var(--app-space-2);
+  padding: var(--app-space-2) 10px;
+  background: var(--debug-surface-muted);
+  border: 1px solid var(--app-border-light);
+  border-radius: var(--app-radius-sm);
+}
+.inline-rule-label {
+  margin-bottom: 4px;
+  color: var(--app-text-secondary);
+  font-size: 12px;
+}
 /* AI 那块与「在页面上找目标」同构，但底色分得开：一个是确定性扫描，
    一个是模型提议（而且**验不了的会出现在这里**） */
 .ai-block {
@@ -1404,6 +1466,18 @@ function copyPage() {
 .ai-err { margin: 6px 0 0; color: #b88230; }
 .cand-head { margin-bottom: 4px; }
 .cand-head-hint { margin-left: 4px; }
+/* 运行态条：sticky 是它存在的意义——滚到证据区仍找得到等待/预算/取消。
+   本组件不经 teleport 挂在页面流里，scoped 写在这里生效（对比 #15 的弹窗情形） */
+.debug-runchip {
+  position: sticky; top: 0; z-index: 20;
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 12px; margin-bottom: 10px;
+  background: var(--app-surface);
+  border: 1px solid var(--el-color-primary-light-5, #a0cfff);
+  border-radius: var(--app-radius-md);
+  box-shadow: 0 2px 6px rgb(0 0 0 / 8%);
+}
+.debug-runchip-text { flex: 1 1 auto; min-width: 0; font-size: 13px; color: var(--app-text); }
 .val-open { margin-left: 6px; font-size: 12px; }
 .debug-workspace { display: flex; gap: 14px; align-items: flex-start; }
 .debug-step-panel {

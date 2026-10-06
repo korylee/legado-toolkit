@@ -19,7 +19,7 @@
 ## 0 · 现在做
 
 > 当前排期：引擎与调试执行链的基础设施已完成；后续调试体验以“入口降噪 → 工作台闭环 → 证据前置 → 编辑能力合入 → DOM 意图化生成”为主线。worker 的 lane、分块恢复、daemon 复用与冷启动批前准备、任务详情的块级证据与执行时间线均已交付（lessons §六十五 / §六十六）。
-> P0 的 unknown 出口与可执行提示已交付，当前前端待办集中在新调试页的视觉层级、编辑闭环和证据可信度。
+> P0 的 unknown 出口与可执行提示已交付，当前前端待办集中在新调试页的视觉层级、编辑闭环和证据可信度；本机引擎的启动耗时观测与重复准备优化尚未完成。
 
 ---
 
@@ -27,7 +27,7 @@
 
 ### 条目：jvm-request-coalesce · 合并重复的进行中请求
 状态：blocked
-依赖：无
+依赖：jvm-coalesce-measurement
 优先级：P2
 背景：同一源、同一规则快照和同一 JVM 参数可能由调试抽屉、生成后验证和批量入口重复提交；单纯排队只能延后重复工作，不能减少请求和站点压力。但它不是当前“重启后单条校验慢”的根因，必须等 worker 和分块边界稳定、且有重复提交数据后再决定是否实现。
 约束：合并键必须包含归一化 URL、规则/源快照、阶段、验证深度、搜索词及本次运行参数；不能只按 URL 合并。只合并仍在运行或可复用的同口径任务，每个调用方仍有自己的 job 观察关系；取消一个观察者不能取消共享执行，除非没有观察者且明确执行取消。
@@ -35,6 +35,28 @@
 阻塞于：先统计重复提交率；没有数据证明收益前不实现。
 指针：backend/jobs/runner.py，backend/api/jvm.py，core/jvm_debug.py，AGENTS.md #5b，lessons §五十三 / §七十八
 
+### 条目：jvm-startup-latency · 本机引擎启动耗时与重复准备优化
+状态：todo
+依赖：无
+优先级：P1
+背景：本机引擎首次响应前可能经历 readiness、JVM lane 排队、daemon 准备、daemon 请求或 Gradle 回退；当前已有 daemon 复用和批前准备，但缺少分段耗时证据，无法确认“每次启动慢”究竟卡在哪一段。
+约束：先记录 readiness、排队、daemon prepare、daemon request、Gradle fallback 的耗时与执行模式，再改策略；daemon 忙时不能杀正在执行的进程，也不能把忙/不确定静默当成源失败；readiness 与 Kotlin source signature 的缓存必须有源码、classpath、Java、SDK、runtime snapshot 等失效条件，不能只按 TTL 复用旧环境；启动阶段文案必须来自真实执行路径。
+子项：
+- jvm-startup-measure · 启动阶段分段测量
+- jvm-daemon-busy-policy · daemon 忙时短等待或回退的策略评估
+- jvm-readiness-cache · readiness 与 source signature 重复扫描优化
+- jvm-daemon-warmup · 受控 daemon warm-up
+验收：时间线或任务详情能区分各启动阶段及执行模式；daemon 热复用时不重复做不必要的完整准备；daemon 忙时按明确策略等待或回退并显示原因；源码或运行环境变化后不会复用旧 daemon；冷启动、热复用、忙回退三类场景均有测试与一次真实耗时对比。
+指针：backend/api/jvm.py，backend/jobs/runner.py，backend/jobs/jvm_exec.py，core/jvm_env.py，core/jvm_daemon.py，core/jvm_validate_daemon.py，lessons §六十五 / §六十六
+
+### 条目：jvm-coalesce-measurement · 校验重复执行收益评估
+状态：todo
+依赖：无
+优先级：P2
+背景：任务级完全重复请求与同站同指纹源级共享探测都可能减少 JVM 执行，但目前没有真实重复率和可减少请求数的统计，先统一完成收益评估，避免两条计划各做一套重复统计。
+约束：分别统计完全相同请求与同站同指纹组；键必须包含归一化 URL、规则/源快照、阶段、验证深度、搜索词及运行参数；统计只读，不改变现有执行与结论；没有数据证明收益前不实现复用。
+验收：给出两类重复的数量、占比、可减少的 JVM/站点请求数和样本口径；据此分别决定是否实施 `jvm-request-coalesce` 与 `batch-fingerprint-coalesce`。
+指针：backend/api/jvm.py，core/dups.py，backend/jobs/runner.py，lessons §五十三 / §七十八
 ### 条目：proj-3-drop · 前端摘掉本地投影
 状态：todo
 依赖：proj-3-bookurl, proj-3-attr
@@ -43,10 +65,10 @@
   「引擎没覆盖的段」的退路；摘之前先定详情段（proj-3-bookurl）与末段属性名
   （proj-3-attr）两处，否则那两段的「命中源码」会空掉。
 约束：等那两条拍板落地才动手；「每种空值有可执行的一句话」前置已落地。
-  摘的位置与依据在 `frontend/src/components/RuleDebugDrawer.vue` 的
+  摘的位置与依据在 `frontend/src/components/DebugWorkbench.vue` 的
   `matchedFrom` / `matchedHint` 旁。
 验收：摘掉后抽屉里每个段的「命中源码」仍能取到值，或明确显示「本段取不到」。
-指针：lessons §七十三 / §七十五，frontend/src/components/RuleDebugDrawer.vue
+指针：lessons §七十三 / §七十五，frontend/src/components/DebugWorkbench.vue
 
 ## 2 · 按需
 
@@ -127,6 +149,23 @@
 验收：点变化数后列表筛到对应子集，且 chip 状态同步。
 指针：frontend/src/views/SourcesView.vue
 
+### 条目：job-detail-poll-consolidate · 合并任务详情与时间线轮询
+状态：todo
+依赖：无
+优先级：P2
+背景：任务详情弹窗同时轮询任务状态、详情和执行时间线；这不改变 JVM 实际启动时间，但会增加弹窗打开时的请求、SQLite 读取和前端刷新竞争。
+约束：不能复制任务状态判据；终态后必须停止所有轮询；时间线增量游标和结果详情的静态字段要保持现有语义；接口失败仍需保留具体原因。
+验收：进行中任务打开详情时，状态/详情/时间线不再为同一任务重复建立独立轮询；进度、时间线增量、终态结果和取消行为与现有测试一致。
+指针：frontend/src/components/TaskDetailDialog.vue，frontend/src/components/JobTimeline.vue，backend/api/jobs.py，backend/api/job_timeline.py
+
+### 条目：timeline-scan-incremental · 时间线失败源改为增量消费
+状态：todo
+依赖：无
+优先级：P2
+背景：时间线轮询每次都重新扫描各块 `results.jsonl` 统计失败源；批量结果越大，弹窗轮询成本越高。失败源当前来自结果快照，不应伪装成逐源实时引擎事件。
+约束：执行线程追加的骨架事件仍按游标消费；失败源计数必须精确，截断清单不能改变总数；终态仍以 `result_json` 为唯一事实；不能把文件尚未写完整的行判成源失败。
+验收：运行中不再每轮从头扫描全部结果文件；大批量时间线轮询的读取量随新增数据增长而非随全量结果重复增长；失败总数、截断提示和终态清单与现有口径一致。
+指针：backend/api/job_timeline.py，backend/jobs/jvm_exec.py，tests/test_job_timeline.py，lessons §二 / §二十八
 ### 条目：ux-timeline · 校验历史时间线
 状态：todo
 依赖：无
@@ -201,7 +240,7 @@
 
 ### 条目：batch-fingerprint-coalesce · 批量校验按同站同指纹复用探测
 状态：blocked
-依赖：无
+依赖：jvm-coalesce-measurement
 优先级：P2
 背景：同站且行为指纹全等的转发源可共享一次探测，但现有批量按源逐条执行；共享结论必须能追溯来源，不能把一次失败静默扩散到整组。
 约束：先量同站同指纹组在实际批量中的占比，证明收益后再实现；仅组内指纹全等时复用，跨站同名不合并；每条结论标明共享来源，不复用旧批次结果；实现时开关纳入 settings_store，默认值与限幅只定义一处；与 `jvm-request-coalesce` 的完全重复请求统计分开评估。
@@ -241,12 +280,12 @@
 
 
 ### 条目：ux-debug-reading · 调试高级信息与响应式阅读体验
-状态：todo
+状态：doing
 依赖：无
 优先级：P1
 背景：运行态、事件流、整页源码、语法速查和详细 AI 信息对熟悉用户有用，但不应挤走首次调试所需的结论和动作。
-约束：默认层只展示结论、原因、主动作、核心值和证据来源；高级材料可展开；**「哪一个是 gap、谁是主动作」的口径见 AGENTS #24，本条只管呈现**；运行态继续消费 `useDebugSession`，固定显示等待、预算和取消状态；移动端保持当前步骤、结论和主动作在首屏；不复制运行态或结果状态。
-验收：滚动到证据区仍能找到运行态；取消等待与后端任务状态文案明确；展开高级信息后原有材料仍可用；窄屏下步骤、结论、来源和主动作可触摸访问且无横向页面溢出。
+约束：默认层只展示结论、原因、主动作、核心值和证据来源；高级材料可展开；**「哪一个是 gap、谁是主动作」的口径见 AGENTS #24，本条只管呈现**；运行态继续消费 `useDebugSession`，固定显示等待、预算和取消状态；移动端保持当前步骤、结论、核心值和主动作在首屏；不复制运行态或结果状态。
+验收：滚动到证据区仍能找到运行态；取消等待与后端任务状态文案明确；默认层能看到当前步骤的核心值（无权威值时明确说明未返回）；展开高级信息后原有材料仍可用；窄屏下步骤、结论、核心值、来源和主动作可触摸访问且无横向页面溢出。
 指针：frontend/src/components/DebugWorkbench.vue，frontend/src/views/DebugWorkbenchView.vue，frontend/src/composables/useDebugSession.js
 
 
@@ -373,18 +412,6 @@
 约束：判据照 `core/checker.is_login_wall` 那套，**别新造**。
 验收：这类源不再被判成 no_result，而是有一个「需人工过一下」的状态。
 指针：lessons §五十八，core/checker.py
-
-### 条目：jvm-keys · `jvm.*` 五个跑批键今天没有写入口
-状态：todo
-依赖：无
-优先级：P2
-背景：弹框只读它们当种子、设置页没有控件，想改永久默认值只能手改 JSON。
-约束：两种收法——**删键**（弹框种子用 `LIMITS` / 常量兜底，行为不变）或给设置页一个
-  显式的「跑批默认值」区。动它要一起改 `DEFAULTS` / `_SPECS` / `JvmSettingsPatch`
-  / `tests/test_settings_api.py`。
-验收：选定一种收法并落地，设置接口与默认值的唯一来源仍在 `core/settings_store.py`
-  （AGENTS #8）。
-指针：AGENTS.md #8，core/settings_store.py，tests/test_settings_api.py
 
 ### 条目：research-type · 调研一：类型判定补齐
 状态：blocked

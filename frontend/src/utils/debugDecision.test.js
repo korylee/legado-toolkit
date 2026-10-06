@@ -137,11 +137,27 @@ test("喂给 AI 的现状与首屏同一份（含其余缺口）", () => {
   assert.equal(lines.length, 3);
   assert.match(lines[0], /没配「正文图片\/音频」规则/);
 });
-
 test("取证按钮只有 app / jvm 两种，别的种类不渲染", () => {
   assert.equal(probeView({ kind: "app" }).kind, "app");
   assert.equal(probeView({ kind: "jvm" }).kind, "jvm");
   assert.match(probeView({ kind: "jvm" }).label, /取材料/);
   assert.equal(probeView({ kind: "nope" }), null);
   assert.equal(probeView(null), null);
+});
+
+test("默认决策卡带出当前步骤核心值，并截断过长值", () => {
+  const d = buildDecision({
+    step: { name: "content", verdict: "pass", values: ["正文首段" + "x".repeat(200), "第二条"] },
+    layer: L1,
+  });
+  assert.equal(d.core_values.length, 2);
+  assert.equal(d.core_values[0].length, 181);
+  assert.equal(d.core_values[0].endsWith("…"), true);
+  assert.equal(d.core_value_hint, "");
+});
+
+test("没有权威核心值时明确提示未返回", () => {
+  const d = buildDecision({ step: { name: "content", verdict: "unknown", values: [] }, layer: L1 });
+  assert.deepEqual(d.core_values, []);
+  assert.equal(d.core_value_hint, "本次通道未返回核心值");
 });

@@ -9,7 +9,8 @@
 // 步骤）留给调用方——那是「这次会话」的事，不是「这次运行」的事。
 //
 // `AbortController` 只断**前端的等**：后端 lane 那一次仍会跑完（lane/锁的设计），
-// 所以按钮叫「取消等待」不叫「取消」——名实相符比客气重要。
+// 所以按钮叫「取消等待」不叫「取消」——名实相符比客气重要。lane 是串行的
+// （JVM 与批量校验共用一条），取消后马上重新调试要排队等它让出来，文案必须说到这层。
 import { ref, computed, watch } from "vue";
 import { ElMessageBox } from "element-plus";
 import { jvmDebug, appDebug, appPreflight } from "../api/rules";
@@ -42,52 +43,15 @@ export const STEP_TARGETS = { explore: "explore", bookUrl: "info", toc: "toc", c
 // ---------------------------------------------------------------- 结果与对比
 
 const result = ref(null);
+const resultRevision = ref(null);
+let activeResultRevision = null;
 const compare = ref({ prev: null, history: [] });
 // 新结果到来时滚动对比基线；错误体不覆盖基线（判据在 utils/debugCompare，有测试）
 watch(result, (cur, old) => {
   compare.value = nextCompareState(compare.value, old, cur);
 });
 
-// 会话源（工作台的编辑载体）：列表页经 getDetail 填充、编辑弹框在跳工作台前
-// 填**表单快照**（深拷贝——工作台里的规则编辑不穿透弹框）。不落库，保存走
-// 各自的 saveSource
-const source = ref(null);
-const savedSourceSnapshot = ref("");
-const sourceDirty = computed(() => {
-  if (!source.value || !savedSourceSnapshot.value) return false;
-  return JSON.stringify(source.value) !== savedSourceSnapshot.value;
-});
-
-function markSourceSaved() {
-  savedSourceSnapshot.value = source.value ? JSON.stringify(source.value) : "";
-}
-
-function setSource(s, options = {}) {
-  source.value = s ? JSON.parse(JSON.stringify(s)) : null;
-  if (options.saved !== false) markSourceSaved();
-  const prefs = readDebugPreferences((source.value || {}).bookSourceUrl);
-  if (!prefs) return;
-  if (prefs.target) target.value = prefs.target;
-  if (prefs.query !== undefined) query.value = prefs.query;
-  if (prefs.channel) channel.value = prefs.channel;
-  if (prefs.cacheMode) cacheMode.value = prefs.cacheMode;
-}
-
-function updateSourceField(field, value) {
-  const parts = String(field || "").split(".");
-  if (parts.length === 1) {
-    if (parts[0] !== "bookSourceUrl" || !source.value) return false;
-    source.value.bookSourceUrl = value;
-    clearPreflight();
-    return true;
-  }
-  if (parts.length !== 2) return false;
-  const [group, key] = parts;
-  if (!source.value?.[group]) return false;
-  source.value[group][key] = value;
-  invalidatePreflight();
-  return true;
-}
+// 源草稿由 SourceWorkspace 管理；session 只保存运行参数和结果。
 
 // ---------------------------------------------------------------- 运行在途
 
@@ -96,17 +60,13 @@ const elapsed = ref(0);
 let ticker = 0;
 let abort = null;
 let runPending = null;
-const CANCEL_WAIT_NOTE = "已取消等待；后端那一次调试仍会跑完，只是不再等它";
+const CANCEL_WAIT_NOTE = "已取消等待；后端那一次仍会跑完，期间重新调试需要排队";
 
 function errorMessage(e) {
   if (e && e.message) return String(e.message);
   if (e && e.detail) return String(e.detail);
   if (e && e.error) return String(e.error);
   return String(e || "未知错误");
-}
-
-function abortNote(e) {
-  return e && e.name === "AbortError" ? CANCEL_WAIT_NOTE : errorMessage(e);
 }
 
 function cancelRun() {
@@ -137,10 +97,21 @@ const target = ref("search");
 const query = ref("");
 const cacheMode = ref("auto");
 
-watch([source, target, query, channel, cacheMode], () => {
-  const url = (source.value || {}).bookSourceUrl;
-  if (!url) return;
-  writeDebugPreferences(url, {
+const activeSourceUrl = ref("");
+
+function setActiveSourceUrl(url) {
+  activeSourceUrl.value = String(url || "");
+  const prefs = readDebugPreferences(activeSourceUrl.value);
+  if (!prefs) return;
+  if (prefs.target) target.value = prefs.target;
+  if (prefs.query !== undefined) query.value = prefs.query;
+  if (prefs.channel) channel.value = prefs.channel;
+  if (prefs.cacheMode) cacheMode.value = prefs.cacheMode;
+}
+
+watch([target, query, channel, cacheMode], () => {
+  if (!activeSourceUrl.value) return;
+  writeDebugPreferences(activeSourceUrl.value, {
     target: target.value,
     query: query.value,
     channel: channel.value,
@@ -314,17 +285,21 @@ watch(host, (value, oldValue) => {
 
 // 结果落位只在这里统一：保留后端错误体里的 detail / 原始字段，不能把用户可见原因
 // 削成只有一行 error；null 也要给出明确原因，不能让界面伪装成「尚未调试」。
-function storeResult(value) {
+function storeResult(value, revision = null) {
   result.value = value == null ? { error: "调试没有返回结果" } : value;
+  resultRevision.value = revision == null ? activeResultRevision : revision;
   return result.value;
 }
 
-function setResult(value) {
-  return storeResult(value);
+function setResult(value, revision = null) {
+  // 生成链路塞进来的首屏证据对应刚 commit 的那版草稿：不显式给 revision 会拿
+  // 到上一次运行的旧版次，调试页立刻误报「规则已修改」
+  return storeResult(value, revision);
 }
 
 function clearResult() {
   result.value = null;
+  resultRevision.value = null;
   compare.value = { prev: null, history: [] };
 }
 
@@ -366,12 +341,13 @@ function resetDebugState() {
  * @returns {Object} 结果体（含 error 时调用方自行呈现）
  */
 async function executeRun({ source: runSource, target: runTarget, query: runQuery,
-                            confirmPush: askPush }) {
+                             confirmPush: askPush, draftRevision = null }) {
   // 一次运行使用固定快照；用户在等待期间切换通道、App 地址或缓存档，
   // 不应把「预检的是 A、实际跑的是 B」拼成一条结论。
   const runChannel = channel.value;
   const runHost = String(host.value || "").trim();
   const runCacheMode = cacheMode.value;
+  activeResultRevision = draftRevision;
   const runSourceSnapshot = runSource && typeof runSource === "object"
     ? JSON.parse(JSON.stringify(runSource))
     : runSource;
@@ -404,7 +380,14 @@ async function executeRun({ source: runSource, target: runTarget, query: runQuer
     }
     return stored;
   } catch (e) {
-    return storeResult({ error: abortNote(e), detail: e && e.detail ? e.detail : "" });
+    // 取消等待不是失败：单独标记，界面按提示而不是错误渲染（结果体里 error 仍要有值，
+    // 调用方「结果体含 error 时自行呈现」的约定不变）
+    const cancelled = !!(e && e.name === "AbortError");
+    return storeResult({
+      error: cancelled ? CANCEL_WAIT_NOTE : errorMessage(e),
+      detail: e && e.detail ? e.detail : "",
+      cancelled,
+    });
   } finally {
     endWait();
   }
@@ -425,12 +408,8 @@ function startRun(params) {
 export function useDebugSession() {
   return {
     // 状态
-    source,
-    sourceDirty,
-    markSourceSaved,
-    setSource,
-    updateSourceField,
     result,
+    resultRevision,
     compare,
     setResult,
     clearResult,
@@ -454,9 +433,9 @@ export function useDebugSession() {
     // 动作
     startRun,
     cancelRun,
-    abortNote,
     confirmPush,
     loadEnvironment,
     runPreflight,
+    setActiveSourceUrl,
   };
 }

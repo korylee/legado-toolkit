@@ -65,18 +65,29 @@ const VERDICT_TYPE = { pass: "success", fail: "danger", unknown: "info" };
     </div>
     <p v-else-if="decision.ai.hint" class="muted dec-ai-hint">{{ decision.ai.hint }}</p>
 
+    <div class="dec-core-value">
+      <b>核心值</b>
+      <template v-if="decision.core_values.length">
+        <pre v-for="(value, i) in decision.core_values" :key="i" class="dec-core-value-text">{{ value }}</pre>
+      </template>
+      <span v-else class="muted">{{ decision.core_value_hint }}</span>
+    </div>
+
+    <!-- 证据来源在默认层（TODO ux-debug-reading 约束）：结论建立在哪些材料上，
+         不展开就能看到；明细（可信边界/其余缺口/层证据）才进下面的折叠 -->
+    <div v-if="decision.have.length" class="dec-evidence">
+      <b>证据来源</b>
+      <el-tag v-for="s in decision.have" :key="s.key" size="small" :type="s.type">
+        {{ s.label }}<template v-if="s.trust === 'authoritative'">（可验收）</template><template
+          v-else-if="s.trust === 'projection'">（辅助）</template>
+      </el-tag>
+    </div>
+
     <details class="dec-more">
       <summary>
-        证据与其余缺口<template v-if="decision.deferred_gaps.length">（还有
+        可信边界与其余缺口<template v-if="decision.deferred_gaps.length">（还有
         {{ decision.deferred_gaps.length }} 条）</template>
       </summary>
-      <div class="dec-evidence">
-        <b>证据来源</b>
-        <el-tag v-for="s in decision.have" :key="s.key" size="small" :type="s.type">
-          {{ s.label }}<template v-if="s.trust === 'authoritative'">（可验收）</template><template
-            v-else-if="s.trust === 'projection'">（辅助）</template>
-        </el-tag>
-      </div>
       <p v-if="decision.boundaries.length" class="muted dec-boundary">
         可信边界：{{ decision.boundaries.join("；") }}
       </p>
@@ -136,6 +147,8 @@ const VERDICT_TYPE = { pass: "success", fail: "danger", unknown: "info" };
 .dec-ai-hint { margin: var(--app-space-2) 0 0; }
 .dec-more { margin-top: var(--app-space-2); }
 .dec-more summary { cursor: pointer; color: var(--app-primary); font-size: 12px; }
+.dec-core-value { display: flex; align-items: flex-start; flex-wrap: wrap; gap: 6px; margin-top: 8px; font-size: 12px; }
+.dec-core-value-text { max-width: 100%; margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; color: var(--app-text); }
 .dec-evidence { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 6px; font-size: 12px; }
 .dec-boundary { margin: 6px 0 0; line-height: 1.5; }
 .dec-list { margin: 6px 0 0; padding-left: 18px; line-height: 1.7; font-size: 12px; }

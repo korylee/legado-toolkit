@@ -13,12 +13,15 @@ export const STEP_LABELS = {
   content: "正文",
 };
 
-//: 步骤 → 表单里那个字段的路径（「应用候选」「应用并重调」写规则时用）。
-//: 步骤词表相关的映射都收在这一份（原在 ruleCandidates.js，随候选启发式
-//: 下沉后端后搬到这）
-export const FIELD_OF_STEP = {
-  search: "ruleSearch.bookList",
-  bookUrl: "ruleSearch.bookUrl",
-  toc: "ruleToc.chapterList",
-  content: "ruleContent.content",
-};
+//: 步骤 → 表单字段及其展示元数据（「应用候选」「去补规则」写规则时共用）。
+//: 规则字段只在这一份定义，FIELD_OF_STEP 从它派生。
+export const RULE_FIELD_DEFS = [
+  { step: "search", field: "ruleSearch.bookList", group: "ruleSearch", key: "bookList", label: "搜索 · bookList", placeholder: "class.book-list@tag.li" },
+  { step: "bookUrl", field: "ruleSearch.bookUrl", group: "ruleSearch", key: "bookUrl", label: "搜索 · bookUrl", placeholder: "tag.a@href" },
+  { step: "toc", field: "ruleToc.chapterList", group: "ruleToc", key: "chapterList", label: "目录 · chapterList", placeholder: "class.chapter@tag.a" },
+  { step: "content", field: "ruleContent.content", group: "ruleContent", key: "content", label: "正文 · content", placeholder: "id.content@text" },
+];
+
+export const FIELD_OF_STEP = Object.fromEntries(
+  RULE_FIELD_DEFS.map(({ step, field }) => [step, field]),
+);
