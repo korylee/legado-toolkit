@@ -73,7 +73,10 @@ def source_sig(dump: Optional[Dict[str, Any]] = None) -> str:
     """版本键：Kotlin 源码（数量+mtime+总大小）+ dump 的 mtime。
 
     **不是密码学哈希**，D1 够用：它的职责只是「改了代码别用旧进程」。文件大小也进来是
-    为了挡住同一秒内的连续编辑（mtime 精度够、但 truncate 成秒就不够了）。"""
+    为了挡住同一秒内的连续编辑（mtime 精度够、但 truncate 成秒就不够了）。
+
+    **刻意不缓存**：本机 26 个 .kt 时单次约 0.5ms（2026-10-06，Windows/NTFS 实测），
+    而它的结果必须逐次反映真实文件状态——加缓存省下的时间抵不上多出来的失效条件。"""
     files = list((jvm_direct.AGSVC / "test").rglob("*.kt"))
     mt = max((f.stat().st_mtime for f in files), default=0.0)
     size = sum(f.stat().st_size for f in files)

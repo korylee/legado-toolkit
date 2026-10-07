@@ -223,7 +223,7 @@ async def _run(job_id: str, kind: str, payload: Dict[str, Any],
                 single = (manifest.get("single") if isinstance(manifest, dict)
                           and "single" in manifest else payload.get("single"))
                 update_phase(job_id, "starting_worker" if single
-                             else "starting_gradle")
+                             else "preparing_engine")
             st.update_job(job_id, status="running")
             result = await HANDLERS[kind](job_id, st, payload)
             st.update_job(job_id, status="done", result=result or {})

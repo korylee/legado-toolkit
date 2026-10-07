@@ -46,8 +46,20 @@ class JvmRunProgressTests(unittest.TestCase):
         source_file.write_text("[]", encoding="utf-8")
         args_file.write_text("file=%s\nout=%s\n" % (source_file, out_path),
                              encoding="utf-8")
+        manifest = jvm_exec._build_jvm_manifest(
+            run_dir=run_dir, source_file=source_file, args_file=args_file,
+            out_path=out_path, single=single, execution_plan="gradle",
+            allow_gradle_fallback=True, runtime={}, readiness={},
+            execution_readiness={}, readiness_fingerprint="",
+            readiness_checked_at="", source_count=(1 if single else 2),
+            urls=(["https://a.com"] if single else
+                  ["https://a.com", "https://b.com"]),
+            params={"keyword": "我", "timeout": 25, "concurrency": 8,
+                    "depth": "search"},
+            chunks=[1 if single else 2])
         return {
             "prep": {"started": True},
+            "manifest": manifest,
             "total": 2,
             "run_dir": str(run_dir),
             "source_file": str(source_file),
@@ -103,7 +115,7 @@ class JvmRunProgressTests(unittest.TestCase):
         self._create_job(2)
 
         def fake_gradle(args_path=None, runtime=None, **kwargs):
-            self._rows(pathlib.Path(payload["out_path"]),
+            self._rows(pathlib.Path(args_path).parent / "results.jsonl",
                        ["https://a.com", "https://b.com"])
             return {"exit": 0, "stdout": "", "stderr": ""}
 
@@ -119,7 +131,7 @@ class JvmRunProgressTests(unittest.TestCase):
         self._create_job(2)
 
         def fake_gradle(args_path=None, runtime=None, **kwargs):
-            self._rows(pathlib.Path(payload["out_path"]), ["https://a.com"])
+            self._rows(pathlib.Path(args_path).parent / "results.jsonl", ["https://a.com"])
             return {"exit": 0, "stdout": "", "stderr": ""}
 
         result = self._run(payload, gradle=fake_gradle)
@@ -156,7 +168,7 @@ class JvmRunProgressTests(unittest.TestCase):
         seen = {"mid": 0}
 
         def slow_gradle(args_path=None, runtime=None, **kwargs):
-            out = pathlib.Path(payload["out_path"])
+            out = pathlib.Path(args_path).parent / "results.jsonl"
             self._rows(out, ["https://a.com"])
             # 等轮询把 1 写进任务表（间隔 0.05s，给足余量）再写第二条；
             # 轮询坏了这里 4 秒超时，下面的断言会带着原因红

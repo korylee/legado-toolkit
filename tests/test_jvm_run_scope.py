@@ -23,6 +23,7 @@ import pathlib
 import shutil
 import tempfile
 import threading
+import time
 import unittest
 import uuid
 from unittest import mock
@@ -50,6 +51,8 @@ class _Base(unittest.TestCase):
         self.runtime_seen = None
         self.gradle_result = 0
         self.no_output = False
+        test_limits = dict(jvm_api.settings_store.LIMITS)
+        test_limits["jvm_chunk_size"] = (1, 200)
         for p in (
             mock.patch.object(jvm_exec, "_AGSVC", self.probe / "appservice"),
             mock.patch.object(jvm_api, "data_dir", lambda: self.probe / "data"),
@@ -63,11 +66,12 @@ class _Base(unittest.TestCase):
             mock.patch.object(jvm_direct, "dump_path",
                               lambda: self.probe / "data" / "app_probe" / "test_jvm_env.json"),
             mock.patch.object(jvm_exec, "_write_meta", lambda rows: "testbatch"),
+            mock.patch.object(jvm_api.settings_store, "LIMITS", test_limits),
             mock.patch.object(jvm_exec, "_run_gradle", self._fake_gradle),
             mock.patch.object(jvm_api.settings_store, "load",
                               lambda: {"network": {"proxy": ""}, "jvm": {"app_repo": "X:/repo", "keyword": "我",
                                                "timeout": 25, "concurrency": 8,
-                                               "depth": "search"}}),
+                                               "depth": "search", "chunk_size": 25}}),
         ):
             p.start()
             self.addCleanup(p.stop)
@@ -204,8 +208,8 @@ class ScopeTests(_Base):
             out_path=out_path, single=False, execution_plan="gradle",
             allow_gradle_fallback=True, runtime={"app_repo": "X:/repo"},
             readiness={"ok": True}, execution_readiness={},
-            readiness_fingerprint="", readiness_checked_at="", source_count=1,
-            urls=["https://a.com"], params={"keyword": "我"}, chunks=[1])
+            readiness_fingerprint="", readiness_checked_at="", source_count=2,
+            urls=["https://a.com", "https://b.com"], params={"keyword": "我", "timeout": 25, "concurrency": 8, "depth": "search"}, chunks=[2])
         control = {"started": threading.Event(), "release": threading.Event()}
         payload = {"prep": {"started": True}, "manifest": manifest,
                    **control}
@@ -265,6 +269,15 @@ class ScopeTests(_Base):
             json.dumps(body, ensure_ascii=False, sort_keys=True,
                        separators=(",", ":")).encode("utf-8")).hexdigest()
         self.assertIn("结构不受支持", jvm_exec._manifest_error(malformed))
+
+        malformed_chunks = dict(manifest)
+        malformed_chunks["chunks"] = ["1"]
+        body = dict(malformed_chunks)
+        body.pop("sha256", None)
+        malformed_chunks["sha256"] = hashlib.sha256(
+            json.dumps(body, ensure_ascii=False, sort_keys=True,
+                       separators=(",", ":")).encode("utf-8")).hexdigest()
+        self.assertIn("chunks", jvm_exec._manifest_error(malformed_chunks))
 
     def test_queued_job_uses_runtime_snapshot_captured_at_submission(self) -> None:
         submitted = {}
@@ -1225,12 +1238,71 @@ class EventTimelineTests(_Base):
             encoding="utf-8")
         return [json.loads(l)["kind"] for l in text.splitlines() if l.strip()]
 
+    def test_queue_wait_event_carries_lane_wait(self) -> None:
+        """排队事件只记录 lane 的实际等待时间。"""
+        _payload, result = self._run_batch(self._QUIET)
+        self.assertTrue(result["ok"], result)
+        queue = [e for e in result["events"] if e.get("stage") == "queue_wait"]
+        self.assertEqual(1, len(queue), result["events"] )
+        self.assertGreaterEqual(queue[0]["cost_sec"], 0)
+        self.assertNotIn("since_submit_sec", queue[0])
+
+    def test_batch_reports_engine_wait_while_daemon_busy(self) -> None:
+        """等待引擎空闲要写进时间线，窗口用实测上界（2s 已证明必然白等）。"""
+        seen = {}
+
+        def fake_prepare(dump, **kwargs):
+            seen["busy_wait_sec"] = kwargs.get("busy_wait_sec")
+            if kwargs.get("on_wait"):
+                kwargs["on_wait"](10.0)
+            return {"outcome": "busy", "reason": "daemon 忙"}
+
+        with mock.patch("core.jvm_direct.load_dump", return_value=self._DUMP), \
+            mock.patch("core.jvm_validate_daemon.prepare",
+                        side_effect=fake_prepare), \
+            mock.patch("core.jvm_validate_daemon.probe", return_value=None):
+            _payload, result = self._run_batch(self._QUIET)
+        self.assertEqual(jvm_exec._DAEMON_BUSY_WAIT_SEC, seen["busy_wait_sec"])
+        waits = [e for e in result["events"] if e.get("kind") == "waiting_engine"]
+        self.assertEqual(1, len(waits), result["events"])
+        self.assertEqual(10.0, waits[0]["elapsed_sec"])
+
+    def test_batch_stale_snapshot_skips_daemon_and_keeps_reason(self) -> None:
+        """改了 Kotlin 未刷新 snapshot：批量不碰 daemon、全部走 Gradle，原因可见。
+
+        daemon 的 sig 只反映源码 mtime，不等于类已重编——少了这道闸门就会整批跑在
+        旧字节码上，而结论和真跑的一样。
+        """
+        gate = {"ok": False,
+                "reason": "snapshot 早于 appservice Kotlin 源码，请先刷新"}
+        with mock.patch.object(jvm_exec, "execution_readiness",
+                               lambda dump=None: gate), \
+             mock.patch("core.jvm_direct.load_dump", return_value=self._DUMP), \
+             mock.patch("core.jvm_validate_daemon.prepare") as prepare:
+            _payload, result = self._run_batch(self._QUIET)
+        self.assertTrue(result["ok"], result)
+        prepare.assert_not_called()
+        self.assertEqual({r.get("execution_mode") for r in result["chunk_reports"]},
+                         {"gradle"})
+        self.assertIn("刷新", result["daemon_prepare"]["reason"])
+
+    def test_batch_without_manifest_is_rejected_with_reason(self) -> None:
+        """无 manifest 的批量调用要给可读失败，而不是块线程里的 KeyError。"""
+        payload = {"prep": {"started": True}, "single": False,
+                   "run_dir": str(self.probe / "data" / "app_probe" / "runs" / "nomanifest")}
+        with mock.patch.object(jvm_exec, "_run_gradle") as gradle:
+            result = asyncio.run(jvm_exec.run_jvm_job(
+                "nomanifest-job", Store(self.db), payload))
+        self.assertFalse(result["ok"])
+        self.assertIn("manifest", result["reason"])
+        gradle.assert_not_called()
+
     def test_batch_event_sequence_and_terminal_merge(self) -> None:
         """成功批清运行目录，时间线靠 result["events"] 长存（合并的意义）。"""
         _payload, result = self._run_batch(self._QUIET)
         self.assertTrue(result["ok"], result)
         self.assertEqual([e["kind"] for e in result["events"]],
-                         ["batch_started", "prepare", "chunk_started", "chunk_done",
+                         ["batch_started", "startup_stage", "prepare", "chunk_started", "chunk_done",
                           "chunk_started", "chunk_done", "chunk_started", "chunk_done",
                           "done"])
 
@@ -1254,7 +1326,7 @@ class EventTimelineTests(_Base):
             _payload, result = self._run_batch(self._BUSY3)
         self.assertTrue(result["ok"], result)
         self.assertEqual([e["kind"] for e in result["events"]],
-                         ["batch_started", "prepare", "chunk_started", "chunk_done",
+                         ["batch_started", "startup_stage", "prepare", "chunk_started", "chunk_done",
                           "chunk_started", "chunk_done", "recovered",
                           "chunk_started", "chunk_done", "done"])
         self.assertEqual(result["daemon_chunks"], 2)
@@ -1299,7 +1371,7 @@ class EventTimelineTests(_Base):
                 "ev-job", Store(self.db), submitted["payload"]))
         run_dir = submitted["payload"]["manifest"]["run_dir"]
         self.assertEqual(self._kinds(run_dir),
-                         ["batch_started", "prepare", "chunk_started", "chunk_done",
+                         ["batch_started", "startup_stage", "prepare", "chunk_started", "chunk_done",
                           "chunk_started", "chunk_failed", "failed"])
         self.assertFalse(r1["ok"])
 
@@ -1312,9 +1384,9 @@ class EventTimelineTests(_Base):
         # 事件文件跨轮**追加**：恢复批的时间线包含上一轮的完整历史，
         # resumed 行标记了两次运行的边界（成功后目录清场，断言走合并结果）
         self.assertEqual([e["kind"] for e in r2["events"]],
-                         ["batch_started", "prepare", "chunk_started", "chunk_done",
+                         ["batch_started", "startup_stage", "prepare", "chunk_started", "chunk_done",
                           "chunk_started", "chunk_failed", "failed",
-                          "batch_started", "resumed", "prepare", "chunk_started",
+                          "batch_started", "startup_stage", "resumed", "prepare", "chunk_started",
                           "chunk_done", "done"])
 
     def test_events_tail_merge_is_bounded(self) -> None:

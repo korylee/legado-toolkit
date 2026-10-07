@@ -13,12 +13,27 @@ export function formatTimelineEvent(ev) {
       return { text: `开始校验：${ev.sources ?? "?"} 条源，分 ${ev.chunks ?? "?"} 块`, tone: "info" };
     case "single_started":
       return { text: "开始校验（单条）", tone: "info" };
+    case "startup_stage": {
+      // 只列后端真会发的阶段（见 backend/jobs/jvm_exec.py 的 _append_event）；
+      // 认不出的阶段原样透出，不伪装成已知项
+      const labels = {
+        queue_wait: "任务排队",
+        daemon_request: "常驻引擎执行",
+      };
+      const label = labels[ev.stage] || ev.stage || "启动阶段";
+      const status = ev.status === "failed" ? "失败" : "完成";
+      const cost = ev.cost_sec != null ? `（${sec(ev.cost_sec)}）` : "";
+      const reason = ev.reason ? `：${ev.reason}` : "";
+      return { text: `${label}${status}${cost}${reason}`, tone: ev.status === "failed" ? "error" : "info" };
+    }
     case "prepare": {
       if (ev.outcome === "ready") return { text: "校验引擎已就绪（热复用）", tone: "info" };
       if (ev.outcome === "started") return { text: `校验引擎已就绪（首次启动 ${sec(ev.cost_sec)}）`, tone: "info" };
       if (ev.outcome === "busy") return { text: `校验引擎忙，本批未准备${ev.reason ? "：" + ev.reason : ""}`, tone: "warn" };
       return { text: `校验引擎启动失败${ev.reason ? "：" + ev.reason : ""}`, tone: "error" };
     }
+    case "waiting_engine":
+      return { text: `等待校验引擎空闲：已等 ${sec(ev.elapsed_sec) || "?"}`, tone: "warn" };
     case "recovered":
       return { text: "校验引擎恢复，后续块重新使用", tone: "info" };
     case "chunk_started": {

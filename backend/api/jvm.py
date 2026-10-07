@@ -125,6 +125,9 @@ async def jvm_run(body: Optional[JvmRunRequest] = None):
             got = settings_store.coerce("jvm", key, want_params[key])
             if got is not None:
                 eff[key] = got
+    params = {key: eff[key] for key in JVM_RUN_PARAMS}
+    chunk_size = settings_store.coerce("jvm", "chunk_size",
+                                          eff["chunk_size"])
 
     # 完整 readiness 是 Gradle/SDK 的准备态；单条请求可以只依赖已有的
     # runtime snapshot + Validate daemon
@@ -154,9 +157,9 @@ async def jvm_run(body: Optional[JvmRunRequest] = None):
     out_path = run_dir / "results.jsonl"
     args_path = run_dir / "args.properties"
     try:
-        _write_args(eff.get("keyword", "我"), int(eff.get("timeout", 25)),
-                    int(eff.get("concurrency", 8)), out_path, src_file,
-                    str(eff.get("depth", "search")), args_path=args_path)
+        _write_args(params["keyword"], params["timeout"],
+                    params["concurrency"], out_path, src_file,
+                    params["depth"], args_path=args_path)
     except Exception:
         _cleanup_run_dir(run_dir)
         raise
@@ -171,7 +174,7 @@ async def jvm_run(body: Optional[JvmRunRequest] = None):
     }
     execution_plan = "validate_daemon" if single else "gradle"
     # 分块大小（提交即冻结）：settings 的 jvm.chunk_size，越界值已被 coerce 收敛
-    cs = int(eff.get("chunk_size") or 0) or 25
+    cs = chunk_size
     n = len(rows)
     chunk_sizes = [cs] * (n // cs) + ([n % cs] if n % cs else []) or [n]
     manifest = _build_jvm_manifest(
@@ -185,7 +188,7 @@ async def jvm_run(body: Optional[JvmRunRequest] = None):
         readiness_checked_at=st_conf.get("checked_at", ""),
         source_count=len(rows),
         urls=[_normalize_url(str(r.get("bookSourceUrl") or "")) for r in rows],
-        params={k: eff.get(k) for k in JVM_RUN_PARAMS},
+        params=params,
         chunks=chunk_sizes,
     )
     # `total` 进 payload：一次跑批没有逐条进度（一次 Gradle 调用跑一批），但**条数**
@@ -202,6 +205,7 @@ async def jvm_run(body: Optional[JvmRunRequest] = None):
           "readiness": st_conf,
           "readiness_fingerprint": st_conf.get("fingerprint", ""),
           "readiness_checked_at": st_conf.get("checked_at", "")},
+
         lane="jvm",
     )
     return dict(prep, **{"job_id": job_id})

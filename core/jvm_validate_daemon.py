@@ -26,6 +26,10 @@ LOG_NAME = "validate_daemon.log"
 DEFAULT_IDLE_SEC = 1800
 DEFAULT_BOOT_TIMEOUT = 180
 
+#: 忙等待期间每隔这么久回调一次 ``on_wait``（让调用方把等待写进时间线）。
+#: 短等待（≤ 这个值）不上报，避免刷屏。
+_BUSY_NOTICE_INTERVAL = 10.0
+
 _LOCK = threading.Lock()
 _PROC: Optional[subprocess.Popen] = None
 _LOG = None
@@ -97,12 +101,12 @@ def params_from_args(args_file: Optional[str] = None) -> Dict[str, Any]:
     result: Dict[str, Any] = {
         "file": props.get("file", ""),
         "dir": props.get("dir", ""),
-        "keyword": props.get("keyword", "我"),
+        "keyword": props["keyword"],
         "out": props.get("out", ""),
-        "concurrency": int(props.get("concurrency") or 1),
-        "timeout": int(props.get("timeout") or 30),
+        "concurrency": int(props["concurrency"]),
+        "timeout": int(props["timeout"]),
         "limit": int(props.get("limit") or 0),
-        "depth": props.get("depth", "search"),
+        "depth": props["depth"],
         "cookie": props.get("cookie", ""),
         "no_strip_webview": props.get("noStripWebview") == "1",
     }
@@ -116,12 +120,12 @@ def request(cfg: Dict[str, Any], port: int, timeout: float) -> Dict[str, Any]:
         "id": int(time.time() * 1000) % 1_000_000,
         "file": str(cfg.get("file") or ""),
         "dir": str(cfg.get("dir") or ""),
-        "keyword": str(cfg.get("keyword") or "我"),
+        "keyword": str(cfg["keyword"]),
         "out": str(cfg.get("out") or ""),
-        "concurrency": int(cfg.get("concurrency") or 1),
-        "timeout": int(cfg.get("timeout") or 30),
+        "concurrency": int(cfg["concurrency"]),
+        "timeout": int(cfg["timeout"]),
         "limit": int(cfg.get("limit") or 0),
-        "depth": str(cfg.get("depth") or "search"),
+        "depth": str(cfg["depth"]),
         "cookie": str(cfg.get("cookie") or ""),
         "no_strip_webview": bool(cfg.get("no_strip_webview")),
     }
@@ -302,8 +306,18 @@ def probe(dump: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _notify_wait(callback: Any, elapsed: float) -> None:
+    """上报忙等待进度；回调失败只记日志，**不许**破坏 ``prepare`` 的「永不抛」。"""
+    try:
+        callback(round(elapsed, 1))
+    except Exception as exc:                    # noqa: BLE001 - 回调不参与判定
+        print("警告：忙等待进度回调失败（不影响等待）：%s" % exc, flush=True)
+
+
 def prepare(dump: Dict[str, Any],
-            boot_timeout: int = DEFAULT_BOOT_TIMEOUT) -> Dict[str, Any]:
+            boot_timeout: int = DEFAULT_BOOT_TIMEOUT,
+            busy_wait_sec: float = 2.0,
+            on_wait: Optional[Any] = None) -> Dict[str, Any]:
     """批量开跑前的一次性 daemon 准备：能复用就复用，该重启才重启。
 
     与 ``ensure`` 的差别是**先分类再行动**——``ensure`` 对「ping 不通」一律
@@ -313,7 +327,8 @@ def prepare(dump: Dict[str, Any],
     - ``ready``   热着且签名匹配：原样复用，不动任何进程。
     - ``started`` 原本没在跑（info 缺失 / pid 已死）或版本不符（ping 通 =
                   正向确认是我们的 daemon 且此刻空闲 → 优雅停旧起新）。
-    - ``busy``    进程还活着但 ping 没应答：忙或探测不确定——**不杀、不启**，
+    - ``busy``    进程还活着但 ping 没应答：先按 ``busy_wait_sec`` 有界等待它空闲
+                  （daemon 串行处理 op，忙是瞬时的），到点仍不确定就**不杀、不启**，
                   调用方按块回落 Gradle。
     - ``failed``  启动尝试失败，reason 保留 ``ValidateDaemonError`` 原文。
 
@@ -333,9 +348,30 @@ def prepare(dump: Dict[str, Any],
                         "info": ensure(dump, boot_timeout=boot_timeout)}
             pid = int(info.get("pid") or 0)
             if pid > 0 and _pid_alive(pid):
+                wait = max(0.0, float(busy_wait_sec))
+                deadline = time.monotonic() + wait
+                waited_from = time.monotonic()
+                next_notice = _BUSY_NOTICE_INTERVAL
+                while time.monotonic() < deadline:
+                    if on_wait is not None:
+                        elapsed = time.monotonic() - waited_from
+                        if elapsed >= next_notice:
+                            next_notice = elapsed + _BUSY_NOTICE_INTERVAL
+                            _notify_wait(on_wait, elapsed)
+                    got = ping(port, timeout=0.25)
+                    if got:
+                        if got.get("sig") == source_sig(dump):
+                            return {"outcome": "ready", "info": info}
+                        return {"outcome": "started",
+                                "info": ensure(dump, boot_timeout=boot_timeout)}
+                    if not _pid_alive(pid):
+                        return {"outcome": "started",
+                                "info": ensure(dump, boot_timeout=boot_timeout)}
+                    time.sleep(0.1)
                 return {"outcome": "busy",
-                        "reason": ("Validate daemon 进程还在（pid=%d）但 ping 没应答"
-                                   "（正忙或探测不确定），本批不准备也不杀" % pid)}
+                        "reason": ("Validate daemon 进程还在（pid=%d）但在 %.1fs 内未空闲，"
+                                   "本批不准备也不杀" %
+                                   (pid, max(0.0, float(busy_wait_sec))))}
             if pid <= 0:
                 return {"outcome": "busy",
                         "reason": ("Validate daemon 的 info 没有 pid，无法判死活，"
@@ -347,17 +383,39 @@ def prepare(dump: Dict[str, Any],
         return {"outcome": "failed", "reason": str(exc)}
 
 
+def resolve(dump: Dict[str, Any], boot_timeout: int = DEFAULT_BOOT_TIMEOUT,
+            busy_wait_sec: float = 2.0,
+            on_wait: Optional[Any] = None) -> Dict[str, Any]:
+    """``prepare`` 的**抛异常版本**：取到可用 daemon 的 info，忙/失败则抛。
+
+    存在的理由是 ``ensure`` 的一个真实危害：它对「ping 不通」一律杀进程重启，
+    而 ping 不通可能只是 daemon 正串行跑**别人**的 op——单条校验踩上去就会掐断
+    那次执行（对方那一块随即失败、回落 Gradle）。这里改成等一小会儿，仍忙就把
+    原因原样抛出去，由调用方按「daemon 未就绪」回落，进程一个都不动。
+    """
+    got = prepare(dump, boot_timeout=boot_timeout, busy_wait_sec=busy_wait_sec,
+                  on_wait=on_wait)
+    if got.get("outcome") in ("ready", "started"):
+        return dict(got.get("info") or {})
+    raise ValidateDaemonError(str(got.get("reason") or "Validate daemon 未就绪"))
+
+
 def run(dump: Dict[str, Any], args_file: str, timeout_slack: int = 30,
-        socket_timeout: Optional[int] = None) -> Dict[str, Any]:
+        socket_timeout: Optional[int] = None,
+        busy_wait_sec: float = 2.0) -> Dict[str, Any]:
     """向 daemon 发一次执行请求并等应答。
 
     ``socket_timeout``：等待**应答**的秒数。不给就沿用单条口径（每源 timeout +
     slack）；批量块的执行时长是块内源数 × 每源预算，必须由调用方按块规模给足
     （Kotlin 侧对 op 时长没有上限，这个客户端超时是唯一的护栏——超时会抛
     ``ValidateDaemonError``，调用方回落 Gradle，不是源失败）。
+
+    ``busy_wait_sec`` 交给 ``resolve``：忙时等一小会儿，不杀进程（见 ``resolve``）。
+    单条的等待窗口**有意短**——单源跑 Gradle 与等一大块跑完不是一个量级，等太久
+    不如直接回落；批量那条链有自己的窗口，见 ``backend/jobs/jvm_exec``。
     """
     cfg = params_from_args(args_file)
-    info = ensure(dump)
+    info = resolve(dump, busy_wait_sec=busy_wait_sec)
     wait = int(socket_timeout) if socket_timeout else int(cfg["timeout"]) + timeout_slack
     response = request(cfg, int(info["port"]), wait)
     response["port"] = info["port"]

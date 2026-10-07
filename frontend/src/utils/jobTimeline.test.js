@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { formatTimelineEvent, formatFailureLine } from "./jobTimeline.js";
 
-test("里程碑与块事件说人话，并展示执行方式", () => {
+test("里程碑与块事件说人话，并展示启动耗时", () => {
   assert.equal(
     formatTimelineEvent({ kind: "batch_started", chunks: 3, sources: 75 }).text,
     "开始校验：75 条源，分 3 块");
@@ -20,6 +20,23 @@ test("里程碑与块事件说人话，并展示执行方式", () => {
     "第 1 块 上次已完成，本次不重跑");
 });
 
+test("启动阶段事件展示耗时和失败原因", () => {
+  assert.equal(
+    formatTimelineEvent({ kind: "startup_stage", stage: "queue_wait", status: "done", cost_sec: 1.2 }).text,
+    "任务排队完成（1.2 秒）");
+  assert.equal(
+    formatTimelineEvent({ kind: "startup_stage", stage: "daemon_request", status: "done", cost_sec: 17.8 }).text,
+    "常驻引擎执行完成（17.8 秒）");
+  assert.equal(
+    formatTimelineEvent({ kind: "startup_stage", stage: "mystery_stage" }).text,
+    "mystery_stage完成");
+  const failed = formatTimelineEvent({ kind: "startup_stage", stage: "daemon_request", status: "failed", cost_sec: 2.4, reason: "daemon 忙" });
+  assert.equal(failed.tone, "error");
+  assert.equal(failed.text, "常驻引擎执行失败（2.4 秒）：daemon 忙");
+  const waiting = formatTimelineEvent({ kind: "waiting_engine", elapsed_sec: 12.5 });
+  assert.equal(waiting.text, "等待校验引擎空闲：已等 12.5 秒");
+  assert.equal(waiting.tone, "warn");
+});
 test("prepare 四档各自有措辞，忙/失败带原因", () => {
   assert.equal(formatTimelineEvent({ kind: "prepare", outcome: "ready" }).text, "校验引擎已就绪（热复用）");
   assert.equal(

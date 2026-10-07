@@ -148,7 +148,7 @@ class PrepareTests(unittest.TestCase):
         self.assertEqual(calls, [("stop", 9999), ("start",)])
 
     def test_prepare_reports_busy_without_killing(self) -> None:
-        """进程还活着、ping 没应答 = 忙/不确定 → 不杀、不启（本任务的核心钉子）。"""
+        """等待窗口内一直没空闲 → 不杀、不启（本任务的核心钉子）。"""
         with mock.patch.object(jvm_validate_daemon, "_read_info",
                                return_value=dict(self._INFO)), \
              mock.patch.object(jvm_validate_daemon, "ping", return_value=None), \
@@ -157,7 +157,7 @@ class PrepareTests(unittest.TestCase):
              mock.patch.object(jvm_validate_daemon, "start") as start, \
              mock.patch.object(jvm_validate_daemon, "_kill_proc") as kill, \
              mock.patch.object(jvm_validate_daemon, "_stop_port") as stop:
-            got = jvm_validate_daemon.prepare(self._DUMP)
+            got = jvm_validate_daemon.prepare(self._DUMP, busy_wait_sec=0)
         self.assertEqual(got["outcome"], "busy")
         self.assertIn("不杀", got["reason"])
         self.assertIn("pid=1", got["reason"])
@@ -165,6 +165,101 @@ class PrepareTests(unittest.TestCase):
         start.assert_not_called()
         kill.assert_not_called()
         stop.assert_not_called()
+
+    def test_prepare_reuses_daemon_that_frees_up_within_wait(self) -> None:
+        """忙是瞬时的：等待窗口内 ping 恢复应答 → ready，杀掉重启才是真损失。"""
+        answers = [None, None, {"sig": "s", "kind": "validate"}]
+        with mock.patch.object(jvm_validate_daemon, "_read_info",
+                               return_value=dict(self._INFO)), \
+             mock.patch.object(jvm_validate_daemon, "ping",
+                               side_effect=lambda *a, **kw: answers.pop(0)), \
+             mock.patch.object(jvm_validate_daemon, "source_sig", return_value="s"), \
+             mock.patch.object(jvm_validate_daemon, "_pid_alive", return_value=True), \
+             mock.patch.object(jvm_validate_daemon, "ensure") as ensure, \
+             mock.patch.object(jvm_validate_daemon, "_kill_proc") as kill:
+            got = jvm_validate_daemon.prepare(self._DUMP, busy_wait_sec=5)
+        self.assertEqual(got["outcome"], "ready")
+        ensure.assert_not_called()
+        kill.assert_not_called()
+
+    def test_prepare_does_not_wait_for_dead_pid(self) -> None:
+        """进程已消失时不该耗满等待窗口：立即判死并交给 ensure 重启。"""
+        with mock.patch.object(jvm_validate_daemon, "_read_info",
+                               return_value=dict(self._INFO)), \
+             mock.patch.object(jvm_validate_daemon, "ping", return_value=None), \
+             mock.patch.object(jvm_validate_daemon, "_pid_alive",
+                               side_effect=[True, False]), \
+             mock.patch.object(jvm_validate_daemon, "ensure",
+                               return_value={"pid": 2, "port": 2}) as ensure:
+            got = jvm_validate_daemon.prepare(self._DUMP, busy_wait_sec=30)
+        self.assertEqual(got["outcome"], "started")
+        ensure.assert_called_once()
+
+    def test_prepare_reports_wait_progress_while_busy(self) -> None:
+        """忙等待期间按间隔回调上报——用户要看得见「在等引擎」，而不是进度不动。"""
+        seen: list = []
+        with mock.patch.object(jvm_validate_daemon, "_BUSY_NOTICE_INTERVAL", 0.2), \
+             mock.patch.object(jvm_validate_daemon, "_read_info",
+                               return_value=dict(self._INFO)), \
+             mock.patch.object(jvm_validate_daemon, "ping", return_value=None), \
+             mock.patch.object(jvm_validate_daemon, "_pid_alive", return_value=True), \
+             mock.patch.object(jvm_validate_daemon, "ensure") as ensure:
+            got = jvm_validate_daemon.prepare(self._DUMP, busy_wait_sec=0.7,
+                                              on_wait=seen.append)
+        self.assertEqual(got["outcome"], "busy")
+        self.assertTrue(seen, "等待期间必须上报进度")
+        self.assertTrue(all(isinstance(v, float) for v in seen), seen)
+        ensure.assert_not_called()
+
+    def test_wait_callback_failure_does_not_break_prepare(self) -> None:
+        """回调只管上报：它抛异常也不能让 prepare 违背「永不抛」（忙仍返回 busy）。"""
+        def boom(_elapsed):
+            raise RuntimeError("上报失败")
+
+        with mock.patch.object(jvm_validate_daemon, "_BUSY_NOTICE_INTERVAL", 0.1), \
+             mock.patch.object(jvm_validate_daemon, "_read_info",
+                               return_value=dict(self._INFO)), \
+             mock.patch.object(jvm_validate_daemon, "ping", return_value=None), \
+             mock.patch.object(jvm_validate_daemon, "_pid_alive", return_value=True), \
+             mock.patch.object(jvm_validate_daemon, "ensure") as ensure:
+            got = jvm_validate_daemon.prepare(self._DUMP, busy_wait_sec=0.4,
+                                              on_wait=boom)
+        self.assertEqual(got["outcome"], "busy")
+        ensure.assert_not_called()
+
+    def test_resolve_raises_on_busy_without_killing(self) -> None:
+        """单条路径不许靠杀进程解决「忙」：resolve 只把原因抛出去，进程一个都不动。"""
+        with mock.patch.object(jvm_validate_daemon, "prepare",
+                               return_value={"outcome": "busy",
+                                             "reason": "进程还在但未空闲，本批不准备也不杀"}), \
+             mock.patch.object(jvm_validate_daemon, "ensure") as ensure, \
+             mock.patch.object(jvm_validate_daemon, "_kill_proc") as kill:
+            with self.assertRaises(jvm_validate_daemon.ValidateDaemonError) as ctx:
+                jvm_validate_daemon.resolve(self._DUMP, busy_wait_sec=0)
+        self.assertIn("未空闲", str(ctx.exception))
+        ensure.assert_not_called()
+        kill.assert_not_called()
+
+    def test_run_does_not_kill_a_busy_daemon(self) -> None:
+        """``run`` 曾把忙当成死（ensure 杀进程重启）；现在必须抛原因、不碰进程。"""
+        path = pathlib.Path(".tmp_validate_run_args.properties")
+        path.write_text("file=C:/a.json\nout=C:/a.jsonl\nkeyword=我\ntimeout=5\nconcurrency=1\ndepth=search\n",
+                        encoding="utf-8")
+        try:
+            with mock.patch.object(jvm_validate_daemon, "prepare",
+                                   return_value={"outcome": "busy",
+                                                 "reason": "daemon 忙"}), \
+                 mock.patch.object(jvm_validate_daemon, "ensure") as ensure, \
+                 mock.patch.object(jvm_validate_daemon, "_kill_proc") as kill, \
+                 mock.patch.object(jvm_validate_daemon, "request") as request:
+                with self.assertRaises(jvm_validate_daemon.ValidateDaemonError):
+                    jvm_validate_daemon.run(
+                        {"workingDir": "C:/repo"}, str(path), busy_wait_sec=0)
+        finally:
+            path.unlink(missing_ok=True)
+        ensure.assert_not_called()
+        kill.assert_not_called()
+        request.assert_not_called()
 
     def test_prepare_reports_busy_when_info_has_no_pid(self) -> None:
         """info 缺 pid（外来/残缺）→ 无法判死活，同样不杀不启。"""

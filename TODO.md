@@ -19,7 +19,7 @@
 ## 0 · 现在做
 
 > 当前排期：引擎与调试执行链的基础设施已完成；后续调试体验以“入口降噪 → 工作台闭环 → 证据前置 → 编辑能力合入 → DOM 意图化生成”为主线。worker 的 lane、分块恢复、daemon 复用与冷启动批前准备、任务详情的块级证据与执行时间线均已交付（lessons §六十五 / §六十六）。
-> P0 的 unknown 出口与可执行提示已交付，当前前端待办集中在新调试页的视觉层级、编辑闭环和证据可信度；本机引擎的启动耗时观测与重复准备优化尚未完成。
+> P0 的 unknown 出口与可执行提示已交付，当前前端待办集中在新调试页的视觉层级、编辑闭环和证据可信度；本机引擎的启动耗时治理已完成（分段观测、排队可见、自适应忙等待、批前按需准备）。
 
 ---
 
@@ -34,20 +34,6 @@
 验收：只有在日志证明重复提交达到值得优化的数量后才实施；实施时完全相同的重复提交只产生一次 JVM 执行和一份底层结果，任一调用方都能收到同一结论及来源，任一合并键字段变化都会产生独立执行，旧结果不会静默复用。
 阻塞于：先统计重复提交率；没有数据证明收益前不实现。
 指针：backend/jobs/runner.py，backend/api/jvm.py，core/jvm_debug.py，AGENTS.md #5b，lessons §五十三 / §七十八
-
-### 条目：jvm-startup-latency · 本机引擎启动耗时与重复准备优化
-状态：todo
-依赖：无
-优先级：P1
-背景：本机引擎首次响应前可能经历 readiness、JVM lane 排队、daemon 准备、daemon 请求或 Gradle 回退；当前已有 daemon 复用和批前准备，但缺少分段耗时证据，无法确认“每次启动慢”究竟卡在哪一段。
-约束：先记录 readiness、排队、daemon prepare、daemon request、Gradle fallback 的耗时与执行模式，再改策略；daemon 忙时不能杀正在执行的进程，也不能把忙/不确定静默当成源失败；readiness 与 Kotlin source signature 的缓存必须有源码、classpath、Java、SDK、runtime snapshot 等失效条件，不能只按 TTL 复用旧环境；启动阶段文案必须来自真实执行路径。
-子项：
-- jvm-startup-measure · 启动阶段分段测量
-- jvm-daemon-busy-policy · daemon 忙时短等待或回退的策略评估
-- jvm-readiness-cache · readiness 与 source signature 重复扫描优化
-- jvm-daemon-warmup · 受控 daemon warm-up
-验收：时间线或任务详情能区分各启动阶段及执行模式；daemon 热复用时不重复做不必要的完整准备；daemon 忙时按明确策略等待或回退并显示原因；源码或运行环境变化后不会复用旧 daemon；冷启动、热复用、忙回退三类场景均有测试与一次真实耗时对比。
-指针：backend/api/jvm.py，backend/jobs/runner.py，backend/jobs/jvm_exec.py，core/jvm_env.py，core/jvm_daemon.py，core/jvm_validate_daemon.py，lessons §六十五 / §六十六
 
 ### 条目：jvm-coalesce-measurement · 校验重复执行收益评估
 状态：todo

@@ -15,6 +15,7 @@ import json
 import re
 import shutil
 import subprocess
+import time
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -511,8 +512,14 @@ def process_environment(result: Dict[str, Any], base: Optional[Dict[str, str]] =
 
 
 def readiness(app_repo: str, configured_sdk_dir: str = "") -> Dict[str, Any]:
-    """发现并校验一次 JVM 执行环境，返回可冻结的 readiness 契约。"""
+    """发现并校验一次 JVM 执行环境，返回可冻结的 readiness 契约。
+
+    每次调用都重新探测当前配置与工具链，避免不完整的失效键返回旧结论。
+    ``cost_sec`` 是本次探测的真实成本。
+    """
     app_repo = (app_repo or "").strip()
+    configured_sdk_dir = (configured_sdk_dir or "").strip()
+    probe_t0 = time.monotonic()
     repo_ok = bool(app_repo) and (Path(app_repo) / "gradlew.bat").exists() or \
         bool(app_repo) and (Path(app_repo) / "gradlew").exists()
     checks: List[Check] = []
@@ -662,11 +669,13 @@ def readiness(app_repo: str, configured_sdk_dir: str = "") -> Dict[str, Any]:
         "runtime": runtime,
         "checks": checks_payload,
     }
-    return {
+    result = {
         "ok": ok,
         "checked_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
         "fingerprint": _fingerprint(stable_payload),
         "checks": checks_payload,
         "repo_ok": repo_ok,
         "runtime": runtime,
+        "cost_sec": round(time.monotonic() - probe_t0, 3),
     }
+    return result

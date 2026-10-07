@@ -188,6 +188,23 @@ def _manifest_error(manifest: Any) -> str:
         return "JVM 任务 manifest 结构不受支持：execution_readiness 不是对象"
     if not isinstance(manifest.get("urls"), list) or not isinstance(manifest.get("params"), dict):
         return "JVM 任务 manifest 结构不受支持：urls/params 形状不对"
+    source_count = manifest.get("source_count")
+    urls = manifest["urls"]
+    chunks = manifest["chunks"]
+    if type(source_count) is not int or source_count <= 0:
+        return "JVM 任务 manifest 结构不受支持：source_count 必须是正整数"
+    if len(urls) != source_count or any(not isinstance(url, str) or not url for url in urls):
+        return "JVM 任务 manifest 结构不受支持：urls 与 source_count 不一致"
+    if (not isinstance(chunks, list) or not chunks or
+            any(type(size) is not int or size <= 0 for size in chunks) or
+            sum(chunks) != source_count):
+        return "JVM 任务 manifest 结构不受支持：chunks 与 source_count 不一致"
+    if bool(manifest.get("single")) != (source_count == 1):
+        return "JVM 任务 manifest 结构不受支持：single 与 source_count 不一致"
+    missing_params = sorted({"keyword", "timeout", "concurrency", "depth"}
+                              - set(manifest["params"]))
+    if missing_params:
+        return "JVM 任务 manifest 缺少执行参数：%s" % ", ".join(missing_params)
     if manifest.get("execution_plan") not in ("validate_daemon", "gradle"):
         return "JVM 任务 manifest 结构不受支持：execution_plan 无效"
     if bool(manifest.get("single")) != (manifest.get("execution_plan") == "validate_daemon"):
@@ -216,13 +233,13 @@ def _write_args(keyword: str, timeout: int, concurrency: int,
     lines = [
         "# 由后端 /api/jvm/run 生成（手工跑批时也可自己改）",
         "file=%s" % source_file.as_posix(),
-        "keyword=%s" % (keyword or st_conf.get("keyword", "我")),
+        "keyword=%s" % keyword,
         "out=%s" % out_path.as_posix(),
-        "timeout=%d" % (timeout or st_conf.get("timeout", 25)),
-        "concurrency=%d" % (concurrency or st_conf.get("concurrency", 8)),
+        "timeout=%d" % timeout,
+        "concurrency=%d" % concurrency,
         # 深度也进参数文件（Launcher 读它转发给 --depth）。**不硬编码 search**：
         # 设置里选了什么就跑什么，跑批结论里的 stage 才与实际一致
-        "depth=%s" % (depth or st_conf.get("depth", "search")),
+        "depth=%s" % depth,
     ]
     # newline="\n" 是必须的：这是 **git 跟踪的文件**，而 write_text 在 Windows 上
     # 把 \n 翻成 \r\n——跑一次批工作区就脏一次（内容与 HEAD 逐字节相同，只差行尾，
@@ -231,6 +248,14 @@ def _write_args(keyword: str, timeout: int, concurrency: int,
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(
         "\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+
+
+def _write_manifest_args(manifest: Dict[str, Any], out_path: Path,
+                         source_file: Path, args_path: Path) -> None:
+    params = manifest["params"]
+    _write_args(str(params["keyword"]), int(params["timeout"]),
+                int(params["concurrency"]), out_path, source_file,
+                str(params["depth"]), args_path=args_path)
 
 
 def _export_sources_file(st, urls: Optional[List[str]] = None,
@@ -509,9 +534,14 @@ def _write_meta(rows: List[Dict[str, Any]]) -> str:
 #: 进度轮询间隔（秒）。测试会把它调小来驱动轮询。
 _PROGRESS_POLL_INTERVAL = 1.0
 
-#: 块级 daemon 请求的 socket 等待上限（秒）。对齐 Gradle 路径的 90 分钟硬上限：
+
 #: Kotlin 侧对单次 op 时长没有上限，客户端等待是唯一护栏，没有它会挂死连接
 _DAEMON_SOCKET_TIMEOUT_CAP = 5400
+
+#: 批量开跑前遇到「daemon 忙」时的等待上界（秒）：拿回退代价当尺子——等多久不超过
+#: 直接回落一次 Gradle 的代价。实测（2026-10-06 本机）：忙 op 41.4s，Gradle 回退块 28–44s，
+#: 写死 2s 必然白等；取 60s 后同场景 37.4s 等到空闲并复用。
+_DAEMON_BUSY_WAIT_SEC = 60.0
 
 #: 块内输出停滞看门狗：results 文件这么久没长一行就断定引擎停摆，主动断掉。
 #: 3× 每源预算是给慢站留的余量（真要 60 秒/源的站不该被误伤），封顶 120 秒。
@@ -646,8 +676,14 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
     """
     from core.jvm_debug import RUN_LOCK
 
-    # 新任务只从提交时生成的 manifest 取输入/输出；旧的直接调用测试仍允许不带 manifest。
+    # 新任务只从提交时生成的 manifest 取输入/输出。**不带 manifest 的旧调用只支持单条**
+    # （那条路有测试钉着，靠 payload 里的显式路径跑）；批量必须带清单——它的参数、分块与
+    # 运行身份全在清单里，放它继续走只会在块线程里 KeyError，而不是一条可读的失败原因。
     manifest_value = payload.get("manifest")
+    if manifest_value is None and not payload.get("single"):
+        return dict(payload.get("prep") or {}, **{
+            "ok": False, "execution_mode": "unknown",
+            "reason": "JVM 任务缺少 manifest：批量执行必须带清单"})
     manifest_reason = _manifest_error(manifest_value) if manifest_value is not None else ""
     has_manifest = isinstance(manifest_value, dict)
     manifest = manifest_value if has_manifest else {}
@@ -688,13 +724,13 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
         run_dir.mkdir(parents=True, exist_ok=True)
         if has_manifest and single and args_path is not None:
             params = (manifest.get("params") or {})
-            _write_args(str(params.get("keyword") or "我"),
-                        int(params.get("timeout") or 25),
-                        int(params.get("concurrency") or 8),
-                        out_path, Path(source_file_value or (run_dir / "sources.json")),
-                        str(params.get("depth") or "search"), args_path=args_path)
+            _write_manifest_args(manifest, out_path,
+                                Path(source_file_value or (run_dir / "sources.json")),
+                                args_path)
 
     cancelled = threading.Event()
+    # lane 等待只记录实际等待时间。
+    queue_wait_sec: Optional[float] = None
 
     def _single_work() -> Dict[str, Any]:
         RUN_LOCK.acquire()
@@ -713,6 +749,9 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
                 _write_run_manifest(run_dir, manifest, job_id)
                 _persist_runtime_snapshot(run_dir)
             _append_event(run_dir, "single_started")
+            if queue_wait_sec is not None:
+                _append_event(run_dir, "startup_stage", stage="queue_wait",
+                              status="done", cost_sec=queue_wait_sec)
             result = _execute_single(tail_stop, tail)
             # 终态事件在读尾合并之前落盘，才能进 result["events"]
             _append_event(run_dir, "done" if result.get("ok") else "failed",
@@ -749,7 +788,11 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
                         raise jvm_validate_daemon.ValidateDaemonError(
                             current_exec.get("reason") or "单条 JVM 执行态在排队期间失效")
                 job_runner.update_phase(job_id, "running_validate")
+                _engine_t0 = time.monotonic()
                 daemon_response = jvm_validate_daemon.run(dump, str(args_path))
+                _append_event(run_dir, "startup_stage", stage="daemon_request",
+                               status="done", cost_sec=round(time.monotonic() - _engine_t0, 3),
+                               mode="validate_daemon")
                 daemon_code = daemon_response.get("code")
                 if daemon_code != 0:
                     raise jvm_validate_daemon.ValidateDaemonError(
@@ -867,7 +910,7 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
         RUN_LOCK.acquire()
         # 块墙钟：每块耗时随环境变化，不能把推演当作性能结论。
         started = time.monotonic()
-        per_source_budget = int(((manifest.get("params") or {}).get("timeout")) or 25)
+        per_source_budget = int(manifest["params"]["timeout"])
         try:
             if has_manifest and chunk_dir is not None:
                 _write_run_manifest(chunk_dir, manifest, job_id,
@@ -1033,11 +1076,11 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
         from core import jvm_direct
         from core import jvm_validate_daemon
 
-        params = (manifest.get("params") or {})
-        keyword = str(params.get("keyword") or "我")
-        timeout = int(params.get("timeout") or 25)
-        concurrency = int(params.get("concurrency") or 8)
-        depth = str(params.get("depth") or "search")
+        params = manifest["params"]
+        keyword = str(params["keyword"])
+        timeout = int(params["timeout"])
+        concurrency = int(params["concurrency"])
+        depth = str(params["depth"])
         try:
             jvm_validate_daemon.stop()
             prep = jvm_validate_daemon.prepare(jvm_direct.load_dump(warn_stale=False))
@@ -1103,23 +1146,37 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
             return False
 
     def _prepare_daemon() -> Dict[str, Any]:
-        """批量开跑前准备 daemon；准备失败转成 failed，块级回落 Gradle。"""
+        """批量开跑前准备 daemon；忙时有界等待（可见），失败转 failed 回落 Gradle。
+
+        **先过单条同一条闸门**（``execution_readiness``，含 ``dump_is_stale``）：少了它，
+        改了 Kotlin 源码又不刷新 snapshot 就会用**旧字节码**跑完整批——daemon 的 sig 只反映
+        源码 mtime，不等于类已经重编，结论看上去和真跑的一样。执行态不成立时**不重试**：
+        重试还是同一份旧快照，只是再拖一轮。
+        """
+
+        def _notice(elapsed_sec: float) -> None:
+            # 忙等待期间每 10 秒一条：用户看得见"在等引擎"，而不是进度条不动
+            _append_event(run_dir, "waiting_engine", elapsed_sec=elapsed_sec)
+
         try:
             from core import jvm_direct, jvm_validate_daemon
 
+            dump = jvm_direct.load_dump(warn_stale=False)
+            gate = execution_readiness(dump)
+            if not gate.get("ok"):
+                return {"outcome": "failed", "retryable": False,
+                        "reason": gate.get("reason") or "JVM 执行态未就绪"}
             return jvm_validate_daemon.prepare(
-                jvm_direct.load_dump(warn_stale=False))
+                dump, busy_wait_sec=_DAEMON_BUSY_WAIT_SEC, on_wait=_notice)
         except Exception as exc:
-            return {"outcome": "failed", "reason": str(exc)}
+            return {"outcome": "failed", "retryable": False, "reason": str(exc)}
 
     async def _run_batch() -> Dict[str, Any]:
         from backend.jobs import runner as job_runner
 
         rows_all = (json.loads(Path(source_file_value).read_text(encoding="utf-8"))
                     if source_file_value else [])
-        sizes = [int(n) for n in (manifest.get("chunks") or [])] if has_manifest else []
-        if not sizes or sum(sizes) != len(rows_all):
-            sizes = [len(rows_all)]      # legacy / 清单不可信：整批一块，行为同旧版
+        sizes = manifest["chunks"]
         chunks: List[List[dict]] = []
         pos = 0
         for n in sizes:
@@ -1132,6 +1189,9 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
         batch_t0 = time.monotonic()
         _append_event(run_dir, "batch_started", chunks=len(chunks),
                       sources=len(rows_all))
+        if queue_wait_sec is not None:
+            _append_event(run_dir, "startup_stage", stage="queue_wait",
+                          status="done", cost_sec=queue_wait_sec)
         job_runner.update_phase(job_id, "preparing_engine")
         # **上一版结论的快照必须在落库之前读**：跑完再读，每条源都是 old == new，
         # 「这次变了什么」会永远答「没变」（与单条同规矩，理由见 ops.run_check_job）
@@ -1142,10 +1202,7 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
         base_done = 0
         abort_reason = ""
         daemon_prepare: Dict[str, Any] = {}
-        daemon_retry_waiting = False
-        daemon_retry_available = False
-        daemon_recovered = False
-        daemon_retry_reason = ""
+        daemon_state = "unknown"
         for idx, chunk_rows in enumerate(chunks):
             if idx > 0:
                 # 块间交还 lane：排队者（调试等）按优先级插队，本批随后重新取许可。
@@ -1174,13 +1231,7 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
                 chunk_args = chunk_dir / "args.properties"
                 chunk_src.write_text(json.dumps(chunk_rows, ensure_ascii=False),
                                      encoding="utf-8", newline="\n")
-                params = (manifest.get("params") or {})
-                _write_args(str(params.get("keyword") or "我"),
-                            int(params.get("timeout") or 25),
-                            int(params.get("concurrency") or 8),
-                            chunk_out, chunk_src,
-                            str(params.get("depth") or "search"),
-                            args_path=chunk_args)
+                _write_manifest_args(manifest, chunk_out, chunk_src, chunk_args)
             else:
                 chunk_out, chunk_args = out_path, args_path
             # daemon 准备放在第一个待跑块前；全部块 DONE 的重试批一次都不准备。
@@ -1193,24 +1244,21 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
                               outcome=str(daemon_prepare.get("outcome") or ""),
                               reason=str(daemon_prepare.get("reason") or ""),
                               cost_sec=round(time.monotonic() - _prepare_t0, 1))
-                if daemon_prepare.get("outcome") in ("busy", "failed"):
-                    daemon_retry_waiting = True
-                    daemon_retry_reason = str(daemon_prepare.get("reason") or
-                                              "daemon 批次准备未就绪")
+                daemon_state = ("ready" if daemon_prepare.get("outcome")
+                                in ("ready", "started")
+                                else ("fallback"
+                                      if daemon_prepare.get("retryable") is False
+                                      else "retry_pending"))
             tail_stop = threading.Event()
             tail = threading.Thread(
                 target=_tail_progress, name="jvm-progress-tail",
                 args=(job_id, chunk_out, tail_stop, _PROGRESS_POLL_INTERVAL,
                       len(chunk_rows), base_done), daemon=True)
             tail.start()
-            retry_this_chunk = daemon_retry_available
-            daemon_allowed = (daemon_recovered or
-                              daemon_prepare.get("outcome") in ("ready", "started") or
-                              retry_this_chunk)
-            daemon_reason = (daemon_retry_reason
+            retry_this_chunk = daemon_state == "retry"
+            daemon_allowed = daemon_state in ("ready", "retry")
+            daemon_reason = (str(daemon_prepare.get("reason") or "")
                              if not daemon_allowed else "")
-            if retry_this_chunk:
-                daemon_retry_available = False
             _append_event(run_dir, "chunk_started", index=idx,
                           total=len(chunks), count=len(chunk_rows),
                           mode=("validate_daemon" if daemon_allowed else "gradle"))
@@ -1235,14 +1283,15 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
                           cost_sec=report.get("cost_sec"),
                           reason=(str(report.get("reason") or "")[:300]
                                   if not report.get("ok") else ""))
-            if daemon_retry_waiting:
-                # 忙/失败后只在下一块重试一次，**有意不逐块重试**：每次 probe 都要
-                # 付满 1 秒超时，忙着的 daemon 不会因为多探几次就空闲
-                daemon_retry_waiting = False
-                daemon_retry_available = True
-            if retry_this_chunk and report.get("execution_mode") == "validate_daemon":
-                daemon_recovered = True
-                _append_event(run_dir, "recovered", index=idx)
+            if daemon_state == "retry":
+                if report.get("execution_mode") == "validate_daemon":
+                    daemon_state = "ready"
+                    _append_event(run_dir, "recovered", index=idx)
+                else:
+                    daemon_state = "fallback"
+            elif daemon_state == "retry_pending":
+                # 首块回退后只给下一块一次重试机会；重试失败后保持回退。
+                daemon_state = "retry"
             if cancelled.is_set():
                 abort_reason = abort_reason or "用户取消，剩余块未启动"
                 break
@@ -1315,7 +1364,9 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
 
     # jvm_run 自管 lane（runner._run 不再代持）：批量按块交还许可重排队
     lane = runner.lane("jvm")
+    queue_t0 = time.monotonic()
     await lane.acquire("batch", job_id)
+    queue_wait_sec = round(time.monotonic() - queue_t0, 3)
     try:
         if single:
             work = asyncio.create_task(run_in_threadpool(_single_work))
