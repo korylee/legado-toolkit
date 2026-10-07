@@ -38,6 +38,7 @@ def create_export(body: dict, st=Depends(get_store)):
     if urls:
         # 模式一：导出勾选的源
         srcs = [s for s in (st.get_source(u) for u in urls) if s]
+        srcs = st.finalize_export(srcs)
     elif filt:
         # 模式二：导出当前筛选结果（复用列表页的筛选条件，不受分页限制）
         srcs = st.export_by_filter(

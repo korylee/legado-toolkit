@@ -552,7 +552,12 @@ class Store:
                     "WHERE deleted_at = ''")}
 
     def export_sources(self) -> List[Dict[str, Any]]:
-        """导出全部书源（保持入库顺序），用于重新生成给 Legado 的 JSON。"""
+        """导出全部书源（保持入库顺序），用于重新生成给 Legado 的 JSON。
+
+        ``respondTime`` 由最近一条**引擎 ok 结论**的实测耗时回填（App 换源排序
+        吃这个字段）；没有合格结论就保持源里自带的值不动。
+        """
+
         out = []
         for row in self.conn.execute(
                 "SELECT raw_json, group_name, user_tags "
@@ -560,7 +565,17 @@ class Store:
             src = self._source_view(row["raw_json"], row["group_name"], row["user_tags"])
             if src:
                 out.append(src)
-        return out
+        return self.finalize_export(out)
+
+    def finalize_export(self, sources: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        from core.loader import _normalize_url
+
+        checks = self.checks_map()
+        fingerprints = self.live_fingerprints()
+        for src in sources:
+            url = _normalize_url(str(src.get("bookSourceUrl") or ""))
+            _attach_respond_time(src, checks.get(url), fingerprints.get(url, ""))
+        return sources
 
     def export_json(self, path: str) -> int:
         from core.loader import dump_json_file
@@ -1386,7 +1401,7 @@ class Store:
         if bad:
             print("WARN export_by_filter: %d/%d 条 raw_json 缺失或无法解析，已跳过"
                   % (bad, bad + len(out)))
-        return out
+        return self.finalize_export(out)
 
     # ---------------------------------------------------------------- 回收站
     # 设计：UI 永不硬删除。软删时把整条 raw_json 快照到
@@ -1560,3 +1575,26 @@ def _tri(v: Any) -> Optional[int]:
 
 def _untri(v: Any) -> Optional[bool]:
     return None if v is None else bool(v)
+
+
+def _attach_respond_time(src: Dict[str, Any],
+                          check: Optional[Dict[str, Any]],
+                          source_fingerprint: str) -> None:
+    """把本机引擎实测耗时写进 ``respondTime``（App 端换源排序吃这个字段）。
+
+    只写**引擎结论为 ok** 的：失败行的耗时是被截断的数据（timeout 行 cost≈预算），
+    写回去会污染排序；没有引擎结论的源不动——导入时源里自带的 respondTime
+    是 App 自己测的，原样保留。``check`` 是 ``checks_map()`` 里该 URL 的最近一条
+    （键已归一；调用侧对 ``bookSourceUrl`` 归一后才查，两侧同归一，AGENTS #5）。
+    """
+    from core.models import Engine, Health
+
+    if not check:
+        return
+    if check.get("engine") != Engine.JVM or check.get("health") != Health.OK:
+        return
+    if not source_fingerprint or source_fingerprint != str(check.get("fingerprint") or ""):
+        return
+    ms = int(check.get("response_time_ms") or 0)
+    if ms > 0:
+        src["respondTime"] = ms
