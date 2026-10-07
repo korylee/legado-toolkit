@@ -67,6 +67,30 @@ class CauseTests(unittest.TestCase):
     def test_unknown_text_is_not_guessed(self) -> None:
         self.assertEqual(H.classify_cause({"reason": "奇怪的一句话"}), "")
 
+    def test_root_kind_takes_precedence_over_string_matching(self) -> None:
+        """Kotlin 按类型判的码优先——消息里再带别的特征词也不改判。"""
+        row = {"root_kind": "dns", "reason": "ScriptException: 混进来的字样"}
+        self.assertEqual(H.classify_cause(row), H.CAUSE_DNS)
+
+    def test_other_and_unknown_kinds_fall_back_to_string_matching(self) -> None:
+        """other = Kotlin 类型/消息都定不了，字符串匹配知道得更多，不短路；
+        未知码（Kotlin 先加了、Python 还没跟）同样落回原文——码表漂移不许变成错判。"""
+        self.assertEqual(
+            H.classify_cause({"root_kind": "other",
+                              "reason": "NoStackTraceException: 搜索url不能为空"}),
+            H.CAUSE_RULE)
+        self.assertEqual(
+            H.classify_cause({"root_kind": "future_kind",
+                              "reason": "SocketException: Connection reset"}),
+            H.CAUSE_RESET)
+
+    def test_kind_table_covers_every_kind_kotlin_may_send(self) -> None:
+        """码表外的已知码不许静默落空——落空会走字符串匹配，那是兜底不是契约。"""
+        self.assertEqual(
+            H.classify_cause({"root_kind": "connect",
+                              "reason": "不存在特征词的一句话"}),
+            H.CAUSE_OTHER)
+
 
 class HealthTests(unittest.TestCase):
     def _h(self, **row):

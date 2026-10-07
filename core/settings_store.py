@@ -94,7 +94,11 @@ DEFAULTS: Dict[str, Dict[str, Any]] = {
         "app_repo": "",
         "android_sdk_dir": "",
         "keyword": "我",
-        "timeout": 25,
+        #: 75 不是随手给的：App 的 okhttp callTimeout 是 60s（HttpHelper 硬顶），
+        #: 每源总预算必须 >60s 才分得清「预算用尽」与「App 内部请求超时」——
+        #: ValidateService 的超时归因就按这个差值写（Kotlin 侧注释同源）。
+        #: 再大只拖慢整批，上界仍压在 LIMITS.jvm_timeout。
+        "timeout": 75,
         "concurrency": 8,
         #: 默认停在**搜索**档：S1/S2 的历史结论就是这一档，深一档（目录+正文）
         #: 会让全量耗时成倍增长（搜索档实测 17 分钟 / 3774 条）。**默认值不许

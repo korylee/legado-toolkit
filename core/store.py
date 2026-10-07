@@ -19,6 +19,8 @@ import threading
 import time
 from typing import Any, Dict, List, Optional, Sequence
 
+from core.checker import CACHE_VERSION
+
 from core.tags import (
     DEFAULT_USER_TAGS as _DEFAULT_USER_TAGS,
     SYSTEM_QUALITY_TAGS as _SYSTEM_QUALITY_TAGS,
@@ -279,8 +281,9 @@ class Store:
                c.toc_complete, c.content_ok, c.search_hit, c.quality_tags, c.engine
         FROM sources s
         LEFT JOIN checks c ON c.id = (
-            SELECT id FROM checks WHERE source_url = s.source_url
-            ORDER BY checked_at DESC, id DESC LIMIT 1)"""
+            SELECT id FROM checks
+            WHERE source_url = s.source_url AND cache_version = %d
+            ORDER BY checked_at DESC, id DESC LIMIT 1)""" % CACHE_VERSION
 
     def _schema_ok(self) -> bool:
         """表和视图都在，才算这个库已经建好。
@@ -1082,15 +1085,15 @@ class Store:
         return len(out)
 
     def sweep_checks(self) -> int:
-        """每个源只留**最近一条**校验结果，返回删掉几行。
+        """当前版本每个源只留最近一条校验结果，旧版本行保留。
 
-        `checks` 原来只增不减（`jobs`/`exports` 都有 TTL 清理，它一条都没有），
-        而**全部读者都只取每源最新一条**（`checks_map`、`last_check`、`v_sources`
-        视图）——历史行没有任何读者。不清理的后果是随每次校验单调增长：实测库里
-        3861 条源攒到 6626 行 / 26.6 MB，而瞬时网络的结论现在也会落库（见
-        `checker.save_cache_append`），于是每次全量会稳定追加约 1000 行。
+        当前版本只保留每源最近一条，旧版本行留作追溯。
+        当前读者都只取当前版本每源最新一条（`checks_map`、`last_check`、`v_sources`
+        视图），历史版本不参与当前状态。
+        瞬时网络的结论现在也会落库（见
+        `checker.save_cache_append`），所以仍需清理当前版本旧行。
 
-        **保留的必须是 `checks_map` 会返回的那一条**（同样是
+        **当前版本保留的必须是 `checks_map` 会返回的那一条**（同样是
         `checked_at DESC, id DESC`）。两边口径一旦不一致，就会出现"列表上显示的是
         A 行、而它刚被这次清理删掉"——表现是健康度莫名其妙变回上一条，且不报错。
 
@@ -1100,18 +1103,20 @@ class Store:
         """
         with self.conn:
             cur = self.conn.execute(
-                "DELETE FROM checks WHERE id NOT IN ("
-                " SELECT id FROM checks c WHERE c.id = ("
-                "  SELECT id FROM checks WHERE source_url = c.source_url"
-                "  ORDER BY checked_at DESC, id DESC LIMIT 1))")
+                "DELETE FROM checks WHERE cache_version = ? AND id NOT IN ("
+                " SELECT id FROM checks c WHERE c.cache_version = ? AND c.id = ("
+                "  SELECT id FROM checks WHERE source_url = c.source_url "
+                "    AND cache_version = ? "
+                "  ORDER BY checked_at DESC, id DESC LIMIT 1))",
+                (CACHE_VERSION, CACHE_VERSION, CACHE_VERSION))
         return cur.rowcount or 0
 
     def last_check(self, url: str) -> Optional[Dict[str, Any]]:
         row = self.conn.execute(
             # id DESC 的兜底理由同 checks_map()
-            "SELECT * FROM checks WHERE source_url = ? "
+            "SELECT * FROM checks WHERE source_url = ? AND cache_version = ? "
             "ORDER BY checked_at DESC, id DESC LIMIT 1",
-            (url,)).fetchone()
+            (url, CACHE_VERSION)).fetchone()
         return dict(row) if row else None
 
     def checks_map(self) -> Dict[str, Dict[str, Any]]:
@@ -1124,7 +1129,8 @@ class Store:
         # 判成「没验过搜索」，每次校验都白打请求
         sql = ("SELECT * FROM checks c WHERE c.id = ("
                "SELECT id FROM checks WHERE source_url = c.source_url "
-               "ORDER BY checked_at DESC, id DESC LIMIT 1)")
+               "AND cache_version = %d "
+               "ORDER BY checked_at DESC, id DESC LIMIT 1)" % CACHE_VERSION)
         for r in self.conn.execute(sql):
             d = dict(r)
             d["url"] = d.pop("source_url", "")

@@ -21,6 +21,7 @@ import uuid
 from backend.api.sources import list_source_urls, soft_delete_sources
 from backend.schemas import SourceDeleteIn, SourceOut
 from core.store import Store
+from core.checker import CACHE_VERSION
 
 
 _ROOT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
@@ -40,7 +41,7 @@ def make_source(url: str, name: str = "测试源") -> dict:
 
 def make_check(url: str, health: str) -> dict:
     return {
-        "v": 8,
+        "v": CACHE_VERSION,
         "url": url,
         "fingerprint": "fp-" + url,
         "name": "测试源",

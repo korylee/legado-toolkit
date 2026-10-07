@@ -15,6 +15,7 @@ import unittest
 import uuid
 
 from core.store import Store
+from core.checker import CACHE_VERSION
 
 
 _ROOT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
@@ -34,7 +35,7 @@ def make_source(url: str, name: str = "测试源") -> dict:
 
 def make_check(url: str, health: str) -> dict:
     return {
-        "v": 6,
+        "v": CACHE_VERSION,
         "url": url,
         "fingerprint": "fp-" + url,
         "name": "测试源",
@@ -259,6 +260,44 @@ class LatestCheckTests(unittest.TestCase):
         with self._seed() as st:
             self.assertEqual(st.query(q="a.com")[0]["health"], "ok")
 
+
+
+    def test_old_version_does_not_feed_current_state(self):
+        with Store(self.db) as st:
+            st.upsert_sources([make_source("https://a.com")])
+            old = make_check("https://a.com", "ok")
+            old["v"] = CACHE_VERSION - 1
+            st.save_checks([old])
+            self.assertEqual(st.checks_map(), {})
+            self.assertIsNone(st.last_check("https://a.com"))
+            self.assertIsNone(st.query(q="a.com")[0]["health"])
+
+    def test_current_version_wins_over_newer_old_version_row(self):
+        with Store(self.db) as st:
+            st.upsert_sources([make_source("https://a.com")])
+            old = make_check("https://a.com", "dead")
+            old["v"] = CACHE_VERSION - 1
+            old["checked_at"] = "2026-09-16 10:00:00"
+            st.save_checks([old])
+            st.save_checks([make_check("https://a.com", "ok")])
+            self.assertEqual(st.checks_map()["https://a.com"]["health"], "ok")
+            self.assertEqual(st.last_check("https://a.com")["health"], "ok")
+            self.assertEqual(st.query(q="a.com")[0]["health"], "ok")
+
+    def test_sweep_keeps_old_versions_and_removes_stale_current_rows(self):
+        with Store(self.db) as st:
+            st.upsert_sources([make_source("https://a.com")])
+            old = make_check("https://a.com", "dead")
+            old["v"] = CACHE_VERSION - 1
+            st.save_checks([old])
+            st.save_checks([make_check("https://a.com", "dead")])
+            st.save_checks([make_check("https://a.com", "ok")])
+            self.assertEqual(st.sweep_checks(), 1)
+            rows = st.conn.execute(
+                "SELECT cache_version, health FROM checks "
+                "WHERE source_url = ? ORDER BY id", ("https://a.com",)).fetchall()
+            self.assertEqual([(r["cache_version"], r["health"]) for r in rows], [
+                (CACHE_VERSION - 1, "dead"), (CACHE_VERSION, "ok")])
 
 if __name__ == "__main__":
     unittest.main()

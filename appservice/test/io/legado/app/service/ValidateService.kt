@@ -57,7 +57,9 @@ import java.io.File
  *                      不是源坏了——「剥掉 webView 后页面要 JS 渲染」属于这条）
  * - `no_result`      : 请求成功、结果为空、页面不是 JS 壳 → 源可能真失效（留给多词复核）
  * - `timeout`        : 该段超出**每源总预算**（各段共享 `--timeout`，不是每段一份）
- * - `error`          : 请求失败（网络/异常），带原因
+ * - `error`          : 请求失败（网络/异常），带原因——`root_kind` 是机器可读的
+ *                      归因码（码表与 Python `core/jvm_health` 的 CAUSE_* 同形，
+ *                      词表契约测试钉着），`reason`/`root` 是给人看的那份
  * - `invalid`        : 源 JSON 解析失败
  *
  * **`stage` 字段**：结论挂在哪一段（`search` / `toc` / `content`）。多段链路里
@@ -204,6 +206,42 @@ object ValidateService {
         return ENGINE_ERROR_MARKERS.any { head.contains(it) }
     }
 
+    /**
+     * 异常 → 归因码。**词表与 Python 那份同形**（`core/jvm_health` 的 CAUSE_*，
+     * `tests/test_jvm_service_parity.py` 钉住）：判定发生在产生结论的这一侧
+     * （AGENTS #22⑤），Python 只消费码；无 `root_kind` 的行（历史结论）由
+     * Python 的字符串匹配兜底。类型定得了的按类型定，定不了的（`Socket closed`
+     * 与 `Connection reset` 同是 SocketException）按消息定——顺序照抄 Python 的
+     * `_CAUSE_PATTERNS`：更具体的先判。
+     */
+    internal fun classifyRoot(e: Throwable): String {
+        val root = generateSequence(e as Throwable?) { it.cause }.lastOrNull() ?: e
+        val cls = root::class.java.simpleName
+        val msg = root.message.orEmpty()
+        return when {
+            // 引擎自身没跑成（我们桩的环境缺口 / OOM）：不是源的结论
+            cls.contains("NoDefinitionFound") || cls.contains("ExceptionInInitializer") ||
+                cls == "OutOfMemoryError" || cls.contains("Koin") -> "self"
+            // 源的规则/配置错（JS 语法、取值路径不存在…）：下一步是修，不是重跑
+            root is javax.script.ScriptException || cls.contains("EcmaError") ||
+                cls.contains("PathNotFoundException") || msg.contains("Expected URL scheme") ||
+                msg.contains("json string can not be null") -> "rule"
+            cls.contains("Certificate") || cls.contains("CertPath") ||
+                msg.contains("证书") -> "cert"
+            cls.startsWith("SSL") -> "tls"
+            root is java.net.ConnectException -> "connect"
+            msg.contains("Connection reset") || msg.contains("Broken pipe") ||
+                msg.contains("StreamReset") || msg.contains("Connection shutdown") -> "reset"
+            root is java.net.UnknownHostException || cls.contains("UnresolvedAddress") ||
+                msg.contains("No address associated") -> "dns"
+            msg.contains("Proxy") -> "proxy"
+            root is java.net.SocketTimeoutException || root is java.io.InterruptedIOException ||
+                cls.contains("TimeoutCancellation") || msg.contains("timed out") ||
+                msg.contains("timeout") -> "timeout"
+            else -> "other"
+        }
+    }
+
     //: App 的两类「空」异常：它们**是源级的结论**（规则跑不出内容/目录），
     //: 不是网络或我们的失败——归成 `error` 会把它混进「网络异常」那桶里。
     //: （对应用户看到的 App 行为：正文页空白，而不是"打不开"）
@@ -232,6 +270,7 @@ object ValidateService {
         val head = urlRule.substring(0, idx)
         val jsonPart = urlRule.substring(idx + 1)
         if (!jsonPart.contains("webView", ignoreCase = true)) return urlRule to false
+        var removed = false
         return try {
             val map = linkedMapOf<String, kotlinx.serialization.json.JsonElement>()
             val parser = kotlinx.serialization.json.Json.parseToJsonElement(jsonPart)
@@ -241,16 +280,74 @@ object ValidateService {
                 if (k.equals("webView", ignoreCase = true) &&
                     (v is kotlinx.serialization.json.JsonPrimitive) &&
                     (v.content == "true" || v.content == "1")
-                ) continue
+                ) { removed = true; continue }
                 map[k] = v
             }
+            if (!removed) return urlRule to false
             val rebuilt = if (map.isEmpty()) head
             else head + "," + kotlinx.serialization.json.JsonObject(map).toString()
             rebuilt to true
         } catch (e: Exception) {
             // JSON 解析不了（可能带模板/函数）→ 正则剥布尔开关，保底
-            val out = WEBVIEW_IN_OPTION.replace(jsonPart) { m: kotlin.text.MatchResult -> m.groupValues[1] + "false" }
+            val out = WEBVIEW_IN_OPTION.replace(jsonPart) { m: kotlin.text.MatchResult -> removed = true; m.groupValues[1] + "false" }
+            if (!removed) return urlRule to false
             (head + "," + out) to true
+        }
+    }
+
+    /** `retry` 选项的钳制上限。上游对非 2xx 的重发次数来自源 URL 选项 `retry`
+     *  （`OkHttpUtils.newCallResponse` 直接 for 循环），**没有上限**——源写
+     *  `retry:50` 会把每源预算全部耗在盲重试上，结论变成 timeout，看不到站点
+     *  的真实行为。钳到 2 属于「验证 ≠ 逐字节复刻 App 行为」的既有先例
+     *  （剥 webView 同族），结论带 `retry_clamped` 自证。
+     *  **范围**：只覆盖 searchUrl / exploreUrl 字段级选项；规则产出的 URL 里的
+     *  retry 摸不到，靠每源预算 + 看门狗兜底。
+     */
+    private const val MAX_RETRY = 2
+
+    private val RETRY_IN_OPTION = Regex(
+        """("retry"\s*:\s*)(\d+)(?=\s*[,}])""", RegexOption.IGNORE_CASE
+    )
+
+    /**
+     * 结构化钳制：把 `url,{json}` 选项里超过 [MAX_RETRY] 的 `retry` 改成上限再拼回去。
+     * 切法与 [stripWebView] 同（第一个 `,{` 之后是选项 JSON）；解析不了走正则保底，
+     * 只钳数值超限的那几处。返回 `(新URL, 是否钳过)`——没超限就原样返回，
+     * 不重新序列化（重排/改写格式会干扰后续比对）。
+     */
+    fun clampRetryOption(urlRule: String): Pair<String, Boolean> {
+        val idx = urlRule.indexOf(",{")
+        if (idx < 0) return urlRule to false
+        val head = urlRule.substring(0, idx)
+        val jsonPart = urlRule.substring(idx + 1)
+        return try {
+            val parser = kotlinx.serialization.json.Json.parseToJsonElement(jsonPart)
+            val obj = parser as? kotlinx.serialization.json.JsonObject
+                ?: return urlRule to false
+            var clamped = false
+            val map = linkedMapOf<String, kotlinx.serialization.json.JsonElement>()
+            for ((k, v) in obj) {
+                val n = (v as? kotlinx.serialization.json.JsonPrimitive)?.content?.toIntOrNull()
+                if (k.equals("retry", ignoreCase = true) && n != null && n > MAX_RETRY) {
+                    map[k] = kotlinx.serialization.json.JsonPrimitive(MAX_RETRY)
+                    clamped = true
+                    continue
+                }
+                map[k] = v
+            }
+            if (!clamped) return urlRule to false
+            (head + "," + kotlinx.serialization.json.JsonObject(map).toString()) to true
+        } catch (e: Exception) {
+            var clamped = false
+            val out = RETRY_IN_OPTION.replace(jsonPart) { m: kotlin.text.MatchResult ->
+                val n = m.groupValues[2].toIntOrNull()
+                if (n != null && n > MAX_RETRY) {
+                    clamped = true
+                    m.groupValues[1] + MAX_RETRY
+                } else m.value
+            }
+            if (!clamped) urlRule to false
+            else (head + "," + out) to true
         }
     }
 
@@ -262,11 +359,15 @@ object ValidateService {
      * （`jvm_concurrency` 上限 32，就是 32 根线程白占），而且内层 Job 与批次的 Job
      * 无关，**外层取消传不进来**（Ctrl-C / 上层 cancel 时它照跑完）。
      * `remaining()` 是墙钟预算，`withTimeout` 在 suspend 里本来就能用。
+     *
+     * 关键词用**源自带的 `checkKeyWord`** 优先（`BookSource.getCheckKeyword`，与 App
+     * 自己的校验同口径——小众源靠特定词才有结果，通用词会冤判 no_result）；
+     * 结论带 `keyword_used` 自证这次用的哪个词。
      */
     suspend fun validateOne(
         sourceJson: String,
         keyword: String,
-        timeoutSec: Long = 30,
+        timeoutSec: Long = 75,
         stripWebView: Boolean = true,
         depth: String = DEPTH_SEARCH,
         manualCookie: String = "",
@@ -280,21 +381,26 @@ object ValidateService {
             )
         }
 
-        // (a) 剥 webView 选项（searchUrl 与 exploreUrl；S1 只跑搜索段）
+        // (a) 选项规整（searchUrl 与 exploreUrl）：剥 webView + 钳 retry，两道都在同一处
+        // 选项 JSON 上做；`--no-strip-webview` 时都不做 = 原样保真模式
         var stripped = false
+        var retryClamped = false
         var effective: BookSource = source
         if (stripWebView) {
-            var any = false
-            fun stripField(get: () -> String?, set: (String) -> Unit) {
+            fun fixField(get: () -> String?, set: (String) -> Unit) {
                 val v = get() ?: return
-                if (!v.contains("webView", true)) return
-                val (nv, did) = stripWebView(v)
-                if (did) { set(nv); any = true }
+                var nv = v
+                if (nv.contains("webView", true)) {
+                    val (a, did) = stripWebView(nv)
+                    if (did) { nv = a; stripped = true }
+                }
+                val (b, clamped) = clampRetryOption(nv)
+                if (clamped) { nv = b; retryClamped = true }
+                if (nv != v) set(nv)
             }
             effective = source
-            stripField({ effective.searchUrl }, { effective.searchUrl = it })
-            stripField({ effective.exploreUrl }, { effective.exploreUrl = it })
-            stripped = any
+            fixField({ effective.searchUrl }, { effective.searchUrl = it })
+            fixField({ effective.exploreUrl }, { effective.exploreUrl = it })
         }
 
         // 源没有搜索规则：「没搜索规则」是**源的能力事实**，不是请求失败——
@@ -318,6 +424,11 @@ object ValidateService {
         // 结论要能自证「这次带没带登录态」，否则「需登录」与「源坏了」分不开。
         val cookieInj = injectSourceCookies(source, manualCookie)
 
+        // 关键词：**源自带的 checkKeyWord 优先**（`BookSource.getCheckKeyword`：非空且
+        // 不是 http/::/++/-- 这类地址形态才认，与 App 自己的校验同口径）。不用它，
+        // 小众源会被我们的通用词误判 no_result；结论带 keyword_used 自证。
+        val effectiveKeyword = effective.getCheckKeyword(keyword)
+
         val startedAt = System.currentTimeMillis()
         // **每源总预算**，不是每段一份：目录+正文比搜索慢好几倍，按段各给一份的话
         // 一个慢源能把整场拖成 O(源数 × 段数 × timeout)（lessons §五十四）
@@ -326,7 +437,7 @@ object ValidateService {
 
         return try {
             val books = withTimeout(remaining()) {
-                WebBook.searchBookAwait(effective, keyword)
+                WebBook.searchBookAwait(effective, effectiveKeyword)
             }
             val cost = System.currentTimeMillis() - startedAt
             when {
@@ -338,8 +449,10 @@ object ValidateService {
                         "stage" to DEPTH_SEARCH,
                         "hit" to books.size,
                         "sample" to books.take(3).map { it.name },
+                        "keyword_used" to effectiveKeyword,
                         "cost_ms" to cost,
                         "webview_stripped" to stripped,
+                        "retry_clamped" to retryClamped,
                         "cookie_len" to cookieInj.len,
                         "cookie_note" to cookieInj.note,
                     )
@@ -393,6 +506,7 @@ object ValidateService {
                                     row["root_stack"] = root.stackTrace.take(6).joinToString(" | ") { f ->
                                         "${f.className.substringAfterLast('.')}.${f.methodName}:${f.lineNumber}"
                                     }
+                                    row["root_kind"] = classifyRoot(e)
                                 }
                             }
                         } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
@@ -415,6 +529,7 @@ object ValidateService {
                             row["root_stack"] = root.stackTrace.take(6).joinToString(" | ") { f ->
                                 "${f.className.substringAfterLast('.')}.${f.methodName}:${f.lineNumber}"
                             }
+                            row["root_kind"] = classifyRoot(e)
                         }
                     }
                     row
@@ -431,7 +546,7 @@ object ValidateService {
                     // 的 is_login_wall）判「需登录」。只在「源声明了登录方式」时才去抓，
                     // 免得给每条空结果源都多发一次请求
                     val loginHit = if (!likelyShell && declaresLogin(source)) {
-                        detectLoginWall(effective, keyword)
+                        detectLoginWall(effective, effectiveKeyword)
                     } else ""
                     // **显式写 <String, Any?>**：靠推断的话，值全是 String/Int 时
                     // 会被推成公共父类型 `Comparable<*> & Serializable`，后面合并
@@ -445,6 +560,7 @@ object ValidateService {
                             else -> "no_result"
                         },
                         "stage" to DEPTH_SEARCH,
+                        "keyword_used" to effectiveKeyword,
                         "reason" to when {
                             loginHit.isNotEmpty() -> "搜索为空，搜索页出现「$loginHit」→ 需登录" +
                                 (if (cookieInj.len > 0)
@@ -453,10 +569,11 @@ object ValidateService {
                                     + "或用 --cookie 手工给一条）")
                             likelyShell ->
                                 "剥掉 webView 选项后搜索为空；原源声明需要 webView（页面可能要 JS 渲染）→ 本机无法验证"
-                            else -> "搜索成功但无结果（关键词：$keyword）"
+                            else -> "搜索成功但无结果（关键词：$effectiveKeyword）"
                         },
                         "cost_ms" to cost,
                         "webview_stripped" to stripped,
+                        "retry_clamped" to retryClamped,
                         "cookie_len" to cookieInj.len,
                         "cookie_note" to cookieInj.note,
                     )
@@ -464,7 +581,7 @@ object ValidateService {
                     // 是源自己的结论，渲染一次也变不出书来，白花时间）
                     if (likelyShell) {
                         val retry = withTimeout(remaining()) {
-                            validateByRendering(source, keyword, timeoutSec)
+                            validateByRendering(source, effectiveKeyword, timeoutSec)
                         }
                         if ((retry["state"] as? String) == "ok") {
                             retry.forEach { (k, v) -> shellRow[k] = v }
@@ -491,6 +608,8 @@ object ValidateService {
                     "搜索超时（每源总预算 ${timeoutSec}s 用尽）"
                 else "搜索超时（是 App 内部的请求超时，非本次预算）",
                 "webview_stripped" to stripped,
+                "retry_clamped" to retryClamped,
+                "keyword_used" to effectiveKeyword,
                 "cookie_len" to cookieInj.len,
                 "cookie_note" to cookieInj.note,
             )
@@ -506,7 +625,10 @@ object ValidateService {
                 "root" to "${root::class.simpleName}: ${root.message?.take(160)}",
                 "root_stack" to root.stackTrace.take(6).joinToString(" | ") { f ->
                     "${f.className.substringAfterLast('.')}.${f.methodName}:${f.lineNumber}" },
+                "root_kind" to classifyRoot(e),
                 "webview_stripped" to stripped,
+                "retry_clamped" to retryClamped,
+                "keyword_used" to effectiveKeyword,
                 "cookie_len" to cookieInj.len,
                 "cookie_note" to cookieInj.note,
             )
@@ -733,7 +855,7 @@ object ValidateService {
         sourceJsons: List<String>,
         keyword: String,
         concurrency: Int = 8,
-        timeoutSec: Long = 30,
+        timeoutSec: Long = 75,
         stripWebView: Boolean = true,
         depth: String = DEPTH_SEARCH,
         manualCookie: String = "",
@@ -767,7 +889,9 @@ object ValidateService {
         var file: String? = null
         var keyword = "我"
         var concurrency = 8
-        var timeoutSec = 30L
+        //: 与 settings_store.DEFAULTS jvm.timeout 同值（tests/test_jvm_service_parity.py
+        //: 钉着）：每源总预算必须 > App okhttp callTimeout 60s，两种超时才分得开
+        var timeoutSec = 75L
         var outPath = ""
         var limit = 0
         var noStrip = false
@@ -817,7 +941,7 @@ object ValidateService {
         }
         if (limit > 0) jsons.subList(0, minOf(limit, jsons.size)).toList().let { jsons.clear(); jsons.addAll(it) }
         System.err.println("[appservice] 待验源: ${jsons.size} 条；关键词=$keyword 并发=$concurrency " +
-            "超时=${timeoutSec}s 深度=$depth 剥webView=${!noStrip} " +
+            "超时=${timeoutSec}s 深度=$depth 剥webView/钳retry=${!noStrip} " +
             "cookie=${if (cookie.isEmpty()) "无（按 profile 读）" else "${cookie.length} 字符（手工）"}")
 
         val writer = if (outPath.isNotEmpty())

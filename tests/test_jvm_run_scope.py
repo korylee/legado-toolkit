@@ -31,6 +31,7 @@ from backend.api import jvm as jvm_api
 from backend.jobs import jvm_exec
 from backend.schemas import JvmRunRequest
 from core import jvm_direct
+from core.checker import CACHE_VERSION
 from core.loader import _normalize_url
 from core.store import Store
 
@@ -391,7 +392,7 @@ class FilterScopeTests(_Base):
 
     def _mark_all(self, health: str) -> None:
         with Store(self.db) as st:
-            st.save_checks([{"url": u, "health": health,
+            st.save_checks([{"url": u, "v": CACHE_VERSION, "health": health,
                              "checked_at": "2026-09-20 10:00:00"}
                             for u in ("https://a.com", "https://b.com", "https://c.com")])
 

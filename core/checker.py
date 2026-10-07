@@ -99,7 +99,8 @@ from core.constants import DEFAULT_UA
 # **静默复用**另一台引擎的结论（AGENTS #5b）。
 # 17：校验结果改为只保留健康状态和逐段验证事实，移除星级及来源字段。
 # 旧缓存即使含有星级，也不能作为新结果形状继续复用。
-CACHE_VERSION = 17
+# 18：校验引擎新增 retry / keyword / root_kind 口径，旧结论不可复用。
+CACHE_VERSION = 18
 
 
 

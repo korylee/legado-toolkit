@@ -84,8 +84,38 @@ _STATE_HEALTH = {
 }
 
 
+#: Kotlin `classifyRoot` 的码 → 这里的 CAUSE_*。**码表两侧逐词同形**
+#: （tests/test_jvm_service_parity.py 钉住，AGENTS #22⑤）；`connect` 在本地口径里
+#: 没有单独的桶（与「网络异常」同动作：重跑，一次连接被拒不是「确认不可达」的证据），
+#: 落 CAUSE_OTHER。
+_ROOT_KIND_TO_CAUSE: Dict[str, str] = {
+    "self": CAUSE_SELF,
+    "rule": CAUSE_RULE,
+    "cert": CAUSE_CERT,
+    "tls": CAUSE_TLS,
+    "reset": CAUSE_RESET,
+    "connect": CAUSE_OTHER,
+    "dns": CAUSE_DNS,
+    "proxy": CAUSE_PROXY,
+    "timeout": CAUSE_TIMEOUT,
+    "other": CAUSE_OTHER,
+}
+
+
 def classify_cause(row: Dict[str, Any]) -> str:
-    """结论行的异常原文 → 归因；分不出来返回 ``""``（调用方按保守处理）。"""
+    """结论行 → 归因；分不出来返回 ``""``（调用方按保守处理）。
+
+    **优先吃 `root_kind`**——那是 Kotlin 在产生结论的一侧按异常类型/消息判的
+    （比字符串匹配稳）。两个口子不短路：`other` 表示 Kotlin 的类型/消息都定不了，
+    而字符串匹配知道得更多（rule/self 的消息特征），所以落回原文再判一遍；
+    未知码（Kotlin 新增、Python 还没跟）也落回字符串匹配——前向兼容，不让
+    码表漂移变成静默错判。
+    """
+    kind = str(row.get("root_kind") or "")
+    if kind and kind != "other":
+        cause = _ROOT_KIND_TO_CAUSE.get(kind)
+        if cause is not None:
+            return cause
     blob = " ".join(str(row.get(k) or "") for k in ("reason", "root", "root_stack"))
     for cause, patterns in _CAUSE_PATTERNS:
         if any(p in blob for p in patterns):

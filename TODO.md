@@ -122,7 +122,8 @@
 依赖：无
 优先级：P2
 背景：`ValidateService.validateBatch` 已是 `Semaphore(concurrency)`；上调一档实测
-  再决定值不值。
+  再决定值不值。单源预算默认已提到 75s（>App okhttp callTimeout 60s）；
+  估整批耗时按 新预算×源数÷并发。
 约束：受「频繁跑全量会被封 IP」这条硬约束，等下次真要跑量时顺带量（skills/legado-source-toolchain §四）。
 验收：给出上调前后的一档实测对比（时长与失败率）。
 指针：lessons §七十四，appservice/test/io/legado/app/service/ValidateService.kt
@@ -333,7 +334,8 @@
 优先级：P2
 背景：跑批那条路（`ValidateService`）今天仍是「剥掉 webView 选项 → 渲染 → 另喂
   `BookList`」。shadow 到位后跑批也可以不剥、直接走 App 自己的链路——能删掉一整条
-  支路。
+  支路。同一道选项工序上还有 retry 钳制；本条若落地，钳制要跟着搬到
+  新的请求路径。
 约束：**会改变跑批结论**（真 webView 语义 ≠ 渲染后喂解析器）→ 要配 `CACHE_VERSION`
   全量重跑；**未评估前不要动手**。
 阻塞于：未评估（要先量「换语义会翻多少条结论」）
@@ -367,7 +369,9 @@
 状态：todo
 依赖：无
 优先级：P2
-背景：JVM 搜索对单关键词跑，某源没结果可能是「没这本书」。
+背景：JVM 搜索对单关键词跑，某源没结果可能是「没这本书」。源自带的
+  `checkKeyWord` 已被跑批采纳（结论带 `keyword_used`）：声明了关键词的源
+  不再因通用词误判 no_result，本条只剩「源没声明关键词」的场景。
 约束：缓解靠多词复核（全不命中才判坏），落地点在做 `no_result` 复核批次时。
 验收：做一个 `no_result` 复核批次，单关键词无结果的源经多词复核后才判坏。
 指针：lessons §五十三，core/checker.py
@@ -409,6 +413,8 @@
 优先级：P2
 背景：`login_wall` 只认 `LOGIN_MARKERS`（「请登录」这类）；验证码 / Cloudflare 那类
   （`ANTI_BOT_MARKERS`）没有对应状态，于是「需人工过一下」被读成「没出结果」。
+  异常归因已机器可读（`root_kind`）；anti-bot 是**页面内容**特征，不是
+  异常分类，别塞进那个码表。
 约束：判据照 `core/checker.is_login_wall` 那套，**别新造**。
 验收：这类源不再被判成 no_result，而是有一个「需人工过一下」的状态。
 指针：lessons §五十八，core/checker.py
@@ -446,5 +452,20 @@
 约束：两条选一，别让 `//` 开头的写法静默走到 CSS 分支（AGENTS #4）。
 验收：结论 + 落地；若判 unknown，原因要一路走到用户眼前。
 指针：lessons §二十六，core/rules/replayer.py
+
+### 条目：explore-depth · 跑批要不要加「发现页」深度档
+状态：todo
+依赖：无
+优先级：P2
+背景：上游校验有五开关（搜索/发现/详情/目录/正文，`checkDiscovery` 级联到发现页
+  第一个分类）；本机引擎的 depth 只有 search/toc/content 三档，死在发现页的源
+  （exploreUrl 配错/失效）验不出来。
+约束：`PROBE_DEPTHS` 是「只增不减、编号含义稳定」的轴，加档必须 bump
+  `CACHE_VERSION`（AGENTS #5b）；失败归因走 root_kind/health_for 那一份，引擎侧
+  别另造判词；先实测「库里带 exploreUrl 且搜索通过」的源规模，没有数量就不值得加。
+验收：给出一次实测的规模数字 + 用户拍板；若做，新档位有正反例测试与
+  `ServiceJson` 形状钉，结论行的 `stage` 词表同步扩。
+指针：appservice/test/io/legado/app/service/ValidateService.kt，core/settings_store.py，
+AGENTS.md #5b，lessons §五十三
 
 ---
