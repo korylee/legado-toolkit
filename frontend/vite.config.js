@@ -2,6 +2,7 @@ import { defineConfig } from "vite";
 import vue from "@vitejs/plugin-vue";
 import Components from "unplugin-vue-components/vite";
 import { ElementPlusResolver } from "unplugin-vue-components/resolvers";
+import ElementPlus from "unplugin-element-plus/vite";
 
 // 开发时把 /api 代理到后端，避免 CORS；
 // 生产时前端由后端托管（同源），也不需要 CORS。
@@ -11,6 +12,7 @@ export default defineConfig({
     Components({
       resolvers: [ElementPlusResolver({ importStyle: "css" })],
     }),
+    ElementPlus(),
   ],
   server: {
     port: 5173,
