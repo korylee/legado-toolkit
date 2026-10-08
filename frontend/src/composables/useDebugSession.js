@@ -13,7 +13,7 @@
 // （JVM 与批量校验共用一条），取消后马上重新调试要排队等它让出来，文案必须说到这层。
 import { ref, computed, watch } from "vue";
 import { ElMessageBox } from "element-plus";
-import { jvmDebug, appDebug, appPreflight } from "../api/rules";
+import { jvmDebug, appDebug, appPreflight, debugStatus } from "../api/rules";
 import { jvmReadiness } from "../api/jvm.js";
 import { getSettings } from "../api/settings";
 import { nextCompareState } from "../utils/debugCompare";
@@ -62,6 +62,62 @@ let abort = null;
 let runPending = null;
 const CANCEL_WAIT_NOTE = "已取消等待；后端那一次仍会跑完，期间重新调试需要排队";
 
+// ---------------------------------------------------------------- 等待观测
+//
+// 调试是**同步长轮询**：`/rules/jvm-debug` 不跑完不返回，而引擎的事件流要等进程退出
+// 才解析——所以等待期界面上没有任何产物可读，只剩一个秒表（用户反馈的「每次调试都是
+// 空等待」）。这里补的是那段空白里**唯一的两条本机事实**：已等多少秒、此刻占着引擎的
+// 是谁（见 `backend/jobs/runner.active_run_snapshot`）。**不做进度、不做 ETA**。
+//
+// 相位码→中文取词在 `utils/debugRun`（与 `core.agent_plan` 同一条约定：后端只给码）。
+const runId = ref("");
+const runStatus = ref(null);
+//: 秒表的毫秒精度副本。界面既有消费者读的是秒（`elapsed`），而相位交接判据
+//: 与「上次用时」都需要毫秒——两者由**同一次 tick 一起推进**，不另起一个表
+const elapsedMs = ref(0);
+let waitStartedAt = 0;
+//: 上一次运行**结束**的墙钟时刻与用时。用途只有一个：抽屉关着的时候跑完的那次，
+//: 重开时界面要能说出「刚才那次已经跑完了」——否则它看起来像从没跑过
+//: （`null` = 还没有过结果）
+const lastRunAt = ref(null);
+const lastRunMs = ref(0);
+//: 轮询间隔：等待期只有「已等秒数」和 lane 持有者会变，1 秒足够，也不给后端添负载
+const STATUS_POLL_MS = 1000;
+let statusTimer = 0;
+
+function newRunId() {
+  try {
+    if (window.crypto && window.crypto.randomUUID) return window.crypto.randomUUID();
+  } catch (e) { /* 老浏览器 / 非安全上下文：退回下面那条 */ }
+  return "run-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 10);
+}
+
+function stopStatusPolling() {
+  if (statusTimer) window.clearInterval(statusTimer);
+  statusTimer = 0;
+}
+
+async function pullRunStatus() {
+  const id = runId.value;
+  if (!running.value || !id) return;
+  try {
+    const data = await debugStatus(id);
+    // 过期保护：等回来时可能已经换了一次运行（新 runId），旧响应不得覆盖
+    if (runId.value === id) runStatus.value = data;
+  } catch (e) {
+    // 观测口失败**不能**影响这次调试：保留上一次快照（哪怕过期），秒表照走。
+    // 界面上那句「已等待 N 秒」本来就不依赖它
+  }
+}
+
+function startStatusPolling(id) {
+  stopStatusPolling();
+  runStatus.value = null;
+  if (!id) return;
+  void pullRunStatus();
+  statusTimer = window.setInterval(() => { void pullRunStatus(); }, STATUS_POLL_MS);
+}
+
 function errorMessage(e) {
   if (e && e.message) return String(e.message);
   if (e && e.detail) return String(e.detail);
@@ -76,16 +132,24 @@ function cancelRun() {
 function beginWait() {
   running.value = true;
   elapsed.value = 0;
+  elapsedMs.value = 0;
+  waitStartedAt = Date.now();
   abort = new AbortController();
   ticker = window.setInterval(() => {
-    elapsed.value += 1;
+    // 由**钟**算，不由 tick 次数累加：间隔被节流/挂起时读数才仍然是真实的已等时长
+    elapsedMs.value = Date.now() - waitStartedAt;
+    elapsed.value = Math.floor(elapsedMs.value / 1000);
   }, 1000);
 }
 
 function endWait() {
   window.clearInterval(ticker);
+  stopStatusPolling();
   abort = null;
   running.value = false;
+  // 收尾时补一次读数：最后一次 tick 与结束之间可能差半秒，用来显示「上次用时」
+  elapsedMs.value = waitStartedAt ? Date.now() - waitStartedAt : elapsedMs.value;
+  elapsed.value = Math.floor(elapsedMs.value / 1000);
 }
 
 // ---------------------------------------------------------------- 通道与入口
@@ -351,12 +415,18 @@ async function executeRun({ source: runSource, target: runTarget, query: runQuer
   const runSourceSnapshot = runSource && typeof runSource === "object"
     ? JSON.parse(JSON.stringify(runSource))
     : runSource;
+  // 本次运行的观测句柄。**只给本机引擎那条**（连 App 走的是设备 WS，没有这条登记）；
+  // 有它界面才能在等待期说出「已等 N 秒 / 谁占着引擎」，没有它就退回原来的秒表
+  const runHandle = runChannel === "jvm" ? newRunId() : "";
+  runId.value = runHandle;
   beginWait();
+  startStatusPolling(runHandle);
   pushed.value = "";
   try {
     if (runChannel === "jvm") {
       const r = await jvmDebug({ source: runSourceSnapshot, target: runTarget,
-        query: runQuery, cache: runCacheMode, signal: abort?.signal });
+        query: runQuery, cache: runCacheMode, signal: abort?.signal,
+        runId: runHandle });
       return storeResult(r);
     }
     // 连 App：先预检——调试 WS 对 App 库里查不到的 tag 静默无响应，而且它跑的
@@ -389,7 +459,11 @@ async function executeRun({ source: runSource, target: runTarget, query: runQuer
       cancelled,
     });
   } finally {
+    // 先收秒表再记用时：`endWait` 会补最后一次读数（最后一次 tick 到结束之间
+    // 可能差将近一秒），顺序反了「上次用时」就会永远短一截
     endWait();
+    lastRunMs.value = elapsedMs.value;
+    lastRunAt.value = Date.now();
   }
 }
 
@@ -418,6 +492,11 @@ export function useDebugSession() {
     invalidatePreflight,
     running,
     elapsed,
+    elapsedMs,
+    runId,
+    runStatus,
+    lastRunAt,
+    lastRunMs,
     budget,
     channel,
     target,

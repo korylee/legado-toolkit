@@ -8,6 +8,8 @@
 #
 # 这样 check 3700 个源、AI 修复循环这类分钟级任务不会让前端超时。
 import asyncio
+import threading
+import time
 import traceback
 import uuid
 import weakref
@@ -124,6 +126,106 @@ class _Lane:
                 "waiting": waiting}
 
 
+# ------------------------------------------------------------ 在途调试的观测口
+#
+# **为什么要有它**：调试是同步长轮询（`/rules/jvm-debug` 阻塞到跑完才返回），而本机
+# 引擎的 ndjson 事件流要等进程退出才解析（`_run_launcher` 是 `subprocess.run`，没有
+# 边跑边 tail）——所以等待期间界面上**一个可读的产物都没有**，只剩一个秒表（用户反馈的
+# 「每次调试都是空等待」）。批量校验那边走 jobs 表 + 时间线，调试没有 job 行。
+#
+# 这里**只记两件本机事实**，不记进度、不记阶段史、不做 ETA：
+#   ① 这一等是从什么时候开始的（界面要显示真实已等秒数）；
+#   ② 现在有没有别的任务占着引擎（`lane` 的持有者）——「为什么这么久没动静」的答案
+#      基本都在这一条上，而它本来就是 `lane_snapshot` 的既有事实，不另造一份状态。
+# 相位词只有两个：queued（等引擎）/ starting（已拿到许可、交给引擎线程）。引擎里跑规则
+# 那一段没有中间产物，界面照实转圈（AGENTS #4：编不出来就别编）。
+_ACTIVE_RUNS: Dict[str, Dict[str, Any]] = {}
+_ACTIVE_RUNS_LOCK = threading.Lock()
+
+
+def capture_active_run(run_id: str, lane: str = "jvm") -> str:
+    """登记一次在途调试的开始时刻（空 run_id 不登记）。"""
+    rid = str(run_id or "").strip()
+    if not rid:
+        return ""
+    now = time.monotonic()
+    with _ACTIVE_RUNS_LOCK:
+        _ACTIVE_RUNS[rid] = {"lane": lane, "phase": "queued",
+                             "since": now, "phase_since": now}
+    return rid
+
+
+def note_active_run(run_id: str, phase: str) -> None:
+    """推进相位（queued → starting）。未知/已收尾的 run_id 静默忽略——
+    迟到的那次调用不该凭空造出一条状态。**只写状态码**：中文句子由前端按码取词。"""
+    rid = str(run_id or "").strip()
+    if not rid:
+        return
+    with _ACTIVE_RUNS_LOCK:
+        record = _ACTIVE_RUNS.get(rid)
+        if record is not None:
+            record["phase"] = phase
+            record["phase_since"] = time.monotonic()
+
+
+def _finish_active_run(run_id: str) -> None:
+    if not run_id:
+        return
+    with _ACTIVE_RUNS_LOCK:
+        _ACTIVE_RUNS.pop(run_id, None)
+
+
+@asynccontextmanager
+async def active_debug_run(run_id: str, lane: str = "jvm"):
+    """登记一次在途调试的**整段等待**（进入时开始计时，退出时摘掉）。"""
+    capture_active_run(run_id, lane)
+    try:
+        yield
+    finally:
+        _finish_active_run(str(run_id or "").strip())
+
+
+def active_run_snapshot(run_id: str) -> Optional[Dict[str, Any]]:
+    """读一次在途调试的现状；没登记（没传 run_id / 已收尾）返回 ``None``。
+
+    只给观测到的事实：相位码、已等毫秒数、**当前占着引擎的是谁**。
+    """
+    rid = str(run_id or "").strip()
+    if not rid:
+        return None
+    now = time.monotonic()
+    with _ACTIVE_RUNS_LOCK:
+        record = _ACTIVE_RUNS.get(rid)
+        if record is None:
+            return None
+        out = {
+            "run_id": rid,
+            "phase": record["phase"],
+            "elapsed_ms": round((now - record["since"]) * 1000),
+            # 当前相位已经持续多久：界面用它决定「正在拉起引擎」要不要换成
+            # 「引擎执行中」——**不能用总已等时长**，前面可能排了很久的队
+            "phase_ms": round((now - record["phase_since"]) * 1000),
+            "lane": record["lane"],
+            # 读不到 lane 时保持空串（**不是 None**）：前端只做字符串比较，
+            # 空串的语义就是「没有别的任务占着 / 读不到」，不必再多一个三态
+            "lane_holder": "",
+            "lane_waiting": 0,
+        }
+    if record["lane"]:
+        # 引擎现状：持有者是谁、后面还排着几个。**不额外登记**——lane 自己就有这份账。
+        # lane 是按事件循环分表的，非事件循环上下文（同步调用 / 命令行）读不到：
+        # 那时**留空**而不是抛错——「读不到」不等于「没人占用」，更不能把一次观测
+        # 失败变成 500（AGENTS #12）
+        try:
+            snap = lane_snapshot(record["lane"])
+        except RuntimeError:
+            snap = None
+        if snap is not None:
+            out["lane_holder"] = snap.get("held") or ""
+            out["lane_waiting"] = len(snap.get("waiting") or [])
+    return out
+
+
 def _lane(name: str) -> _Lane:
     loop = asyncio.get_running_loop()
     return _LANES.setdefault(loop, {}).setdefault(name, _Lane())
@@ -158,14 +260,21 @@ async def run_in_lane(name: str, kind: str, fn: Callable, *args, **kwargs):
     把工作**等完**才放 lane——引擎调用不许被半路掐死（没有可恢复的中间态），
     lane 也只能跟着真正跑完的那次调用走。调试入口共用这一段（原在
     ``api/rules.py`` 两处与 ``api/ops.py`` 一处各抄一遍）。
+
+    ``run_id`` 非空时登记这段等待（见 `active_run_snapshot`）：界面因此能显示
+    **真实已等秒数**与**此刻占着引擎的是谁**，而不是只有一个空转的秒表。
     """
-    async with acquire_lane(name, kind=kind):
-        work = asyncio.create_task(asyncio.to_thread(fn, *args, **kwargs))
-        try:
-            return await asyncio.shield(work)
-        except asyncio.CancelledError:
-            await asyncio.shield(work)
-            raise
+    run_id = str(kwargs.pop("run_id", "") or "")
+    async with active_debug_run(run_id, lane=name):
+        async with acquire_lane(name, kind=kind):
+            # 拿到许可 → 交给工作线程：与「等引擎」分开，界面据此换一次词
+            note_active_run(run_id, "starting")
+            work = asyncio.create_task(asyncio.to_thread(fn, *args, **kwargs))
+            try:
+                return await asyncio.shield(work)
+            except asyncio.CancelledError:
+                await asyncio.shield(work)
+                raise
 
 
 def register(kind: str):

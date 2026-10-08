@@ -128,7 +128,26 @@ async def jvm_debug(body: JvmDebugRequest):
         "jvm", "debug", run_jvm_debug, dict(body.source or {}), key,
         timeout, body.cookie or "", cache, resolve_proxy(),
         readiness_result=readiness_result,
+        run_id=str(body.run_id or ""),
     )
+
+
+@router.get("/debug-status")
+async def debug_status(run_id: str = ""):
+    """在途调试的**等待观测口**：已等多少秒 + 此刻占着引擎的是谁。
+
+    为什么要有这个口：`/rules/jvm-debug` 是**同步长轮询**——不跑完不返回，而引擎的
+    ndjson 事件流要等进程退出才解析，所以等待期间界面上一个可读产物都没有（用户反馈
+    的「每次调试都是空等待」）。批量校验那边有 jobs 表 + 时间线，调试没有 job 行；
+    这里读的是 `backend/jobs/runner` 的进程内登记 + 既有的 `lane` 现状，
+    **只回事实，不回进度、不做 ETA**。
+
+    没登记（没传 run_id / 这次已收尾）返回 `{"phase": ""}`：那不是错误。
+    """
+    snapshot = runner.active_run_snapshot(run_id)
+    if snapshot is None:
+        return {"phase": "", "run_id": str(run_id or "")}
+    return snapshot
 
 
 @router.post("/app-debug")

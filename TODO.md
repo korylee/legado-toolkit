@@ -266,16 +266,6 @@
 指针：lessons §七十八，tests/test_jvm_debug_contract.py
 
 
-### 条目：ux-debug-reading · 调试高级信息与响应式阅读体验
-状态：doing
-依赖：无
-优先级：P1
-背景：运行态、事件流、整页源码、语法速查和详细 AI 信息对熟悉用户有用，但不应挤走首次调试所需的结论和动作。
-约束：默认层只展示结论、原因、主动作、核心值和证据来源；高级材料可展开；**「哪一个是 gap、谁是主动作」的口径见 AGENTS #24，本条只管呈现**；运行态继续消费 `useDebugSession`，固定显示等待、预算和取消状态；移动端保持当前步骤、结论、核心值和主动作在首屏；不复制运行态或结果状态。
-验收：滚动到证据区仍能找到运行态；取消等待与后端任务状态文案明确；默认层能看到当前步骤的核心值（无权威值时明确说明未返回）；展开高级信息后原有材料仍可用；窄屏下步骤、结论、核心值、来源和主动作可触摸访问且无横向页面溢出。
-指针：frontend/src/components/DebugWorkbench.vue，frontend/src/views/DebugWorkbenchView.vue，frontend/src/composables/useDebugSession.js
-
-
 ### 条目：agent-layer-orchestration · 按 Layer 编排受限调试 Agent
 状态：open
 依赖：无

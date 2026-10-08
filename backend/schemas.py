@@ -155,6 +155,10 @@ class JvmDebugRequest(BaseModel):
     #: 页面缓存策略，只管**我们补抓的那几页**（A4 还没从 JVM 取回真实 HTML）；
     #: 取值校验在路由里做（不合法要 400，不能静默退回默认）
     cache: str = "auto"
+    #: 这次运行的**观测句柄**（可选，前端生成）。等待期界面靠它轮询
+    #: `GET /rules/debug-status` 读「已等多少秒 + 谁占着引擎」——调试是同步长轮询，
+    #: 没有 job_id 可用（见 `backend/jobs/runner` 的在途登记）。空值 = 不登记。
+    run_id: str = ""
 
 
 class AppDebugRequest(BaseModel):

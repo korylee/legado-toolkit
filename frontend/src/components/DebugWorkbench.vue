@@ -43,6 +43,8 @@ import { buildDecision, decisionLines } from "../utils/debugDecision";
 import { parseDoc, previewCss, selectorCandidates } from "../utils/selector";
 import { assessRuleQuality } from "../utils/ruleQuality";
 import { candidateView } from "../utils/debugCandidate";
+// 在途调试的相位码 → 中文（唯一一份；后端只给码与事实）
+import { debugRunState } from "../utils/debugRun";
 import DebugCandidateCard from "./DebugCandidateCard.vue";
 import StepDecision from "./StepDecision.vue";
 // 语法速查清单（唯一一份，编辑弹框右列共用）：外壳各宿主自备
@@ -66,10 +68,26 @@ const props = defineProps({
 // 结果、在途、对比基线直接读**会话**（第二期收尾）：本组件不再经 props 接收
 // 运行态——弹框与工作台页面挂它，看到的是同一份。运行中的等待/预算/取消
 // 显示在下面那条 sticky 运行条里（唯一一份，入口卡不另设）
-const { result, compare, running, elapsed, budget, channel: debugChannel, cancelRun } = useDebugSession();
+const {
+  result, compare, running, elapsedMs, runStatus,
+  lastRunAt, lastRunMs, budget, channel: debugChannel, cancelRun,
+} = useDebugSession();
 const rerunning = running;
 const prevResult = computed(() => compare.value.prev);
 const emit = defineEmits(["update:modelValue", "goto", "rerunFrom", "applyRule"]);
+
+//: 运行条上那一行字。相位码与事实来自后端（`runStatus` 轮询），**词在这里出**
+//: （utils/debugRun）。后端说不知道就照实说「已等待 N 秒」，不编进度
+const runLine = computed(() => debugRunState(runStatus.value, elapsedMs.value));
+
+//: 这次结果是**在本组件之外跑完的**（抽屉关着时跑完、或另一个标签页跑的）：
+//: 结果已经在会话里，而用户没看见它跑——不标出来，它看起来就像「从没跑过」
+//: （关掉调试弹窗后重开正是这个情形）。挂载时刻之后才结束的运行才算
+const openedAt = ref(Date.now());
+const finishedInBackground = computed(
+  () => !running.value && result.value !== null && lastRunAt.value !== null
+        && lastRunAt.value > openedAt.value,
+);
 
 //: 规则四段与源类型都从 **source 自己**派生，宿主只传 source 一份（AGENTS #13：
 //: 算得出的不传）——历史上它们是两个独立 props，靠宿主记得传齐；现在由覆盖层
@@ -256,6 +274,9 @@ onMounted(() => {
 });
 watch(result, (show) => {
   if (!show) return;
+  // 抽屉常开时也可能收到**别处跑完**的结果（另一个标签页 / 后台那次收尾）：
+  // 把「打开时刻」推到这一刻，「后台跑完」那条提示才不会把它误标成没看见过
+  openedAt.value = Date.now();
   // 每次打开都重拉：用户可能刚在「设置 → 模型」里配好，不该还看着上一次的结论
   refreshLLMStatus();
   if (show) activeStep.value = props.initialStep || (steps.value[0] && steps.value[0].name) || "";
@@ -1044,13 +1065,24 @@ function copyPage() {
 </script>
 
 <template>
-  <div class="debug-workbench">
+  <div class="debug-workbench" :class="{ running }">
     <!-- 运行态的**固定显示**（ux-debug-reading）：等待/预算/取消收在这条 sticky 条里，
-         滚到证据区仍找得到；结束后整个消失，不占版面 -->
+         滚到证据区仍找得到；结束后整个消失，不占版面。
+         那一行字说**当时到底在等什么**：调试是同步长轮询，等待期没有产物可读，
+         所以只有「已等多久 + 此刻占着引擎的是谁」两条事实（utils/debugRun） -->
     <div v-if="running" class="debug-runchip">
-      <span class="debug-runchip-text">已等待 {{ elapsed }} 秒<template v-if="budget"> / 预算 {{ budget }} 秒</template></span>
+      <span class="debug-runchip-text">
+        {{ runLine.text }}<template v-if="budget"> · 预算 {{ budget }} 秒</template>
+      </span>
       <el-button size="small" @click="cancelRun">取消等待</el-button>
     </div>
+
+    <!-- 结果是在本组件之外跑完的（关掉调试弹窗之后跑完的正是这种）：说出来，
+         否则重开时结果突然出现，而等待过程一点痕迹都没有 -->
+    <el-alert v-if="finishedInBackground" type="info" :closable="false" show-icon
+              style="margin-bottom: 10px" title="这次调试已在后台跑完">
+      <span>用时 {{ Math.max(1, Math.round(lastRunMs / 1000)) }} 秒；下面的结论就是它的结果。</span>
+    </el-alert>
 
     <!-- 来源必须写在标题旁：App 实测与本机引擎视觉完全一样，不标就分不清
          手里这份结果是在哪儿跑出来的 -->
@@ -1489,6 +1521,10 @@ function copyPage() {
   border: 1px solid var(--debug-panel-border);
   border-radius: var(--app-radius-lg);
 }
+/* 运行态条与步骤面板都钉在 top:0，宽屏运行中向下滚时前者会盖住后者顶部（标题+前几个页签）。
+   运行态下让面板让位，不运行时不留空档；46px ≈ 条高 42（padding 8×2＋内容 24＋边框 2）+
+   余量，防那条文字换行后仍被盖 */
+.debug-workbench.running .debug-step-panel { top: 46px; }
 .debug-step-panel-title {
   margin: 0 2px var(--app-space-2);
   color: var(--app-text);
