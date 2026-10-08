@@ -79,6 +79,28 @@ def compare(dump: dict, actual: dict, runtime: dict | None = None) -> dict[str, 
     return differences
 
 
+def describe_differences(differences: dict) -> str:
+    """把差异压成一行：哪些字段不同、各自多少项。
+
+    完整 declared/actual 清单可能有几百条（实测 2026-10-06 一次跑批 16KB），
+    灌进 stdout 只会淹没日志；完整内容本来就会写进 `.comparison.json`。
+    """
+    parts = []
+    for field, value in differences.items():
+        if isinstance(value, dict) and "declared" in value and "actual" in value:
+            declared, actual = value["declared"], value["actual"]
+            if isinstance(declared, list) or isinstance(actual, list):
+                parts.append("%s(declared=%d/actual=%d)"
+                             % (field, len(declared or []), len(actual or [])))
+            else:
+                parts.append(field)
+        elif isinstance(value, dict):
+            parts.append("%s（%d 项）" % (field, len(value)))
+        else:
+            parts.append(field)
+    return "、".join(parts) or "（未分类）"
+
+
 def compare_runtime_snapshot(mode: str, entry: str, path: Path | None = None, runtime: dict | None = None, declared_path: Path | None = None) -> dict:
     dump_file = declared_path or dump_path()
     actual_file = path or Path(str(dump_file) + f".actual.{mode}.{entry}.json")
@@ -91,12 +113,16 @@ def compare_runtime_snapshot(mode: str, entry: str, path: Path | None = None, ru
         return {"error": str(exc)}
     report = {"mode": mode, "entry": entry, "differences": differences}
     report_file = actual_file.with_suffix(".comparison.json")
+    saved = True
     try:
         report_file.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     except OSError as exc:
+        saved = False
         print(f"JVM runtime snapshot 报告无法保存（仅诊断）：{exc}")
     if differences:
-        print(f"JVM runtime snapshot 有差异（仅诊断）：{json.dumps(differences, ensure_ascii=False)}")
+        where = "；完整清单见 %s" % report_file if saved else ""
+        print("JVM runtime snapshot 有差异（仅诊断）：%s%s"
+              % (describe_differences(differences), where))
     else:
         print("JVM runtime snapshot 对拍一致")
     return report

@@ -1,5 +1,11 @@
+import contextlib
+import io
+import json
+import pathlib
+import tempfile
 import unittest
-from core.jvm_runtime_snapshot import compare, compare_readiness_environment
+from core.jvm_runtime_snapshot import (compare, compare_readiness_environment,
+                                       compare_runtime_snapshot)
 
 
 class RuntimeSnapshotComparisonTests(unittest.TestCase):
@@ -86,6 +92,48 @@ class RuntimeSnapshotComparisonTests(unittest.TestCase):
         result = compare(self.dump, actual, runtime=runtime)
         self.assertEqual(result["readinessEnvironment"]["LEGADO_REPO"]["actual"],
                          "D:/other-repo")
+
+
+class RuntimeSnapshotReportTests(unittest.TestCase):
+    """stdout 只留摘要：完整 declared/actual 清单在报告文件里（实测一次 16KB）。"""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = pathlib.Path(tmp.name)
+        self.declared = self.root / "dump.json"
+        self.actual = self.root / "dump.json.actual.gradle.validate.json"
+        base = {
+            "workingDir": "D:/app",
+            "maxHeapSize": "3g",
+            "jvmArgs": [],
+            "systemProperties": {},
+            "environment": {},
+        }
+        self.declared.write_text(json.dumps(
+            {**base, "classpath": "D:/a.jar"}), encoding="utf-8")
+        self.actual.write_text(json.dumps(
+            {**base, "jvmArgs": ["-Xmx3g"],
+             "classpath": ";".join("D:/j%d.jar" % i for i in range(50))}),
+            encoding="utf-8")
+
+    def test_stdout_gets_a_summary_while_the_file_keeps_the_detail(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            report = compare_runtime_snapshot("gradle", "validate",
+                                              path=self.actual,
+                                              declared_path=self.declared)
+        line = out.getvalue().strip()
+        self.assertIn("classpath(declared=1/actual=50)", line)
+        self.assertIn("comparison.json", line, "要告诉读者详情在哪")
+        self.assertLess(len(line), 300, "stdout 不许灌完整清单")
+        self.assertNotIn("D:/j49.jar", line)
+        saved = json.loads(
+            self.actual.with_suffix(".comparison.json").read_text(encoding="utf-8"))
+        self.assertEqual(
+            len(saved["differences"]["classpath"]["actual"]), 50,
+            "完整清单必须留在报告里，摘要不是删数据")
+        self.assertEqual(set(report), {"mode", "entry", "differences"})
 
 
 if __name__ == "__main__":

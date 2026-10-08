@@ -543,6 +543,10 @@ _DAEMON_SOCKET_TIMEOUT_CAP = 5400
 #: 写死 2s 必然白等；取 60s 后同场景 37.4s 等到空闲并复用。
 _DAEMON_BUSY_WAIT_SEC = 60.0
 
+#: 排队耗时的上报阈值（秒）：低于它就当没排队。无并发时 lane 等待是毫秒级，每次都来一条
+#: 「任务排队完成（0 秒）」只是噪声——时间线要留的是真发生过的等待。
+_QUEUE_NOTICE_MIN_SEC = 0.5
+
 #: 块内输出停滞看门狗：results 文件这么久没长一行就断定引擎停摆，主动断掉。
 #: 3× 每源预算是给慢站留的余量（真要 60 秒/源的站不该被误伤），封顶 120 秒。
 _STALL_FACTOR = 3
@@ -749,7 +753,7 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
                 _write_run_manifest(run_dir, manifest, job_id)
                 _persist_runtime_snapshot(run_dir)
             _append_event(run_dir, "single_started")
-            if queue_wait_sec is not None:
+            if queue_wait_sec is not None and queue_wait_sec >= _QUEUE_NOTICE_MIN_SEC:
                 _append_event(run_dir, "startup_stage", stage="queue_wait",
                               status="done", cost_sec=queue_wait_sec)
             result = _execute_single(tail_stop, tail)
@@ -1189,7 +1193,7 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
         batch_t0 = time.monotonic()
         _append_event(run_dir, "batch_started", chunks=len(chunks),
                       sources=len(rows_all))
-        if queue_wait_sec is not None:
+        if queue_wait_sec is not None and queue_wait_sec >= _QUEUE_NOTICE_MIN_SEC:
             _append_event(run_dir, "startup_stage", stage="queue_wait",
                           status="done", cost_sec=queue_wait_sec)
         job_runner.update_phase(job_id, "preparing_engine")

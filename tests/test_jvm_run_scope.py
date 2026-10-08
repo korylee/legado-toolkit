@@ -1238,14 +1238,36 @@ class EventTimelineTests(_Base):
             encoding="utf-8")
         return [json.loads(l)["kind"] for l in text.splitlines() if l.strip()]
 
-    def test_queue_wait_event_carries_lane_wait(self) -> None:
-        """排队事件只记录 lane 的实际等待时间。"""
+    def test_queue_wait_is_not_reported_when_nothing_queued(self) -> None:
+        """没排队就不发那行：每次跑都来一条「任务排队完成（0 秒）」是噪声。"""
         _payload, result = self._run_batch(self._QUIET)
         self.assertTrue(result["ok"], result)
+        self.assertEqual(
+            [], [e for e in result["events"] if e.get("stage") == "queue_wait"],
+            result["events"])
+
+    def test_queue_wait_is_reported_when_the_lane_makes_it_wait(self) -> None:
+        """真排队时必须留下那一行，且秒数来自 lane 的实际等待。"""
+
+        class _SlowFirstLane:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def acquire(self, kind, job_id=None):
+                if self.calls == 0:
+                    await asyncio.sleep(jvm_exec._QUEUE_NOTICE_MIN_SEC + 0.2)
+                self.calls += 1
+
+            def release(self) -> None:
+                return None
+
+        lane_stub = _SlowFirstLane()
+        with mock.patch.object(jvm_exec.runner, "lane", lambda name: lane_stub):
+            _payload, result = self._run_batch(self._QUIET)
+        self.assertTrue(result["ok"], result)
         queue = [e for e in result["events"] if e.get("stage") == "queue_wait"]
-        self.assertEqual(1, len(queue), result["events"] )
-        self.assertGreaterEqual(queue[0]["cost_sec"], 0)
-        self.assertNotIn("since_submit_sec", queue[0])
+        self.assertEqual(1, len(queue), result["events"])
+        self.assertGreaterEqual(queue[0]["cost_sec"], jvm_exec._QUEUE_NOTICE_MIN_SEC)
 
     def test_batch_reports_engine_wait_while_daemon_busy(self) -> None:
         """等待引擎空闲要写进时间线，窗口用实测上界（2s 已证明必然白等）。"""
@@ -1302,7 +1324,7 @@ class EventTimelineTests(_Base):
         _payload, result = self._run_batch(self._QUIET)
         self.assertTrue(result["ok"], result)
         self.assertEqual([e["kind"] for e in result["events"]],
-                         ["batch_started", "startup_stage", "prepare", "chunk_started", "chunk_done",
+                         ["batch_started", "prepare", "chunk_started", "chunk_done",
                           "chunk_started", "chunk_done", "chunk_started", "chunk_done",
                           "done"])
 
@@ -1326,7 +1348,7 @@ class EventTimelineTests(_Base):
             _payload, result = self._run_batch(self._BUSY3)
         self.assertTrue(result["ok"], result)
         self.assertEqual([e["kind"] for e in result["events"]],
-                         ["batch_started", "startup_stage", "prepare", "chunk_started", "chunk_done",
+                         ["batch_started", "prepare", "chunk_started", "chunk_done",
                           "chunk_started", "chunk_done", "recovered",
                           "chunk_started", "chunk_done", "done"])
         self.assertEqual(result["daemon_chunks"], 2)
@@ -1371,7 +1393,7 @@ class EventTimelineTests(_Base):
                 "ev-job", Store(self.db), submitted["payload"]))
         run_dir = submitted["payload"]["manifest"]["run_dir"]
         self.assertEqual(self._kinds(run_dir),
-                         ["batch_started", "startup_stage", "prepare", "chunk_started", "chunk_done",
+                         ["batch_started", "prepare", "chunk_started", "chunk_done",
                           "chunk_started", "chunk_failed", "failed"])
         self.assertFalse(r1["ok"])
 
@@ -1384,9 +1406,9 @@ class EventTimelineTests(_Base):
         # 事件文件跨轮**追加**：恢复批的时间线包含上一轮的完整历史，
         # resumed 行标记了两次运行的边界（成功后目录清场，断言走合并结果）
         self.assertEqual([e["kind"] for e in r2["events"]],
-                         ["batch_started", "startup_stage", "prepare", "chunk_started", "chunk_done",
+                         ["batch_started", "prepare", "chunk_started", "chunk_done",
                           "chunk_started", "chunk_failed", "failed",
-                          "batch_started", "startup_stage", "resumed", "prepare", "chunk_started",
+                          "batch_started", "resumed", "prepare", "chunk_started",
                           "chunk_done", "done"])
 
     def test_events_tail_merge_is_bounded(self) -> None:

@@ -8,6 +8,7 @@ import pathlib
 import socket
 import tempfile
 import threading
+import time
 import unittest
 from unittest import mock
 
@@ -260,6 +261,35 @@ class PrepareTests(unittest.TestCase):
         ensure.assert_not_called()
         kill.assert_not_called()
         request.assert_not_called()
+
+    def test_concurrent_ensure_starts_only_one_daemon(self) -> None:
+        """两个调用方同时 ensure 只能起一个 daemon：否则多占一个端口和一份堆，
+        而且 ``_PROC`` 只记住后一个，前一个成孤儿。"""
+        state = {"info": {}}
+        started = []
+
+        def fake_start(dump, idle_sec=1800, boot_timeout=180):
+            time.sleep(0.2)          # 放大竞态窗口：没有锁时两个线程都会进来
+            state["info"] = {"pid": 2, "port": 2, "sig": "s"}
+            started.append(1)
+            return dict(state["info"])
+
+        with mock.patch.object(jvm_validate_daemon, "_read_info",
+                               side_effect=lambda: dict(state["info"])), \
+             mock.patch.object(jvm_validate_daemon, "source_sig", return_value="s"), \
+             mock.patch.object(jvm_validate_daemon, "ping",
+                               return_value={"sig": "s"}), \
+             mock.patch.object(jvm_validate_daemon, "_kill_proc"), \
+             mock.patch.object(jvm_validate_daemon, "start",
+                               side_effect=fake_start):
+            threads = [threading.Thread(
+                target=lambda: jvm_validate_daemon.ensure(self._DUMP))
+                for _ in range(2)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(5)
+        self.assertEqual(1, len(started), "并发 ensure 只能启动一次")
 
     def test_prepare_reports_busy_when_info_has_no_pid(self) -> None:
         """info 缺 pid（外来/残缺）→ 无法判死活，同样不杀不启。"""

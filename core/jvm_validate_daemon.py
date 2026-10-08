@@ -30,7 +30,10 @@ DEFAULT_BOOT_TIMEOUT = 180
 #: 短等待（≤ 这个值）不上报，避免刷屏。
 _BUSY_NOTICE_INTERVAL = 10.0
 
-_LOCK = threading.Lock()
+#: 守护启动/停止的互斥锁。**必须是可重入锁**：``ensure`` 内部会调 ``start``，两处都要持锁。
+#: 没有它，两个调用方（后端进程内两条链、或后端与 CLI 同机）同时判定「没在跑」就会各起一个
+#: daemon：多占一个端口与一份堆，``_PROC`` 只记住后一个，前一个成孤儿。
+_LOCK = threading.RLock()
 _PROC: Optional[subprocess.Popen] = None
 _LOG = None
 
@@ -230,6 +233,12 @@ def stop() -> bool:
 
 def start(dump: Dict[str, Any], idle_sec: int = DEFAULT_IDLE_SEC,
           boot_timeout: int = DEFAULT_BOOT_TIMEOUT) -> Dict[str, Any]:
+    with _LOCK:
+        return _start_locked(dump, idle_sec=idle_sec, boot_timeout=boot_timeout)
+
+
+def _start_locked(dump: Dict[str, Any], idle_sec: int = DEFAULT_IDLE_SEC,
+                  boot_timeout: int = DEFAULT_BOOT_TIMEOUT) -> Dict[str, Any]:
     global _PROC, _LOG
     jvm_direct.validate_dump(dump)
     port = jvm_daemon.pick_port()
@@ -270,21 +279,22 @@ def start(dump: Dict[str, Any], idle_sec: int = DEFAULT_IDLE_SEC,
 
 def ensure(dump: Dict[str, Any], idle_sec: int = DEFAULT_IDLE_SEC,
            boot_timeout: int = DEFAULT_BOOT_TIMEOUT) -> Dict[str, Any]:
-    info = _read_info()
-    port = int(info.get("port") or 0)
-    current_sig = source_sig(dump)
-    if port:
-        got = ping(port, timeout=1.0)
-        if got and got.get("sig") == current_sig:
-            return info
-        if got:
-            _stop_port(port)
-    _kill_proc()
-    try:
-        info_path().unlink()
-    except OSError:
-        pass
-    return start(dump, idle_sec=idle_sec, boot_timeout=boot_timeout)
+    with _LOCK:
+        info = _read_info()
+        port = int(info.get("port") or 0)
+        current_sig = source_sig(dump)
+        if port:
+            got = ping(port, timeout=1.0)
+            if got and got.get("sig") == current_sig:
+                return info
+            if got:
+                _stop_port(port)
+        _kill_proc()
+        try:
+            info_path().unlink()
+        except OSError:
+            pass
+        return start(dump, idle_sec=idle_sec, boot_timeout=boot_timeout)
 
 
 def probe(dump: Dict[str, Any]) -> Optional[Dict[str, Any]]:
