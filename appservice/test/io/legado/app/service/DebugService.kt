@@ -359,10 +359,9 @@ object DebugService {
         //
         // 浏览器收掉之前做：URL 带 webView 选项时要用它，此时还热着（省一次 0.65s 的
         // 启动）；收尾那段的取舍见下面。
-        val matchFails = mutableListOf<String>()
-        val matchSkipped = java.util.concurrent.atomic.AtomicInteger(0)
-        val matched = if (urls.isEmpty()) emptyMap()
-        else runMatched(source, urls.toList(), matchSkipped, matchFails)
+        val matchedResult = if (urls.isEmpty()) MatchedResult.empty()
+        else runMatched(source, urls.toList(), engineHtml.pages())
+        val matched = matchedResult.html
 
         // 浏览器进程要收掉：A2 起它可能被 shadow 拉起过。**常驻也收**（实测取舍见下）：
         // 留着能省 0.65s/次（实测 0.7s → 0.05s），但它会**一直占着浏览器 profile**
@@ -433,8 +432,12 @@ object DebugService {
             "matched_html" to matched,
             "matched_urls" to urls.size,
             "matched_hits" to matched.values.sumOf { it.size },
-            "matched_skipped" to matchSkipped.get(),
-            "matched_fail" to matchFails,
+            "matched_skipped" to matchedResult.stats.skipped,
+            "matched_engine_reused" to matchedResult.stats.engineReused,
+            "matched_refetched" to matchedResult.stats.refetched,
+            "matched_engine_miss" to matchedResult.stats.engineMiss,
+            "matched_engine_truncated" to matchedResult.stats.engineTruncated,
+            "matched_fail" to matchedResult.fails,
             "error" to failure.get(),
             "hint" to if (code == ZERO_EVENT) ZERO_EVENT_HINT else "",
         ))
@@ -447,8 +450,8 @@ object DebugService {
                 "${dropped.get()} 条里配上了 ${engineHtml.result().size} 条）")
         System.err.println(
             "[appservice] 命中回填：${urls.size} 个 URL 里记下 ${matched.values.sumOf { it.size }} 段命中" +
-                (if (matchSkipped.get() > 0) "（预算用尽，跳过 ${matchSkipped.get()} 个）" else "") +
-                (if (matchFails.isNotEmpty()) "；没记成的：${matchFails.joinToString(" / ")}" else ""))
+                (if (matchedResult.stats.skipped > 0) "（预算用尽，跳过 ${matchedResult.stats.skipped} 个）" else "") +
+                (if (matchedResult.fails.isNotEmpty()) "；没记成的：${matchedResult.fails.joinToString(" / ")}" else ""))
         return code
     }
 
@@ -486,10 +489,18 @@ object DebugService {
      * 单页超过 [MAX_ENGINE_HTML_CHARS] 截断并写明——超长的多半是整本正文，对
      * 「看结构 / 写规则」没意义。**不参与「同构」**：它进侧车，不进 NDJSON。
      */
+    internal data class EnginePage(
+        val body: String,
+        val truncated: Boolean,
+        val originalLength: Int,
+    ) {
+        fun isReusable(): Boolean = !truncated && body.isNotBlank()
+    }
+
     internal class EngineHtmlCollector(
         private val limit: Int = DebugService.MAX_ENGINE_HTML_CHARS,
     ) {
-        private val out = LinkedHashMap<String, String>()
+        private val out = LinkedHashMap<String, EnginePage>()
         private var lastUrl = ""
 
         fun accept(text: String, payload: Boolean) {
@@ -500,18 +511,32 @@ object DebugService {
             // payload 不带 URL，靠紧邻的那条 `≡获取成功` 配——**不复刻分段逻辑**
             //（分段语义只有 Python 那一份；这里只认「最近一页」）
             if (lastUrl.isEmpty() || out.containsKey(lastUrl)) return
-            out[lastUrl] = if (text.length > limit) {
-                text.take(limit) + "\n…（已截断：整页 " + text.length + " 字符）"
+            val body = DebugService.stripEventTimePrefix(text)
+            out[lastUrl] = EnginePage(
+                body = body.take(limit),
+                truncated = body.length > limit,
+                originalLength = body.length,
+            )
+        }
+
+        fun result(): Map<String, String> = out.mapValues { (_, page) ->
+            if (page.truncated) {
+                page.body + "\n…（已截断：整页 " + page.originalLength + " 字符）"
             } else {
-                text
+                page.body
             }
         }
 
-        fun result(): Map<String, String> = out
+        fun pages(): Map<String, EnginePage> = out.toMap()
     }
 
     /** 事件里的 `≡获取成功:<URL>`：App 每取到一页就打一条（列表 / 详情 / 目录 / 正文
      *  四处各一处）。URL 连 `,{...}` 选项都还在，正好原样交给 `AnalyzeUrl`（它认选项）。 */
+    private val EVENT_TIME_PREFIX_RE = Regex("^\\[\\d{2}:\\d{2}\\.\\d{3}\\]\\s*")
+
+    internal fun stripEventTimePrefix(text: String): String =
+        EVENT_TIME_PREFIX_RE.replaceFirst(text, "")
+
     private val GOT_URL_RE = Regex("≡获取成功[:：](.+)$")
 
     private fun gotUrlOf(text: String): String? =
@@ -548,22 +573,43 @@ object DebugService {
      * 失败一律吞成 `fails` 里的一行：它是**附加证据**，取不到只该让「命中源码」那块空着，
      * 不能把已经跑完的调试结果带走（同「补抓页面失败不动判定」那条纪律）。
      */
+    internal data class MatchStats(
+        var skipped: Int = 0,
+        var engineReused: Int = 0,
+        var refetched: Int = 0,
+        var engineMiss: Int = 0,
+        var engineTruncated: Int = 0,
+    )
+
+    internal data class MatchedResult(
+        val html: Map<String, Map<String, String>>,
+        val stats: MatchStats,
+        val fails: List<String>,
+    ) {
+        companion object {
+            fun empty() = MatchedResult(emptyMap(), MatchStats(), emptyList())
+        }
+    }
+
     private fun runMatched(
         source: BookSource,
         urls: List<String>,
-        skipped: java.util.concurrent.atomic.AtomicInteger,
-        fails: MutableList<String>,
-    ): Map<String, Map<String, String>> {
+        enginePages: Map<String, EnginePage>,
+    ): MatchedResult {
         val done = java.util.concurrent.atomic.AtomicBoolean(false)
-        val out = java.util.concurrent.atomic.AtomicReference<Map<String, Map<String, String>>>(emptyMap())
+        val out = java.util.concurrent.atomic.AtomicReference<MatchedResult?>(null)
         val worker = Thread {
-            runBlocking {
+            val stats = MatchStats()
+            val fails = mutableListOf<String>()
+            val html = runBlocking {
                 try {
-                    out.set(collectMatched(source, urls, skipped, fails))
+                    collectMatched(source, urls, enginePages, stats, fails)
                 } catch (e: Throwable) {
                     fails.add("整段失败 — ${e::class.simpleName}: ${e.message?.take(120)}")
+                    emptyMap()
                 }
             }
+            out.set(MatchedResult(html, stats, fails))
             done.set(true)
         }
         worker.isDaemon = true
@@ -572,7 +618,11 @@ object DebugService {
         // 预算 + 收尾余量：worker 到点该自己停了，这里多给一点是让它的 finally 跑完
         driveMainLooperUntil(done, System.currentTimeMillis() + MATCH_BUDGET_MS + 5_000)
         runCatching { worker.join(2_000) }
-        return out.get()
+        return out.get() ?: MatchedResult(
+            emptyMap(),
+            MatchStats(skipped = urls.size),
+            listOf("整段命中回填未在预算内结束"),
+        )
     }
 
     /**
@@ -582,7 +632,8 @@ object DebugService {
     private suspend fun collectMatched(
         source: BookSource,
         urls: List<String>,
-        skipped: java.util.concurrent.atomic.AtomicInteger,
+        enginePages: Map<String, EnginePage>,
+        stats: MatchStats,
         fails: MutableList<String>,
     ): Map<String, Map<String, String>> {
         val rules = MATCHED_STEP_NAMES.map { it to matchedRuleOf(source, it) }
@@ -593,12 +644,12 @@ object DebugService {
         for (url in urls) {
             val left = deadline - System.currentTimeMillis()
             if (left <= 0) {
-                skipped.incrementAndGet()
+                stats.skipped++
                 continue
             }
             try {
                 val body = withTimeout(minOf(left, MATCH_FETCH_TIMEOUT_MS)) {
-                    fetchForMatch(source, url)
+                    loadMatchBody(source, url, enginePages, stats)
                 }
                 if (body.isBlank()) {
                     noteFail(fails, url, "取到的页面是空的")
@@ -620,6 +671,27 @@ object DebugService {
             }
         }
         return out
+    }
+
+    private suspend fun loadMatchBody(
+        source: BookSource,
+        url: String,
+        enginePages: Map<String, EnginePage>,
+        stats: MatchStats,
+    ): String {
+        val page = enginePages[url]
+        if (page != null && page.isReusable()) {
+            stats.engineReused++
+            return page.body
+        }
+
+        if (page?.truncated == true) {
+            stats.engineTruncated++
+        } else {
+            stats.engineMiss++
+        }
+        stats.refetched++
+        return fetchForMatch(source, url)
     }
 
     /** 用 App 自己的客户端取这一页：cookie / UA / 代理都是这次调试的同一套。

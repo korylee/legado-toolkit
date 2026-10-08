@@ -69,6 +69,38 @@ class EngineHtmlCollectorTest {
     }
 
     @Test
+    fun payload_event_time_prefix_is_removed_before_match_reuse() {
+        val c = DebugService.EngineHtmlCollector(limit = 1000)
+        c.accept("≡获取成功:https://a.com/1", false)
+        c.accept("[00:04.440] <html><body>page</body></html>", true)
+
+        val page = c.pages()["https://a.com/1"]!!
+        assertEquals("<html><body>page</body></html>", page.body)
+        assertTrue(page.isReusable())
+    }
+
+    @Test
+    fun truncated_page_is_not_reusable() {
+        val c = DebugService.EngineHtmlCollector(limit = 5)
+        c.accept("≡获取成功:https://a.com/1", false)
+        c.accept("[00:01.000] 123456789", true)
+
+        val page = c.pages()["https://a.com/1"]!!
+        assertTrue(page.truncated)
+        assertTrue(!page.isReusable())
+    }
+
+    @Test
+    fun url_options_are_kept_in_the_engine_page_key() {
+        val c = DebugService.EngineHtmlCollector(limit = 1000)
+        val url = "https://a.com/1,{\"webView\":true}"
+        c.accept("≡获取成功:$url", false)
+        c.accept("<html>page</html>", true)
+
+        assertEquals("<html>page</html>", c.pages()[url]?.body)
+    }
+
+    @Test
     fun oversized_pages_are_truncated_with_a_note() {
         val c = DebugService.EngineHtmlCollector(limit = 20)
         c.accept(获取 + "https://a.com/big", false)
