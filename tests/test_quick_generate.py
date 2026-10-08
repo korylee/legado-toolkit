@@ -19,10 +19,16 @@ import unittest
 from unittest import mock
 
 from core.analyzer import analyze_search_page
+from core.fetch import _page_has_search_results
 from services.add_source import run_add
 
 FIXTURE = pathlib.Path(__file__).parent / "fixtures" / "samsbook_search_shaosong.html"
 MANGA_FIXTURE = pathlib.Path(__file__).parent / "fixtures" / "manhuayu88_search_wo.html"
+#: 实测页面（2026-10-08 抓 `m.qudushu.org` 搜索「我」，10873 字节，原样存下）。
+#: 它钉的是一条**误判链**：结果页里有 50 个 `p.sone` 结果项，但详情链接长成
+#: `/html/1287420/asc-1/`——路径里一个 `DETAIL_LINK_HINTS` 的词都没有，于是
+#: `_page_has_search_results` 判否 → `run_add` 静默降级成「仅发现」（见下方用例）。
+QUDUSHU_FIXTURE = pathlib.Path(__file__).parent / "fixtures" / "qudushu_search_wo.html"
 KEYWORD = "绍宋"
 #: 搜索 URL（关键词在 query 里，`extract_keyword` 认得出来）
 URL = "http://example.com/search.php?q=" + KEYWORD
@@ -56,6 +62,20 @@ class AnalyzeSearchPageTests(unittest.TestCase):
         self.assertTrue(a["bookUrl"], a)
         # 判据要能看见：用户要能反驳「你凭什么说这是书名」
         self.assertIn("前缀装饰", a["note"], a["note"])
+
+    def test_sample_book_url_is_the_first_link_the_generated_rule_selects(self):
+        """详情页样例 = 生成的 `bookUrl` 规则选中的**第一条**链接。
+
+        `run_add` 拿 `sampleBookUrl` 当详情页样例（不再拿规则重跑一遍）。两者一旦
+        漂开，后面的目录/正文规则就是按**另一条**书的页面配的，而界面看不出来
+        （AGENTS #11 一族：两个来源必须同源）。
+
+        **有意只取第一条**：`analyze_search_page` 按第一个命中的锚点推断规则，
+        详情页样例也只能有一条——所以这里直接钉住 fixture 里那一条。
+        """
+        a = analyze_search_page(self.html, KEYWORD)
+        self.assertEqual(a["sampleBookUrl"], "/book/0/282/", a)
+        self.assertTrue(a["bookUrl"].endswith("@href"), a)
 
     def test_page_title_text_is_not_taken_as_the_book_name(self):
         """`<title>` / `<b>` 里也含关键词，但它们不是链接 → 一个都不许当锚点。"""
@@ -104,6 +124,106 @@ class AnalyzeSearchPageTests(unittest.TestCase):
         self.assertEqual(a["name"], ".media-content .title", a)
         self.assertEqual(a["bookUrl"], ".media-content .title@href", a)
         self.assertNotIn("h1", a["bookList"])
+
+    def test_the_fast_add_path_does_not_load_a_rule_interpreter(self):
+        """快速新增源这条路**不许**再依赖一个 Python 规则解释器。
+
+        详情页样例用的是分析时看见的那个 href（`sampleBookUrl`）。谁要是图省事又写一句
+        `apply_css_rule(...)` 从规则反算，本用例会红——那是**第二套规则解释器**
+        （JS / xpath / 模板都要另算一遍）。`core/rules/replayer.py` 已按这个理由退场，
+        这里守的是它别以任何形式回来。
+        """
+        import subprocess
+        import sys
+
+        probe = ("import sys, services.add_source, core.analyzer;"
+                 "print('core.rules.replayer' in sys.modules)")
+        root = str(pathlib.Path(__file__).resolve().parent.parent)
+        p = subprocess.run([sys.executable, "-c", probe], capture_output=True,
+                           text=True, cwd=root)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(p.stdout.strip(), "False",
+                         "analyze/add 这条路又把 core.rules.replayer 导进来了：%s" % p.stdout)
+
+
+class SearchResultDetectionTests(unittest.TestCase):
+    """「这份页面里有没有结果」只有一份判据（`core.analyzer`），且它认得出长尾站点。
+
+    实测（2026-10-08）：`m.qudushu.org` 的搜索页抓回来就是结果页（50 个 `p.sone` 条目、
+    书名都在），但详情链接是 `/html/1287420/asc-1/`——词表（`DETAIL_LINK_HINTS`）里
+    一个词都没有。当时 `_page_has_search_results` 自己写的那套「详情链接正则」判否，
+    `run_add` 于是**静默降级成「仅发现」**、生成 `ruleSearch` 全空的源且 rc=0。
+    """
+
+    def setUp(self):
+        self.html = QUDUSHU_FIXTURE.read_text(encoding="utf-8")
+
+    def test_real_results_page_is_recognized(self):
+        """一个字的短关键词在真站点上必然匹配到变体书名——必须靠结构认出来。"""
+        a = analyze_search_page(self.html, "我")
+        self.assertGreater(a["results"], 1, a)
+        self.assertEqual(a["bookList"], ".searchresult .sone", a)
+        self.assertIs(_page_has_search_results(self.html, "我"), True)
+
+    def test_exact_title_still_works(self):
+        a = analyze_search_page(self.html, "我门我派我江湖")
+        self.assertEqual(a["results"], 1, a)
+        self.assertEqual(a["bookList"], ".searchresult .sone", a)
+
+    def test_absent_keyword_is_still_not_a_result(self):
+        """反方向同样要钉住：页面上没有的词，不许因为「结构像列表」就判成搜到了。"""
+        a = analyze_search_page(self.html, "这本书页面上肯定没有")
+        self.assertEqual(a["results"], 0, a)
+        self.assertIs(_page_has_search_results(self.html, "这本书页面上肯定没有"), False)
+
+    def test_keyword_missing_from_the_page_is_never_a_result(self):
+        """关键词压根不在页面上时，无论什么结构信号都不该判成「搜到了这本书」。"""
+        self.assertIs(_page_has_search_results(self.html, "完全不存在的词"), False)
+
+    def test_empty_result_marker_and_short_body_are_negatives(self):
+        self.assertIs(_page_has_search_results(
+            "<html><body><div>没有搜索到相关内容</div></body></html>", "我"), False)
+        self.assertIs(_page_has_search_results("CN", "我"), False)
+
+
+class FragmentAnalysisTests(unittest.TestCase):
+    """HTML **片段**（没有 `<body>` 包一层）也要给出可用规则。
+
+    L4 那条链拿到的是 JSON 信封里的 HTML 片段，`core/net_hunt` 把片段拼起来直接喂
+    `analyze_search_page`。片段里 `list_item.parent` 可能是 `None` 甚至 BS4 的
+    `[document]`——那时原来会抛 `AttributeError`（`container.name`），
+    而把 `[document]` 写进选择器更糟：**那是一条永远选不中的假规则**。
+    """
+
+    def test_fragment_with_class_gets_a_usable_single_segment_rule(self):
+        frag = ('<div class="item"><a href="/novel/1/">绍宋</a></div>'
+                '<div class="item"><a href="/novel/2/">诡秘之主</a></div>')
+        a = analyze_search_page(frag, "绍宋")
+        self.assertEqual(a["results"], 1, a)
+        self.assertEqual(a["bookList"], ".item", a)
+        self.assertNotIn("[document]", a["bookList"])
+
+    def test_classless_fragment_declines_instead_of_inventing_a_rule(self):
+        """卡片连 class 都没有 → 宁可弃权（空规则），也不给「选中整页链接」的假规则。"""
+        a = analyze_search_page("<a href='/novel/1/'>绍宋</a>", "绍宋")
+        self.assertEqual(a["bookList"], "", a)
+        self.assertNotIn("[document]", a["bookList"])
+
+    def test_detection_survives_a_fragment(self):
+        """判据在片段上不许抛（它会喂给 `_page_has_search_results`）。
+
+        片段要够长：那层还有一道「小于 300 字节不算页面」的闸门（它挡的是 2 字节 `CN`
+        那种响应），拿 187 字节的片段去测是把闸门当判据——那是两件事。
+        """
+        head = ('<html><head><title>搜索绍宋</title></head><body>'
+                '<div class="head"><a href="/">首页</a><a href="/top">排行</a>'
+                '<a href="/full">完本</a></div>')
+        items = "".join(
+            '<div class="item"><a href="/novel/%d/">绍宋%s</a></div>'
+            % (i, "" if i == 1 else "后传%d" % i) for i in range(1, 4))
+        frag = head + '<div class="searchresult">' + items + "</div></body></html>"
+        self.assertGreater(len(frag.encode("utf-8")), 300)
+        self.assertIs(_page_has_search_results(frag, "绍宋"), True)
 
 
 class RunAddTests(unittest.TestCase):

@@ -29,7 +29,6 @@ from core.app_debug import (
     preflight,
     push_source,
 )
-from core.verify import replay_step
 
 
 def _free_port() -> int:
@@ -384,67 +383,6 @@ class AppDebugRouteKeyTests(unittest.TestCase):
         self.assertIn("exploreUrl", str(ctx.exception.detail))
 
 
-class ReplayStepTests(unittest.TestCase):
-    """离线重放单步：改完规则不发请求就能看判定变化。"""
-
-    HTML = ('<div class="book"><a href="/b/1">诡秘之主</a></div>'
-            '<ul id="toc"><li>第一章</li><li>第二章</li></ul>'
-            '<div id="content">正文内容，一段足够长的中文文本用于通过长度判定。</div>')
-
-    def test_list_step_pass(self):
-        r = replay_step(self.HTML, "class.book@tag.a@text", "search", 0)
-        self.assertEqual(r["verdict"], "pass")
-        self.assertEqual(r["values"], ["诡秘之主"])
-
-    def test_toc_step_pass(self):
-        r = replay_step(self.HTML, "#toc@tag.li@text", "toc", 0)
-        self.assertEqual(r["verdict"], "pass")
-        self.assertEqual(len(r["values"]), 2)
-
-    def test_content_step_pass(self):
-        r = replay_step(self.HTML, "#content@text", "content", 0)
-        self.assertEqual(r["verdict"], "pass")
-
-    def test_js_rule_is_unknown_not_fail(self):
-        # 能力边界 ≠ 源坏了。判 fail 会误杀（lessons 第一条）
-        r = replay_step(self.HTML, "<js>java.ajax(x)</js>", "toc", 0)
-        self.assertEqual(r["verdict"], "unknown")
-        self.assertTrue(r["rule_error"])
-
-    def test_empty_rule_is_fail(self):
-        # 空规则是源的配置错误，与「回放不了」性质不同
-        r = replay_step(self.HTML, "", "toc", 0)
-        self.assertEqual(r["verdict"], "fail")
-
-    def test_list_step_uses_list_judge(self):
-        # 列表步骤必须走 judge_list_step——「同源不同判」是本项目反复在消灭的东西。
-        # 断言报错文案是列表语义：判成 judge_content 时会变成「正文提取为空」。
-        # （只断言 verdict 的话两种情况都是 fail，测不出走错了分支）
-        r = replay_step("<html></html>", "#toc@tag.li@text", "toc", 0)
-        self.assertEqual(r["verdict"], "fail")
-        self.assertIn("解析结果为空", r["reason"])
-
-    def test_search_step_uses_list_judge(self):
-        r = replay_step("<html></html>", "class.book@tag.a@text", "search", 0)
-        self.assertEqual(r["verdict"], "fail")
-        self.assertIn("解析结果为空", r["reason"])
-
-    def test_step_name_is_normalized(self):
-        # 大写笔误会把本该 toc 语义的结果带偏（quality.STEP_TOC 的注释）
-        r = replay_step(self.HTML, "#toc@tag.li@text", "TOC", 0)
-        self.assertEqual(r["verdict"], "pass")
-
-    def test_download_type_skips_toc(self):
-        # 下载源不解析目录（Legado 的豁免），重放要保持同一口径
-        r = replay_step(self.HTML, "", "toc", 3)
-        self.assertEqual(r["verdict"], "unknown")
-        self.assertIn("文件类", r["reason"])
-
-    def test_empty_html_does_not_raise(self):
-        r = replay_step("", "#toc@tag.li@text", "toc", 0)
-        self.assertEqual(r["verdict"], "fail")
-
-
 # ---------------------------------------------------------------- 变异记录
 # 惯例：新增用例后把源码改坏跑一遍，确认对应条数变红，再改回来。以下均为实测。
 #
@@ -466,10 +404,4 @@ class ReplayStepTests(unittest.TestCase):
 #        → test_preflight_ignores_fields_the_app_adds_or_we_do_not_compare 红
 #        —— 这条守的是「别拿 loader.fingerprint 比」：App 存的是它自己的实体，
 #           字段集合本就不同，整份比必然每次都判「不同」，白覆盖一遍
-#  M4  replay_step 的 `if step_key in _LIST_STEPS` 改成 `if False`（一律走
-#      judge_content）
-#        → **第一次跑仍全绿**——下载源上两个 judge 都返回 unknown，短文本两个都
-#          判 pass，只断言 verdict 测不出分支走错。补了断言 reason 的
-#          test_list_step_uses_list_judge / test_search_step_uses_list_judge
-#          之后才变红。
-#        → 教训：只断言 verdict 的用例，守不住「同源不同判」这类分支错误。
+#  M4 是 `replay_step` 的列表/取值分支（那条本地重放链已退场，用例随它删除）。

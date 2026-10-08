@@ -241,8 +241,7 @@ def build_evidence(values: Sequence[str], matched_html: str = "") -> Dict[str, A
         # 正文全文不截断，这个量级会真实出现，
         # 而这个字段只用于统计展示——不值得为它瞬时吃上百 MB
         "cjk_chars": sum(1 for _ in _CJK_RE.finditer(joined)),
-        # 段落信息只能从命中节点的 HTML 拿：replayer 的 text 动作会 re.sub(r"\s+", " ")
-        # 把换行全抹掉，提取值里已经没有段落信息了
+        # 段落信息只能从命中节点的 HTML 拿：提取值那边换行早被折成空格了
         "block_seps": len(_BLOCK_SEP_RE.findall(matched_html or "")),
         "tag_ratio": _tag_ratio(joined),
         # 噪声词只在短内容上采信，避免长正文里的偶然命中污染证据

@@ -208,7 +208,6 @@ const checkDialogTitle = computed(() =>
 );
 
 //: 校验只有**一台引擎**（本机引擎 = 在 JVM 里跑「阅读」App 的真源码）：
-//: 本地回放那条路 2026-09-20 撤了（判定口径见 TODO §一点九 / lessons §七十二），
 //: 所以弹框里不再有引擎选择——**可调的是「跑哪些」**。
 const jvmReady = ref(false);
 const jvmFormRef = ref(null);

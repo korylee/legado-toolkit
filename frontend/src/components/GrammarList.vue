@@ -1,7 +1,7 @@
 <!-- 语法速查清单（唯一一份）：编辑弹框右列与调试工作台共用。
-     条目与 core/rules/replayer.py 的判定对齐（RULE_PREFIXES / VALUE_ACTIONS /
-     COMMON_ATTRS / parse_rule）；本地回放不了的语法不硬凑进清单，缺口账在
-     TODO syntax-gap。外壳各宿主自备（弹框是 el-card，工作台是 details）。 -->
+     条目按上游 App 的规则语法（`AnalyzeRule`：类型前缀 / 链式选择器 / 取值动作 / 属性）
+     列，只服务「怎么写规则」——本地回放器退场后不再标注「我们能不能离线跑」。
+     外壳各宿主自备（弹框是 el-card，工作台是 details）。 -->
 <template>
   <ul class="muted grammar-list">
     <li>简写：class.xxx → .xxx；tag.a → a</li>

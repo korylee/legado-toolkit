@@ -43,19 +43,6 @@
 约束：分别统计完全相同请求与同站同指纹组；键必须包含归一化 URL、规则/源快照、阶段、验证深度、搜索词及运行参数；统计只读，不改变现有执行与结论；没有数据证明收益前不实现复用。
 验收：给出两类重复的数量、占比、可减少的 JVM/站点请求数和样本口径；据此分别决定是否实施 `jvm-request-coalesce` 与 `batch-fingerprint-coalesce`。
 指针：backend/api/jvm.py，core/dups.py，backend/jobs/runner.py，lessons §五十三 / §七十八
-### 条目：proj-3-drop · 前端摘掉本地投影
-状态：todo
-依赖：proj-3-bookurl, proj-3-attr
-优先级：P1
-背景：`replayResult` / `canReplay` / `doReplay` / `/replay-step` 那条链是
-  「引擎没覆盖的段」的退路；摘之前先定详情段（proj-3-bookurl）与末段属性名
-  （proj-3-attr）两处，否则那两段的「命中源码」会空掉。
-约束：等那两条拍板落地才动手；「每种空值有可执行的一句话」前置已落地。
-  摘的位置与依据在 `frontend/src/components/DebugWorkbench.vue` 的
-  `matchedFrom` / `matchedHint` 旁。
-验收：摘掉后抽屉里每个段的「命中源码」仍能取到值，或明确显示「本段取不到」。
-指针：lessons §七十三 / §七十五，frontend/src/components/DebugWorkbench.vue
-
 ## 2 · 按需
 
 ### 条目：site-req-opt · 站点请求那一段的优化（都未评估）
@@ -113,18 +100,6 @@
 约束：受「频繁跑全量会被封 IP」这条硬约束，等下次真要跑量时顺带量（skills/legado-source-toolchain §四）。
 验收：给出上调前后的一档实测对比（时长与失败率）。
 指针：lessons §七十四，appservice/test/io/legado/app/service/ValidateService.kt
-
-### 条目：proj-3 · 第三期收尾：摘抽屉里最后那块本地投影
-状态：open
-依赖：无
-优先级：P2
-背景：`matched_html` 回填已交付（机制见 lessons §七十五）。剩下的是把抽屉里那块
-  本地投影彻底摘掉，但必须先定子项列出的两处。
-约束：拆子项逐步实现——两处定不下来之前不许摘 `proj-3-drop`。
-子项：
-- proj-3-drop / proj-3-bookurl / proj-3-attr
-验收：三个子项全部落地后，抽屉里每个段的「命中源码」都走引擎，没有投影退路。
-指针：lessons §七十三 / §七十五
 
 ### 条目：ux-chip-jump · 点击摘要里的变化数跳到对应筛选
 状态：todo
@@ -235,43 +210,12 @@
 验收：评估报告给出重复组规模与可减少的请求数；若实施，同组只探测一次、每行结论均带来源，指纹或站点不同则独立执行，显式关闭开关时不共享探测。
 指针：backend/api/jvm.py，core/dups.py，AGENTS.md #5b，lessons §五十三
 
-### 条目：syntax-gap · 本地回放的语法缺口
-状态：open
-依赖：无
-优先级：P2
-背景：本地回放**已不在校验与调试链路上**，剩下的两个读者都不判定源：`preselect` 的免费初筛
-  （`core/repair/suggest.py`）与前端 `/rules/replay-step` 的投影退路。所以下面这张缺口表
-  是「本地验不了」的账，不是待办。
-约束：只有当某个缺口挡了初筛或投影时才急（初筛遇到不支持的语法时如实标「只能连 App 试」
-  即可，不因此判源坏）；别为了「让本地能验」把 webView 去掉——去掉就真的读不了。
-子项：
-- syntax-bang · 排除索引 `li!0` / `dd!0:1:2`：`findIndexSet` 里 `.` 与 `!` 语义相反，只实现了点式（最大一块）
-- syntax-fallback · 执行期兜底的「选择器解析不了」：样例（URL 模板、JSONPath 片段、碎片）先逐个归类再实现
-- syntax-jsonpath · JSONPath 超出子集：`[*]` / `['键']` 已支持，`[1:3]` 切片没有，扩展时已有写法行为不变
-- syntax-xpath · `//` 开头的 XPath：引引擎或恒 unknown，别静默当 CSS（AGENTS #4），决议归 xa-1111
-- syntax-bracket · 方括号索引 `[-1]` / `[0]` / `[1,3]` 与区间 `[0:10]`：未实现，与点式保持同一套归一
-- syntax-shorthand · `text.` / `children.` 简写：语义已查清，实现即可，判定半边一律 unknown 不动
-验收：每行语义能在本地回放跑通或有明确归因，带正反例测试。
-指针：lessons §二十三 / §四十四 / §四十九 / §六十，core/rules/replayer.py
-
-### 条目：strengthen-contract · 用契约测试钉住那个隐式约定
-状态：todo
-依赖：无
-优先级：P2
-背景：`verify.skipped && !verify.error` 蕴含「用户没选验」；以及「验证结果必带
-  `source` 或 `local_approx` 之一」——后者是「加通道时忘了设 `source` → 静默退回
-  空标签」那颗地雷。
-约束：判据是「会静默过期 / 隐式到没人验证得了」，只补测试不改行为。
-验收：两条约定各有契约测试钉住，破坏任一条测试变红。
-指针：lessons §七十八，tests/test_jvm_debug_contract.py
-
-
 ### 条目：agent-layer-orchestration · 按 Layer 编排受限调试 Agent
 状态：open
 依赖：无
 优先级：P1
 背景：当前项目已经有 `core/page_layer.py` 的 L1-L4 判定、`debugNextAction.js` 的下一步动作、`/rules/suggest-rule` 的 AI 提议，以及 JVM/App 两条真实引擎通道；缺的是把它们按 Layer 串成一个小上下文、有限动作、逐步验证的 Agent。第一目标是因地制宜支持口袋漫画的 L3 动态正文，不建设通用逆向平台。
-约束：Agent 只输出结构化动作和受控提议，不直接改源、不自行联网、不判定成功、不猜密钥；L1 优先走本地候选，L2/L3 优先转 App/JVM 实测，L4 只消费已观测接口摘要，L5 只提示登录上下文；所有提议必须经过 `replay-step`、`jvm-debug` 或 `app-debug` 验证；上下文只传本地压缩摘要，完整 HTML/脚本/事件流按需取证；AI 调用必须由用户显式触发，免费 dry-run 不发模型请求；动作与提议的结构按 AGENTS #24 的五格合同来，不另设计一套。
+约束：Agent 只输出结构化动作和受控提议，不直接改源、不自行联网、不判定成功、不猜密钥；L1 优先走本地候选，L2/L3 优先转 App/JVM 实测，L4 只消费已观测接口摘要，L5 只提示登录上下文；所有提议必须经过 `jvm-debug`、`app-debug` 或 `/rules/verify-candidate` 验证；上下文只传本地压缩摘要，完整 HTML/脚本/事件流按需取证；AI 调用必须由用户显式触发，免费 dry-run 不发模型请求；动作与提议的结构按 AGENTS #24 的五格合同来，不另设计一套。
 验收：对 L1 静态页、L2 空容器、L3 口袋漫画正文、L4 接口页、L5 登录提示各有一条结构化动作链；Agent 输出不能绕过真实引擎；口袋漫画能从选定章节得到 `webView + webJs + content` 草稿并通过图片数量与可访问性验证；未知、缺证据和验证失败均保留具体原因。
 子项：
 - agent-context
@@ -317,29 +261,6 @@
 阻塞于：未评估（要先量「换语义会翻多少条结论」）
 验收：评估结论 + 用户拍板；若做，全量重跑一次并记 `CACHE_VERSION`。
 指针：lessons §六十 / §七十三 / §八十七
-
-### 条目：proj-3-bookurl · 详情段（`bookUrl`）没有命中
-状态：todo
-依赖：无
-优先级：P2
-背景：`ruleSearch.bookUrl` 是在**搜索页**的每个 `bookList` 节点内求值的——证据在
-  搜索页上，而 Python 按「段自己的 url + 段名」取（详情段的 url 是详情页），
-  `(url, 段名)` 这把键表达不了。
-约束：要么改契约（把记录扩成 `{page_url, step, container_selector}`，或 App 侧
-  `DebugService.kt` 新增按列表节点求 bookUrl 的分支并定义同页多条书取哪个节点），
-  要么让它继续走投影；两条选一，别两边都改。
-验收：一张实测的「详情段想看的其实是搜索页的那块 DOM」样例，据此定契约或维持投影。
-指针：lessons §七十五
-
-### 条目：proj-3-attr · 末段是属性名的规则
-状态：todo
-依赖：无
-优先级：P2
-背景：兜底只认那五个动作词；属性名与标签名同形（`title` / `style`）。
-约束：要做得先有与 `core/rules/replayer._is_attr_or_action_name` 对齐的词表 + 逐词
-  比对测试（AGENTS #22⑤）与 App 侧末段回填分支（`DebugService.kt`）。
-验收：词表与逐词比对测试落地，末段属性名规则能给出命中。
-指针：lessons §七十五，core/rules/replayer.py
 
 ### 条目：norl-ambig · 「没结果」的二义性
 状态：todo
@@ -419,15 +340,16 @@
 验收：评估结论 + 用户拍板。
 指针：lessons §五十五
 
-### 条目：xa-1111 · XPath 引擎：引还是判 unknown
+### 条目：xa-1111 · XPath 规则在引擎侧的结论
 状态：todo
 依赖：无
 优先级：P2
-背景：XPath 引擎**不在「已明确不做」的名单里**——它是 `syntax-xpath` 那条「还没定」：
-  要么引引擎、要么一直 unknown。
-约束：两条选一，别让 `//` 开头的写法静默走到 CSS 分支（AGENTS #4）。
-验收：结论 + 落地；若判 unknown，原因要一路走到用户眼前。
-指针：lessons §二十六，core/rules/replayer.py
+背景：本地回放器退场后，XPath 是否被支持**只由 App 引擎决定**：`//` 开头的规则在
+  `AnalyzeRule` 上是走 XPath 还是被当成 CSS 失败，要给一条实测结论。
+约束：别在 Python 侧再补一个 XPath 判断（那正是这次删掉的东西）；结论以引擎实测为准，
+  取不到时原因要一路走到用户眼前（AGENTS #4）。
+验收：一条带 `//` 规则的源在本机引擎下的实测结论 + 界面上的归因。
+指针：lessons §二十六，core/jvm_debug.py
 
 ### 条目：explore-depth · 跑批要不要加「发现页」深度档
 状态：todo

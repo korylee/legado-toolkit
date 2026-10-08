@@ -669,9 +669,11 @@ object DebugService {
     /**
      * 按一条规则取元素，返回命中节点的 HTML（没命中返回 null）。
      *
-     * 取前 [MATCHED_NODES_LIMIT] 个拼起来、不注入换行：与本地投影
-     * （`core/rules/replayer.py`）同一口径——列表规则下只看第一条看不出「混进了
-     * 导航栏」这类问题。JSON 规则下节点不是 Element，退化成 `toString()`。
+     * 取前 [MATCHED_NODES_LIMIT] 个拼起来、不注入换行：与 Python 侧
+     * `core.quality.MATCHED_NODES_LIMIT` 同一个数（逐词比对钉在
+     * `tests/test_jvm_debug_contract.py::TestMatchedStepNameParity`）——列表规则下
+     * 只看第一条看不出「混进了导航栏」这类问题。JSON 规则下节点不是 Element，
+     * 退化成 `toString()`。
      */
     private suspend fun htmlOn(source: BookSource, body: String, url: String, rule: String): String? {
         val analyzeRule = AnalyzeRule(RuleData(), source)

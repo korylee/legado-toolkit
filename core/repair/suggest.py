@@ -2,15 +2,16 @@
 """调试抽屉的「AI 提议规则」：**单步、一轮、交互式**。
 
 与 ``loop.py`` 的分工：那条链是整源、批量、多轮（CLI）；这条是某一步改不动时，
-让模型看着**这一页的 DOM** 给几条候选。共同点与项目既定原则一致——**模型只写规则
-文本，能不能离线回放通过由回放器初筛，最终结论以引擎验证为准**（AGENTS #3）。所以这里的每条候选都必须过
-``core.verify.replay_step``，并把三种结论分开呈现：
+让模型看着**这一页的 DOM** 给几条候选。模型只写规则文本，**能不能用由本机引擎
+说了算**（AGENTS #3）；这条链自己不做判定，只做两件不花钱的事：
 
-  - 本地验过（取到值）→ 可以「用这条」
-  - 本地回放不了（``@js:`` / ``@xpath:``）→ **只能连 App 试**，不得显示成已验证
-  - 在这份页面上取不到值 → 说明这条不对
+  - ``preselect``：拿 App 实测值当基准，在**候选自己给出的样本**里挑一条对得上的
+    （样本就是界面上摆给用户看的那几个值，不是我们另跑一遍规则算的）；
+  - ``login_wall``：模型看到的这一页是不是登录墙——是的话先拦，别让用户花冤枉钱。
 
-第三种和第二种必须分开：一个是「规则不好」，一个是「我们验不了」。
+**这里不再本地跑规则**：候选的真伪一律由用户点击后的引擎验收
+（``verify_candidate`` → 本机 App 引擎）决定。此前那条「先用回放器验一遍」的路
+已被删掉——同一份页面上两套规则解释器，迟早会把「我们不会算」说成「规则不好」。
 """
 
 from __future__ import annotations
@@ -19,7 +20,9 @@ import hashlib
 import re
 from typing import Any, Dict, List, Optional
 
-#: 最多让模型给几条。多了反而挑不动，而且每条都要回放一遍
+from core import candidates as candidates_mod
+
+#: 最多让模型给几条。多了反而挑不动，而且每条都要用户点一次才验
 MAX_CANDIDATES = 3
 #: 给模型的 DOM 大纲行数（与 core/repair/evidence 同口径）
 MAX_OUTLINE_LINES = 90
@@ -37,8 +40,8 @@ def patch_candidate(source: Dict[str, Any], field: str, rule: str) -> Dict[str, 
     """复制源并只替换一个规则字段，供候选验收使用。
 
     这是一次性的验证输入，不修改调用方的 ``source``，也不允许候选改写源元数据、请求头、
-    登录配置或其他规则组。``@js:`` 等本地回放器不支持的规则在这里可以保留——它们
-    需要后续真实引擎验收，不能在这个边界被提前当成非法规则。
+    登录配置或其他规则组。``@js:`` 等规则在这里原样保留——它们只能由真实引擎验收，
+    不能在这个边界被提前当成非法规则。
     """
     if not isinstance(source, dict):
         raise ValueError("source 必须是对象")
@@ -122,19 +125,52 @@ def verify_candidate(source: Dict[str, Any], field: str, rule: str,
         }
 
     ok = bool(step.get("ok"))
-    engine_status = "pass" if ok else "fail"
+    empty_field = _empty_hit_reason(step)
+    verified = ok and not empty_field
     out = {
-        "status": "verified" if ok else "rejected",
+        "status": "verified" if verified else "rejected",
         "local": {"status": "not_run"},
         "engine": {
-            "status": engine_status, "channel": "jvm",
+            "status": "pass" if verified else "fail", "channel": "jvm",
             "step": step_name, "detail": str(step.get("detail") or ""),
             "count": len(step.get("values") or []),
             "samples": [str(v) for v in (step.get("values") or [])[:3]],
         },
         "target": target, "step": step_name, "key": key,
     }
+    if empty_field:
+        # **整步通过不等于这个字段取到了东西**：搜索步的 verdict 来自事件流
+        # （`◇书籍总数:N` 与页解析完成）。把 `bookList` 换成一个不存在的 class，
+        # 站点自己的搜索页照样出结果、步照样 pass——实测（2026-10-08，`去读书网`）
+        # 「不存在的 class」拿到过 `verified`。所以补这条**字段级**的零命中判据。
+        out["engine"]["reason"] = ("整步跑通了，但这一个字段命中 0 条（%s）——它没取到东西"
+                                   % empty_field)
     return out
+
+
+#: 引擎自己报的「这一字段命中 0 条」形状。**只认已知的零命中标记**：判据窄一点，
+#: 宁可漏判（那样只是退回「整步通过」），也不能把引擎说的别的东西当零命中。
+_EMPTY_HIT_RES = (
+    re.compile(r"总数[:：]\s*0(?!\d)"),
+    re.compile(r"解析结果为空"),
+    re.compile(r"未找到章节链接"),
+)
+
+
+def _empty_hit_reason(step: Dict[str, Any]) -> str:
+    """这一个字段是不是命中 0 条（是则返回引擎原文，否则空串）。
+
+    ``verify_candidate`` 判的是**整步**：搜索步的 verdict 由事件流决定
+    （`◇书籍总数:N` + 页解析完成），换掉 `bookList` 之后站点自己的搜索页照样出结果。
+    字段级的「命中 0 条」是唯一能一眼看出的反证，所以单独判一次。
+    """
+    text = "；".join([str(step.get("detail") or "")]
+                    + [str(n) for n in (step.get("notes") or [])])
+    for rx in _EMPTY_HIT_RES:
+        m = rx.search(text)
+        if m:
+            return m.group(0)
+    return ""
 
 
 SYSTEM_PROMPT = """你是 Legado（阅读 App）书源的规则专家。用户正在调试**一步**规则，你只给这一步的候选规则。只输出 JSON，不要解释。
@@ -152,8 +188,8 @@ Legado 规则语法（`@` 分段，前面是选择器，最后一段是取值动
 
 硬性要求：
 1. 规则里用到的 class / id 必须**真实存在于**我给的 DOM 大纲里，不许臆造。
-2. 本地回放器跑不了 `@js:` / `<js>` / `@xpath:`。只有当别的写法确实不成立时才用它，
-   并在 why 里写明「本地验不了，只能连 App 试」。
+2. `@js:` / `<js>` / `@xpath:` 是允许的：候选会由本机 App 引擎验收。用它们时在 why 里
+   说明依赖什么（全局对象 / 登录态 / 接口），因为取不到材料的那次会判失败。
 3. 一条候选只写规则文本本身，不要带字段名、不要写 JSON 以外的内容。
 """
 
@@ -206,21 +242,31 @@ def build_prompt(ctx: Dict[str, Any]) -> str:
     return "\n".join(L)
 
 
+_FOCUS_SHORTHAND = {"class": ".", "id": "#"}
+
+#: `class.a.b` / `tag.div.x` 这类简写里，第一个点之前是**前缀**、之后是名字
+_FOCUS_LEGADO_RE = re.compile(r"^(class|id|tag)\.([^.@##:]+)")
+#: `tag.a.x` 要退化成 `a`；`class.a.b` 要退化成 `.a`
+_FOCUS_NAME_RE = re.compile(r"^[A-Za-z_][\w-]*")
+
+
 def focus_selector(rule: str) -> str:
     """把一条 Legado 规则的首段转成 CSS 选择器（给 ``dom_outline(select=)`` 用）。
 
-    转换只能用回放器那份解析（``parse_rule``）：`class.x` / `id.x` / `tag.a` 是
-    Legado 简写而不是 CSS，直接丢给 BeautifulSoup 一个都匹配不到。
+    ``class.x`` / ``id.x`` / ``tag.a`` 是 Legado 简写，直接丢给 BeautifulSoup 一个都
+    匹配不到。**只认这三种前缀**，别的一律给空串让大纲退回整篇：这里只是「给模型看
+    哪块 DOM」的取景框，不需要一个完整的规则解释器——认错的代价是提示词里少一段
+    相关内容，而不是给错规则（选候选与验收都不经过这里）。
     """
-    from core.rules.replayer import parse_rule
-
-    try:
-        steps = parse_rule(str(rule or "").strip()).steps
-    except Exception:
-        return ""
-    if steps and steps[0][0] == "select":
-        return steps[0][1]
-    return ""
+    rule = str(rule or "").strip().split("##")[0].split("@")[0].strip()
+    m = _FOCUS_LEGADO_RE.match(rule)
+    if not m:
+        # 已经是 CSS 选择器（`.cls .item` / `#id`）就原样用
+        return rule if rule[:1] in (".", "#") else ""
+    prefix, rest = m.group(1), m.group(2)
+    if prefix == "tag":
+        return _FOCUS_NAME_RE.match(rest).group(0) if _FOCUS_NAME_RE.match(rest) else ""
+    return _FOCUS_SHORTHAND[prefix] + rest
 
 
 def _outline(html: str, focus: str = "") -> str:
@@ -244,50 +290,6 @@ def _outline(html: str, focus: str = "") -> str:
                        select=focus_selector(focus) if focus else "")
 
 
-def verify(html: str, rule: str, step: str, source_type: int = 0,
-           with_values: bool = False) -> Dict[str, Any]:
-    """用**回放器**验一条候选（不联网）。取到值才算本地通过。
-
-    返回同时保留旧的 ``verified`` 字段和新的 ``local`` / ``engine`` / ``status``
-    三段结果；真实引擎验收留给后续 ai-verify 步骤，本函数不把本地通过冒充引擎通过。
-
-    ``with_values=True`` 时额外带回**全部**取值（默认只给前 3 条样本）——
-    ``preselect`` 要靠全量值去和 App 实测值比对；而回给前端的结果只要样本，
-    正文那类全量值可能有几万字。
-    """
-    from core.verify import replay_step
-
-    r = replay_step(html or "", rule or "", step, source_type)
-    values = [str(v) for v in (r.get("values") or [])]
-    rule_error = str(r.get("rule_error") or "")
-    out: Dict[str, Any] = {
-        # 兼容旧消费者：verified/count/samples/rule_error/note 暂时保留。
-        "verified": False, "count": len(values), "samples": values[:3],
-        "verdict": r.get("verdict") or "", "rule_error": rule_error, "note": "",
-        # 新口径：local 是当前回放器能证明的事实；engine 留给后续真实引擎验收。
-        "local": {"status": "", "count": len(values), "samples": values[:3],
-                  "rule_error": rule_error},
-        "engine": {"status": "not_required"},
-        "status": "",
-    }
-    if with_values:
-        out["values"] = values
-    if rule_error:
-        # 「我们验不了」——不是「规则不好」。前端必须显式标「只能连 App 试」
-        out["local"]["status"] = "unsupported"
-        out["status"] = "needs_engine"
-        out["note"] = "本地调试不了（%s），只能连 App 试" % rule_error
-    elif not values:
-        out["local"]["status"] = "fail"
-        out["status"] = "rejected"
-        out["note"] = "在这份页面上取不到值"
-    else:
-        out["local"]["status"] = "pass"
-        out["status"] = "verified"
-        out["verified"] = True
-    return out
-
-
 def login_wall(html: str, enabled_cookie_jar: bool = False) -> bool:
     """这一页是不是登录墙 / 反爬挑战页。
 
@@ -307,10 +309,10 @@ def login_wall(html: str, enabled_cookie_jar: bool = False) -> bool:
 
 #: 程序先挑的判据权重：与 App 实测值完全相等 = 2，互相包含 = 1
 _STRONG, _WEAK = 2, 1
-#: 低于这个分数不算「挑得出来」（单条完全相等刚好够）
-_MIN_SCORE = 2
 #: 领先不到这个倍数就不猜（并列时交给模型）
 _LEAD_RATIO = 2
+#: 超过这个长度的「样本」不是可比的值（容器类候选会给一整块列表文本）
+_MAX_SAMPLE_CHARS = 120
 
 
 def _norm(value: Any) -> str:
@@ -323,98 +325,142 @@ def _norm(value: Any) -> str:
 
 
 def _sig(values: List[str]) -> str:
-    """一组取值的指纹，用来判「两条候选取到的是不是同一批值」。
+    """一组值的指纹，用来判「两条候选取到的是不是同一批值」。
 
     用摘要而不是原值是怕大：正文那类一次就是几万字，而这里只做相等比较。
     """
     return hashlib.sha1("\x00".join(values).encode("utf-8")).hexdigest()[:12]
 
 
-def preselect(candidates: List[str], app_values: List[str], html: str,
-              step: str, source_type: int = 0) -> Dict[str, Any]:
-    """**先用程序挑一遍**：拿 App 实测到的值当基准，看哪条候选取到的就是那批。
+def _samples_of(candidate: Any) -> List[str]:
+    """候选自己报的样本值（界面上摆给用户看的那几个）。
+
+    候选（算法/点选那两族）与它的样本是**同一份材料**：`core.candidates` 造候选时
+    就是按这些值分组的，所以拿样本比对不需要再解释一遍规则文本。模型给的那族没有
+    样本，返回空列表——调用方要把它读成「没参与比对」。
+
+    **超长样本丢掉**：容器类候选的样本可能是整块列表文本（实测一次 1000+ 字，
+    里面装着全部书名），它和任何基线都「包含」得上，会把分数抬到几十却什么也没说明。
+    这一层只认「短样本完全相等」，长文本不是可比的值。
+    """
+    if isinstance(candidate, dict):
+        raw = candidate.get("samples") or []
+    else:
+        raw = []
+    out = []
+    for v in raw:
+        text = _norm(v)
+        if text and len(text) <= _MAX_SAMPLE_CHARS:
+            out.append(text)
+    return out
+
+
+def preselect(candidates: List[Any], app_values: List[str], html: str,
+              step: str, source_type: int = 0, kind: str = "") -> Dict[str, Any]:
+    """**先用程序挑一遍**：拿 App 实测到的值当基准，看哪条候选报的样本就是那批。
 
     为什么值得先来这一遍：AI 那条路要花钱，而「哪条候选对」多数时候**可判**——
     连 App 调试时 App 自己取到过值（``steps[].values``，比如书名的真实文本），
     那就是免费的 ground truth。
 
-    **挑不出来时如实说，不猜**，三种情况：没有基准（不是 App 实测的结果，或 App
-    那一步本来就取不到值）、多条候选并列、命中的那条本地回放不了。
-    注意「本地回放取到的值」**不能**当基准——那是坏规则的产物，拿它比等于自证循环。
+    **比的是候选自己报的样本**，不是我们另跑一遍规则算出来的值：样本就是用户
+    在卡片上看到的那些，口径一致；也就没有第二套规则解释器。
+    候选**没报样本**时（列表族的候选只给容器）退回页面那一侧：
+    `core.candidates.sample_values` 按候选自己的取样范围收「页面上像 App 实测值的那些」。
+    两边都比不出来就如实说，**不许读成「取不到值」**（AGENTS #4：不把「我们比不了」
+    说成「规则不好」）。
+
+    挑不出来时如实说，不猜：没有基准（不是 App 实测的结果，或 App 那一步本来就取不到
+    值）、候选报的样本都对不上、多条候选并列。
     """
-    rules = [str(r or "").strip() for r in (candidates or []) if str(r or "").strip()]
-    basis = [_norm(v) for v in (app_values or []) if _norm(v)]
+    rules = [c for c in (candidates or []) if str((c or {}).get("rule") if isinstance(c, dict)
+                                                  else c or "").strip()]
+    basis = [x for x in (_norm(v) for v in (app_values or [])) if x]
     out: Dict[str, Any] = {"picked": None, "ranked": [], "need_ai": True,
                            "basis": "app" if basis else "", "reason": ""}
     if not rules:
         out["reason"] = "没有候选可挑"
         return out
     if not basis:
-        out["reason"] = ("没有 App 实测值作基准（本地调试取到的值不能当基准——"
-                         "那是当前这条坏规则的产物）")
+        out["reason"] = ("没有 App 实测值作基准。先连 App 或本机引擎把这一步跑一遍："
+                         "当前规则自己取到的值不能当基准（那是它的产物）")
         return out
+
+    #: 页面上像 App 实测值的那几个，作为候选**没报样本**时的比对材料（列表步的候选
+    #: 只给容器、不报样本，而 App 在列表步取到的正是条目里的书名）。拿不到就是拿不到，
+    #: 调用方按「这一页上比不了」如实说。同样丢掉超长项：容器整块文本会与任何基线
+    #: 「包含」得上（实测一次 1000+ 字，把分数抬到 76）。
+    on_page = [x for x in (_norm(v) for v in
+                           candidates_mod.sample_values(html or "", kind, basis))
+               if len(x) <= _MAX_SAMPLE_CHARS]
 
     ranked = []
-    for rule in rules:
-        # with_values：比对要用**全部**取值，只看前 3 条样本会把「第 4 条才对上」判成对不上
-        v = verify(html, rule, step, source_type, with_values=True)
-        vals = [_norm(x) for x in (v.get("values") or []) if _norm(x)]
-        strong = sum(1 for a in basis for x in vals if a == x)
-        weak = sum(1 for a in basis for x in vals
+    for item in rules:
+        rule = str(item.get("rule") if isinstance(item, dict) else item).strip()
+        samples = _samples_of(item)
+        if not samples:
+            # 候选自己没报样本（列表族）：退回「页面上像 App 实测值的那些」
+            samples = on_page
+        strong = sum(1 for a in basis for x in samples if a == x)
+        weak = sum(1 for a in basis for x in samples
                    if a != x and len(a) >= 2 and (a in x or x in a))
         ranked.append({"rule": rule, "score": strong * _STRONG + weak * _WEAK,
-                       "strong": strong, "weak": weak, "verified": v["verified"],
-                       "count": v["count"], "samples": v.get("samples") or [],
-                       "rule_error": v.get("rule_error") or "",
-                       #: 取值指纹，只用于下面的「等价」判断，不外发
-                       "sig": _sig(vals)})
+                       "strong": strong, "weak": weak,
+                       "samples": list(samples[:3]), "count": len(samples),
+                       "sig": _sig(samples)})
     ranked.sort(key=lambda r: (-r["score"], r["rule"]))
-    top = ranked[0]
-    tied = [r for r in ranked if r["score"] == top["score"]]
     out["ranked"] = [{k: v for k, v in r.items() if k != "sig"} for r in ranked]
 
-    if top["score"] >= _MIN_SCORE and top["verified"]:
-        if len(tied) > 1:
-            # 取到**同一批值**的候选是**等价**的（如 `.item@tag.a@text` 与
-            # `.item@tag.h3@text`，a 就在 h3 里）——那不算歧义，挑更简洁的那条即可；
-            # 否则「页面上有一堆等价写法」会让这一层形同虚设（实测：两条各 4 分，
-            # 按「不猜」处理就永远轮不到它省钱）。
-            if len({r["sig"] for r in tied}) == 1:
-                top = min(tied, key=lambda r: (str(r["rule"]).count("@"),
-                                               len(str(r["rule"])), str(r["rule"])))
-                out["picked"] = top
-                out["need_ai"] = False
-                out["reason"] = ("%d 条候选取到的是同一批值（等价），取了更简洁的那条；"
-                                 "App 取到的值就在它选中的 %d 条里"
-                                 % (len(tied), top["count"]))
-                return out
-            out["reason"] = ("多条候选都能对上、取的还不是同一批值（%d 分 / %d 分），"
-                             "不替你猜" % (top["score"], tied[1]["score"]))
+    scored = [r for r in ranked if r["score"] > 0]
+    if not scored:
+        if not on_page and not any(r["count"] for r in ranked):
+            # 这一页上根本没有像 App 实测值的材料——这是「比不了」，不是「对不上」
+            out["reason"] = ("这一页上找不到 App 实测的那些值（材料可能不是同一份），"
+                             "没法按样本比：点一次 AI，或直接用引擎验")
             return out
-        if len(ranked) > 1 and ranked[1]["score"] * _LEAD_RATIO > top["score"]:
-            out["reason"] = ("另一条候选也能对上（%d 分 / %d 分），不替你猜"
-                             % (top["score"], ranked[1]["score"]))
-            return out
-        out["picked"] = top
-        out["need_ai"] = False
-        out["reason"] = ("App 取到的值就在它选中的 %d 条里（对上 %d 条）"
-                         % (top["count"], top["strong"] + top["weak"]))
+        out["reason"] = "候选报的样本和 App 实测值都对不上"
+        return out
+    if not any(r["strong"] for r in scored):
+        # 只有「包含」没有「完全相等」→ 基线里没有真正的值，撑不起挑一条的结论。
+        # App 那一步取到的是事件流水（带 ┌└◇≡ 的结构行、URL、导航文本）时就会这样：
+        # 随便一条候选都能撞上几处，报「对上 N 条」等于把人引到错的规则上。
+        out["reason"] = ("App 这一步的值里没有和候选样本完全相等的（看着像事件流水或"
+                         "统计行，不是取到的值）——不替你猜，点一次 AI 或直接用引擎验")
         return out
 
-    # —— 挑不出来 ——
-    # 「规则取不到值」与「规则本地跑不了」是两件事，别混成一句：后者要连 App 试
-    unreplayable = [r for r in ranked if r["rule_error"]]
-    out["reason"] = "候选取到的值和 App 实测值都对不上"
-    if unreplayable:
-        out["reason"] += ("；另有 %d 条本地调试不了（%s）——只能连 App 试"
-                          % (len(unreplayable), unreplayable[0]["rule_error"]))
+    top = scored[0]
+    tied = [r for r in scored if r["score"] == top["score"]]
+    if len(tied) > 1:
+        # 报**同一批样本**的候选是**等价**的（如 `.item@tag.a@text` 与
+        # `.item@tag.h3@text`，a 就在 h3 里）——那不算歧义，挑更简洁的那条即可；
+        # 否则「页面上有一堆等价写法」会让这一层形同虚设。
+        if len({r["sig"] for r in tied}) == 1:
+            top = min(tied, key=lambda r: (str(r["rule"]).count("@"),
+                                           len(str(r["rule"])), str(r["rule"])))
+            out["picked"] = top
+            out["need_ai"] = False
+            out["reason"] = ("%d 条候选报的是同一批样本（等价），取了更简洁的那条；"
+                             "App 取到的值就在它选中的 %d 条里"
+                             % (len(tied), top["strong"] + top["weak"]))
+            return out
+        out["reason"] = ("多条候选都能对上、报的还不是同一批样本（%d 分 / %d 分），"
+                         "不替你猜" % (top["score"], tied[1]["score"]))
+        return out
+    if len(scored) > 1 and scored[1]["score"] * _LEAD_RATIO > top["score"]:
+        out["reason"] = ("另一条候选也能对上（%d 分 / %d 分），不替你猜"
+                         % (top["score"], scored[1]["score"]))
+        return out
+    out["picked"] = top
+    out["need_ai"] = False
+    out["reason"] = ("App 取到的值就在它报的样本里（对上 %d 条）"
+                     % (top["strong"] + top["weak"]))
     return out
 
 
 async def suggest(ctx: Dict[str, Any], client: Any = None,
                   temperature: Optional[float] = None,
                   dry_run: bool = False) -> Dict[str, Any]:
-    """跑一轮提议 + 逐条回放验证，返回给前端直接渲染的结构。
+    """跑一轮提议，返回给前端直接渲染的结构。
 
     ``client`` 可注入（离线测试用假客户端）。返回体恒有 ``candidates`` /
     ``llm`` / ``error`` 三个键：``llm`` 用 ``ok`` / ``off``（没配模型）/
@@ -422,6 +468,9 @@ async def suggest(ctx: Dict[str, Any], client: Any = None,
 
     ``dry_run=True`` 时**一个模型请求都不发**：只跑免费的 ``preselect``（外加
     登录墙判断），``llm`` 记为 ``dry_run``。前端先来这一趟，挑得出来就不花钱。
+
+    模型给的候选**不带本地判定**（只有 ``rule`` / ``why``）：验收是引擎那一趟的事，
+    在界面上由用户点击触发（``/rules/verify-candidate``）。
     """
     from core.repair.llm import LLMClient, extract_json
 
@@ -435,7 +484,8 @@ async def suggest(ctx: Dict[str, Any], client: Any = None,
                            "preselect": preselect(
                                ctx.get("candidates") or [], ctx.get("app_values") or [],
                                ctx.get("html") or "", str(ctx.get("step") or ""),
-                               int(ctx.get("source_type") or 0)),
+                               int(ctx.get("source_type") or 0),
+                               str(ctx.get("kind") or "")),
                            #: 这一页是不是登录墙——是的话模型看到的不是 App 那份，
                            #: 前端先把话说在前面（别让用户花冤枉钱）
                            "login_wall": login_wall(ctx.get("html") or "",
@@ -475,10 +525,10 @@ async def suggest(ctx: Dict[str, Any], client: Any = None,
         if not rule or rule in seen:
             continue
         seen.add(rule)
-        cand = {"rule": rule, "why": str(item.get("why") or "").strip()[:200]}
-        cand.update(verify(ctx.get("html") or "", rule, str(ctx.get("step") or ""),
-                           int(ctx.get("source_type") or 0)))
-        out["candidates"].append(cand)
+        # 只带规则与理由：**这条链不做本地判定**。候选能不能用由用户点击后的
+        # 「验证并应用」（本机引擎）说了算（AGENTS #3）。
+        out["candidates"].append({"rule": rule,
+                                  "why": str(item.get("why") or "").strip()[:200]})
         if len(out["candidates"]) >= MAX_CANDIDATES:
             break
     if not out["candidates"]:

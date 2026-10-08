@@ -65,11 +65,10 @@ const quickProbe = ref(true);
 const quickLoading = ref(false);
 const quickProgress = ref("");
 const quickVerify = ref(null);
-//: 生成后的那次验证是谁给的（十-5 之后默认是**本机引擎**）：标签必须跟着来源走——
+//: 生成后的那次验证是谁给的（十-5 之后只有**真引擎**两个通道）：标签必须跟着来源走——
 //: 跑真引擎的结果挂着「本地调试 · 仅供参考」是句假话（AGENTS #4 那一类）
 const quickVerifyFrom = computed(() => {
   const v = quickVerify.value || {};
-  if (v.local_approx) return { tag: "本地调试", type: "info" };
   if (v.source === "app") return { tag: "App 实测", type: "success" };
   if (v.source === "jvm") return { tag: "本机引擎", type: "primary" };
   return { tag: "", type: "info" };
@@ -669,15 +668,11 @@ function rerunFromStep(stepName) {
         </el-form>
         <div v-if="quickVerify" class="quick-verify">
           <!-- **谁给的结论要标出来**：十-5 之后这里默认是本机引擎（同一段 App 代码），
-               与调试页的结果用的是同一套三态视觉，不标就分不清哪份是什么。
-               只有回落到本地回放器那种结果才写「仅供参考」 -->
+               与调试页的结果用的是同一套三态视觉，不标就分不清哪份是什么 -->
           <p class="muted" style="margin: 0 0 8px">
             <el-tag v-if="quickVerifyFrom.tag" size="small" :type="quickVerifyFrom.type">
               {{ quickVerifyFrom.tag }}
             </el-tag>
-            <span v-if="quickVerifyFrom.tag === '本地调试'" style="margin-left: 6px">
-              只检查是否取到值，不支持 JS 规则。要确认请切到「调试」。
-            </span>
             <span v-else style="margin-left: 6px">
               生成后的验证跑的是「阅读」App 的真源码（本机引擎）；差在环境——
               登录态要预热、网络出口是本机。要连真机确认请切到「调试」。

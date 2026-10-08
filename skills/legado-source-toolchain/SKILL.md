@@ -1,6 +1,6 @@
 ---
 name: legado-source-toolchain
-description: 本仓库 Legado 书源工具链的用法——SQLite 管理库、规则回放器的边界、AI 提议与验收的边界。
+description: 本仓库 Legado 书源工具链的用法——SQLite 管理库、规则由谁执行、AI 提议与验收的边界。
 ---
 
 # Legado 书源工具链
@@ -17,30 +17,30 @@ description: 本仓库 Legado 书源工具链的用法——SQLite 管理库、�
 
 → 给 Legado 的 JSON 永远由 `Store.export_json` 生成，别拿它当事实来源（AGENTS #2）。
 
-## 二、规则回放器（core/rules/replayer.py）
+## 二、规则由谁执行
 
-**不支持的语法要返回明确原因，不是空列表**（`@js:`、`<js>`、`@xpath:`、`||` 备选、JSONPath
-递归 `..`…）——**完整清单以 `parse_rule(...).unsupported` 的返回为准**，每条未实现的分支
-都带自己的原因码；别在文档里维护第二份枚举。调用方据此判「无法验证」，不是「规则失效」。
+**只有一台执行者：本机 App 引擎**（`core/jvm_debug`）或真机（`core/app_debug`）。
+Python 侧不解释 Legado 规则——曾经的本地回放器已随「引擎是唯一执行者」删除，同一份
+页面上两套解释器必然把「我们不会算」说成「规则不好」（AGENTS #4）。
 
-    from core.rules.replayer import extract_all_ex, parse_list, parse_field
-    values, err = extract_all_ex(html, rule)   # err 非空 = 无法回放
+唯一残留的规则文本解析是给**提示词取景框**用的：`core.repair.suggest.focus_selector`
+把首段的 `class.` / `id.` / `tag.` 简写转成 CSS，认不出就退回整篇。它不取值、不判定。
 
-`@html`（没有冒号）是**取值动作**不是前缀（带冒号那支已删，见 `replayer.RULE_PREFIXES`）。
-
-→ 这是 AGENTS #4 的落点：**「我们做不到」必须说出来**，不能被读成源坏了。
+→ 候选的真伪一律由引擎验收（`POST /api/rules/verify-candidate`）；不支持的语法由引擎
+自己给原因。
 
 ## 三、AI 提议（只有调试工作台一条路）
 
 AI 只做**单步提议**：
 
-    POST /api/rules/suggest-rule      # 只提议；dry_run 那趟免费（回放器初筛，不发模型请求）
+    POST /api/rules/suggest-rule      # 只提议；dry_run 那趟免费（按候选样本挑一遍，不发模型请求）
     POST /api/rules/verify-candidate  # 用户显式点击才跑，本机引擎验收这一条
 
-**模型只提议，验收一律由本机引擎完成**；回放器只用在不花钱的初筛上（AGENTS #3）。
-失效归因看跑批校验的明细（自带归因，结论落在管理库），没有独立命令。
+**模型只提议、不做本地判定**；免费那趟只做样本比对（`core/repair/suggest.preselect`），
+不跑规则、不调模型（AGENTS #3）。失效归因看跑批校验的明细（自带归因，结论落在管理库），
+没有独立命令。
 
-→ 花钱与验收都在用户点击之后；回放器不是第二个健康事实（lessons §七十三）。
+→ 花钱与验收都在用户点击之后（lessons §七十三）。
 
 ## 四、一次批量的完整动作
 

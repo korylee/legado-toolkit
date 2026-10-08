@@ -61,21 +61,13 @@ export const appPreflight = (source, host, port) =>
 export const appPush = (source, host, port) =>
   api.post("/rules/app-push", { source, host, port });
 
-// 用已抓到的 HTML 重放一步规则，**不发网络请求**。
-// 改完规则立刻看判定变化用这个，比重跑整条链（要重新联网搜索）快得多。
-export const replayStep = (html, rule, step, sourceType) =>
-  api.post("/rules/replay-step", {
-    html, rule, step, source_type: sourceType,
-  });
-
-// 让 AI 给**某一步**提候选规则。模型只提议：后端会把每条候选拿本地回放器验一遍，
-// 结果里带 verified / count / samples / rule_error——「本地回放不了」的那类
-// （@js: 等）只能连 App 试，前端必须分开显示，不能混进「已验证」。
+// 让 AI 给**某一步**提候选规则。模型只提议：这条链不做本地判定，能把候选填进表单
+// 之后由用户点「验证并应用」走本机引擎验收（`/rules/verify-candidate`）。
 // 没配模型 / 模型输出不是 JSON 都从 llm 三态（ok|off|error|dry_run）+ error 里读。
 //
 // **这是一个会花钱的动作，必须由用户显式触发**（同 appPush 那条边界）：
-// 只在按钮的点击回调里调，不得自动调用。唯一的例外是 dry_run=true——它只跑本地的
-// 「程序先挑一遍」与登录墙判断，一个模型请求都不发，所以换步骤时可以自动跑。
+// 只在按钮的点击回调里调，不得自动调用。唯一的例外是 dry_run=true——它只按候选
+// 自己报的样本挑一遍（外加登录墙判断），一个模型请求都不发，所以换步骤时可以自动跑。
 export const suggestRule = (body) => api.post("/rules/suggest-rule", body);
 
 export const verifyCandidate = (source, field, rule, target, query, timeout = null) =>

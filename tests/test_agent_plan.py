@@ -21,15 +21,16 @@ from core.agent_plan import (FIX_KINDS, FIX_TARGETS, GAP_CODES, PROBE_KINDS,
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 FRONTEND = ROOT / "frontend" / "src" / "utils" / "debugDecision.js"
 
-#: 口袋漫画那一步的真实形状：正文规则为空、页面判到 L3、本机引擎没有运行时材料
+#: 口袋漫画那一步的真实形状：正文规则为空、页面判到 L3、本机引擎没有运行时材料。
+#: `values_count` 是引擎给的事实（`planBody` 一直带它）：0 条 = 规则没选中任何节点。
 POCKET_COMIC = {
     "layer": "L3",
     "target": {"step": "content", "want": "media", "rule_empty": True},
-    "step": {"verdict": "unknown", "page_id": "p1", "url": "https://a.com/c/1"},
+    "step": {"verdict": "unknown", "values_count": 0,
+             "page_id": "p1", "url": "https://a.com/c/1"},
     "page": {"present": True, "has_wanted": False,
              "stats": {"links": 7, "images": 2, "images_with_src": 0}},
     "channel": "jvm",
-    "replay": {"present": True, "values_count": 0},
     "signals": {"can_suggest": True, "llm_ready": True},
     "capabilities": {"jvm_debug": True, "app_debug": True},
 }
@@ -78,7 +79,8 @@ class DecisionGapTests(unittest.TestCase):
         """真机已经是最后一条通道，再给 probe 就只剩换回来。"""
         plan = plan_for(POCKET_COMIC, layer="L2", channel="app",
                         target={"step": "search", "want": "list"},
-                        page={"present": True, "has_wanted": True}, replay={})
+                        page={"present": True, "has_wanted": True},
+                        step={"verdict": "unknown"})
         self.assertEqual(plan["gap"]["code"], "unknown")
         self.assertIsNone(plan["probe"])
 
@@ -132,7 +134,8 @@ class AiMaterialTests(unittest.TestCase):
 
     def test_l1_static_page_is_a_qualified_material(self):
         plan = plan_for(POCKET_COMIC, layer="L1", target={"step": "search", "want": "list"},
-                        page={"present": True, "has_wanted": True}, replay={})
+                        page={"present": True, "has_wanted": True},
+                        step={"verdict": "unknown", "values_count": 0})
         self.assertTrue(plan["ai"]["eligible"])
         self.assertEqual(plan["ai"]["material_kind"], "page_html")
 

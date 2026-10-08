@@ -22,6 +22,8 @@
 
 import re
 
+from typing import List
+
 from core.html import make_soup
 
 KINDS = ("link", "media", "text", "list")
@@ -205,3 +207,82 @@ def find_candidates(html: str, kind: str, limit: int = 6) -> list:
     run = {"link": _link_candidates, "media": _media_candidates,
            "text": _text_candidates, "list": _list_candidates}[kind]
     return run(soup, limit)
+
+
+# ---------------------------------------------------------------- 取「候选能取到什么」
+
+#: 带 class 的文本块：与 `_text_candidates` 的取样范围一致（正文/书名这类都要过 class）
+_TEXT_TAGS = ("div", "article", "section", "td", "p", "h1", "h2", "h3", "h4", "span", "a")
+#: 单个取值最多留多少字符。**在取样时就截断**，而不是收集完再筛：
+#: 正文页上一段就是上万字符（实测 11200），不截断的话收集阶段会为几百个元素
+#: 各materialize 一份全文再丢掉（白付内存与时间）；而这一层只用来比对
+#: 「样子像不像 App 取到的值」，200 字符早已过量（真正的值都比这短）。
+_VALUE_MAX_CHARS = 200
+
+
+def _elem_values(el) -> List[str]:
+    """一个元素身上**可能被规则取到**的值：自身文本、href、title，以及直接子元素的对应值。
+
+    子元素那一层要收，是因为列表步的候选是**容器**（`.list .item`），而 App 在列表步
+    取到的是**条目里的书名**——不收子元素，列表候选就永远拿不出可比的值。
+    """
+    out = [_squeeze(el.get_text())[:_VALUE_MAX_CHARS],
+           str(el.get("href") or "").strip(), str(el.get("title") or "").strip()]
+    for child in el.find_all(True):
+        out.append(_squeeze(child.get_text())[:_VALUE_MAX_CHARS])
+        out.append(str(child.get("href") or "").strip())
+        out.append(str(child.get("title") or "").strip())
+    return [v for v in out if v]
+
+
+def _squeeze(text) -> str:
+    """连续空白折成一个空格（比对用的值不需要保留排版）。"""
+    return re.sub(r"\s+", " ", str(text or "")).strip()
+
+
+def _collect(soup, kind: str) -> List[str]:
+    """把页面上**同族**的取值收成一个集合（候选能取到的值必然是它的子集）。
+
+    这里不解释规则文本——候选本来就是按这些值分组造出来的（见上面各 family），
+    所以「候选能取到什么」与「页面上有什么」是同一份材料，不需要第二套规则解释器。
+    """
+    if kind == "link":
+        return [str(a.get("href") or "").strip() for a in soup.select("a[href]")]
+    if kind == "media":
+        out = []
+        for img in soup.select("img"):
+            if _first_class(img):
+                out += [str(img.get(attr) or "").strip() for attr in _MEDIA_ATTRS]
+        return [v for v in out if v]
+    if kind == "list":
+        return [v for el in soup.select("ul, ol, div, section") for v in _elem_values(el)]
+    out = []
+    for el in soup.select(", ".join(_TEXT_TAGS)):
+        if not _first_class(el):
+            continue
+        out += _elem_values(el)
+    return [v for v in out if v]
+
+
+def sample_values(html: str, kind: str, app_values, limit: int = 300) -> List[str]:
+    """页面上**像 App 实测值**的那些值——免费初筛的比对基准。
+
+    这是「取候选的值」的**唯一一份**实现（造候选时用的就是同一套取值口径），所以
+    免费初筛不必再写一个规则解释器。找不到就返回空列表：调用方要把它读成
+    「这一页上比不了」，**不是**「候选取不到值」（AGENTS #4）。
+    """
+    kind = str(kind or "").strip()
+    if kind not in KINDS:
+        return []
+    wanted = [_squeeze(v).replace(" ", "") for v in (app_values or [])]
+    wanted = [w for w in wanted if len(w) >= 2][:limit]
+    if not wanted:
+        return []
+    out = []
+    for value in _collect(make_soup(html or ""), kind):
+        norm = re.sub(r"\s+", "", value)
+        if any(w == norm or w in norm or norm in w for w in wanted):
+            out.append(value)
+        if len(out) >= limit:
+            break
+    return out

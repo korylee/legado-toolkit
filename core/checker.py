@@ -24,14 +24,11 @@ from core.models import (
     anti_bot_marker_of, login_marker_of,
     NOVEL_TEST_KEYWORDS, MANGA_TEST_KEYWORDS, TEST_TITLES, TOC_COMPLETE_THRESHOLD,
 )
-from core.toc_page import resolve_toc_page
-from core.urls import abs_url as _abs_url, rule_url as _rule_url, split_url_options
+from core.urls import split_url_options
+
 # DNS 失败的归因（域名注销 vs 本地解析被污染）：**外部视角的唯一实现**，
 # 判定口径与「为什么不能只凭本机一次解析失败判死」都写在那模块的开头
 from core import dns_check
-from core.rules.replayer import (extract_all as apply_css_rule, extract_all_nodes,
-                          extract_field_in_nodes,
-                          parse_rule)
 from core.loader import _normalize_url, fingerprint
 # 判定口径的唯一来源（与「全链路试跑」共用，避免同源两判）。
 # 依赖方向：checker → quality，quality 不依赖 replayer，这是刻意的。
@@ -333,14 +330,6 @@ def build_domain_url(url: str) -> str:
 
 
 # ------------------------------------------------------------ 校验公共逻辑
-
-
-def _strip_rule_prefix(rule: str) -> str:
-    """剥离 Legado 规则类型前缀（@css:），保留纯 CSS 选择器给 apply_css_rule。"""
-    rule = rule.strip()
-    if rule.startswith("@css:"):
-        return rule[len("@css:"):]
-    return rule
 
 
 def _static_toc_ok(raw: Optional[Dict[str, Any]]) -> bool:

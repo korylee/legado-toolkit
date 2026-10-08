@@ -195,15 +195,6 @@ class AppHostRequest(BaseModel):
     port: int = 0
 
 
-class ReplayStepRequest(BaseModel):
-    """用已抓到的 HTML 重放一步规则。"""
-
-    html: str = ""
-    rule: str = ""
-    step: str = ""
-    source_type: int = 0
-
-
 class CandidatesRequest(BaseModel):
     """从已抓到的 HTML 里找候选规则（交互候选面板）。
 
@@ -235,8 +226,13 @@ class SuggestRuleRequest(BaseModel):
     #: 而提示词又要求「class 必须真实存在于大纲里」。缺省时退回整篇
     focus: str = ""
     source_type: int = 0
-    #: 第 1 层算出的候选规则：**先让程序拿它们挑一遍**（免费），挑不出来才问模型
-    candidates: List[str] = []
+    #: 第 1 层算出的候选规则：**先让程序拿它们挑一遍**（免费），挑不出来才问模型。
+    #: 每条都是 `core.candidates` 的产物（带 `rule` / `samples` / `count`），
+    #: 免费那趟拿它自己报的样本与 App 实测值比对——**不在这里重跑规则**。
+    candidates: List[Dict[str, Any]] = []
+    #: 这一步要什么（`link` / `media` / `text` / `list`）：决定「页面上像 App 实测值的
+    #: 那些值」从哪一族里取（`core.candidates.sample_values`）
+    kind: str = ""
     #: App 实测取到的值样本：既是给模型的锚点，也是「程序先挑」用来比对的基准
     app_values: List[str] = []
     #: 只跑免费的那一趟（本地挑选 + 登录墙判断），**一个模型请求都不发**

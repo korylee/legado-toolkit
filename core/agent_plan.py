@@ -25,7 +25,6 @@ GAP_CODES = (
     "page_fetch_missing",  # 页面没抓回来
     "no_wanted_nodes",     # 这一页没有目标这类节点（改选择器没用）
     "runtime_missing",     # 动态层 + 本机引擎，缺运行时材料
-    "rule_unsupported",    # 规则本地跑不了（JS / 模板 / xpath）
     "no_hit",              # 规则在这份页面上一条都没选中
     "fail_content",        # 取到了值但判定不达标
     "stale",               # 规则改过，旧结论不作数
@@ -47,7 +46,7 @@ MATERIAL_KINDS = {
 #: 需要换通道取材料的缺口：本机引擎拿不到运行时材料的那些
 _PROBE_GAPS = frozenset((
     "no_url", "page_fetch_missing", "no_wanted_nodes",
-    "runtime_missing", "rule_unsupported", "unknown",
+    "runtime_missing", "unknown",
 ))
 
 #: 「改源就是声明这一层的取数方式」的层
@@ -63,7 +62,6 @@ def _decision_gaps(context: Mapping[str, Any]) -> List[Dict[str, Any]]:
     layer = str(context.get("layer") or "")
     target = _mapping(context.get("target"))
     step = _mapping(context.get("step"))
-    replay = _mapping(context.get("replay"))
     channel = str(context.get("channel") or "")
     gaps: List[Dict[str, Any]] = []
 
@@ -87,12 +85,13 @@ def _decision_gaps(context: Mapping[str, Any]) -> List[Dict[str, Any]]:
             and layer not in ("", "L1")):
         add("runtime_missing")
     if not rule_empty:
-        if replay.get("rule_error"):
-            add("rule_unsupported")
-        elif replay.get("present") is True and replay.get("values_count") == 0:
-            add("no_hit")
-        elif step.get("verdict") == "fail" and int(step.get("values_count") or 0) > 0:
-            add("fail_content")
+        # 取值类缺口只看引擎给的事实：取到 0 条 = 规则没选中任何节点；取到了但判不达标 =
+        # 问题在内容。**`values_count` 缺失时不给这两档**——没给的事实不当成 0
+        # （AGENTS #12），否则「这一步还没跑到取值」会被说成「一条都没选中」。
+        verdict = str(step.get("verdict") or "")
+        values_raw = step.get("values_count")
+        if verdict in ("fail", "unknown") and values_raw is not None:
+            add("no_hit" if int(values_raw or 0) == 0 else "fail_content")
     if not gaps and step.get("stale") is True:
         add("stale")
     if not gaps and step.get("verdict") == "unknown":

@@ -1,63 +1,31 @@
 # -*- coding: utf-8 -*-
 """由 services/add_source.py 拆分而来。
 
-全链路试跑：search → bookUrl → toc → content，并采集每一步的证据。
+这里只留两件**引擎链共用**的事，两件都与「怎么取值」无关：
 
-设计要点（原设计文档已随实现完成删除，要点保留在此）：
-- 判定底线对齐 Legado 的调试（只判「非空 / 不报错」），见 core/quality.py
-- 证据含**提取值全文**，对齐 BookContent.kt:194-205 的「正文长度或全文」
-- 返回体是**离线回放**的结论，只作粗略参考，与 App 的真实行为可能有偏差——
-  只有「连 App 调试」（core/app_debug.py）才等同于 App 的结果
-- 判定口径的唯一一份在 ``core.quality``（``Judgement.as_step_dict``）：本模块只
-  负责取值与拼装，不另写一份映射
+- :data:`RULE_GROUP_TO_STEPS`：规则组 → 求值所在步骤（前端新鲜度判定读它）；
+- :func:`strip_evidence`：剥掉结果里的大体积证据字段（写库/推送前必过）。
+
+**这里曾经有一条本地回放链**（``replay_step``：拿补抓的页面把规则跑一遍），连同
+``core/rules/replayer.py`` 一起删除了——同一份页面上两套规则解释器，迟早把「我们不会算」
+说成「规则不好」（AGENTS #3 / #4）。
 """
 
+from __future__ import annotations
+
 from core import quality as Q
-# replay_step 只用 replayer 的取值那两个口（提取值 + 命中片段）；
-# 证据预算在这里显式传（预算的唯一权威在 quality）
-from core.rules.replayer import extract_all_nodes
 
 
-#: 走 judge_list_step 的步骤。前三个用 quality 的常量（拼错会把本该 unknown
-#: 的结果变成 fail，见 quality.STEP_TOC 的注释）；explore 没有常量，但它就是
-#: 一个列表步骤，judge_list_step 只对 "toc" 有特殊语义，传进去是对的。
-_LIST_STEPS = (Q.STEP_SEARCH, Q.STEP_BOOK_URL, Q.STEP_TOC, "explore")
-
-#: 规则组 → 该组规则**求值所在的步骤**。这是本模块 verify 链的结构事实
-#: （「bookUrl 规则在搜索页求值」，proj-3-bookurl），唯一一份在这里：
-#: 前端的新鲜度判定（verifyFreshness）经 ``GET /api/rules/meta`` 读它——
-#: 前端自己抄一份的话，这里改了求值位置它就会静默判错「哪些步骤过期」。
-#: content 没有常量，同上面 explore 的处理。
+#: 规则组 → 该组规则**求值所在的步骤**。这是链路的**结构事实**（「bookUrl 规则在
+#: 搜索页求值」），唯一一份在这里：前端的新鲜度判定（verifyFreshness）经
+#: ``GET /api/rules/meta`` 读它——前端自己抄一份的话，这里改了求值位置它就会静默
+#: 判错「哪些步骤过期」。content / explore 在 quality 里没有常量，按字符串写。
 RULE_GROUP_TO_STEPS = {
     "ruleSearch": (Q.STEP_SEARCH, Q.STEP_BOOK_URL),
     "ruleBookInfo": (Q.STEP_BOOK_URL,),
     "ruleToc": (Q.STEP_TOC,),
     "ruleContent": ("content",),
 }
-
-
-def replay_step(html: str, rule: str, step: str, source_type: int = 0) -> dict:
-    """用**已经抓到的 HTML** 重放一步规则——不发任何网络请求。
-
-    改完一条规则想知道「它在这份页面上现在取到什么」，重跑整条链（含联网搜索）
-    太慢；而试跑结果里本来就存着每页 HTML（``pages[].html``），拿它直接重放即可。
-    判定口径只有一份：``quality.judge_*`` + ``Judgement.as_step_dict``，这里不另写映射。
-
-    只对**本地试跑**有意义：App 调试的 pages 是我们自己补抓的（App 只推文本，
-    不给 HTML），不代表 App 所见。所以别拿它的结论去否定 App 的判定。
-    """
-    step_key = str(step or "").strip().lower()
-    source_type = Q.safe_int(source_type)
-    values, hits, rule_error = extract_all_nodes(
-        html or "", rule or "", Q.MATCHED_NODES_LIMIT, Q.MAX_MATCHED_HTML_CHARS)
-    joined = "".join(hits)
-    if step_key in _LIST_STEPS:
-        j = Q.judge_list_step(step_key, values, joined, rule_error,
-                              source_type, rule=rule)
-    else:
-        j = Q.judge_content(source_type, values, rule, joined, rule_error)
-    return j.as_step_dict(step_key, values=values, matched_html=joined,
-                          rule_error=rule_error)
 
 
 def strip_evidence(verify_result):

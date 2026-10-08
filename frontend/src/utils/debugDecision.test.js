@@ -92,18 +92,17 @@ test("候选摆在主动作位：动作种类与规则都照后端给的走", ()
   assert.equal(fix.rule, ".book-list .item@tag.a@href");
 });
 
-test("规则本地跑不了：取证是唯一动作，按钮词仍带「取材料」", () => {
+test("规则一条都没选中：候选摆在主动作位，取证仍可换通道", () => {
   const d = buildDecision({
-    plan: { layer: "L1", gap: { code: "rule_unsupported" }, deferred_gaps: [],
-            fix: null, probe: { kind: "app" },
+    plan: { layer: "L1", gap: { code: "no_hit" }, deferred_gaps: [],
+            fix: { kind: "apply_candidate", rule: ".books .item@tag.a@href" },
+            probe: { kind: "app" },
             ai: { eligible: false, reason_code: "material_mismatch", material_kind: "" } },
-    step: { name: "search", verdict: "unknown" },
+    step: { name: "search", verdict: "fail", values: [] },
     layer: L1,
-    replay: { rule_error: "@js: 脚本" },
   });
-  assert.equal(d.fix, null);
-  assert.equal(d.gap.level, "info");
-  assert.match(d.gap.reason, /@js: 脚本/);
+  assert.equal(d.fix.rule, ".books .item@tag.a@href");
+  assert.match(d.gap.reason, /一条都没选中/);
   assert.equal(d.probe.label, "连 App 取运行时材料");
 });
 

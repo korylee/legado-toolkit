@@ -452,37 +452,39 @@ def _too_small_to_be_a_page(html: str) -> bool:
 
 
 def _page_has_search_results(html: str, keyword: str) -> bool:
-    """判断搜索页是否真的返回了结果：
-    1) 页面不含「无结果/表单页」强信号
-    2) 详情页链接 + 页面含关键词 → 真结果页（关键词限定可排除「热门推荐/首页」假结果
-       —— 无效搜索参数常返回首页/推荐页，靠详情链接信号会误判）
-    3) 含精确书名的叶子元素
+    """这一份页面里**有没有这本书的搜索结果**（判据只有一份：`core.analyzer`）。
+
+    为什么改成委托：这里原来自己写了一套「详情页链接正则 + 页面含关键词」的启发式，
+    与 `analyze_search_page`（真正要拿这份页面去推规则的那份判据）**判的不是同一件事**。
+    实测（2026-10-08，`m.qudushu.org/modules/article/search.php?q=我`）：抓回来就是结果页
+    （10883 字节、50 个 `class="sone"` 条目、书名在页面上），而那条正则只认
+    `/novel|book|detail|read|comic|manga|manhua|info|show|chapter` 这类路径词，
+    这个站的详情链接是 `/html/1287420/asc-1/` → 判否 → `run_add` **静默降级成「仅发现」**，
+    生成一条 `ruleSearch` 全空的源且 rc=0（AGENTS #4：用户看不到任何原因）。
+    同一份页面的引擎跑出来是 `◇书籍总数:50`。
+
+    两声号仍然留在前面：**空结果标记**（`EMPTY_RESULT_MARKERS`，如「没有搜索到」）与
+    **关键词压根不在页面上**（这时无论什么信号都不该判成「搜到了这本书」）。
     """
     if not html or len(html) < 300:
         return False
-    # 无结果/表单页强信号：直接判否
     if any(m in html for m in EMPTY_RESULT_MARKERS):
         return False
-    # 详情页链接信号（cyppt 类 /novel26888/，koudaimh 类 /manhua/xxx）
-    if re.search(r'/[a-z]*(?:novel|book|detail|read|comic|manga|manhua|info|show|chapter)\d*/', html, re.I):
-        # 关键词限定：页面必须真的包含搜索词（或其前 2 字符，兼容变体标题）
-        if keyword in html:
-            return True
-        if len(keyword) >= 2 and keyword[:2] in html:
-            return True
+    if keyword and keyword not in html:
         return False
-    # 关键词锚点（精确书名出现在页面）
+    from core.analyzer import analyze_search_page
+
     try:
-        from core.html import make_soup
-        soup = make_soup(html)
-        for el in soup.find_all(True):
-            txt = el.get_text(strip=True)
-            if txt == keyword and not el.find_all(True):
-                return True
+        return bool(analyze_search_page(html, keyword or "").get("results"))
     except Exception:
-        if keyword in html:
-            return True
-    return False
+        # **判据读不出来时弃权（判否），不猜**：这一层问的是「有没有这本书的结果」，
+        # 读不出来就没有证据说「有」。调用方据此走「未直接命中 → 探测/仅发现」那条
+        # 既有路径，而不是被一条猜出来的 True 骗着落一份假源（AGENTS #4 反方向同一条）。
+        # 已知的真实原因只有「传进来的不是字符串」（`fetch()` 恒返回字符串，调用方
+        # 都是它）；片段输入曾经也会炸，那已在 `core.analyzer` 里修掉。
+        return False
+
+
 def probe_search_endpoint(domain: str, keyword: str, timeout: int = 12) -> tuple:
     """
     探测站点常见搜索端点，返回第一个能搜到结果 (url_template, found_url, param_name)。

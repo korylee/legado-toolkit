@@ -109,11 +109,19 @@ class OutlineFocusTests(unittest.TestCase):
         self.assertNotIn("book-list", p)
 
     def test_focus_accepts_legado_shorthand(self):
-        """`class.x` / `id.x` / `tag.a` 是 Legado 简写不是 CSS，必须转（用回放器那份解析）。"""
+        """`class.x` / `id.x` / `tag.a` 是 Legado 简写不是 CSS，必须转。
+
+        转换只认这三种前缀（见 `focus_selector`）：它只是给模型看哪块 DOM 的取景框，
+        不需要一个完整的规则解释器——认错的代价是提示词里少一段内容，不是给错规则。
+        """
         self.assertEqual(S.focus_selector("class.book-list@tag.li"), ".book-list")
         self.assertEqual(S.focus_selector("id.content@text"), "#content")
         self.assertEqual(S.focus_selector("tag.a@href"), "a")
         self.assertEqual(S.focus_selector(""), "")
+        # 已经是 CSS 的原样用（第 1 层的算法候选就是 `.父类 .子类` 这种）
+        self.assertEqual(S.focus_selector(".list .item"), ".list .item")
+        # `tag.a.x`：tag 前缀下名字取到第一个点为止
+        self.assertEqual(S.focus_selector("tag.a.b@href"), "a")
 
     def test_unknown_focus_falls_back_to_the_whole_page(self):
         """选择器在大纲里不存在时回退整篇，不能报错（这条链跑在请求线程里）。"""
@@ -121,37 +129,44 @@ class OutlineFocusTests(unittest.TestCase):
         self.assertIn("item", p)
 
     def test_focus_with_no_selector_returns_empty(self):
-        """解析不出首段时要返回空串，不能索引崩（`@js:x` / `##正则##` 这类都是空 steps）。
+        """认不出的首段要返回空串，不能崩、也不能硬当成 CSS（`@js:x` / `##正则##` 这类）。
 
-        这些值在真实链路上到不了（第 1 层的候选与表单里的规则都是可回放的规则），
-        但这一层是**请求线程里的纯函数**：脏值在这里抛异常 = 用户看到一个 500。
+        这些值在真实链路上到不了（第 1 层的候选是 `.类 .类` 形状），但这一层是
+        **请求线程里的纯函数**：脏值在这里抛异常 = 用户看到一个 500；而硬当成 CSS
+        会让大纲从一棵根本不存在的子树起——那比退回整篇更糟。
         """
-        for bad in ("@js:x", "##正则##", "   ", "js:return 1"):
+        for bad in ("@js:x", "##正则##", "   ", "js:return 1", "<js>x</js>", "$.a.b"):
             with self.subTest(bad=bad):
                 self.assertEqual(S.focus_selector(bad), "")
 
 
 class PreselectTests(unittest.TestCase):
-    """程序先挑：拿 App 实测到的值当基准，比每条候选取到的东西。
+    """程序先挑：拿 App 实测到的值当基准，比**候选自己报的样本**。
 
     这一层的意义是**省钱**：多数情况一次就对上了，不必调模型。所以「挑不出来」
-    的三种情况必须如实说、不许猜——猜错的代价是用户按着错规则改。
+    的情况必须如实说、不许猜——猜错的代价是用户按着错规则改。
+    **这里不跑规则**：候选的样本就是界面上摆给用户看的那几个（`core.candidates`
+    造候选时按值分组，两边同一份材料）。
     """
 
-    #: 列表页：两条等价的候选（a 在 h3 里）+ 一条无关的
-    CANDS = ["class.item@tag.a@text", "class.item@tag.h3@text", "class.other@text"]
+    #: 列表页：两条候选报同一批样本（等价）+ 一条无关的
+    CANDS = [
+        {"rule": "class.item@tag.a@text", "samples": ["诡秘之主", "绍宋"]},
+        {"rule": "class.item@tag.h3@text", "samples": ["诡秘之主", "绍宋"]},
+        {"rule": "class.other@text", "samples": ["无关文本"]},
+    ]
 
     def _pick(self, cands=None, **over):
-        ctx = {"html": HTML, "step": "search", "source_type": 0,
+        ctx = {"html": HTML, "step": "search", "source_type": 0, "kind": "text",
                "app_values": ["诡秘之主", "绍宋"], "candidates": cands or self.CANDS}
         ctx.update(over)
         return S.preselect(ctx["candidates"], ctx["app_values"], ctx["html"],
-                           ctx["step"], ctx["source_type"])
+                           ctx["step"], ctx["source_type"], ctx["kind"])
 
     def test_picks_the_equivalent_simplest_candidate(self):
-        """取到同一批值的候选是**等价**的，挑更简洁的那条就行——不算歧义。
+        """报同一批样本的候选是**等价**的，挑更简洁的那条就行——不算歧义。
 
-        不然「页面上有一堆等价写法」会让这一层形同虚设（实测：两个候选各 4 分，
+        不然「页面上有一堆等价写法」会让这一层形同虚设（实测：两条各 4 分，
         按「不猜」处理就永远轮不到它省钱）。
         """
         out = self._pick()
@@ -160,34 +175,60 @@ class PreselectTests(unittest.TestCase):
         self.assertIn("等价", out["reason"])
 
     def test_no_basis_means_ask_the_model(self):
-        """没有基准就别挑：本地回放取到的值是**当前这条坏规则**的产物，自证循环。"""
+        """没有基准就别挑：当前规则自己取到的值是**它的产物**，拿它比等于自证循环。"""
         out = self._pick(app_values=[])
         self.assertIs(out["need_ai"], True)
         self.assertIn("没有 App 实测值", out["reason"])
 
     def test_nothing_matches_means_ask_the_model(self):
-        out = self._pick(cands=["class.other@text"])
+        out = self._pick(cands=[{"rule": "class.other@text",
+                                 "samples": ["完全无关"]}])
         self.assertIs(out["need_ai"], True)
         self.assertIn("对不上", out["reason"])
 
-    def test_unreplayable_candidate_is_not_picked(self):
-        out = self._pick(cands=["@js:return 1"])
+    def test_no_exact_match_is_not_picked(self):
+        """只有「包含」没有「完全相等」→ **不挑**。
+
+        实测（2026-10-08，`去读书网`）：引擎那一步的 `values` 是事件流水
+        （`⇒开始搜索关键字` / `◇书籍总数:50`），候选样本随便就能撞上几处（当时报「对上
+        24 条」），挑出来的规则与 App 取到的东西无关。基线里没有真正的值时，这一层必须
+        闭嘴——报一个高分把人引到错的规则上，比不挑更糟。
+        """
+        out = self._pick(app_values=["⇒开始搜索关键字:我"], cands=[
+            {"rule": "class.nav@text", "samples": ["搜索关键"]},
+            {"rule": "class.other@text", "samples": ["关键字"]},
+        ])
+        self.assertIs(out["need_ai"], True, out)
+        self.assertIn("完全相等", out["reason"])
+
+    def test_list_candidates_without_samples_fall_back_to_the_page(self):
+        """列表族的候选**不报样本**（取到的是节点）——那就拿页面上像 App 实测值的那些比。
+
+        这一支是列表步的主力：App 在列表步取到的正是条目里的书名，而候选是容器规则。
+        """
+        out = self._pick(cands=[{"rule": "class.list .item", "samples": []}], kind="list")
+        self.assertIs(out["need_ai"], False, out)
+        self.assertEqual(out["picked"]["rule"], "class.list .item")
+        self.assertIn("样本", out["reason"])
+
+    def test_nothing_comparable_on_the_page_says_so_instead_of_failing(self):
+        """页面上根本没有像 App 实测值的材料 → 说「比不了」，**不是**「取不到值」。
+
+        AGENTS #4：能力边界与源失效不能混成一句话。
+        """
+        out = self._pick(html="<html><body><p>无关</p></body></html>",
+                         cands=[{"rule": "class.list .item", "samples": []}], kind="list")
         self.assertIs(out["need_ai"], True)
-        self.assertIn("只能连 App 试", out["reason"])
+        self.assertIn("没法按样本比", out["reason"])
 
     def test_different_value_sets_tie_means_ask_the_model(self):
-        """都能对上、但取的不是同一批值 = 真歧义，不替用户猜。
-
-        两条候选**同分**（各对上 2 条）才叫并列；分数不同走的是「单一命中」那条路。
-        所以这里的 fixture 要让第二条多取一个（分相同、值不同）。
-        """
-        html = ('<ul class="list"><li class="item"><a href="/b/1">诡秘之主</a>'
-                '<a href="/b/2">绍宋</a></li></ul>'
-                '<div class="hot"><a href="/b/1">诡秘之主</a><a href="/b/2">绍宋</a>'
-                '<a href="/b/3">另一本</a></div>')
-        out = self._pick(cands=["class.item@tag.a@text", "class.hot@tag.a@text"], html=html)
+        """都能对上、但报的不是同一批样本 = 真歧义，不替用户猜。"""
+        out = self._pick(cands=[
+            {"rule": "class.item@tag.a@text", "samples": ["诡秘之主", "绍宋"]},
+            {"rule": "class.hot@tag.a@text", "samples": ["诡秘之主", "绍宋", "另一本"]},
+        ])
         self.assertIs(out["need_ai"], True)
-        self.assertIn("不是同一批值", out["reason"])
+        self.assertIn("不是同一批样本", out["reason"])
 
     def test_ranked_is_sorted_and_carries_no_values(self):
         """排名要按分数降序；**全量取值不外发**（正文那类一次几万字）。"""
@@ -289,6 +330,26 @@ class CandidateEngineVerifyTests(unittest.TestCase):
         self.assertEqual(seen["source"]["ruleSearch"]["bookList"], ".item")
         self.assertEqual(self.SOURCE["ruleSearch"]["bookList"], ".old")
 
+    def test_passing_step_with_zero_field_hits_is_rejected(self):
+        """**整步通过 ≠ 这个字段取到了东西**——实测出来的假通过。
+
+        实测（2026-10-08，`去读书网`）：把 `ruleSearch.bookList` 换成
+        `.this-class-does-not-exist`，引擎仍报 `ok=True`（搜索步的 verdict 来自事件流：
+        `◇书籍总数:N` + 页解析完成，站点自己的搜索页照样出结果），于是界面上
+        「验证并应用」把一条**根本取不到书名**的规则判成了 verified。
+        字段级的「命中 0 条」是能一眼看出的反证。
+        """
+        result = {"all_ok": True, "steps": [
+            {"name": "search", "ok": True, "values": ["⇒开始搜索"],
+             "detail": "该段没有解析完成信号", "notes": ["◇书籍总数:0"]},
+        ]}
+        out = S.verify_candidate(self.SOURCE, "ruleSearch.bookList",
+                                 ".this-class-does-not-exist", "search", "我",
+                                 runner=self._runner(result))
+        self.assertEqual(out["status"], "rejected")
+        self.assertEqual(out["engine"]["status"], "fail")
+        self.assertIn("命中 0 条", out["engine"]["reason"])
+
     def test_engine_fail_rejects_candidate(self):
         result = {"all_ok": False, "steps": [
             {"name": "content", "ok": False, "values": [], "detail": "正文为空"},
@@ -368,59 +429,35 @@ class CandidateVerifyRouteTests(unittest.TestCase):
         self.assertNotIn("push", verify.call_args.kwargs)
 
 
-class VerifyTests(unittest.TestCase):
-    def test_replayable_rule_is_verified_with_values(self):
-        v = S.verify(HTML, "class.item@tag.a@text", "search")
-        self.assertIs(v["verified"], True)
-        self.assertEqual(v["local"]["status"], "pass")
-        self.assertEqual(v["status"], "verified")
-        self.assertEqual(v["engine"]["status"], "not_required")
-        self.assertEqual(v["count"], 2)
-        self.assertEqual(v["samples"][0], "诡秘之主")
-
-    def test_js_rule_is_not_verified_and_says_connect_the_app(self):
-        v = S.verify(HTML, "@js:return doc.select('.item')", "search")
-        self.assertIs(v["verified"], False)
-        self.assertEqual(v["local"]["status"], "unsupported")
-        self.assertEqual(v["status"], "needs_engine")
-        self.assertIn("只能连 App 试", v["note"])
-
-    def test_no_match_is_not_verified(self):
-        v = S.verify(HTML, "class.nothing@tag.a@text", "search")
-        self.assertIs(v["verified"], False)
-        self.assertEqual(v["local"]["status"], "fail")
-        self.assertEqual(v["status"], "rejected")
-        self.assertIn("取不到值", v["note"])
-        self.assertEqual(v["rule_error"], "")
-
-
 class SuggestTests(unittest.TestCase):
     def _run(self, reply, **over):
         ctx = dict(CTX)
         ctx.update(over)
         return asyncio.run(S.suggest(ctx, client=FakeLLM(reply)))
 
-    def test_candidates_are_verified_one_by_one(self):
+    def test_candidates_come_back_without_local_judgement(self):
+        """模型给的候选**只带规则与理由**：这条链不做本地判定（AGENTS #3）。
+
+        有没有用由用户点击后的「验证并应用」（本机引擎）说了算；在这里先判一遍，
+        等于用第二套解释器替引擎下结论。
+        """
         out = self._run('{"candidates":[{"rule":"class.item@tag.a@text","why":"看着对"},'
                         '{"rule":"@js:return 1","why":"只能这样"}],"reason":"试两条"}')
         self.assertEqual(out["llm"], "ok")
         self.assertEqual(out["reason"], "试两条")
-        first, second = out["candidates"]
-        self.assertIs(first["verified"], True)
-        self.assertEqual(first["count"], 2)
-        # 验不了的那条要**单独**标出来，而不是和「不对」混成一句
-        self.assertIs(second["verified"], False)
-        self.assertIn("只能连 App 试", second["note"])
+        self.assertEqual([c["rule"] for c in out["candidates"]],
+                         ["class.item@tag.a@text", "@js:return 1"])
+        for c in out["candidates"]:
+            self.assertNotIn("verified", c)
+            self.assertNotIn("local", c)
+            self.assertNotIn("engine", c)
 
     def test_result_points_at_the_step(self):
-        """候选必须用**这一步**的语义回放：搜索是列表、正文是取值，判定不同。"""
+        """候选一律指向**这一步**：`step` 进结论体，界面才知道该把它填回哪个字段。"""
         out = self._run('{"candidates":[{"rule":"id.list@tag.li@tag.a@href"}]}',
                         step="search")
-        # 列表步：选到 2 条 → 通过
-        self.assertIs(out["candidates"][0]["verified"], True)
-        out2 = self._run('{"candidates":[{"rule":"id.list@tag.li"}]}', step="content")
-        # 同一条规则放在正文档：取到的是 <li> 元素文本，仍算取到值
-        self.assertIs(out2["candidates"][0]["verified"], True)
+        self.assertEqual(out["candidates"][0]["rule"], "id.list@tag.li@tag.a@href")
+        self.assertEqual(out["preselect"]["basis"], "app")
 
     def test_duplicates_dropped_and_capped(self):
         rules = "".join('{"rule":"r%d"},' % i for i in range(6))
@@ -431,7 +468,7 @@ class SuggestTests(unittest.TestCase):
         """模型只给一条 rule（没包 candidates 数组）时也要能用。"""
         out = self._run('{"rule":"class.item@tag.a@text","why":"就这条"}')
         self.assertEqual(len(out["candidates"]), 1)
-        self.assertIs(out["candidates"][0]["verified"], True)
+        self.assertEqual(out["candidates"][0]["why"], "就这条")
 
     def test_bad_json_is_an_error_state_not_an_exception(self):
         out = self._run("我不是 JSON")
@@ -478,13 +515,14 @@ class SuggestTests(unittest.TestCase):
         self.assertEqual(out["usage"], {})
 
     def test_dry_run_sends_no_model_request(self):
-        """免费那趟**一个模型请求都不发**（它只跑本地挑选 + 登录墙）。
+        """免费那趟**一个模型请求都不发**（它只按候选样本挑一遍 + 登录墙）。
 
         这条守着「AI 提议必须用户主动」的前半截：换步骤时会自动跑的就是这一趟，
         它一旦开始调模型，就等于自动花了用户的钱。
         """
         llm = FakeLLM('{"candidates":[{"rule":"class.item@tag.a@text"}]}')
-        ctx = dict(CTX, candidates=["class.item@tag.a@text"])
+        cand = {"rule": "class.item@tag.a@text", "samples": ["诡秘之主", "绍宋"]}
+        ctx = dict(CTX, candidates=[cand])
         out = asyncio.run(S.suggest(ctx, client=llm, dry_run=True))
         self.assertEqual(llm.calls, 0)
         self.assertEqual(out["llm"], "dry_run")
@@ -493,8 +531,9 @@ class SuggestTests(unittest.TestCase):
 
     def test_paid_run_also_carries_the_free_conclusion(self):
         """付费那趟也要带「程序挑的结论」——两个结论摆在一起才看得出该信谁。"""
+        cand = {"rule": "class.item@tag.a@text", "samples": ["诡秘之主", "绍宋"]}
         out = self._run('{"candidates":[{"rule":"class.item@tag.a@text"}]}',
-                        candidates=["class.item@tag.a@text"])
+                        candidates=[cand])
         self.assertIsNotNone(out["preselect"])
         self.assertIn("login_wall", out)
 
@@ -534,7 +573,9 @@ class SuggestRouteTests(unittest.TestCase):
         with patch("core.repair.suggest.suggest", side_effect=fake_suggest):
             asyncio.run(suggest_rule(self._req(app_values=["甲"], diagnosis=["乙"],
                                                field="ruleSearch.bookList",
-                                               candidates=["class.item@text"],
+                                               candidates=[{"rule": "class.item@text",
+                                                            "samples": ["甲"]}],
+                                               kind="text",
                                                enabled_cookie_jar=True, dry_run=True)))
         self.assertEqual(seen["step"], "search")
         self.assertEqual(seen["want_label"], "列表")
@@ -542,7 +583,9 @@ class SuggestRouteTests(unittest.TestCase):
         self.assertEqual(seen["app_values"], ["甲"])
         self.assertEqual(seen["diagnosis"], ["乙"])
         # 免费那趟与登录墙判定都要透传到核心：漏掉任一，「程序先挑」就永远是空的
-        self.assertEqual(seen["candidates"], ["class.item@text"])
+        self.assertEqual(seen["candidates"], [{"rule": "class.item@text",
+                                               "samples": ["甲"]}])
+        self.assertEqual(seen["kind"], "text")
         self.assertIs(seen["enabled_cookie_jar"], True)
         self.assertIs(seen["dry_run"], True)
 
@@ -550,17 +593,17 @@ class SuggestRouteTests(unittest.TestCase):
 # ---------------------------------------------------------------- 变异记录
 # 以下为实测（改坏 → `python -B -m unittest tests.test_suggest` → 确认变红 → 还原）。
 #
-#  M5  候选不做回放验证（一律标 verified=True）
-#        → test_candidates_are_verified_one_by_one 红
-#  M6  verify 里 `if rule_error` 改成恒假（「本地验不了」与「取不到值」合流）
-#        → test_js_rule_is_not_verified_and_says_connect_the_app 红
+#  M5  模型给的候选被本地判过（不再只有 rule/why）
+#        → test_candidates_come_back_without_local_judgement 红
+#  M6  preselect 拿候选自己的值替代样本比对（不再用 samples）
+#        → PreselectTests.test_nothing_matches_means_ask_the_model 红
 #  M7  没配模型时不标 llm="off"（返回空 candidates 装作没事）
 #        → test_no_model_configured_is_off_not_error 红
 #  M8  候选数上限失效（不 break）
 #        → test_duplicates_dropped_and_capped 红
 #  M9  提示词不带 App 实测值
 #        → test_prompt_carries_what_the_model_needs 红
-#  M10 提示词不带当前回放结论
+#  M10 提示词不带当前表现（`replay_note` 那句）
 #        → test_prompt_carries_what_the_model_needs 红
 #  M11 大纲挪回最后（稳定内容不再前置 → 前缀缓存吃不到）
 #        → test_stable_parts_come_before_the_varying_ones 红
@@ -570,7 +613,7 @@ class SuggestRouteTests(unittest.TestCase):
 #        → test_focus_accepts_legado_shorthand 红
 #  M14 token 用量不回传
 #        → test_token_usage_is_passed_through 红
-#  M15 focus_selector 对空 steps 直接索引（脏值抛 IndexError）
+#  M15 focus_selector 不挡脏值（`@js:x` 直接当 CSS 用）
 #        → test_focus_with_no_selector_returns_empty 红
 #  N1  preselect 不拿 App 值比对（分数恒 0）
 #        → PreselectTests.test_picks_the_equivalent_simplest_candidate 红
@@ -584,6 +627,14 @@ class SuggestRouteTests(unittest.TestCase):
 #        → LoginWallTests.test_login_markers_need_cookie_jar 红
 #  N6  路由不透传 enabled_cookie_jar
 #        → SuggestRouteTests.test_ctx_reaches_the_core 红
+#  N7  列表候选没样本时直接放弃（不退回页面上像 App 实测值的那些）
+#        → PreselectTests.test_list_candidates_without_samples_fall_back_to_the_page 红
+#  N8  「页面上比不了」说成「对不上」（能力边界当成规则判负）
+#        → PreselectTests.test_nothing_comparable_on_the_page_says_so_instead_of_failing 红
+#  N9  preselect 只看「包含」也挑（基线是事件流水时高分挑错规则）
+#        → PreselectTests.test_no_exact_match_is_not_picked 红
+#  N10 verify_candidate 不看字段级零命中（整步 pass 就判 verified）
+#        → CandidateEngineVerifyTests.test_passing_step_with_zero_field_hits_is_rejected 红
 #
 #  **没覆盖的**：
 #    - 真实模型的输出质量（本文件全是假客户端）。提示词改了要手工跑一次真模型看。

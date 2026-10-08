@@ -4,8 +4,8 @@
 为什么需要它
 ------------
 本项目是给「阅读」App 产源的**离线**工具，但实测 56.5% 的源含 JS 规则
-（``<js>`` / ``@js:``），静态回放不了（那是 core/rules/replayer.py 的能力边界，
-不是源坏了）。而 App 内建了一个**给 PC 用的调试 WebSocket**：Rhino JS、cookie、
+（``<js>`` / ``@js:``），静态解析拿不到值——那不是源坏了，是同一段规则必须由
+App 自己的引擎执行。而 App 内建了一个**给 PC 用的调试 WebSocket**：Rhino JS、cookie、
 webView、正文分页全都在。我们只当客户端——**App 一行源码都不用改**。
 
 协议（已实测，探测工具见 tools/probe_app_debug.py）

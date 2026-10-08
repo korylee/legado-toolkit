@@ -287,8 +287,8 @@ def verify_generated(source: Dict[str, Any], keyword: str, detail_url: str = "",
     为什么收在这里而不是各写一份：两条路（CLI 的 `services.add_source.run_add`、Web 的
     `backend/api/ops.py`）验的是同一件事——「这份刚生成的源在 App 的真引擎上跑得通吗」。
     各写一份就会漂，而漂的表现是**两边的结论不一样**，看的人不知道该信哪个（lessons §二十三
-    那类）。本地回放（`core/rules/replayer.py` 那一路）跑不了 JS、没有登录态，对 L2–L4
-    的页面看的是**另一份材料**——它的「通过」与 App 的实际行为无关（lessons §七十七）。
+    那类）。离线推断（静态材料上的候选与样本比对）看到的是**另一份东西**：它跑不了 JS、
+    没有登录态，对 L2–L4 的页面注定不同——那份结论只用于挑选，不是「通过」（lessons §七十七）。
 
     两条边界：
 

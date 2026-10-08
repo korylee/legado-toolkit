@@ -10,7 +10,7 @@ import { LAYER_INFO } from "./layers.js";
 const layerFixTodo = (layer) => (LAYER_INFO[layer] || {}).action || "对照「整页源码」改规则";
 
 //: 判定档：这两类不是「坏了」，是「还没法判」——标签用中性色
-const INFO_GAPS = new Set(["rule_unsupported", "fail_content", "stale", "unknown"]);
+const INFO_GAPS = new Set(["fail_content", "stale", "unknown"]);
 
 /**
  * 缺口码 → 现状句 + 下一步。**键必须与后端 `core/agent_plan.GAP_CODES` 一致**：
@@ -52,10 +52,6 @@ export const GAP_TEXT = {
       ? "本机引擎缺少登录态或运行环境材料，当前不能判定"
       : "本机引擎没拿到渲染 / 解密后的运行时材料",
     todo: c.layerFixTodo,
-  }),
-  rule_unsupported: (c) => ({
-    reason: "规则不支持本地调试：" + c.ruleError,
-    todo: "只能连 App 调试。本地跑不了 JS、模板和 xpath",
   }),
   no_hit: (c) => ({
     reason: "规则在这份页面上一条都没选中",
@@ -161,13 +157,12 @@ function coreValueView(step) {
 export function buildDecision(input = {}) {
   const {
     plan = null, step = {}, want = null, layer = null, stats = null,
-    quality = null, channel = "", page = null, replay = null, stale = false,
+    quality = null, channel = "", page = null, stale = false,
   } = input;
-  const summary = buildStepSummary({ channel, step, page, replay, layer, quality, stale });
+  const summary = buildStepSummary({ channel, step, page, layer, quality, stale });
   const coreValue = coreValueView(step);
   const layerKey = String((layer && layer.layer) || "");
   const notes = Array.isArray(step.notes) ? step.notes : [];
-  const replayValues = (replay && replay.values) || [];
   const ctx = {
     label: (want && want.label) || step.name || "",
     wantKind: (want && want.kind) || "",
@@ -176,8 +171,7 @@ export function buildDecision(input = {}) {
     stats: stats || {},
     note: String(notes.find((n) => String(n).includes("页面抓取失败")) || ""),
     detail: String(step.detail || ""),
-    valuesCount: (step.values || []).length || replayValues.length,
-    ruleError: String((replay && replay.rule_error) || step.rule_error || ""),
+    valuesCount: (step.values || []).length,
     layer: layerKey,
     layerFixTodo: layerFixTodo(layerKey),
     stateReason: summary.reason,
@@ -210,7 +204,6 @@ export function buildDecision(input = {}) {
     probe: plan ? probeView(plan.probe) : null,
     ai: aiView(plan),
     notes,
-    rule_error: String(step.rule_error || ""),
     plan_ready: !!plan,
   };
 }

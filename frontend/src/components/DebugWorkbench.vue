@@ -5,15 +5,8 @@
 // 调试抽屉：把每一步的证据摊开。
 // 三个子页签：提取结果（全文）/ 命中源码 / 整页源码。
 //
-// **引擎只有一台**（App 引擎：连 App / 本机），判定与逐段结论都来自它——
-// 2026-09-20 起抽屉里**不再提供"本地跑一遍"这个动作**（原来那个「重新调试本页」
-// 按钮、候选规则的「试」都撤了：它们给的是离线引擎的判定，而这台引擎只是 App 的
-// 近似。要验一条规则就点「重新调试本步」，那是真引擎，D2 之后第二次约 1 秒）。
-//
-// **本地回放只剩一个用途**：「命中源码」那块 DOM——引擎现在自己会把它带回来
-// （`steps[].matched_html`，第三期回填），**只有引擎没覆盖的段**（详情段、末段是
-// 属性名的规则）才退回本地投影：拿我们补抓的页面把规则跑一遍。两者来源不同，
-// 界面上分别标着（引擎给的 = App 选中的；投影 = 可能不一样）。
+// **引擎只有一台**（App 引擎：连 App / 本机），判定与逐段结论都来自它。
+// 命中源码只显示引擎返回的 `steps[].matched_html`；没有就明确显示取不到。
 //
 // 设计取舍：**源码默认按「格式化」显示，但能手切回「原文」，复制永远是原文**。
 // 原来只给原文（pre-wrap 软换行 + 按字符偏移分片渲染），理由是不能让用户把改过字符的
@@ -22,7 +15,7 @@
 import { ref, computed, watch, nextTick, onMounted } from "vue";
 import { ElMessage } from "element-plus";
 
-import { agentPlan, replayStep, ruleCandidates, suggestRule, verifyCandidate } from "../api/rules";
+import { agentPlan, ruleCandidates, suggestRule, verifyCandidate } from "../api/rules";
 import { getLLMStatus } from "../api/llm";
 // 步骤名 → 中文的**唯一**一份（编辑视图共用），别再在本组件里写第二份。
 // RULE_FIELD_DEFS 是规则字段的唯一词表（内联编辑框的标签/占位符也从它取）
@@ -39,6 +32,8 @@ import { classifyLayer } from "../utils/layers";
 // `diagnosis` / `aiLayerBlock` 与 `debugOutlets` / `debugNextAction` / `debugEvidence`
 // 各判一遍，同一件事说三遍、动作互相覆盖——现在收敛进 `buildDecision`。
 import { buildDecision, decisionLines } from "../utils/debugDecision";
+// 「这一步 App 实际拿到了什么」：从引擎带回的命中 DOM 里取样本（事件流水不是值）
+import { matchedSampleValues } from "../utils/debugEvidence";
 // 点选（九-2a）：元素 → 候选选择器 + 实测三个数。**只是提议**，验收仍走真引擎
 import { parseDoc, previewCss, selectorCandidates } from "../utils/selector";
 import { assessRuleQuality } from "../utils/ruleQuality";
@@ -142,7 +137,7 @@ const pages = computed(() => (result.value && result.value.pages) || []);
 //:   - `app`：连 App 实测（手机上跑，登录态/网络出口都是真的）
 //:   - `jvm`：本机引擎（**同一段 App 代码**跑在本机：真规则、真 JS；差在环境——
 //:     登录态要预热、没有手机的网络出口）见 lessons §六十三
-//: 本地回放不再是来源（它只在「命中源码」那里做 DOM 投影，不在结果链路上）
+//: 本地调试不再是结果来源；命中源码只显示引擎返回的片段。
 const channel = computed(() => String((result.value || {}).source || ""));
 const isAppResult = computed(() => channel.value === "app");
 //: 跑的是不是「App 的真引擎」——连 App 与本机引擎都算。事件流页签、分段重跑、
@@ -151,8 +146,7 @@ const isEngineResult = computed(() => channel.value === "app" || channel.value =
 //: App 推来的原始事件流。steps[].values 是它去掉耗时前缀后的段内文本，
 //: 排查「哪一步慢」「App 到底推了什么」只能看这里
 const events = computed(() => (result.value && result.value.events) || []);
-//: 默认子页签：真引擎（连 App / 本机）看事件流，本地回放看提取结果（那两个 tab
-//: 各自只在对应的结果下出现，选错会是一片空白）
+//: 默认子页签：真引擎看事件流；没有事件时看提取结果
 const defaultSubTab = computed(
   () => (isEngineResult.value && events.value.length ? "events" : "values"));
 
@@ -187,9 +181,6 @@ watch([result, activeStep], () => {
       { behavior: "smooth", block: "start" }));
   }
 });
-
-const replaying = ref(false);
-const replayResult = ref(null);
 
 const current = computed(
   () => steps.value.find((s) => s.name === activeStep.value) || steps.value[0] || null,
@@ -284,7 +275,6 @@ watch(result, (show) => {
   renderLimit.value = RENDER_CHUNK;
   searchKey.value = "";
   activeHit.value = 0;
-  replayResult.value = null;
 });
 
 // 「从此步重跑」完成后父组件会更新 initialStep 想定位到重跑的那一步。
@@ -321,7 +311,6 @@ function selectStep(name) {
   renderLimit.value = RENDER_CHUNK;
   searchKey.value = "";
   activeHit.value = 0;
-  replayResult.value = null;   // 上一步的重放结论不适用于当前这步
   candidateResults.value = {};
   candidateVerifying.value = "";
 }
@@ -350,88 +339,37 @@ function onInlineRuleInput(value) {
   markStepStale(name);
   emit("applyRule", { field: (inlineDef.value || {}).field, rule: value });
 }
-//: 重放要同时满足：这一步对应一个页面的 HTML、这一步有规则可回放、
-//: 且这一步确实是一条规则步骤（explore 的规则结构不同，不给重放）
-const canReplay = computed(
-  () => !!currentPage.value && !!currentRule.value
-    && !!FIELD_OF_STEP[(current.value || {}).name],
-);
-
-//: 「命中源码」要显示的那段 DOM。**两个来源，标签必须分清**：
-//:   - **引擎给的**（`steps[].matched_html`）：连 App / 本机都会带回来，那就是 App
-//:     自己选中的那块 DOM；
-//:   - **本地投影**（`replayResult`）：引擎没覆盖这一段时的退路，拿我们补抓的页面
-//:     把规则跑一遍——它是投影不是判定，所以标成警告色。
-//:
-//: 顺带说一句用途：本地回放结果正是「让 AI 改规则」要喂给模型的东西（规则 + 它
-//: 选中的 DOM），所以两者摆在同一屏上。
+// 命中源码只认引擎返回的 `steps[].matched_html`。
 const matchedFrom = computed(() => {
-  if ((current.value || {}).matched_html) return isAppResult.value ? "App 实测" : "本机引擎";
-  return replayResult.value ? "本地调试" : "";
+  if (!(current.value || {}).matched_html) return "";
+  return isAppResult.value ? "App 实测" : "本机引擎";
 });
-//: 来源标签的配色跟着来源走（本地投影只是投影，用警告色）
-const matchedFromType = computed(() => {
-  if (matchedFrom.value === "本地调试") return "warning";
-  return isAppResult.value ? "success" : "primary";
-});
-//: 引擎给了位置、却没给命中片段：App 通道只推文本（不可修），本机引擎则是真的没
-//: 返回。分开判是为了把原因说到用户能照着做（AGENTS #4）；两者都只在
-//: `matchedHtml` 为空时才成立，所以不会把投影给的那份误标成空。
+//: 来源标签的配色跟着通道走
+const matchedFromType = computed(() => isAppResult.value ? "success" : "primary");
+//: 引擎给了位置、却没给命中片段：App 通道只推文本，本机引擎则是未返回。
 const matchedEmptyFromEngine = computed(
   () => isEngineResult.value && !(current.value || {}).matched_html,
 );
-const matchedHtml = computed(() => (current.value || {}).matched_html
-  || (replayResult.value || {}).matched_html || "");
+const matchedHtml = computed(() => (current.value || {}).matched_html || "");
 //: 命中源码的显示形态（同 pageText：显示一份、复制一份）
 const matchedShown = computed(() => (formatSource.value && matchedHtml.value
   ? formatHtml(matchedHtml.value) : matchedHtml.value));
-//: 命中片段为空时那一句话。每种空值都要能照着做（AGENTS #4：不许静默空白）。
-//: 顺序就是优先级：页面 → 投影的已知原因（不支持 / 在读 / 选中 0 条）→ 引擎空。
-//: 后两者都只在投影没给东西时到达，所以新文案**不会吞掉**
-//: 下面那两条旧原因（不支持本地调试 / 没选中）。
+//: 命中片段为空时只根据引擎事实提示。
 const matchedHint = computed(() => {
   if (!currentPage.value) return "这一步没有页面。App 只推文本，页面是我们另抓的";
-  // 页面在、录音不能播：这条原因必须原样到用户眼前（AGENTS #4）
-  if (!canReplay.value) return "这一步的规则不支持本地调试";
-  if (replaying.value) return "正在读取…";
-  if (replayResult.value) {
-    // 回放不了（JS / xpath 等）时 `rule_error` 就是原因，别笼统说「没有命中」
-    return (replayResult.value.rule_error || replayResult.value.detail
-            || "这条规则在这份页面上没有选中任何 DOM");
-  }
-  // 这里开始：投影也没给东西。引擎自己带回的那份命中片段为空，
-  // 必须说清楚差在哪个通道、下一步能做什么
   if (matchedEmptyFromEngine.value) {
     if (isAppResult.value) {
-      return "本段取不到命中源码：App 调试通道只推文本；要查看本段命中源码，"
-        + "请改用本机引擎调试。";
+      return "本段取不到命中源码：App 调试通道只推文本；要查看本段命中源码，请改用本机引擎调试。";
     }
     return "本段取不到命中源码：本机引擎未返回命中片段。";
   }
-  // **这一支今天不可达**，写在这里是为了「多一条通道时也不撒谎」（AGENTS #4）。
-  // 为什么不可达：本 computed 唯一的消费点是模板里
-  // `<pre v-if="matchedHtml">` 的 `v-else`（hint 显示 ⟹ `matchedHtml` 为空 ⟹ 本段
-  // `matched_html` 为空）；而结果来源 `source` 只有两个产者——`core/app_debug.py:898`
-  // 产出 `"app"`、`core/jvm_debug.py:328` 产出 `"jvm"`——所以 `isEngineResult` 恒真，
-  // 上面 `matchedEmptyFromEngine` 那一支必定先命中，走不到这里。
-  // 留成显式文案而不是 `return "正在读取…"`：后者在 `replaying` 为假时是谎报
-  // （页面在、也没在读，用户只会看到一个永不结束的加载态）。将来多一条通道
-  // 时这句就立刻是对的，不必等有人先想起它。
-  return "本段取不到命中源码：既没有引擎返回的命中片段，"
-    + "本地调试也没选中 DOM。";
-});
-
-//: 打开抽屉 / 换步骤就自动回放一次：**诊断与「命中源码」都要它的结果**。
-//: 用的是表单里的当前规则，所以改完规则点「用本页重放」就能刷新。
-watch([result, activeStep], () => {
-  if (!result.value) return;
-  if (canReplay.value) doReplay();
+  return "本段取不到命中源码。";
 });
 
 // ---------------------------------------------------------------- 第 0 层：诊断
 // 把「这一步为什么取不到」分成**下一步动作不同**的几类，而不是笼统一句「失败」。
-// 全部由前端从已有数据算出（规则字符串、step.url/page_id、notes、本地回放结果、
-// 补抓页面的节点统计），不新增后端接口。
+// 全部由前端从已有数据算出（规则字符串、step.url/page_id、notes、补抓页面的节点统计），
+// 不新增后端接口。
 //
 // 为什么先要有这一层：**取不到有五种成因，动作完全不同**。最坑的是「连页面都没有」——
 // 正文规则为空时 App 不会发请求（退回拿章节链接当正文），而补抓只从 `≡获取成功:` 那行
@@ -566,20 +504,21 @@ function candidateCard(c, i = 0) {
   return {
     ...candidateView({ ...c, ...stored, kind: c.kind || c.role }, {
       intent: (want.value || {}).kind || "",
-      status: stored.status || c.status || (c.verified ? "verified" : "pending"),
+      status: stored.status || c.status || "pending",
     }),
     presentation,
   };
 }
 
+//: 候选的状态只有两个来源：**本机引擎验过**（`candidateResults`，用户点「验证并应用」
+//: 之后才有）与「还没验」。本地那条回放链已经摘掉，所以这里不再有「本地已验/本地验不了」
+//: 这两种状态——候选是否需要实测由**引擎**说了算（AGENTS #3）。
 function candidatePresentation(c, i = 0) {
-  const result = candidateResults.value[candidateKey(c, i)] || c || {};
-  const status = result.status || (result.verified ? "verified" :
-    (result.rule_error ? "needs_engine" : "rejected"));
-  if (status === "verified") {
+  const stored = candidateResults.value[candidateKey(c, i)] || {};
+  if (stored.status === "verified") {
     return { label: "可直接使用", type: "success", action: "apply", actionLabel: "应用" };
   }
-  if (status === "rejected") {
+  if (stored.status === "rejected") {
     return { label: "不可用", type: "danger", action: "details", actionLabel: "查看原因" };
   }
   return { label: "需要实测", type: "warning", action: "verify", actionLabel: "验证并应用" };
@@ -602,7 +541,8 @@ async function verifyAndApplyCandidate(c, i = 0) {
   const shown = candidatePresentation(c, i);
   if (shown.action === "apply") return useCandidate(c);
   if (shown.action === "details") {
-    ElMessage.warning(c.note || c.engine?.reason || "这条候选未通过验证");
+    const engine = (candidateResults.value[key] || {}).engine || {};
+    ElMessage.warning(engine.reason || engine.detail || "这条候选没通过引擎验证");
     return;
   }
   const field = aiField.value;
@@ -820,21 +760,26 @@ const aiUsage = computed(() => {
   return u.prompt_tokens ? u : null;
 });
 
-//: **真引擎**取到的值 = 「正确的规则应当取到形似的东西」。行首的 ┌└◇ 是事件流的
-//: 结构符号、不是内容，喂模型前先剥掉。
-//: ⚠️ **本地回放的结果不能当基准**：那批值正是**当前这条坏规则**的产物，拿它比
-//: 等于自证循环（后端 `core/repair/suggest.preselect` 的注释也这么写着）。
-//: 所以这里按来源判一下——以前无条件用 `current.values`，本地结果会喂进去
-const appValues = computed(() => (isEngineResult.value
-  ? (current.value || {}).values || []
-  : [])
-  .map((v) => String(v).replace(/^[┌└◇≡⇒︾︽\s]+/, "").trim())
-  .filter(Boolean).slice(0, 8));
+//: **真引擎**取到的值 = 「正确的规则应当取到形似的东西」。
+//: 优先用**引擎带回的命中 DOM**（`steps[].matched_html`，是 App 自己的解析器跑规则
+//: 拿到的那些值）——这一步的 `values` 是**事件流水**（`⇒开始搜索` / `◇书籍总数:50`
+//: 这类结构行与统计行），拿它当基准比出来的「对上 N 条」是巧合（实测过：候选撞上 24 条，
+//: 而基线里根本没有书名）。设备通道不带命中 DOM，那时才退回事件流水（剥掉行首结构符号）。
+//: ⚠️ **只有引擎的取值能当基准**：就地取到的值不允许当基准——那是当前这条坏规则的产物。
+const appValues = computed(() => {
+  if (!isEngineResult.value) return [];
+  const fromEngineDom = matchedSampleValues((current.value || {}).matched_html);
+  const raw = fromEngineDom.length ? fromEngineDom : (current.value || {}).values || [];
+  return raw
+    .map((v) => String(v).replace(/^[┌└◇≡⇒︾︽\s]+/, "").trim())
+    .filter(Boolean)
+    .slice(0, 8);
+});
 
 //: DOM 大纲的起点：拿第 1 层第一个候选的首段（列表步是容器、链接步是条目，
 //: 两种都能让模型看见目标附近的结构）。**留空等于从 `<html>` 起**——深于 6 层的
 //: 容器那样根本走不到，而提示词要求 class 必须真实存在于大纲里。
-//: 后端负责 class./id./tag. → CSS 的转换（那是回放器的活，前端不抄一份）
+//: 后端负责 `class.` / `id.` / `tag.` → CSS 的转换（前端不抄一份 Legado 简写解析）
 const focusRule = computed(
   () => String((candidates.value[0] || {}).rule || currentRule.value || "").split("@")[0],
 );
@@ -853,19 +798,27 @@ function suggestBody(step) {
     step_label: STEP_LABELS[step] || step,
     want_label: (want.value && want.value.label) || "",
     field: aiField.value,
+    // DOM 大纲的起点：**只给规则首段**，转换交给后端（前端不抄一份 Legado 简写解析）
     focus: focusRule.value,
     source_type: sourceType.value,
     app_values: appValues.value,
-    candidates: candidates.value.map((c) => c.rule),
+    // 免费那趟要拿候选**自己报的样本**与 App 实测值比对：所以传候选对象，
+    // 而不是只传规则串（后端不重跑规则，见 core/repair/suggest.preselect）
+    candidates: candidates.value,
+    // 这一步要什么：决定「页面上像 App 实测值的那几个」从哪一族里取
+    kind: (want.value || {}).kind || "",
     enabled_cookie_jar: !!props.enabledCookieJar,
     diagnosis: decisionLines(decision.value),
   };
 }
 
 //: 换步骤就自动跑**免费**那趟：程序先在候选里挑一遍（拿 App 实测值当基准）。
-//: 它不发模型请求、不花钱，所以可以自动；付费的那趟见 askAI
+//: 它不发模型请求、不花钱，所以可以自动；付费的那趟见 askAI。
+//: **受同一份层闸门管**（`candidatesUsable`）：候选是按静态 HTML 算的 L1 材料，
+//: 在 L2–L5 上选出来的不是数据（假证据）——那时连这趟都不跑，既省一次请求，
+//: 也不会在界面上摆出一张和层结论相反的候选
 async function runPreselect() {
-  if (!canSuggest.value) return;
+  if (!canSuggest.value || !candidatesUsable.value) return;
   const step = (current.value || {}).name || "";
   preselLoading.value = true;
   preselRes.value = null;
@@ -929,11 +882,6 @@ function planBody() {
       evidence: layer.value.evidence || [],
     },
     channel: channel.value,
-    replay: {
-      present: !!replayResult.value,
-      values_count: ((replayResult.value || {}).values || []).length,
-      rule_error: (replayResult.value || {}).rule_error || "",
-    },
     signals: {
       login_wall: loginWall.value,
       llm_ready: llmReady.value,
@@ -957,8 +905,8 @@ async function refreshPlan() {
   }
 }
 
-// 免费、不发模型请求、不落库，所以换步骤/换页面/换规则/换回放结论都可以自动刷
-watch([result, activeStep, currentPage, currentRule, replayResult, candidates,
+// 免费、不发模型请求、不落库，所以换步骤/换页面/换规则都可以自动刷
+watch([result, activeStep, currentPage, currentRule, candidates,
        preselRes, llmReady], refreshPlan, { immediate: true });
 
 //: 这一步的**五格视图模型**：判据来自上面的 `plan`，句子与按钮词由 `debugDecision` 出
@@ -970,7 +918,6 @@ const decision = computed(() => buildDecision({
   page: currentPage.value,
   layer: layer.value,
   stats: pageStats.value,
-  replay: replayResult.value,
   quality: ruleQuality.value,
   stale: staleSteps.value.has((current.value || {}).name),
 }));
@@ -982,21 +929,6 @@ watch([result, activeStep, currentPage], () => {
   aiRes.value = null;
   runPreselect();
 });
-
-async function doReplay() {
-  if (!canReplay.value) return;
-  replaying.value = true;
-  try {
-    replayResult.value = await replayStep(
-      currentPage.value.html, currentRule.value,
-      current.value.name, sourceType.value);
-  } catch (e) {
-    ElMessage.error("调试失败：" + e.message);
-    replayResult.value = null;
-  } finally {
-    replaying.value = false;
-  }
-}
 
 // 从失败步骤直接送到「源设置」抽屉里对应的规则字段（字段路径是 FIELD_OF_STEP
 // 那份唯一词表；宿主按它开抽屉并滚动定位）
@@ -1186,12 +1118,15 @@ function copyPage() {
       </div>
 
       <!-- 第 2 层：**先让程序挑，挑不出来再问 AI**。
-           程序那趟免费：拿 App 实测到的值当基准，看哪条候选取到的就是那批（多数情况
-           一次就对上了，不用花钱）。剩下两种情况才需要模型：没有基准（不是 App 实测、
-           或 App 那步本来就没取到值）与多条候选分不出高下。
-           模型那趟**必须用户点**——它会花钱；而且每条候选回来都要过一遍回放器：
-           验过的才显示条数样本，验不了的**显式标『只能连 App 试』**，不许伪装成已验证 -->
-      <div class="ai-block">
+           程序那趟免费：拿 App 实测到的值当基准，看哪条候选**自己报的样本**就是那批
+           （多数情况一次就对上了，不用花钱）。剩下三种情况才需要模型：没有基准
+           （不是 App 实测、或 App 那步本来就没取到值）、样本都对不上、多条候选分不出高下。
+           模型那趟**必须用户点**——它会花钱。模型给的候选**不带本地判定**：
+           能不能用由「验证并应用」（本机引擎）说了算（AGENTS #3）。
+           **整块与上一块共用同一份层闸门**：候选是按静态 HTML 算出来的，L2–L5 上选中的
+           不是数据（假证据）——那时摆出候选，会与「改选择器没用」的层结论互相打架
+           （AGENTS #24：同一件事一次只说一条） -->
+      <div v-if="candidatesUsable" class="ai-block">
         <div class="cand-head">
           <b>候选规则</b>
           <span class="muted">（先自动挑，挑不出来再问 AI）</span>
@@ -1239,9 +1174,9 @@ function copyPage() {
             </el-tag>
           </template>
           <template #meta>
-            <span>{{ c.status === "verified" || c.verified
+            <span>{{ (c.samples || []).length
               ? (c.samples || []).join("  |  ")
-              : (c.note || c.why || "需要真实引擎确认") }}</span>
+              : (c.why || candidatePresentation(c, i).actionLabel) }}</span>
           </template>
         </DebugCandidateCard>
       </div>
@@ -1250,7 +1185,7 @@ function copyPage() {
         <!-- App 事件排第一，且 App 结果下不显示「提取结果」：
              App 实测的 values 就是事件原文去掉耗时前缀，两个 tab 说的是同一件事；
              而且那份 evidence 统计（标签占比之类）是对**事件文本**算的，
-             在 App 结果下没有意义。只有本地回放的 values 才是真正取到的值 -->
+             在 App 结果下没有意义 -->
         <el-tab-pane v-if="events.length" name="events">
           <template #label>调试事件 ({{ events.length }})</template>
           <DebugTimeline :events="events" />
@@ -1273,8 +1208,8 @@ function copyPage() {
               <a v-if="openableUrl(v)" :href="openableUrl(v)" target="_blank"
                  rel="noopener noreferrer" class="val-open">打开</a>
             </div>
-            <!-- 提取值经 replayer 的 text 动作把 \s+ 折成了空格，通常是一行超长文本，
-                 必须和「命中源码」一样软换行，否则只能横向滚动阅读 -->
+            <!-- 提取值常是一行超长文本（正文那种几万字），必须和「命中源码」一样
+                 软换行，否则只能横向滚动阅读 -->
             <pre class="debug-pre debug-pre-wrap">{{ v }}</pre>
           </div>
           <el-empty v-if="current && !current.values.length"
@@ -1284,10 +1219,6 @@ function copyPage() {
         <el-tab-pane label="命中源码" name="matched">
           <p v-if="matchedFrom" class="muted" style="margin: 6px 0">
             <el-tag size="small" :type="matchedFromType">{{ matchedFrom }}</el-tag>
-            <span v-if="matchedFrom === '本地调试'" style="margin-left: 6px">
-              这是本地调试投影，不是 App 实测；
-              跑不了 JS 规则，可能与 App 的实际命中不同
-            </span>
           </p>
           <!-- 没有命中片段时按钮禁用，避免「点一下复制了空串」 -->
           <div class="toolbar">

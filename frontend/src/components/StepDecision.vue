@@ -108,9 +108,6 @@ const VERDICT_TYPE = { pass: "success", fail: "danger", unknown: "info" };
           <code class="dec-snippet">{{ e.snippet }}</code>
         </li>
       </ul>
-      <p v-if="decision.rule_error" class="dec-rule-error">
-        规则无法离线回放：{{ decision.rule_error }}
-      </p>
       <ul v-if="decision.notes.length" class="dec-list dec-notes">
         <li v-for="(n, i) in decision.notes" :key="i">
           {{ n }}

@@ -26,6 +26,13 @@ def _strip_title_decor(text: str) -> str:
     return _TITLE_DECOR_RE.sub("", text or "").strip()
 
 
+def _first_class_of(el) -> str:
+    """元素的第一个 class（比对同形兄弟用）；没有就返回空串。"""
+    raw = (el.get("class") or "") if el is not None else ""
+    parts = raw.split() if isinstance(raw, str) else [c for t in raw for c in str(t).split()]
+    return parts[0] if parts else ""
+
+
 def _leaf_text_elems(soup, keyword: str):
     """找出书名锚点（叶子元素）。返回 `(元素列表, 判据)`——**判据要一路带到界面上**
     （认不出来与源坏了长得一样，所以「按什么认出来的」必须能看见，AGENTS #4 一族）。
@@ -45,7 +52,13 @@ def _leaf_text_elems(soup, keyword: str):
     tiers = {1: [], 2: [], 3: []}
     seen_detail_urls = set()
 
-    def detail_anchor(el):
+    def detail_anchor(el, allow_unknown_path: bool = False):
+        """这个元素所在/最近的链接是不是**详情页链接**。
+
+        ``allow_unknown_path``：路径词表（`DETAIL_LINK_HINTS`）认不出时，只按
+        「不是静态资源/导航链接」接受。这是**兜底那一趟**才开的宽松口，见函数末尾的
+        说明——实测有站点的详情链接长成 `/html/1287420/asc-1/`，路径里一个词表词都没有。
+        """
         links = ([el] if getattr(el, "name", None) == "a" else [])
         links += list(el.find_parents("a"))
         for link in links:
@@ -53,7 +66,7 @@ def _leaf_text_elems(soup, keyword: str):
             low = href.lower()
             if not href or _is_static_link(href):
                 continue
-            if any(h in low for h in DETAIL_LINK_HINTS):
+            if allow_unknown_path or any(h in low for h in DETAIL_LINK_HINTS):
                 return link
         return None
 
@@ -69,30 +82,66 @@ def _leaf_text_elems(soup, keyword: str):
                 return True
         return False
 
-    for el in soup.find_all(True):
-        if el.name in ("title", "script", "style", "meta"):
-            continue
-        txt = el.get_text(strip=True)
-        if not txt or el.find_all(True):        # 空文本 / 非叶子
-            continue
-        if is_noise(el):
-            continue
-        link = detail_anchor(el)
-        if link is None:
-            continue
-        href = (link.get("href") or "").strip()
-        if href in seen_detail_urls:
-            continue
-        seen_detail_urls.add(href)
-        if txt == keyword:
-            tiers[1].append(el)
-            continue
-        if _strip_title_decor(txt) == keyword:
-            tiers[2].append(el)
-            continue
-        # 第 3 档：含关键词的**详情链接**（不能接受页面标题/搜索建议）
-        if keyword in txt and len(txt) <= len(keyword) + 16:
-            tiers[3].append(el)
+    def in_repeated_group(el) -> bool:
+        """这个元素是不是落在**一组同形的结果卡片**里（而不是页面框架的一部分）。
+
+        逐层往上问：**这一层的祖先**在它自己的父节点下有没有 3 个以上同形兄弟。
+        数的是**祖先**而不是元素自己——结果卡片是 `<p class="sone">`（50 个兄弟），
+        书名 `<a>` 在卡片里是唯一的，拿 `<a>` 自己数必然数不到（这一版第一稿就这么错了）。
+        """
+        node = el
+        while getattr(node, "parent", None) is not None:
+            parent = node.parent
+            key = (str(node.name or "").lower(), _first_class_of(node))
+            same = sum(1 for child in parent.find_all(recursive=False)
+                       if (str(child.name or "").lower(), _first_class_of(child)) == key)
+            if same >= 3:
+                return True
+            node = parent
+        return False
+
+    # 第二趟只在**第一趟一个都没认出来**时才跑，判据换成两条**结构证据**：
+    #   ① 链接路径词表认不出时只按「不是静态链接」接受（实测 `m.qudushu.org` 的详情页
+    #      链接长成 `/html/1287420/asc-1/`，路径里一个词表词都没有）；
+    #   ② 文本里含关键词（不要求相等）——但**必须落在一组同形兄弟里**，否则搜索框、
+    #      面包屑、导航同样带词，会被一起收进来（AGENTS #12 那一类）。
+    # 这样：路径词表认得的站点走老路一字不变；认不出的站点能靠「书名锚点 + 它在结果列表里」
+    # 认出来，而不是静默判成「搜索不可用」。
+    for allow_unknown in (False, True):
+        for el in soup.find_all(True):
+            if el.name in ("title", "script", "style", "meta"):
+                continue
+            txt = el.get_text(strip=True)
+            if not txt or el.find_all(True):        # 空文本 / 非叶子
+                continue
+            if is_noise(el):
+                continue
+            link = detail_anchor(el, allow_unknown_path=allow_unknown)
+            if link is None:
+                continue
+            href = (link.get("href") or "").strip()
+            if href in seen_detail_urls:
+                continue
+            seen_detail_urls.add(href)
+            if txt == keyword:
+                tiers[1].append(el)
+                continue
+            if _strip_title_decor(txt) == keyword:
+                tiers[2].append(el)
+                continue
+            # 第 3 档：含关键词的**详情链接**（不能接受页面标题/搜索建议）。
+            # 兜底那一趟不开它：只按「不是静态链接」放开的路径，凭「含关键词」就认，
+            # 会把搜索框、面包屑这类同样带词的链接一起收进来（AGENTS #12 那一类）。
+            if not allow_unknown and keyword in txt and len(txt) <= len(keyword) + 16:
+                tiers[3].append(el)
+                continue
+            # 兜底那一趟的第 4 档：文本里含关键词 + **落在一组同形兄弟里**。
+            # 短关键词（如一个「我」）在真站点上必然匹配到变体书名（`我门我派我江湖`），
+            # 要求相等就永远认不出——而「它在结果列表里」正是「这是结果项」的结构证据。
+            if allow_unknown and keyword and keyword in txt and in_repeated_group(el):
+                tiers[3].append(el)
+        if any(tiers.values()):
+            break
     for tier, why in ((1, ""),
                       (2, "书名带前缀装饰（如「[历史]绍宋」）：按「去掉开头的 [分类] 后"
                           "等于关键词」认出来的。"),
@@ -131,15 +180,43 @@ def _nearest_list_item(name_elem):
     return name_elem.parent  # 兜底
 
 
+#: 能当「结果卡片 / 列表容器」的标签。BS4 的根对象 `[document]` 的 `name` 就是
+#: `"[document]"`——它进不了 CSS，一旦落到选择器里就是一条**永远选不中**的坏规则。
+_CONTAINER_TAGS = frozenset((
+    "li", "div", "ul", "ol", "tr", "td", "section", "article", "dl", "dd", "dt",
+    "p", "span", "a", "body", "table", "tbody", "main", "nav",
+))
+
+
 def _container_selector(list_item, container):
-    """生成 bookList 选择器：列表容器 + 稳定结果卡片选择器。"""
+    """生成 bookList 选择器：列表容器 + 稳定结果卡片选择器。
+
+    ``container`` 可能为空或不是真标签：文档没有包一层的父节点时（HTML **片段**——
+    L4 那条链拿到的是 JSON 信封里的片段，`core/net_hunt` 直接拼起来喂进来），
+    `list_item.parent` 会是 `None` 甚至 BS4 的 `[document]`。**`[document]` 不能进
+    选择器**（那不是 CSS 语法，导出的规则永远选不中）。这时退回卡片自己的类名单段规则；
+    卡片连 class 都没有就返回空——让调用方按「没推断出列表规则」如实说（AGENTS #4），
+    而不是落一条「选中整页链接」的假规则。
+    """
+    usable = (lambda el: el is not None
+              and str(getattr(el, "name", "") or "").lower() in _CONTAINER_TAGS)
+    if not usable(list_item):
+        # 连卡片都不是真标签（理论上到不了，兜一下别让选择器里出现 [document]）
+        return ""
+    item_sel = _class_selector(list_item)
+    if not usable(container) or container is list_item:
+        # 只剩卡片自己：**只在它有 class 时才给单段规则**（`.item` 有意义）；
+        # 裸标签（`a`）会把「页面里所有链接」选进来——那是坏规则，宁可弃权返回空，
+        # 让调用方按「没推断出列表规则」如实说（AGENTS #4），而不是落一条假规则。
+        return item_sel if list_item.get("class") else ""
     ctag = container.name or "div"
     ccls = [c for c in (container.get("class", []) or []) if ":" not in c]
-    item_sel = _class_selector(list_item)
     if ccls:
         # `.columns .media` 这类形状只选结果卡片，不把标题/封面内部 div 一并选进来。
         return f".{ccls[0]} {item_sel}"
     return f"{ctag} {item_sel}"
+
+
 def _path_selector(el, list_item):
     """生成从列表项到目标元素的 CSS 路径（如 `.name h3 a`）。
 
@@ -190,6 +267,11 @@ def analyze_search_page(html: str, keyword: str) -> dict:
         "bookList": "",
         "name": "",
         "bookUrl": "",
+        #: 选中那个结果节点**当时真实带的** href（相对地址原样）。
+        #: `bookUrl` 是给 App 的规则；本字段是「我们已经看见的那个地址」，
+        #: 调用方拿它当详情页样例，不必再拿规则重跑一遍（也就没有第二套解释器）。
+        #: 它不是规则、不写进书源（`build_source` 只读上面那几个键）。
+        "sampleBookUrl": "",
         "coverUrl": "",
         "author": "",
         "intro": "",
@@ -238,6 +320,7 @@ def analyze_search_page(html: str, keyword: str) -> dict:
         else (detail or (links[0] if links else None))
     if target is not None:
         result["bookUrl"] = _path_selector(target, list_item) + "@href"
+        result["sampleBookUrl"] = (target.get("href") or "").strip()
 
     # coverUrl 规则：优先 data-original/data-src/src，取含封面特征者
     # 兼容两种形态：<img data-original=...> 与 <div style/class=... data-original=...>（背景懒加载）

@@ -20,7 +20,6 @@ from core.analyzer import analyze_search_page, analyze_detail_page
 from core.app_debug import want_of_page
 from core.build import build_source, load_sources, save_sources
 from core.jvm_debug import verify_generated
-from core.rules.replayer import extract_all as apply_css_rule
 
 def _safe_input(prompt: str = "") -> str:
     if prompt:
@@ -218,7 +217,7 @@ def _reason_of(verdict: Dict[str, Any]) -> str:
 def run_add(url, name="", source_type="novel", group="📖新增源",
             output="auto_added.json", no_ask=False, probe=True,
             detail_url: str = "", verify: bool = True,
-            pick: int = 1, interactive: bool = False,
+            interactive: bool = False,
             to_merge: str = "", discover: bool = False, human_gate: bool = False):
     """新增一个书源（可被 main.py 复用）。返回 `AddResult`：rc 0=成功 / 1=失败 / 2=已存在，
     **失败时 error 里带原因**（别只回一个码——§七十七 那次的教训）。
@@ -412,15 +411,14 @@ def run_add(url, name="", source_type="novel", group="📖新增源",
             "\n[仅发现] 搜索接口不可用/被限流，此源无搜索规则，可通过发现页或详情页直达访问")
 
     # 4.5) 详情页规则推断（可显式指定样例详情页，否则用搜索结果第一条；仅发现模式兜底用原 URL）
+    # 详情页样例用**分析时已经看见的那个 href**（`sampleBookUrl`），不拿刚生成的
+    # `bookUrl` 规则再跑一遍本地回放器：那是同一份 HTML、同一个节点，重算只多一套
+    # 解释器，还会把「本地回放不了这条规则」变成「推不出详情页」。
     detail_for_toc = detail_url
     if not detail_for_toc:
-        try:
-            hrefs = apply_css_rule(html, analysis.get("bookUrl", ""))
-            if hrefs and pick <= len(hrefs):
-                first = hrefs[pick - 1]
-                detail_for_toc = _abs_url(url, first) if not first.startswith("http") else first
-        except Exception:
-            detail_for_toc = ""
+        sample = str(analysis.get("sampleBookUrl") or "").strip()
+        if sample:
+            detail_for_toc = _abs_url(url, sample) if not sample.startswith("http") else sample
     if not detail_for_toc and discover_mode and "{{key}}" not in url:
         # 仅发现模式且 URL 本身是详情页形态（如 liumanhua.com/263176）→ 直接用原 URL
         detail_for_toc = url

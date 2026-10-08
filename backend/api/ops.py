@@ -30,7 +30,6 @@ async def run_add_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
     probe = bool(payload.get("probe", True))
     discover = bool(payload.get("discover", False))
     verify = bool(payload.get("verify", True))
-    pick = int(payload.get("pick", 1) or 1)
 
     out_dir = data_path("out", "quick_add")
     os.makedirs(out_dir, exist_ok=True)
@@ -48,7 +47,6 @@ async def run_add_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
             probe=probe,
             detail_url=detail_url,
             verify=False,
-            pick=pick,
             interactive=False,
             to_merge="",
             discover=discover,

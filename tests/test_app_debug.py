@@ -773,8 +773,8 @@ class TestQualityNewPageShared(unittest.TestCase):
     def test_verify_has_no_second_page_implementation(self):
         """页面登记只有一份实现（`quality.new_page`）。
 
-        本地试跑那条链退场（十-4）后 verify 只剩 replay_step / strip_evidence，
-        连页面登记都不需要了——钉「别让它再长一份出来」。"""
+        本地试跑那条链退场（十-4）后 verify 只剩事实表与证据剥离，连页面登记都不需要了
+        ——钉「别让它再长一份出来」。"""
         from core import verify
         self.assertFalse(hasattr(verify, "_new_page"),
                          "verify 又长出了自己的页面登记——那是第二份实现")

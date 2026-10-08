@@ -15,7 +15,6 @@ from backend.schemas import (
     CandidatesRequest,
     CandidateVerifyRequest,
     JvmDebugRequest,
-    ReplayStepRequest,
     SuggestRuleRequest,
 )
 
@@ -277,11 +276,11 @@ async def verify_candidate_rule(body: CandidateVerifyRequest):
 
 @router.post("/suggest-rule")
 async def suggest_rule(body: SuggestRuleRequest):
-    """让 AI 给某一步提候选规则。**只提议，每条都要过本地回放器**（AGENTS #3）。
+    """让 AI 给某一步提候选规则。**只提议，不做本地判定**（AGENTS #3）。
 
     **这是个花钱的动作，只能由用户显式触发**（同 `/app-push` 那条边界）：
     前端只在一颗按钮的点击回调里调它，任何流程都不得自动调用。
-    免费的那部分（`dry_run=true`：程序先挑一遍 + 登录墙判断）不在此列，
+    免费的那部分（`dry_run=true`：程序按候选样本先挑一遍 + 登录墙判断）不在此列，
     它不发任何模型请求，可以在换步骤时自动跑。
 
     「没配模型」「模型输出不是 JSON」都**不是 HTTP 错误**：结果体里带 `llm`
@@ -300,6 +299,7 @@ async def suggest_rule(body: SuggestRuleRequest):
             "field": body.field, "focus": body.focus, "source_type": body.source_type,
             "replay_note": body.replay_note, "app_values": body.app_values,
             "diagnosis": body.diagnosis, "candidates": body.candidates,
+            "kind": body.kind,
             "enabled_cookie_jar": body.enabled_cookie_jar,
         }, dry_run=body.dry_run)
     except Exception as e:
@@ -325,22 +325,6 @@ async def rule_candidates(body: CandidatesRequest):
     except Exception as e:
         raise HTTPException(400, "候选生成失败：%s：%s" % (type(e).__name__, e))
     return {"candidates": candidates}
-
-
-@router.post("/replay-step")
-async def replay_rule_step(body: ReplayStepRequest):
-    """用已抓到的 HTML 重放一步规则，**不发网络请求**。
-
-    改完规则想立刻看判定变化时用它：试跑结果里已经存了每页 HTML，
-    不必重跑整条链（那要重新联网搜索）。
-    """
-    from core.verify import replay_step
-
-    try:
-        return await asyncio.to_thread(
-            replay_step, body.html, body.rule, body.step, body.source_type)
-    except Exception as e:
-        raise HTTPException(400, "重放失败: %s: %s" % (type(e).__name__, e))
 
 
 @router.post("/agent-plan")
