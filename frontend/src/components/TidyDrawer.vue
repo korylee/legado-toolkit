@@ -16,7 +16,7 @@ import { ElMessage, ElMessageBox } from "element-plus";
 import {
   applyNames, listDups, mergeSources, previewNames, undoNames, undoMerge,
 } from "../api/sources";
-import { HEALTH_LABELS } from "../utils/health";
+import { healthCell, depthClass, depthText, triToInt } from "../utils/sourceRow";
 const props = defineProps({ modelValue: { type: Boolean, default: false } });
 const emit = defineEmits(["update:modelValue", "changed", "requestCheck"]);
 
@@ -180,13 +180,20 @@ function toggleGroup(key, on) {
   selected.value = next;
 }
 
-function memberLabel(m) {
-  const verified = m.content_ok === true ? "正文✓"
-    : m.toc_complete === true ? "目录✓"
-    : m.search_hit ? "搜索命中"
-    : m.probe_depth ? "已校验" : "";
-  return [m.name || "（无名）", m.host, HEALTH_LABELS.value[m.health] || m.health || "未校验",
-          verified, m.checked_at || ""].filter(Boolean).join(" · ");
+//: 成员来自 `core/dups._member`：`toc_complete` / `content_ok` 是 bool|null
+//: （`Store.checks_map` 的三态），而 `depthText` / `depthClass` 判的是 0/1/null——
+//: **不转就会静默说反**：`true === 1` 不成立，一条正文通过的源会显示成「正文 ✗」。
+//: 未校验（没有结论行）时 `probe_depth` 为 0，两种判据都空 → 由调用方写「未校验」。
+function depthRow(m) {
+  return { probe_depth: m.probe_depth, toc_complete: triToInt(m.toc_complete),
+           content_ok: triToInt(m.content_ok) };
+}
+//: 验到哪一步 / 验得怎么样：**结果优先、深度兜底**（`depthText` 的口径，与列表页同一份）
+function verifyText(m) {
+  return depthText(depthRow(m)) || "未校验";
+}
+function verifyClass(m) {
+  return depthClass(depthRow(m));
 }
 
 function groupBody(g) {
@@ -382,18 +389,38 @@ watch(() => props.modelValue, (v) => {
             <span class="site mono">{{ g.site }}</span>
             <span class="muted">{{ g.members.length }} 条，可精简 {{ g.redundant }} 条</span>
           </div>
+          <!-- 成员两行：上行是「这是什么」（名称 + 状态标签），下行是「凭什么」——
+               地址与校验证据。原来挤在一行里，名称与 host 重复了两遍（host 就在
+               地址里），而后端 `_member` 已经算好的深度结论、搜索命中、署名与端口
+               一个都没显示：判「留哪条」的依据全丢了。 -->
           <div v-for="(m, i) in g.members" :key="m.url" class="member"
                :class="{ keep: picks[g.key] === i }" @click="picks[g.key] = i">
             <el-radio :model-value="picks[g.key]" :value="i" @change="picks[g.key] = i">
               <span class="muted">保留</span>
             </el-radio>
-            <div class="names">
-              <div class="new">{{ m.name || "（无名）" }}</div>
-              <div class="muted mono url">{{ m.url }}</div>
+            <div class="member-main">
+              <div class="member-line">
+                <span class="new">{{ m.name || "（无名）" }}</span>
+                <el-tag v-if="picks[g.key] === i" size="small" type="success">保留这条</el-tag>
+                <el-tag v-if="healthCell(m)" size="small" :type="healthCell(m).type">
+                  {{ healthCell(m).label }}
+                </el-tag>
+                <span v-else class="muted">未校验</span>
+                <el-tag v-if="m.has_fragment" size="small" type="warning"
+                        title="地址尾部带分享署名——同一条源被转发几次就会这样">
+                  带署名
+                </el-tag>
+                <el-tag v-if="m.has_port" size="small" type="warning"
+                        title="地址里写了端口（含端口写空的畸形地址）">带端口</el-tag>
+              </div>
+              <div class="member-line">
+                <span class="mono member-url">{{ m.url }}</span>
+                <span class="muted" :class="verifyClass(m)">{{ verifyText(m) }}</span>
+                <span v-if="m.search_hit" class="muted">命中《{{ m.search_hit }}》</span>
+                <span v-if="m.checked_at" class="muted">{{ m.checked_at }}</span>
+              </div>
+              <div v-if="m.comment" class="member-line muted">备注：{{ m.comment }}</div>
             </div>
-            <el-tag v-if="picks[g.key] === i" size="small" type="success">保留这条</el-tag>
-            <span class="muted why">{{ memberLabel(m) }}</span>
-            <span v-if="m.comment" class="muted why">备注：{{ m.comment }}</span>
           </div>
         </div>
         <el-empty v-if="!dupsLoading && !dupGroups.length"
@@ -482,10 +509,17 @@ watch(() => props.modelValue, (v) => {
 .card.on { background: #f7fbff; }
 .card-head { display: flex; align-items: center; gap: 8px; padding: 4px 10px; }
 .card-head .site { font-weight: 600; }
-.member { display: flex; align-items: center; gap: 8px; padding: 3px 10px 3px 34px; cursor: pointer; }
+.member { display: flex; align-items: flex-start; gap: 8px; padding: 5px 10px 5px 34px; cursor: pointer; }
 .member:hover { background: #fafcff; }
 .member.keep { background: #f0f9eb; }
-.member .names { flex: 0 1 auto; }
+.member-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; }
+.member-line { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px; min-width: 0; }
+.member-url { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 深度结论的着色：绿=验过且通过、红=验了没过、不着色=还没结论。
+   判据是共用那份（`utils/sourceRow.depthClass`），样式在列表页是 scoped 的，
+   这里够不到，所以按同一套语义令牌（styles.css 的 `--app-status-*`）再声明一次。 */
+.member-line .v-ok { color: var(--app-status-pass); }
+.member-line .v-bad { color: var(--app-status-fail); }
 .result {
   display: flex; align-items: center; gap: 8px;
   padding: 8px 12px; background: #f0f9eb; border-radius: 4px;
