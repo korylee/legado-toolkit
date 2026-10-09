@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { formatTimelineEvent, formatFailureLine } from "./jobTimeline.js";
+import { formatTimelineEvent, formatFailureLine, groupTimelineLines } from "./jobTimeline.js";
 
 test("里程碑与块事件说人话，并展示启动耗时", () => {
   assert.equal(
@@ -63,4 +63,33 @@ test("失败源一行：名字优先、理由收尾", () => {
   assert.deepEqual(
     formatFailureLine({ name: "", url: "https://b.com", state: "error", reason: "连不上" }).title,
     "https://b.com");
+});
+
+test("事件流按块归组：块首不缩进、块内后续缩进", () => {
+  const grouped = groupTimelineLines([
+    { seq: 1, kind: "batch_started", text: "开始校验", tone: "info" },
+    { seq: 2, kind: "chunk_started", index: 0, text: "第 1 块 开始", tone: "info" },
+    { seq: 3, kind: "chunk_done", index: 0, text: "第 1 块 完成", tone: "info" },
+    { seq: 4, kind: "chunk_started", index: 1, text: "第 2 块 开始", tone: "info" },
+    { seq: 5, kind: "done", text: "校验完成", tone: "info" },
+  ]);
+  assert.deepEqual(grouped.map((g) => g.depth), [0, 0, 1, 0, 0]);
+  assert.deepEqual(grouped.map((g) => g.chunk), [false, true, true, true, false]);
+  assert.equal(grouped[2].line.text, "第 1 块 完成");
+});
+
+test("同一块被顶层事件打断后仍算同一块", () => {
+  const grouped = groupTimelineLines([
+    { seq: 1, kind: "chunk_started", index: 3, text: "第 4 块 开始", tone: "info" },
+    { seq: 2, kind: "waiting_engine", text: "等待校验引擎空闲", tone: "warn" },
+    { seq: 3, kind: "chunk_done", index: 3, text: "第 4 块 完成", tone: "info" },
+  ]);
+  assert.deepEqual(grouped.map((g) => g.depth), [0, 0, 1]);
+  assert.equal(grouped[1].chunk, false);
+});
+
+test("归组对空输入与脏输入不抛", () => {
+  assert.deepEqual(groupTimelineLines([]), []);
+  assert.deepEqual(groupTimelineLines(null), []);
+  assert.deepEqual(groupTimelineLines([null, undefined]), []);
 });

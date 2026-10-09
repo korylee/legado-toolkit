@@ -63,6 +63,28 @@ export function formatTimelineEvent(ev) {
   }
 }
 
+/** 把平铺的事件流读成「块」。批量校验天然是分块的（事件自带 index），平铺成
+ *  流水账就浪费了这层结构——一屏几十行里看不出「第 6 块失败了」。
+ *  返回扁平数组（渲染只用一个循环）：`depth` 0 是块首与顶层事件、1 是块内后续；
+ *  `chunk` 标记该行属于某个块，样式据此画左侧竖线。
+ *  同一 index 被顶层事件打断后再次出现，仍算同一块（否则一块会被拆成两段）。 */
+export function groupTimelineLines(lines) {
+  const out = [];
+  const opened = new Set();
+  for (const line of Array.isArray(lines) ? lines : []) {
+    if (!line) continue;
+    const idx = line.index != null ? Number(line.index) : null;
+    if (idx == null) {
+      out.push({ key: line.seq, line, depth: 0, chunk: false });
+      continue;
+    }
+    const first = !opened.has(idx);
+    opened.add(idx);
+    out.push({ key: line.seq, line, depth: first ? 0 : 1, chunk: true });
+  }
+  return out;
+}
+
 // 失败源一行：名字优先，理由收尾——「哪条源、为什么」一眼可读
 export function formatFailureLine(item) {
   if (!item) return { title: "", detail: "" };

@@ -5,7 +5,7 @@
 // 引擎没有上报，不编。失败块的引擎日志从详情投影的 chunk_reports 取。
 import { ref, computed, watch, onUnmounted, nextTick } from "vue";
 import { api } from "../api/client";
-import { formatTimelineEvent, formatFailureLine } from "../utils/jobTimeline";
+import { formatTimelineEvent, formatFailureLine, groupTimelineLines } from "../utils/jobTimeline";
 
 const props = defineProps({
   jobId: { type: String, default: "" },
@@ -45,6 +45,8 @@ const logOf = (index) => {
   return report.gradle.stderr || report.gradle.stdout || "";
 };
 
+//: 渲染前先归组：块结构是模板与样式共用的判据（见 utils/jobTimeline 的 groupTimelineLines）
+const groupedLines = computed(() => groupTimelineLines(lines.value));
 const failureTotal = computed(() => failures.value.total || 0);
 const notShown = computed(() =>
   Math.max(failureTotal.value - (failures.value.items || []).length, 0));
@@ -157,24 +159,35 @@ function onScroll() {
       <span v-if="!following" class="job-timeline-follow" @click="following = true; scrollFollow()">回到最新</span>
     </div>
     <div ref="listEl" class="job-timeline-list" @scroll="onScroll">
-      <div v-for="line in lines" :key="line.seq" class="job-timeline-line" :class="'is-' + line.tone">
-        <span class="job-timeline-ts">{{ hhmmss(line.ts) }}</span>
-        <span class="job-timeline-text">{{ line.text }}</span>
+      <div v-for="item in groupedLines" :key="item.key" class="job-timeline-line"
+           :class="['is-' + item.line.tone, { 'is-nested': item.depth > 0 }]">
+        <span class="job-timeline-ts">{{ hhmmss(item.line.ts) }}</span>
+        <span class="job-timeline-text">{{ item.line.text }}</span>
         <span
-          v-if="line.kind === 'chunk_failed' && logOf(line.index)"
+          v-if="item.line.kind === 'chunk_failed' && logOf(item.line.index)"
           class="job-timeline-log-toggle"
-          @click="expanded = expanded === String(line.seq) ? '' : String(line.seq)"
-        >{{ expanded === String(line.seq) ? "收起日志" : "看日志" }}</span>
-        <pre v-if="expanded === String(line.seq) && logOf(line.index)" class="job-timeline-log">{{ logOf(line.index) }}</pre>
+          @click="expanded = expanded === String(item.line.seq) ? '' : String(item.line.seq)"
+        >{{ expanded === String(item.line.seq) ? "收起日志" : "看日志" }}</span>
+        <pre v-if="expanded === String(item.line.seq) && logOf(item.line.index)"
+             class="job-timeline-log">{{ logOf(item.line.index) }}</pre>
       </div>
-      <div v-for="(item, i) in failures.items" :key="'failure' + i" class="job-timeline-line is-error">
-        <span class="job-timeline-ts">失败源</span>
-        <span class="job-timeline-text">✕ {{ formatFailureLine(item).title }}：{{ formatFailureLine(item).detail }}</span>
+
+      <!-- 失败源是**结论**、不是时间序列：和事件行同格式混在一起时，读的人分不清
+           哪条是「发生过什么」、哪条是「最后坏了几条」 -->
+      <div v-if="failures.items.length" class="job-timeline-failures">
+        <div class="muted job-timeline-failures-title">失败源（{{ failureTotal }}）</div>
+        <div v-for="(item, i) in failures.items" :key="'failure' + i"
+             class="job-timeline-line is-error">
+          <span class="job-timeline-ts">✕</span>
+          <span class="job-timeline-text">
+            {{ formatFailureLine(item).title }}：{{ formatFailureLine(item).detail }}
+          </span>
+        </div>
+        <div v-if="notShown > 0" class="muted job-timeline-failures-more">
+          还有 {{ notShown }} 条失败源未显示
+        </div>
       </div>
-      <div v-if="notShown > 0" class="job-timeline-line is-warn">
-        <span class="job-timeline-ts">{{ hhmmss() }}</span>
-        <span class="job-timeline-text">还有 {{ notShown }} 条失败源未显示</span>
-      </div>
+
       <div v-if="pollError === 'err'" class="muted job-timeline-note">时间线暂时取不到（任务仍在后台执行），会继续重试</div>
       <div v-if="!lines.length && !failures.items.length" class="muted job-timeline-note">还没有执行记录</div>
     </div>
@@ -206,15 +219,43 @@ function onScroll() {
   border-radius: 6px; background: var(--el-fill-color-lighter);
   font-family: var(--el-font-family-monospace, monospace); font-size: 12px;
 }
-.job-timeline-line { line-height: 1.7; white-space: pre-wrap; word-break: break-all; }
-.job-timeline-ts { color: var(--el-text-color-secondary); margin-right: 8px; }
+/* 三列：时间戳 / 正文 / 动作。原来是行内文本流——有没有第三列、正文长短，
+   都会把正文起点推歪，几十行看下来是锯齿。 */
+.job-timeline-line {
+  display: grid; grid-template-columns: 62px 1fr auto;
+  column-gap: 8px; align-items: baseline;
+  line-height: 1.7; white-space: pre-wrap;
+  /* break-all 会把 URL 与路径从中间劈开；anywhere 只在该断的地方断 */
+  overflow-wrap: anywhere;
+}
+/* 块内后续事件缩进 + 左侧细线：块的边界一眼可辨（块结构见 groupTimelineLines） */
+.job-timeline-line.is-nested {
+  padding-left: 14px;
+  border-left: 2px solid var(--el-border-color-extra-light);
+}
+.job-timeline-ts { color: var(--el-text-color-secondary); }
+.job-timeline-log-toggle { margin-left: 8px; }
+/* 异常行给整行淡底 + 左侧色条：跑批时用户的动作就是扫一眼有没有红的，
+   只染文字色不够——一屏几十行里找不出来。写在 is-nested 之后，异常优先级更高。 */
+.job-timeline-line.is-warn {
+  padding-left: 8px; border-left: 2px solid var(--el-color-warning);
+  background: var(--el-color-warning-light-9, #fdf6ec);
+}
+.job-timeline-line.is-error {
+  padding-left: 8px; border-left: 2px solid var(--el-color-danger);
+  background: var(--el-color-danger-light-9, #fef0f0);
+}
 .job-timeline-line.is-warn .job-timeline-text { color: var(--el-color-warning); }
 .job-timeline-line.is-error .job-timeline-text { color: var(--el-color-danger); }
-.job-timeline-log-toggle { margin-left: 8px; }
 .job-timeline-log {
+  /* 日志块横跨三列：挤在正文列里会被时间戳列吃掉宽度 */
+  grid-column: 1 / -1;
   margin: 4px 0 2px; padding: 6px; max-height: 160px; overflow: auto;
   background: var(--el-fill-color-light); border-radius: 4px;
   white-space: pre-wrap; font-size: 11px;
 }
+.job-timeline-failures { margin-top: 10px; }
+.job-timeline-failures-title { margin-bottom: 4px; }
+.job-timeline-failures-more { margin-top: 4px; }
 .job-timeline-note { font-size: 12px; padding: 4px 0; }
 </style>
