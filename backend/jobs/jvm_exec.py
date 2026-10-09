@@ -342,7 +342,8 @@ def _tail_process_output(value: Any, limit: int = 4000) -> str:
 
 def _run_gradle(timeout_min: int = 90, args_path: Optional[Path] = None,
                 runtime: Optional[Dict[str, str]] = None,
-                stall_watch: Optional[Tuple[Path, float]] = None) -> Dict[str, Any]:
+                stall_watch: Optional[Tuple[Path, float]] = None,
+                job_id: str = "") -> Dict[str, Any]:
     """调启动器跑批（阻塞直到 Gradle 退出）。保留退出码和输出尾部。
 
     以前这里只返回整数。Gradle 在测试 JVM 启动前失败时，调用方只能知道结果文件
@@ -350,6 +351,10 @@ def _run_gradle(timeout_min: int = 90, args_path: Optional[Path] = None,
 
     **顺手刷新 dump**：与 `core.jvm_debug._run_launcher` 同一条不变式（机制在
     `core.jvm_direct.dump_is_stale` 与 `core.jvm_debug.default_launcher` 那两处，别在这抄）。
+
+    **相位跟着真观测走**：给了 `job_id` 就盯校验 JVM 自己写的那份报告
+    （`snapshot_actual`），落盘即把相位从「启动 Gradle」推到「执行校验」
+    （见 `_watch_validate_start`）。
     """
     exe = _launcher()
     if not runtime:
@@ -366,6 +371,15 @@ def _run_gradle(timeout_min: int = 90, args_path: Optional[Path] = None,
             pass
         except OSError:
             pass
+
+    # 相位观察：**校验 JVM 自己的那份报告**一落盘，就把这几十秒到两分钟的「启动 Gradle」
+    # 收掉（不是 dump——那份是编译期写的，早于 JVM 启动约 10 秒，见 _watch_validate_start）。
+    # 观察必须在这里起（跑前已把这三个文件删掉），否则上一批留下的文件会被当成信号。
+    # 停表在 finally 里，与停滞看门狗同一次收尾——Gradle 退出后不该再有相位写入。
+    phase_stop = threading.Event()
+    if job_id:
+        threading.Thread(target=_watch_validate_start, daemon=True,
+                         args=(job_id, snapshot_actual, phase_stop)).start()
 
     def with_runtime_snapshot(result: Dict[str, Any]) -> Dict[str, Any]:
         from core.jvm_runtime_snapshot import compare_runtime_snapshot
@@ -409,6 +423,7 @@ def _run_gradle(timeout_min: int = 90, args_path: Optional[Path] = None,
             timed_out = True
     finally:
         stop_watch.set()
+        phase_stop.set()
     _write_run_logs(args_path, stdout, stderr)
     if timed_out:
         return with_runtime_snapshot({
@@ -528,6 +543,9 @@ _STALL_FACTOR = 3
 _STALL_CAP_SEC = 120
 #: 停滞采样间隔。文件大小是单调的，采样丢了中间态也没关系。
 _STALL_POLL_SEC = 5.0
+#: 相位观察的采样间隔：它等的是一次相位切换（编译结束），不是停滞判定——
+#: 0.5 秒足够快，也不给库添没必要的写。
+_VALIDATE_START_POLL_SEC = 0.5
 #: 隔离重跑（单源块）的 socket 等待 = 每源预算 + 这个余量。
 _REMEDIAL_WAIT_MARGIN_SEC = 30
 
@@ -564,6 +582,30 @@ def _watch_output_stall(watch_path: Path, stall_sec: float, stop: threading.Even
             if why is not None:
                 why["stalled"] = True
             abort()
+            return
+
+
+def _watch_validate_start(job_id: str, report_path: Path, stop: threading.Event,
+                          interval: Optional[float] = None) -> None:
+    """盯**校验 JVM 自己写的那份报告**：它一出现，说明测试 JVM 起来了、校验在跑。
+
+    传进来的必须是 `$dump.actual.gradle.validate.json`（`snapshot_actual`），不是 dump：
+    dump 由 init 脚本在测试任务的 `doFirst` 里写（`appservice/legado-test.init.gradle`），
+    落在**编译结束、测试 JVM 启动之前**；这份报告是 `ValidateService.main` 的**第一句**
+    `ServiceJson.writeRuntimeSnapshot("validate")` 写的，由干活的那个进程自己落盘。
+    2026-10-09 最后一块实测：块起 23:15:39 → dump 23:15:46（7 秒）→ 本文件 23:15:56
+    （17 秒）→ 块结束 23:17:06；用 dump 会把 JVM 启动那 10 秒也说成「执行校验」。
+
+    为什么要这一步：`starting_gradle` 是**启动**相位，而 `_run_gradle` 一次阻塞调用把
+    任务图、编译与全部校验都干完（实测 60～130 秒/块）——没人推进的话，进度在涨、头上
+    还写着「启动 Gradle」（2026-10-09 实测：snapshot 过期使 400 条批 16 块全走 Gradle，
+    进度 150/400 时相位仍是 `starting_gradle`）。判据是**文件出现**这个真观测，不是
+    拿计时器估「编译大概要多久」。
+    """
+    every = _VALIDATE_START_POLL_SEC if interval is None else interval
+    while not stop.wait(every):
+        if report_path.exists() and not stop.is_set():
+            runner.update_phase(job_id, "running_validate")
             return
 
 
@@ -792,8 +834,8 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
         if execution_mode != "validate_daemon":
             job_runner.update_phase(job_id, "starting_gradle")
             gradle = _normalize_gradle_result(
-                _run_gradle(args_path=args_path, runtime=runtime)
-                if args_path is not None else _run_gradle(runtime=runtime))
+                _run_gradle(args_path=args_path, runtime=runtime, job_id=job_id)
+                if args_path is not None else _run_gradle(runtime=runtime, job_id=job_id))
             code = gradle.get("exit")
             execution_note = (daemon_failure + "；已使用 Gradle 完成本次校验"
                               if daemon_failure else execution_note)
@@ -958,7 +1000,8 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
                     _run_gradle(args_path=chunk_args, runtime=runtime,
                                 stall_watch=(chunk_out, min(
                                     _STALL_FACTOR * per_source_budget,
-                                    _STALL_CAP_SEC))))
+                                    _STALL_CAP_SEC)),
+                                job_id=job_id))
                 code = gradle.get("exit")
                 if gradle.get("stalled"):
                     stalled = True

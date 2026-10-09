@@ -49,6 +49,7 @@ class _Base(unittest.TestCase):
         (self.probe / "appservice" / "legado-gradle.bat").write_text("@echo off\n",
                                                                     encoding="utf-8")
         self.gradle_calls = 0
+        self.gradle_kwargs = {}
         self.runtime_seen = None
         self.gradle_result = 0
         self.no_output = False
@@ -88,6 +89,7 @@ class _Base(unittest.TestCase):
 
     def _fake_gradle(self, args_path=None, runtime=None, **kwargs) -> int:
         self.runtime_seen = runtime
+        self.gradle_kwargs = dict(kwargs)
         self.gradle_calls += 1
         self.args_seen = pathlib.Path(args_path).read_text(encoding="utf-8")
         source_path = next(line.split("=", 1)[1] for line in self.args_seen.splitlines()
@@ -964,6 +966,21 @@ class BatchDaemonTests(_Base):
         self.assertEqual(result["execution_mode"], "gradle_fallback")
         self.assertEqual(result["daemon_prepare"],
                          {"outcome": "busy", "reason": busy["reason"]})
+
+    def test_gradle_fallback_hands_job_id_to_the_phase_watch(self) -> None:
+        """Gradle 回落的调用必须带上任务号：相位观察靠它写库。
+
+        忘了传**不报错**——只是整个块头都写着「启动 Gradle」（2026-10-09 那个 bug：
+        进度 150/400 时相位还是 starting_gradle），所以这里钉一下接线。
+        """
+        stale = {"outcome": "failed", "retryable": False,
+                 "reason": "runtime_snapshot：snapshot 早于 appservice Kotlin 源码，请先刷新"}
+        with mock.patch("core.jvm_direct.load_dump", return_value=self._DUMP), \
+            mock.patch("core.jvm_validate_daemon.prepare", return_value=stale):
+            result = self._call()
+        self.assertEqual(self.gradle_calls, 1, "准备失败后本块必须走 Gradle")
+        self.assertEqual(result["execution_mode"], "gradle_fallback")
+        self.assertEqual(self.gradle_kwargs.get("job_id"), "testjob")
 
     def test_batch_busy_retries_once_then_reuses_recovered_daemon(self) -> None:
         """批次初始忙：首块直接回落，下一块只重试一次；恢复后余块复用。"""

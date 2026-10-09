@@ -3,6 +3,15 @@
 // 后端给的是骨架事件（ts + kind + 字段），这里负责说成人话：主行只展示必要的执行方式
 // 与失败原因，不编造后端没给的数字（比如预计剩余时间）。tone: info | warn | error，前端据此上色。
 
+// 「这一块走的是哪条引擎」的取词（**唯一一份**）：块开始/结束/失败三处都说它。
+// 各写一遍时，分歧正好落在不报错的地方——同一块开头说 Gradle、结尾说常驻引擎。
+// 值域由后端给（`backend/jobs/jvm_exec.py` 的 execution_mode：validate_daemon / gradle）。
+function modeLabel(mode) {
+  if (mode === "validate_daemon") return "常驻引擎";
+  if (mode === "gradle") return "Gradle";
+  return "";
+}
+
 export function formatTimelineEvent(ev) {
   if (!ev || !ev.kind) return { text: "", tone: "info" };
   const n = ev.index != null ? Number(ev.index) + 1 : null;
@@ -37,19 +46,22 @@ export function formatTimelineEvent(ev) {
     case "recovered":
       return { text: "校验引擎恢复，后续块重新使用", tone: "info" };
     case "chunk_started": {
-      return { text: at(` 开始（${ev.count ?? "?"} 条）`), tone: "info" };
+      // 引擎名在这里就报：块里慢下来的原因（走的是 Gradle 还是常驻引擎）跑的时候就要看得见，
+      // 而不是等这一块结束——`mode` 是后端 chunk_started 自带的事实，不是前端推的
+      const mode = modeLabel(ev.mode);
+      return { text: at(` 开始（${ev.count ?? "?"} 条${mode ? " · " + mode : ""}）`), tone: "info" };
     }
     case "resumed":
       return { text: at(" 上次已完成，本次不重跑"), tone: "info" };
     case "chunk_stalled":
       return { text: at(" 疑似卡在慢源（输出停滞），隔离重跑剩余源"), tone: "warn" };
     case "chunk_done": {
-      const mode = ev.mode === "validate_daemon" ? "常驻引擎" : ev.mode === "gradle" ? "Gradle" : "";
+      const mode = modeLabel(ev.mode);
       const suffix = mode ? ` · ${mode}` : "";
       return { text: at(` 完成：${ev.count ?? "?"} 条${ev.cost_sec != null ? " · " + sec(ev.cost_sec) : ""}${suffix}`), tone: "info" };
     }
     case "chunk_failed": {
-      const mode = ev.mode === "validate_daemon" ? "常驻引擎" : ev.mode === "gradle" ? "Gradle" : "";
+      const mode = modeLabel(ev.mode);
       return { text: at(` 失败${mode ? "（" + mode + "）" : ""}${ev.reason ? "：" + ev.reason : ""}`), tone: "error" };
     }
     case "done":
