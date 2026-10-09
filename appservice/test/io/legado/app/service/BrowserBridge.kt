@@ -267,7 +267,11 @@ object BrowserBridge {
                js: String? = null,
                jsRetryTimes: Int = 0,
                jsRetryIntervalMs: Long = 1000,
-               challengeWaitMs: Long = CHALLENGE_WAIT_MS): Result {
+               challengeWaitMs: Long = CHALLENGE_WAIT_MS,
+               /** 非 null = **渲染这份 HTML**（上游 `loadData` / `loadDataWithBaseURL` 的对应物），
+                *  不去取 `url`。配合 `url` 用：空 = 无 baseUrl（`loadData`），非空 = 按它作
+                *  帧地址与来源（`loadDataWithBaseURL(url, html, …, url)`）。 */
+               content: String? = null): Result {
         // **复用启动时那个 about:blank 页签**（/json/list 的第一个 page），
         // 不每次 `/json/new`：少一个端点就少一类失败（实测 /json/new 偶发拿不到页签），
         // 而且只有一个页签时，渲染天然是串行的——不必再操心多页签互相干扰。
@@ -311,14 +315,84 @@ object BrowserBridge {
             // （实测 2026-09-26：`--` 重跑的相对地址 + webView 白等 60s、75.5s 才 fail）。
             // 判据纯函数化钉在 WebViewNavigationTest；加载期失败（DNS / 连接拒绝）不在这
             // 一层管——Chromium 会渲染错误页并照常发 load 事件，由「不是站点」的判据处置。
-            val nav = sendForResult(ws, 2, "Page.navigate", params, tapQueue, timeoutMs)
-            navigationFailure(nav)?.let {
-                return Result(false, reason = "navigation_failed: $it")
+            if (content == null) {
+                val nav = sendForResult(ws, 2, "Page.navigate", params, tapQueue, timeoutMs)
+                navigationFailure(nav)?.let {
+                    return Result(false, reason = "navigation_failed: $it")
+                }
+            } else if (url.isBlank()) {
+                // 上游 `loadData(html, "text/html", enc)`：没有 baseUrl、不联网。
+                // `setDocumentContent` 与它语义一致（文档塞进当前页签，origin 不透明）。
+                val frame = sendForResult(ws, 4, "Page.getFrameTree", null, tapQueue, timeoutMs)
+                    ?.optJSONObject("result")?.optJSONObject("frameTree")
+                    ?.optJSONObject("frame")?.optString("id").orEmpty()
+                if (frame.isEmpty()) return Result(false, reason = "cdp_error: 取不到 frameId")
+                if (!send(ws, 5, "Page.setDocumentContent",
+                          JSONObject().put("frameId", frame).put("html", content),
+                          tapQueue, timeoutMs)) {
+                    return Result(false, reason = "cdp_error: Page.setDocumentContent 无响应")
+                }
+            } else {
+                // 上游 `loadDataWithBaseURL(url, html, "text/html", enc, url)`：**帧地址与来源
+                // 都得是 `url`**，而且一个真实请求都不该发。同时满足这两条的只有 Fetch：
+                // 暂停这次导航、用我们的 HTML 满足它。`<base href>` 只能补相对地址解析，
+                // 补不了 origin——规则里的 XHR 会因此跨域被拦或取到别的站点。
+                if (!send(ws, 6, "Fetch.enable", JSONObject().put("patterns",
+                        org.json.JSONArray().put(JSONObject()
+                            .put("urlPattern", url).put("requestStage", "Request"))),
+                          tapQueue, timeoutMs)) {
+                    return Result(false, reason = "cdp_error: Fetch.enable 无响应")
+                }
+                try {
+                    // **发出去不等应答**：请求被暂停时 `Page.navigate` 的应答不会来（见 sendNoWait），
+                    // 先拿暂停事件、把这条请求满足掉，事后再核命令级错误。
+                    sendNoWait(ws, 2, "Page.navigate", params)
+                    var fulfilled = false
+                    val deadline = System.currentTimeMillis() + timeoutMs
+                    while (!fulfilled && System.currentTimeMillis() < deadline) {
+                        val ev = findEvent(tapped.toList(), "Fetch.requestPaused") { p ->
+                            p.optJSONObject("request")?.optString("url") == url
+                        }
+                        if (ev == null) {
+                            Thread.sleep(50)
+                            continue
+                        }
+                        val rid = ev.optJSONObject("params")?.optString("requestId").orEmpty()
+                        if (rid.isEmpty()) break
+                        fulfilled = send(ws, 7, "Fetch.fulfillRequest", JSONObject()
+                            .put("requestId", rid).put("responseCode", 200)
+                            .put("responseHeaders", org.json.JSONArray().put(JSONObject()
+                                .put("name", "Content-Type")
+                                .put("value", "text/html; charset=utf-8")))
+                            .put("body", java.util.Base64.getEncoder()
+                                .encodeToString(content.toByteArray(Charsets.UTF_8))),
+                            tapQueue, timeoutMs)
+                    }
+                    if (!fulfilled) {
+                        return Result(false, reason = "content_fulfill_timeout: " +
+                            "${timeoutMs}ms 内没等到导航请求")
+                    }
+                    // 应答到了才核：没到不算失败（后面还有 load 等待与超时兜底）
+                    findResponse(tapped.toList(), 2)?.let {
+                        navigationFailure(it)?.let { why ->
+                            return Result(false, reason = "navigation_failed: $why")
+                        }
+                    }
+                } finally {
+                    // **用完必须 detach**：页签是复用的，留着这个域会把**下一次渲染**的导航
+                    // 也暂停住，表现成偶发渲染超时（极难归因）。
+                    runCatching { send(ws, 9, "Fetch.disable", null, tapQueue, 2000) }
+                }
             }
-            val loaded = awaitEvent(tapQueue, setOf("Page.loadEventFired", "Page.domContentEventFired"),
-                                    timeoutMs)
-            if (!loaded) {
-                return Result(false, reason = "render_timeout: ${timeoutMs}ms 内没有 load 事件")
+            // `setDocumentContent` 不是导航，**不保证发 load 事件**；照下面那样等会白等满
+            // 渲染预算（现场看起来就是一个假的 render_timeout）。真导航（含 Fetch fulfill）仍等。
+            if (content == null || url.isNotBlank()) {
+                val loaded = awaitEvent(tapQueue,
+                                        setOf("Page.loadEventFired", "Page.domContentEventFired"),
+                                        timeoutMs)
+                if (!loaded) {
+                    return Result(false, reason = "render_timeout: ${timeoutMs}ms 内没有 load 事件")
+                }
             }
             if (waitAfterLoadMs > 0) Thread.sleep(waitAfterLoadMs)
             // 等文档真的 complete 再取 HTML（SPA 常有二次渲染）
@@ -637,10 +711,23 @@ object BrowserBridge {
                      waitAfterLoadMs: Long = 800,
                      js: String? = null,
                      jsRetryTimes: Int = 0,
-                     jsRetryIntervalMs: Long = 1000): Result =
+                     jsRetryIntervalMs: Long = 1000,
+                     content: String? = null): Result =
         synchronized(renderLock) {
-            render(session, url, timeoutMs, waitAfterLoadMs, js, jsRetryTimes, jsRetryIntervalMs)
+            render(session, url, timeoutMs, waitAfterLoadMs, js, jsRetryTimes, jsRetryIntervalMs,
+                   content = content)
         }
+
+    /**
+     * 渲染**我们自己给的 HTML**（上游 `loadData` / `loadDataWithBaseURL` 的对应物）：
+     * `baseUrl` 空 = 无 baseUrl 的本地文档；非空 = 帧地址与来源都是它，且**不发真实请求**。
+     */
+    fun renderContent(session: Session, html: String, baseUrl: String? = null,
+                      timeoutMs: Long = 30000, waitAfterLoadMs: Long = 800,
+                      js: String? = null, jsRetryTimes: Int = 0,
+                      jsRetryIntervalMs: Long = 1000): Result =
+        renderSerial(session, baseUrl?.trim().orEmpty(), timeoutMs, waitAfterLoadMs, js,
+                     jsRetryTimes, jsRetryIntervalMs, content = html)
 
     /**
      * 读浏览器 profile 里**这个 URL 适用的 cookie**（CDP `Network.getCookies`）。
@@ -751,6 +838,44 @@ object BrowserBridge {
             if (names.contains(o.optString("method"))) return true
         }
         return false
+    }
+
+    /**
+     * 发一条命令**不等应答**。
+     *
+     * 为什么需要它：`Page.navigate` 在请求被 `Fetch` 暂停时，**应答会一直等到那条请求被满足**
+     * ——先等应答再 fulfill 是死锁（实测 2026-10-09：等满 60s，报
+     * `navigation_failed: Page.navigate 无响应`）。命令级错误事后再从 `tapped` 里核。
+     */
+    private fun sendNoWait(ws: WebSocket, id: Int, method: String, params: JSONObject?) {
+        val obj = JSONObject().put("id", id).put("method", method)
+        if (params != null) obj.put("params", params)
+        ws.send(obj.toString())
+    }
+
+    /** 从全量副本里取某条命令的应答（`id` 匹配）。 */
+    private fun findResponse(messages: List<String>, id: Int): JSONObject? =
+        messages.asSequence()
+            .mapNotNull { runCatching { JSONObject(it) }.getOrNull() }
+            .firstOrNull { it.optInt("id", -1) == id }
+
+    /**
+     * 在**全量消息副本**里找一条事件。
+     *
+     * 为什么不从队列里等：`sendForResult` 等自己的应答时会把**不匹配的消息直接丢掉**，
+     * 而 `Fetch.requestPaused` 往往比 `Page.navigate` 的应答先到——从队列里等就永远等不到
+     * （实测 2026-10-09：`content_fulfill_timeout: 60000ms 内没等到导航请求`）。
+     * `tapped` 抄的是每一条流过的消息，不受这个消费顺序影响。
+     */
+    private fun findEvent(messages: List<String>, method: String,
+                          match: (JSONObject) -> Boolean): JSONObject? {
+        for (msg in messages) {
+            val o = runCatching { JSONObject(msg) }.getOrNull() ?: continue
+            if (o.optString("method") != method) continue
+            val p = o.optJSONObject("params") ?: continue
+            if (match(p)) return o
+        }
+        return null
     }
 
     /** `Runtime.evaluate` 一个表达式，取回字符串结果。 */

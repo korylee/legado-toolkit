@@ -3,10 +3,12 @@
 // 与五格决策**分开**是有意的：五格判据在后端一处（`core/agent_plan`），这里只负责
 // 「这条事实怎么显示 + 它对某一步算不算数」。判据要它时，是把**事实**交上去（见
 // `unsupportedForStep`），不是把句子搬过去。
+// 键必须与 `ShadowBackstageWebView.recordUnsupported(...)` 的码逐词一致
+// （`tests/test_jvm_debug_contract.py` 的边界码 parity 会拦住「各改一边」）。
 export const WEBVIEW_UNSUPPORTED_TEXT = {
-  unsupported_is_rule: "本机调试暂不支持 isRule 注入路径",
+  unsupported_is_rule: "本机调试暂不支持需要页面环境的 webJs 规则",
+  unsupported_is_rule_local: "这条 webJs 规则本机求值失败，需连 App 取证",
   unsupported_source_regex: "本机调试暂不支持 sourceRegex 嗅探路径",
-  unsupported_html_only: "本机调试暂不支持仅提供 html 的 WebView 页面",
 };
 
 const FALLBACK_TEXT = "本机调试有一项 WebView 能力未覆盖";

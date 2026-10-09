@@ -10,11 +10,11 @@ test("debug 与 matched 两个阶段都保留", () => {
     source: "jvm",
     webview_unsupported: [
       { code: "unsupported_is_rule", url: "https://a.test", phase: "debug" },
-      { code: "unsupported_html_only", url: "", phase: "matched" },
+      { code: "unsupported_source_regex", url: "", phase: "matched" },
     ],
   });
   assert.equal(view.length, 2);
-  assert.equal(view[0].text, "本机调试暂不支持 isRule 注入路径");
+  assert.equal(view[0].text, "本机调试暂不支持需要页面环境的 webJs 规则");
   assert.equal(view[1].phase, "matched");
   assert.deepEqual(view[1].urls, []);
 });
@@ -59,7 +59,7 @@ test("只有能归因到这一步的缺口才算这一步的事实", () => {
     source: "jvm",
     webview_unsupported: [
       { code: "unsupported_is_rule", url: "https://a.test", phase: "debug" },
-      { code: "unsupported_html_only", url: "", phase: "matched" },
+      { code: "unsupported_source_regex", url: "", phase: "matched" },
     ],
   };
   assert.equal(unsupportedForStep(result, "https://a.test"), true);

@@ -1,11 +1,16 @@
 package io.legado.app.service
 
+import android.webkit.WebView
+import io.legado.app.data.appDb
+import io.legado.app.help.CacheManager
 import io.legado.app.help.http.BackstageWebView
 import io.legado.app.help.http.StrResponse
+import io.legado.app.help.webView.WebJsExtensions
 import org.robolectric.annotation.Implementation
 import org.robolectric.annotation.Implements
 import org.robolectric.annotation.RealObject
 import org.robolectric.util.ReflectionHelpers
+import splitties.init.appCtx
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
@@ -71,6 +76,27 @@ class ShadowBackstageWebView {
                 "phase" to phase.get(),
             )
         }
+
+        /** 走本机 JS 引擎跑完的 isRule 次数（不渲染页面）。对照实验与测试用它区分两条路。 */
+        val ruleLocalRuns = AtomicInteger(0)
+
+        /**
+         * 规则 JS 是否**需要页面环境**（document / window 之类）。
+         *
+         * 扫的是规则原文：`getInjectionString` 前奏是 `LoadJsRunnable` 之后才拼上去的，
+         * shadow 这里拿不到，所以前奏里的东西不会混进来。
+         *
+         * 判据**取保守**：拿不准就算需要。宁可报「本机未覆盖 + 连 App 取证」，也不要跑出
+         * 一个错的値——类注释里那条「假阴性比延期糟」对这里同样成立。
+         */
+        val PAGE_ENV_MARKERS = listOf(
+            "document", "window", "location", "navigator", "history", "screen",
+            "localStorage", "sessionStorage", "XMLHttpRequest", "fetch(",
+            "querySelector", "getElementsBy", "getElementById", "createElement",
+        )
+
+        internal fun needsPageEnvironment(js: String): Boolean =
+            PAGE_ENV_MARKERS.any { js.contains(it) }
         /** L4 的材料：这一页**实际发过的接口请求**（XHR / Fetch，见 `BrowserBridge.networkRequests`）。
          *  写进侧车的 `network` 键；Python 侧只认形状（形状不对整块丢掉）。 */
         @Volatile
@@ -101,6 +127,7 @@ class ShadowBackstageWebView {
         fun reset() {
             calls.set(0); lastUrl.set(""); lastJsLen.set(0); lastIsRule.set(false)
             rendered.set(0); lastRenderMs.set(0L); lastReason.set("")
+            ruleLocalRuns.set(0)
             lastNetwork = null; lastNetworkEvents = 0; lastNetworkTypes = ""; lastNetworkDrops = ""
             lastCookieLen.set(0); lastCookieNote.set("")
             webviewUnsupported.clear()
@@ -135,11 +162,27 @@ class ShadowBackstageWebView {
         }
         // ---- 本批边界：显式报不支持（理由见类注释）----
         if (isRule) {
+            // isRule 不是「一条边界」，而是「在页面里跑 App 的 webJs 规则」。其中**不需要
+            // 页面环境**的那部分（只用 java/source/cache 做数据变换）没有理由跑浏览器：
+            // App 自带的 Rhino 就是同一个引擎、绑定同步、语义最接近 App（`BaseSource.evalJS`）。
+            // 只有真要用 document/window 的才需要页面，仍走显式不支持。
+            if (js.isNotBlank() && !needsPageEnvironment(js)) {
+                return try {
+                    runRuleWithoutPage(url, js)
+                } catch (e: Throwable) {
+                    recordUnsupported("unsupported_is_rule_local", url)
+                    lastReason.set("unsupported_is_rule_local")
+                    throw IllegalStateException(
+                        "webview_shadow_unsupported: 这条 webJs 规则本机求值失败" +
+                            "（${e.javaClass.simpleName}: ${e.message?.take(120)}）" +
+                            "——不是源的问题", e)
+                }
+            }
             recordUnsupported("unsupported_is_rule", url)
             lastReason.set("unsupported_is_rule")
             throw IllegalStateException(
-                "webview_shadow_unsupported: 这条规则走的是 isRule 注入路径" +
-                    "（需要 java/source 等绑定），本机调试暂不支持——不是源的问题")
+                "webview_shadow_unsupported: 这条规则要用页面环境（document/window 之类），" +
+                    "本机调试暂不支持——不是源的问题")
         }
         if (sourceRegex.isNotBlank()) {
             recordUnsupported("unsupported_source_regex", url)
@@ -148,12 +191,33 @@ class ShadowBackstageWebView {
                 "webview_shadow_unsupported: 源声明了 sourceRegex（嗅探路径），" +
                     "本机调试暂不支持——不是源的问题")
         }
-        if (html.isNotBlank() && url.isBlank()) {
-            recordUnsupported("unsupported_html_only", url)
-            lastReason.set("unsupported_html_only")
-            throw IllegalStateException(
-                "webview_shadow_unsupported: 只给了 html 没给 url（loadDataWithBaseURL），" +
-                    "本机调试暂不支持——不是源的问题")
+        // 上游 `load()` **先看 html**：html 有就分两条——url 空走 `loadData(html, …)`（没有 baseUrl），
+        // url 有走 `loadDataWithBaseURL(url, html, …, url)`（按这个地址渲染这份 html）。
+        // 两条都交给桥的 `content` 入口：前者 `setDocumentContent`，后者 `Fetch.fulfillRequest`
+        // （帧地址与来源都是 url，且一个真实请求都不发）。这里**不再联网去取那个地址**——
+        // 早先那样做会拿另一份材料当结果（`java.webView(script, source.key, "")` 这类调用点
+        // 会拿到源站首页），而界面看起来像「源取不到」。
+        if (html.isNotBlank()) {
+            val (session, why) = BrowserSession.get()
+            if (session == null) {
+                lastReason.set("browser_unavailable")
+                throw IllegalStateException("browser_unavailable: $why")
+            }
+            val t0 = System.currentTimeMillis()
+            // 注入 JS 前的等待照上游：`LoadJsRunnable` 是 `onPageFinished` 之后 1000 + delayTime
+            val delayTime = ReflectionHelpers.getField<Long?>(real, "delayTime") ?: 0L
+            val r = BrowserBridge.renderContent(
+                session, html, baseUrl = url.takeIf { it.isNotBlank() }, timeoutMs = timeoutMs,
+                waitAfterLoadMs = 1000L + delayTime, js = js.takeIf { it.isNotBlank() },
+                jsRetryTimes = JS_RETRY_TIMES, jsRetryIntervalMs = JS_RETRY_INTERVAL_MS)
+            lastRenderMs.set(System.currentTimeMillis() - t0)
+            if (!r.ok) {
+                lastReason.set(r.reason.substringBefore(':'))
+                throw IllegalStateException("webview_render_failed: ${r.reason}")
+            }
+            rendered.incrementAndGet()
+            lastReason.set("")
+            return StrResponse(if (url.isNotBlank()) r.url.ifBlank { url } else "", r.body)
         }
         if (url.isBlank()) {
             lastReason.set("no_url")
@@ -201,5 +265,35 @@ class ShadowBackstageWebView {
         lastCookieNote.set(inj.note)
         // url 用**落地地址**：App 的 buildStrResponse 也是拿 WebView 跳转后的地址
         return StrResponse(r.url.ifBlank { url }, r.body)
+    }
+
+    /**
+     * 在 App 自己的 JS 引擎里跑 webJs 规则（**不渲染页面**）。
+     *
+     * 绑定形状照 `BackstageWebView` 的 WebView 路径对齐，**不是**照 `BaseSource.evalJS`
+     * 的默认形状——两条路看着像，实际差两处（照抄默认绑定会跑出不一样的値）：
+     *
+     * - `java`：WebView 路径里是 `WebJsExtensions`（`ajax` / `connect` / `get` / `log` …），
+     *   而 `evalJS` 默认把它绑成 BaseSource 自己。所以必须显式覆盖。
+     * - `result`：WebView 路径里进的是 `CacheManager["webview_result"]`，不是 JS 绑定
+     *   （`getInjectionString` 只把 cache / source / java 起个别名）。
+     *
+     * `WebJsExtensions` 只在 JS 桥回调（`window.$JSBridgeResult`）那一处用真 WebView，
+     * 传 Robolectric 的桩即可；用到那条桥的规则会在求值时报错，归入「本机未覆盖」。
+     *
+     * 返回值**不做 unescape**：WebView 路径要 `unescapeJson` 是因为 `evaluateJavascript`
+     * 给的是 JSON 转义串，Rhino 这里直接返回真値，多剥一层反而错。
+     */
+    private fun runRuleWithoutPage(url: String, js: String): StrResponse {
+        val tag = ReflectionHelpers.getField<String?>(real, "tag").orEmpty()
+        val source = appDb.bookSourceDao.getBookSource(tag)
+            ?: throw IllegalStateException("拿不到这条源（tag=$tag）")
+        ReflectionHelpers.getField<String?>(real, "result")
+            ?.let { CacheManager.put("webview_result", it) }
+        val ext = WebJsExtensions(source, null, WebView(appCtx))
+        val out = source.evalJS(js) { put("java", ext) }
+        ruleLocalRuns.incrementAndGet()
+        lastReason.set("")
+        return StrResponse(url, out?.toString().orEmpty())
     }
 }
