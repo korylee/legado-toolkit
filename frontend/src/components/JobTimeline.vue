@@ -222,10 +222,13 @@ function onScroll() {
    用组件名前缀写在无 Scoped 块（只此组件用，不上全局 styles.css） */
 /* 高度由弹窗骨架给（TaskDetailDialog 末尾的 flex 链往这里传），`flex-basis: 0`
    让列表吃剩余空间，而不是自己按视口定高——52vh 与弹窗的 88vh 各算各的，
-   窗口一矮就会同时冒出弹窗和列表两根滚动条。min-height 是结果态的保底：
-   那里结论与变化清单先占空间，时间线不许被压没。 */
+   窗口一矮就会同时冒出弹窗和列表两根滚动条。
+   **保底必须是视口相关的**：弹窗只有 max-height，内容不到 88vh 时它按内容收缩，
+   链上就没有「剩余空间」可分，grow 全是空转——这种情形下保底就是时间线实际
+   拿到的高度（固定 96px 时实测只有三行，2026-10-05 截图）。32vh 在任何窗口下
+   都够读，又不会把弹窗顶过 88vh。 */
 .job-timeline {
-  flex: 1 1 0; min-height: 96px; margin-top: 12px;
+  flex: 1 1 0; min-height: 32vh; margin-top: 12px;
   display: flex; flex-direction: column;
 }
 /* 收起时不再吃剩余空间：结果态把高度让给结论（变化清单），自己只留一行标题 */
