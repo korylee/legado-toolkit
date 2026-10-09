@@ -66,6 +66,18 @@ export function jobStatusType(status) {
   return status === "done" ? "success" : status === "failed" ? "danger" : "warning";
 }
 
+/** 进度条的 `status`：Element Plus 只有 success / exception / warning 三档，
+ *  而任务状态有五档——少映射一档是**静默画错**，不报错也不失败：
+ *  `cancelled` 落进 `success` 就是一根绿色满条，与头部「已取消」标签自相矛盾。
+ *  `unknown` 取中性：它只是「SSE 没拿到终态」，库里那条可能早就跑完了，
+ *  画成功和画失败都是编。 */
+export function jobProgressStatus(status) {
+  if (status === "failed") return "exception";
+  if (status === "cancelled") return "warning";
+  if (status === "done") return "success";
+  return undefined;   // 排队 / 在跑 / unknown：中性
+}
+
 /** 终态：不会再变的状态（删除、重试只对这些开放）。
  *
  *  `unknown` 也算终态：它是 SSE 重连到上限仍没拿到终态时的兜底，而库里那条很可能

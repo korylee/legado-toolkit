@@ -11,6 +11,7 @@ import {
   jobIsInFlight,
   jobIsTerminal,
   jobKindLabel,
+  jobProgressStatus,
   jobStatusLabel,
   jobStatusType,
 } from "./jobs.js";
@@ -53,4 +54,13 @@ test("状态与类型都有中文词，未知值原样透出不伪装", () => {
   assert.equal(jobKindLabel("weird"), "weird");
   assert.equal(jobStatusType("done"), "success");
   assert.equal(jobStatusType("failed"), "danger");
+});
+
+test("进度条状态：取消不许画成成功，unknown 不猜", () => {
+  assert.equal(jobProgressStatus("done"), "success");
+  assert.equal(jobProgressStatus("failed"), "exception");
+  assert.equal(jobProgressStatus("cancelled"), "warning");
+  for (const status of ["pending", "running", "cancel_requested", "unknown"]) {
+    assert.equal(jobProgressStatus(status), undefined, status + " 应取中性档");
+  }
 });

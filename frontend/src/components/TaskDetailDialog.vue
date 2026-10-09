@@ -17,6 +17,7 @@ import {
   jobIsTerminal,
   jobKindLabel,
   jobPhaseLabel,
+  jobProgressStatus,
   jobStatusLabel,
   jobStatusType,
 } from "../utils/jobs";
@@ -192,8 +193,7 @@ async function deleteJob() {
       <!-- 在跑：这一段就是「进度弹窗」；结束后同一位置换成结论 -->
       <div class="td-progress">
         <el-progress :percentage="pct" :stroke-width="10"
-                     :status="job.status === 'failed' ? 'exception'
-                              : (inFlight ? undefined : 'success')" />
+                     :status="jobProgressStatus(job.status)" />
         <p class="muted td-progress-text">
           <span v-if="progressText">{{ progressText }}</span>
           <span v-if="job.updated_at"> · 更新于 {{ job.updated_at }}</span>
@@ -279,7 +279,18 @@ async function deleteJob() {
 </template>
 
 <style scoped>
-.td-body { min-height: 80px; }
+/* 弹窗骨架的下一层（上一层在文件末尾的无 scoped 块）：内容区自己也是 flex
+   容器，才能把剩余高度交给时间线。`flex: 1 0 auto` 的 shrink=0 是刻意的——
+   结果态内容超长时不许缩，让它撑出外层的滚动条；有富余时才撑满（进行中态）。 */
+.td-body {
+  flex: 1 0 auto; min-height: 80px;
+  display: flex; flex-direction: column;
+}
+/* 除时间线外都不参与伸缩：flex 的默认 shrink=1，漏了这条会把结果态的结论
+   胶囊与变化清单一起压扁——不报错，只是看着不对。 */
+.td-head, .td-progress, .td-summary, .td-warn, .td-changes, .td-empty, .td-fold {
+  flex: 0 0 auto;
+}
 .td-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .td-head .grow { flex: 1 1 auto; }
 .td-progress {
@@ -346,7 +357,9 @@ async function deleteJob() {
 /* el-dialog 会 teleport 到 body：内部结构够不到 scoped（AGENTS #15），按组件名前缀单开一块。
    限高 + 内滚是本弹窗的骨架：长结果（时间线 + 失败清单）曾把弹窗撑出屏幕，
    footer 永远看不见、只能滚被遮住的页面去看（2026-10-05 实测）——现在头部/底部
-   常驻，只有内容区滚。modal-class 挂在 overlay 根上，用它限定作用范围。 */
+   常驻，只有内容区滚。modal-class 挂在 overlay 根上，用它限定作用范围。
+   **高度只有这一条链决定**：body → `.td-body` → `.job-timeline` → 时间线列表，
+   每一层都要 flex + min-height: 0；中间任何一层自己按视口定高，就会出现第二根滚动条。 */
 .task-detail-overlay .el-overlay-dialog { overflow: hidden; }
 .task-detail-overlay .task-detail-dialog {
   max-height: 88vh;
@@ -356,6 +369,10 @@ async function deleteJob() {
 .task-detail-overlay .task-detail-dialog .el-dialog__header { flex: 0 0 auto; }
 .task-detail-overlay .task-detail-dialog .el-dialog__body {
   flex: 1 1 auto; min-height: 0; overflow-y: auto;
+  display: flex; flex-direction: column;
+  /* 跑批中每 2 秒来一行：没有它，内容刚越过高度的那一刻会冒出滚动条，
+     整块文字跟着横跳一下 */
+  scrollbar-gutter: stable;
 }
 .task-detail-overlay .task-detail-dialog .el-dialog__footer { flex: 0 0 auto; }
 @media (max-width: 760px) {

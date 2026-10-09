@@ -184,16 +184,24 @@ function onScroll() {
 <style>
 /* el-drawer 会 teleport：本组件的壳元素由 Scoped 管不了，按 AGENTS #15
    用组件名前缀写在无 Scoped 块（只此组件用，不上全局 styles.css） */
-.job-timeline { margin-top: 12px; }
-.job-timeline-head { display: flex; align-items: baseline; gap: 12px; }
+/* 高度由弹窗骨架给（TaskDetailDialog 末尾的 flex 链往这里传），`flex-basis: 0`
+   让列表吃剩余空间，而不是自己按视口定高——52vh 与弹窗的 88vh 各算各的，
+   窗口一矮就会同时冒出弹窗和列表两根滚动条。min-height 是结果态的保底：
+   那里结论与变化清单先占空间，时间线不许被压没。 */
+.job-timeline {
+  flex: 1 1 0; min-height: 96px; margin-top: 12px;
+  display: flex; flex-direction: column;
+}
+.job-timeline-head { display: flex; align-items: baseline; gap: 12px; flex: 0 0 auto; }
 .job-timeline-follow, .job-timeline-log-toggle {
   font-size: 12px; color: var(--el-color-primary); cursor: pointer; user-select: none;
 }
 .job-timeline-list {
-  /* 52vh 而不是固定 320px：时间线是跑批弹窗里的**主内容**，压在 320px 里
-     一屏只能看十几行，用户读到的信息被滚动条藏掉大半（2026-10-05 用户反馈
-     「布局不能完整展示信息」）。vh 随窗口走，小窗口也不至于把弹窗撑爆 */
-  margin-top: 6px; max-height: 52vh; overflow: auto;
+  /* 高度来自骨架（吃 `.job-timeline` 的剩余空间），不再按视口定高：52vh 与
+     弹窗的 88vh 各算各的，窗口一矮就同时出现两根滚动条。「要能完整展示信息」
+     这条约束还在，只是现在由 flex 保证，而不是靠调 vh 的数值。 */
+  flex: 1 1 0; min-height: 0;
+  margin-top: 6px; overflow: auto; scrollbar-gutter: stable;
   padding: 6px 8px; border: 1px solid var(--el-border-color-extra-light);
   border-radius: 6px; background: var(--el-fill-color-lighter);
   font-family: var(--el-font-family-monospace, monospace); font-size: 12px;
