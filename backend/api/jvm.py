@@ -36,7 +36,7 @@ from core.store import Store
 
 router = APIRouter()
 
-#: 结论 state → 展示口径（来源阶梯：本地回放 < JVM < 真机）
+#: 结论 state → 展示口径（来源阶梯：JVM < 真机）
 STATE_LABEL = {
     "ok": "可用（JVM·App 引擎）",
     "no_result": "搜索无结果（JVM）",

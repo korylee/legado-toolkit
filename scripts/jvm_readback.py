@@ -8,10 +8,9 @@
   - 结论四态：ok / empty_js_shell（unknown 语义）/ no_result / error / timeout / invalid
 
 写库策略：
-  - **不覆盖本地校验**——两套证据等级不同（lessons §五十一 的来源阶梯：本地回放 < JVM < 真机）。
-    JVM 结果写到 `meta` 表（key 前缀 `jvm_check:`），**不进 checks**——
-    S2 会做「来源阶梯」的展示层，那里再决定怎么合并呈现。
-  - 本脚本只做「读回 + 汇总 + 落 meta」，幂等（重跑覆盖同 key）。
+  - 结论经 `core.jvm_health.store_checks` 落 `checks`（与产品那条路同一份映射：
+    五档 / 验证阶段 / 谁判的），同时把原文另存 `meta`（key 前缀 `jvm_check:`）便于复核。
+  - 本脚本只做「读回 + 汇总 + 落库」，幂等（重跑覆盖同 key）。
 
 用法：
     python scripts/jvm_readback.py data/app_probe/s1_results.jsonl

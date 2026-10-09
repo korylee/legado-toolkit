@@ -99,7 +99,7 @@ def verify_candidate(source: Dict[str, Any], field: str, rule: str,
         result = runner(patched, key, timeout) or {}
     except Exception as exc:
         return {
-            "status": "engine_unavailable", "local": {"status": "not_run"},
+            "status": "engine_unavailable",
             "engine": {"status": "unavailable", "channel": "jvm",
                         "reason": "%s: %s" % (type(exc).__name__, exc)},
             "target": target, "step": _STEP_OF_TARGET[target], "key": key,
@@ -107,7 +107,7 @@ def verify_candidate(source: Dict[str, Any], field: str, rule: str,
 
     if not isinstance(result, dict):
         return {
-            "status": "engine_unavailable", "local": {"status": "not_run"},
+            "status": "engine_unavailable",
             "engine": {"status": "unavailable", "channel": "jvm",
                         "reason": "引擎返回不是对象"},
             "target": target, "step": _STEP_OF_TARGET[target], "key": key,
@@ -119,7 +119,7 @@ def verify_candidate(source: Dict[str, Any], field: str, rule: str,
         reason = str(result.get("error") or result.get("code_text") or
                      "引擎没有返回目标步骤")
         return {
-            "status": "engine_unavailable", "local": {"status": "not_run"},
+            "status": "engine_unavailable",
             "engine": {"status": "unavailable", "channel": "jvm", "reason": reason},
             "target": target, "step": step_name, "key": key,
         }
@@ -129,7 +129,6 @@ def verify_candidate(source: Dict[str, Any], field: str, rule: str,
     verified = ok and not empty_field
     out = {
         "status": "verified" if verified else "rejected",
-        "local": {"status": "not_run"},
         "engine": {
             "status": "pass" if verified else "fail", "channel": "jvm",
             "step": step_name, "detail": str(step.get("detail") or ""),

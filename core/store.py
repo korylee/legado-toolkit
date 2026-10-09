@@ -274,9 +274,9 @@ class Store:
         # `core/checker` 的 `CACHE_VERSION`。**不落这一列等于没修**：
         # item 里写了但没建列，读回来恒为 None，新旧口径在库里分不出来
         ("search_probed", "INTEGER DEFAULT 0"),
-        # 结论**是谁判的**（core/models.Engine：'' / local / jvm / device）。撤掉本地
-        # 引擎之后，存量行是本地判的、新行是本机引擎判的——两种证据等级的判据强度不同
-        # （本地跑不了 `@js:`、没有登录态），不记出处就是一份没有来源的结论
+        # 结论**是谁判的**（core/models.Engine：jvm / device）。本机引擎与真机的
+        # 判据强度不同（真机有登录态和用户自己的网络出口），不记出处就是一份
+        # 没有来源的结论。**本地回放那个取值随本地校验链退场（十-4）**
         ("engine", "TEXT NOT NULL DEFAULT ''"),
     ], "jobs": [
         # 任务保留：对齐 exports（expires_at + pinned + sweep），**原来完全没有**——
