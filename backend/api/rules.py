@@ -90,18 +90,19 @@ def _debug_key(body, source: Dict[str, Any], keyword: str) -> str:
         raise HTTPException(400, str(e))
 
 
-@router.post("/jvm-debug")
+@router.post("/jvm-debug", status_code=202)
 async def jvm_debug(body: JvmDebugRequest):
-    """在本机引擎里跑一次调试（S5-A4）：**不填 IP、不推送**，直接出分段结果。
+    """提交一次本机引擎调试（S5-A4）：**不填 IP、不推送**，立刻返回任务号。
 
-    返回体与 ``/app-debug`` **同形状**（source/steps/pages/all_ok/events/error），
-    前端抽屉与卡片零改动——`source` 是 ``"jvm"``，抽屉据此标「本机引擎」而不是
-    「App 实测」。
+    调试已经是一个**异步任务**（``kind="jvm_debug"``，执行体见
+    ``backend/jobs/jvm_debug_job``）：过程走那一条观测流
+    （``GET /api/jobs/{id}/stream``），跑完的返回体在 ``GET /api/jobs/{id}/detail``。
+    界面因此不必再"空等待"——等待期就能看到正在跑哪一步、谁占着引擎。
 
-    后端请求进入共享的 JVM lane，按提交顺序等待；命令行等不经过后端 lane 的调用仍
-    由 `core.jvm_debug.RUN_LOCK` 做非阻塞保护。
+    入参校验、环境就绪快照、key 拼装仍然在**提交之前**做完：不合法要当场 400 说清，
+    不能变成一个"跑起来才知道不对"的任务（AGENTS #4）。
     """
-    from core.jvm_debug import run_jvm_debug
+    from backend.jobs.jvm_debug_job import debug_payload
     from core import settings_store
     from core.jvm_env import readiness
 
@@ -119,34 +120,13 @@ async def jvm_debug(body: JvmDebugRequest):
     # key 在占 lane **之前**拼好：入参不合法就快速 400，不占着 JVM lane 报错
     keyword = str(jvm_conf.get("keyword") or settings_store.DEFAULTS["jvm"]["keyword"])
     key = _debug_key(body, dict(body.source or {}), keyword)
-    # JVM 与批量校验共用一条 lane。常驻 daemon 本身也只能串行处理请求；后来的
-    # 调试请求按**优先级**排队（debug 档先于批量档）等待，而不是拿不到
-    # `RUN_LOCK` 后直接返回 busy。取消语义（断开也要等引擎跑完）收在
-    # `run_in_lane` 一处。
-    return await runner.run_in_lane(
-        "jvm", "debug", run_jvm_debug, dict(body.source or {}), key,
-        timeout, body.cookie or "", cache, resolve_proxy(),
-        readiness_result=readiness_result,
-        run_id=str(body.run_id or ""),
-    )
-
-
-@router.get("/debug-status")
-async def debug_status(run_id: str = ""):
-    """在途调试的**等待观测口**：已等多少秒 + 此刻占着引擎的是谁。
-
-    为什么要有这个口：`/rules/jvm-debug` 是**同步长轮询**——不跑完不返回，而引擎的
-    ndjson 事件流要等进程退出才解析，所以等待期间界面上一个可读产物都没有（用户反馈
-    的「每次调试都是空等待」）。批量校验那边有 jobs 表 + 时间线，调试没有 job 行；
-    这里读的是 `backend/jobs/runner` 的进程内登记 + 既有的 `lane` 现状，
-    **只回事实，不回进度、不做 ETA**。
-
-    没登记（没传 run_id / 这次已收尾）返回 `{"phase": ""}`：那不是错误。
-    """
-    snapshot = runner.active_run_snapshot(run_id)
-    if snapshot is None:
-        return {"phase": "", "run_id": str(run_id or "")}
-    return snapshot
+    payload = debug_payload(dict(body.source or {}), key=key, timeout=timeout,
+                            cookie=body.cookie or "", cache=cache,
+                            proxy=resolve_proxy(), readiness=readiness_result)
+    # JVM 与批量校验共用一条 lane，**调试档优先**（LANE_PRIORITY：debug=0 / batch=10）
+    job_id = runner.submit("jvm_debug", payload, lane="jvm", lane_kind="debug")
+    return {"job_id": job_id, "kind": "jvm_debug",
+            "events": "/api/jobs/%s/stream" % job_id}
 
 
 @router.post("/app-debug")

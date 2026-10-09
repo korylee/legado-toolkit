@@ -1,11 +1,9 @@
 # -*- coding: utf-8 -*-
-import asyncio
 import json
 import time
 from typing import Any, Dict, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import StreamingResponse
 
 from backend.deps import get_store
 from backend.jobs import runner
@@ -217,12 +215,16 @@ def _job_row(job: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _job_detail(job: Dict[str, Any]) -> Dict[str, Any]:
+def _job_detail(job: Dict[str, Any], raw: bool = False) -> Dict[str, Any]:
     """把数据库任务行转换成前端唯一使用的明细形状。
 
-    列表和 SSE 继续只返回轻量任务行；只有用户主动查看时才解析结果。
-    校验任务只下发摘要和变化明细，避免把 ``items[:500]`` 再复制进详情响应；
+    **列表与流继续只返回轻量行**；只有用户主动查看（或终态收尾）时才解析结果。
+    校验任务默认只下发摘要和变化明细，避免把 ``items[:500]`` 再复制进详情响应；
     其他任务保留结构化结果，方便查看生成/导入任务的实际返回值。
+
+    ``raw=True`` 才把校验的**原始结果体**一并给出：列表页的「就地回填 + 结果条」
+    要用 ``items``／``transitions``，而摘要是给界面看的投影、不够用。它是一条
+    **一次性的拉取**（点开详情、跑完收尾），不是每拍都来的东西。
     """
     parsed = _load_result(job)
 
@@ -253,7 +255,7 @@ def _job_detail(job: Dict[str, Any]) -> Dict[str, Any]:
         "execution_note": execution_note,
         "daemon_fallback_reason": daemon_fallback_reason,
         "error": error,
-        "result": parsed if summary is None else None,
+        "result": parsed if (summary is None or raw) else None,
     }
     if job.get("kind") == "jvm_run" and isinstance(parsed, dict):
         detail.update(_chunk_detail_reports(parsed))
@@ -272,7 +274,7 @@ async def create_job(body: JobCreate):
         job_id = runner.submit(body.kind, body.payload)
     except ValueError as exc:
         raise HTTPException(400, str(exc))
-    return {"job_id": job_id, "kind": body.kind, "events": "/api/jobs/%s/events" % job_id}
+    return {"job_id": job_id, "kind": body.kind, "events": "/api/jobs/%s/stream" % job_id}
 
 
 #: 状态档位 → 库内状态。**只认档位名**：让前端传 `running` 这类原始字面量，
@@ -300,12 +302,15 @@ def list_jobs(
     scope: Literal["recent", "all"] = "recent",
     status: Literal["", "active", "done", "failed", "cancelled"] = "",
     kind: str = "",
+    exclude_kind: str = "",
     st=Depends(get_store),
 ):
     """任务列表：筛选 + 每行结论摘要。
 
     ``scope=recent``（默认）给「进行中 + 最近 ``JOBS_TTL_DAYS`` 天」——任务多起来以后
     全部历史在首屏就是噪音；``scope=all`` 才是全量。筛选口径都在这里决定，前端只传档位名。
+    ``exclude_kind`` 给任务中心用：**调试运行（``jvm_debug``）不进这份列表**——
+    它由调试页自己观测，一次点击一条会把任务中心刷成流水账。
 
     每行带 ``summary``（通过 / 未通过 / 检查数 / 相对上次变化），**不带 result_json**：
     列表要能直接看出这次跑得好不好，而上百 KB 的结果不能进列表响应。
@@ -318,7 +323,7 @@ def list_jobs(
     rows = st.list_jobs(
         limit=_LIST_LIMIT,
         statuses=_STATUS_SCOPES.get(status) or (),
-        kind=kind.strip(), recent_since=since)
+        kind=kind.strip(), recent_since=since, exclude_kind=exclude_kind.strip())
     return {"items": [_job_row(row) for row in rows], "limit": _LIST_LIMIT,
             # 界面把窗口天数写进档位名（「进行中 + 最近 N 天」）：数字从这里走，
             # 别在文案里再抄一份（JOBS_TTL_DAYS 改了标签跟着变）
@@ -342,11 +347,16 @@ def job_kinds():
 
 
 @router.get("/{job_id}/detail")
-def get_job_detail(job_id: str, st=Depends(get_store)):
+def get_job_detail(job_id: str, raw: bool = False, st=Depends(get_store)):
+    """任务明细：``raw=1`` 时连校验的原始结果体一起给（见 ``_job_detail``）。
+
+    默认不给：那是一份 ``items[:500]``（一条上百 KB），只有"就地回填 + 结果条"
+    这种真要用 ``items`` 的调用方才该说这一声。
+    """
     job = st.get_job(job_id)
     if not job:
         raise HTTPException(404, "任务不存在")
-    return _job_detail(job)
+    return _job_detail(job, raw=raw)
 
 
 @router.get("/{job_id}")
@@ -388,7 +398,7 @@ async def retry_job(job_id: str, st=Depends(get_store)):
     except ValueError as exc:
         raise HTTPException(409, str(exc))
     return {"job_id": new_id, "kind": kind, "retry_of": job_id,
-            "events": "/api/jobs/%s/events" % new_id}
+            "events": "/api/jobs/%s/stream" % new_id}
 
 
 @router.post("/{job_id}/cancel")
@@ -407,33 +417,3 @@ def delete_job(job_id: str, st=Depends(get_store)):
         raise HTTPException(409, "任务状态已变化，请刷新后重试")
     return {"deleted": True, "job_id": job_id}
 
-
-@router.get("/{job_id}/events")
-async def job_events(job_id: str):
-    # SSE：只推变化，任务结束即关闭
-    def frame(data: dict) -> str:
-        return "data: " + json.dumps(data, ensure_ascii=False) + "\n\n"
-
-    async def gen():
-        last = None
-        # Store **建一次**就用整条流。放进循环里的话，每 0.5 秒要重跑一遍
-        # `Store.__init__`——建连接 + PRAGMA + `_init_schema()`（CREATE TABLE
-        # IF NOT EXISTS 外加逐列 ALTER 补列），为一个 `SELECT` 付一次建库的价。
-        # 客户端断开时生成器被关，with 块照常收连接
-        with runner.Store() as st:
-            while True:
-                job = st.get_job(job_id)
-                if not job:
-                    yield frame({"error": "任务不存在"})
-                    return
-                cur = (job.get("status"), job.get("phase"), job.get("progress"))
-                if cur != last:
-                    yield frame(job)
-                    last = cur
-                if job.get("status") in ("done", "failed", "cancelled"):
-                    return
-                await asyncio.sleep(0.5)
-
-    return StreamingResponse(gen(), media_type="text/event-stream",
-                             headers={"Cache-Control": "no-cache",
-                                      "X-Accel-Buffering": "no"})

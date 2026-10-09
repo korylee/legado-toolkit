@@ -4,13 +4,13 @@
 <script setup>
 import { ref, computed, watch, nextTick, onMounted, onUnmounted, inject } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { api, subscribeJob } from "../api/client";
-import { jobFailReason } from "../utils/jobs";
+import { getJobDetail, submitJob } from "../api/jobs";
 import {
   canonicalTag, ensureTagMeta, isQualityTag, isStatusTag,
   mergeGroup, sourceTypes, splitSystemUser, statusTags, tagOfType, typeKeyOf,
 } from "../utils/tags";
 import { useMobile } from "../composables/useMobile";
+import { useJobs } from "../composables/useJobs";
 import SourceFields from "./SourceFields.vue";
 import GrammarList from "./GrammarList.vue";
 // 步骤名 → 中文的**唯一**一份（调试页共用），别再在本组件里写第二份
@@ -27,6 +27,7 @@ const workspace = inject(SOURCE_WORKSPACE_KEY);
 if (!workspace)
   throw new Error("SourceEditDialog must be mounted under MainLayout");
 const isMobile = useMobile();
+const { watchJob, frameOf } = useJobs();
 
 const {
   result: testResult,
@@ -64,6 +65,8 @@ const quickDiscover = ref(false);
 const quickProbe = ref(true);
 const quickLoading = ref(false);
 const quickProgress = ref("");
+//: 正在盯的那个生成任务（进度从它的观测帧来，见下面的 watch）
+const quickJobId = ref("");
 const quickVerify = ref(null);
 //: 生成后的那次验证是谁给的（十-5 之后只有**真引擎**两个通道）：标签必须跟着来源走——
 //: 跑真引擎的结果挂着「本地调试 · 仅供参考」是句假话（AGENTS #4 那一类）
@@ -108,6 +111,14 @@ function rerunStaleStep(stepName) {
   return rerunFromStep(stepName);
 }
 let quickStop = null;
+//: 进度取那条观测流的帧（每个任务一条，与明细弹窗共用）：生成也是分钟级的，
+//: 只在收尾才更新的话，按钮旁那句话会一直停在「任务 xxx」不动。
+watch(() => {
+  const frame = frameOf(quickJobId.value);
+  return (frame && frame.job) || null;
+}, (job) => {
+  if (job && job.total) quickProgress.value = `${job.progress || 0}/${job.total}`;
+});
 onUnmounted(() => {
   if (quickStop) { quickStop(); quickStop = null; }
 });
@@ -533,51 +544,52 @@ async function quickGenerate() {
   quickProgress.value = "提交中...";
   quickVerify.value = null;
   try {
-    const r = await api.post("/jobs", {
-      kind: "add",
-      payload: {
-        url,
-        name: form.value.bookSourceName || "",
-        type: typeKey,
-        detail_url: quickDetailUrl.value.trim(),
-        probe: quickProbe.value,
-        discover: quickDiscover.value,
-        verify: true,
-      },
+    const r = await submitJob("add", {
+      url,
+      name: form.value.bookSourceName || "",
+      type: typeKey,
+      detail_url: quickDetailUrl.value.trim(),
+      probe: quickProbe.value,
+      discover: quickDiscover.value,
+      verify: true,
     });
     quickProgress.value = "任务 " + r.job_id;
     if (quickStop) quickStop();
-    quickStop = subscribeJob(
-      r.job_id,
-      (d) => {
-        if (d && d.total) quickProgress.value = `${d.progress || 0}/${d.total}`;
-      },
-      (d) => {
-        quickLoading.value = false;
-        quickStop = null;
-        if (d.status !== "done") {
-          quickProgress.value = "";
-          // 失败原因在后端的 result_json.error 里（连「进程重启没写终态」那种也有，
-          // 见 Store.fail_orphan_jobs）。只显示 status 字面量等于把原因丢了
-          const why = jobFailReason(d.result_json);
-          const message = why || d.status || "未知错误";
-          ElMessage.error("生成失败，已打开调试工作台：" + message);
-          void openDebugForGenerationFailure(message);
-          return;
-        }
-        let result = {};
-        try { result = JSON.parse(d.result_json || "{}"); } catch (e) { result = {}; }
-        if (!result.ok) {
-          quickProgress.value = "";
-          const message = result.error || "生成失败";
-          ElMessage.error("生成失败，已打开调试工作台：" + message);
-          void openDebugForGenerationFailure(message);
-          return;
-        }
+    quickJobId.value = r.job_id;
+    quickStop = watchJob(r.job_id, async (state) => {
+      quickLoading.value = false;
+      quickStop = null;
+      quickJobId.value = "";
+      const status = (state && state.job && state.job.status) || "";
+      if (status !== "done") {
         quickProgress.value = "";
-        applyGenerated(result);
-      },
-    );
+        // 失败原因在后端的 `error`（连「进程重启没写终态」那种也有，见
+        // Store.fail_orphan_jobs）。只显示 status 字面量等于把原因丢了
+        const why = (state && state.job && state.job.error) || "";
+        const message = why || status || "未知错误";
+        ElMessage.error("生成失败，已打开调试工作台：" + message);
+        void openDebugForGenerationFailure(message);
+        return;
+      }
+      // 生成类任务的结果体走明细（列表/流都只给轻量行）：用户主动等到的这一次
+      // 收尾，拉一次完整结果
+      let result = {};
+      try {
+        const detail = await getJobDetail(r.job_id);
+        result = detail.result || {};
+      } catch (e) {
+        result = {};
+      }
+      if (!result.ok) {
+        quickProgress.value = "";
+        const message = result.error || "生成失败";
+        ElMessage.error("生成失败，已打开调试工作台：" + message);
+        void openDebugForGenerationFailure(message);
+        return;
+      }
+      quickProgress.value = "";
+      applyGenerated(result);
+    });
   } catch (e) {
     quickLoading.value = false;
     quickProgress.value = "";

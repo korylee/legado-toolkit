@@ -1,4 +1,5 @@
-// 在途调试**渲染层**的断言：后端只给相位码与事实（`backend/jobs/runner.active_run_snapshot`），
+// 在途运行**渲染层**的断言：后端只给相位码与事实（观测帧里的
+// phase / elapsed_ms / lane_holder，见 `backend/api/job_timeline`），
 // 中文句子在这里出。要钉住的是两件事：
 //   ① 码 → 词的两张表（排队 / 拉起引擎 / 引擎执行中），以及「谁占着引擎」的说法；
 //   ② **交接判据用 phase_ms，不用总已等时长**——前面排了多久的队不影响「拉起引擎」

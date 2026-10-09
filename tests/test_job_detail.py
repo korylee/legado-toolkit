@@ -126,6 +126,16 @@ class JobDetailShapeTests(unittest.TestCase):
         detail = _job_detail(self._job({"ok": True, "reason": "块间交还调度权"}))
         self.assertEqual("", detail["error"])
 
+    def test_check_result_raw_is_opt_in(self):
+        """校验结果默认只给摘要；``raw=True`` 才给原始体（列表页要 items 回填）。"""
+        result = {"checked": 2, "cached": 0, "fetched": 2,
+                  "items": [{"url": "https://a.example"}],
+                  "transitions": {"changed": {}}}
+        job = self._job(result)
+        self.assertIsNone(_job_detail(job)["result"])
+        raw = _job_detail(job, raw=True)["result"]
+        self.assertEqual(raw["items"], [{"url": "https://a.example"}])
+
     def test_other_job_keeps_structured_result(self):
         result = {"source_url": "https://a.example", "saved": True}
         detail = _job_detail({**self._job(result), "kind": "add"})

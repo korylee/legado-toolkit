@@ -24,6 +24,7 @@ from unittest import mock
 from fastapi import HTTPException
 
 from backend.api.rules import jvm_debug as jvm_debug_endpoint
+from backend.jobs import runner as job_runner
 from backend.schemas import JvmDebugRequest
 from core import jvm_daemon, jvm_debug, jvm_direct
 
@@ -542,31 +543,33 @@ class GradleDumpRefreshTests(unittest.TestCase):
 
 
 class EndpointTests(_RunCase):
-    """端点只做入参校验与转交（同步阻塞的部分交给线程池，这里直调看形状）。"""
+    """端点做入参校验，然后**提交成任务**（执行体在 `jvm_debug_job`，这里只看形状）。
+
+    调试不再是同步长轮询：端点返回任务号，过程与结果从那条观测流 / 明细里看。
+    所以这里钉的是"参数有没有原样进 payload"——校验与转交这两件事各只有一处。
+    """
 
     def setUp(self) -> None:
         super().setUp()
         self.seen = {}
 
-        def fake_run(source, key, timeout, cookie, cache, proxy="", out_path="",
-                     readiness_result=None):
-            self.seen.update(source=source, key=key, timeout=timeout, cookie=cookie,
-                             cache=cache, readiness=readiness_result)
-            return {"source": "jvm", "steps": [{"name": "search", "ok": True}], "pages": [],
-                    "all_ok": True, "events": [], "error": ""}
+        def capture(kind, payload, **kw):
+            self.seen.update(payload)
+            self.seen["kind"] = kind
+            return "debug-job"
 
-        self._patch_run = fake_run
-        real = jvm_debug.run_jvm_debug
-        jvm_debug.run_jvm_debug = fake_run            # 端点内部 `from core.jvm_debug import`
-        self.addCleanup(setattr, jvm_debug, "run_jvm_debug", real)
+        self._submit = mock.patch.object(job_runner, "submit", side_effect=capture)
+        self._submit.start()
+        self.addCleanup(self._submit.stop)
 
     def _call(self, **kw):
         body = JvmDebugRequest(source=fake_source(), **kw)
         return asyncio.run(jvm_debug_endpoint(body))
 
-    def test_endpoint_passes_params_through(self) -> None:
+    def test_endpoint_submits_a_debug_job_with_the_params(self) -> None:
         r = self._call(key="斗破", timeout=90, cookie="a=1", cache="only")
-        self.assertEqual(r["source"], "jvm")
+        self.assertEqual(r["job_id"], "debug-job")
+        self.assertEqual(self.seen["kind"], "jvm_debug")
         self.assertEqual(self.seen["key"], "斗破")
         self.assertEqual(self.seen["timeout"], 90)
         self.assertEqual(self.seen["cookie"], "a=1")
@@ -590,8 +593,9 @@ class EndpointTests(_RunCase):
         fake = {"network": {"proxy": ""},
                 "jvm": {"app_repo": "", "android_sdk_dir": ""},
                 "debug": {"timeout": 120}}
-        with mock.patch.object(settings_store, "load", return_value=fake),              mock.patch("core.jvm_env.readiness",
-                        return_value={"ok": True, "checks": []}):
+        with mock.patch.object(settings_store, "load", return_value=fake), \
+                mock.patch("core.jvm_env.readiness",
+                           return_value={"ok": True, "checks": []}):
             self._call()
         self.assertEqual(self.seen["timeout"], 120)
 
@@ -614,7 +618,8 @@ class EndpointTests(_RunCase):
         from core import settings_store
 
         with mock.patch.object(settings_store, "load",
-                               return_value=self._settings("斗破")),                mock.patch("core.jvm_env.readiness",
+                               return_value=self._settings("斗破")), \
+                mock.patch("core.jvm_env.readiness",
                            return_value={"ok": True, "checks": []}):
             self._call(target="toc", query="++https://a.com/t")
             self.assertEqual(self.seen["key"], "++https://a.com/t")

@@ -1,10 +1,15 @@
 <script setup>
 // 执行时间线（jvm-batch-timeline）：像构建日志一样看批量校验。
-// 运行中每 2 秒按游标拉一次骨架事件增量 + 失败源；终态拉一次全量就停。
-// 进度只报后端给的真实数（不做估算/ETA）；「正在校验某源」的瞬时状态
-// 引擎没有上报，不编。失败块的引擎日志从详情投影的 chunk_reports 取。
-import { ref, computed, watch, onUnmounted, nextTick } from "vue";
-import { api } from "../api/client";
+//
+// **本组件不再自己取数**：事件、失败清单、终态都来自 `useJobs` 的那条流
+// （每个任务一条，引用计数共用；见 composables/useJobs.js）。原来的 2 秒轮询 +
+// 行号游标是"同一个任务的第二份观测"，它和明细弹窗拉的 `/jobs/{id}` 必然漂。
+// 进度只报后端给的真实数（不做估算/ETA）；「正在校验某源」的瞬时状态引擎没有上报，不编。
+// 失败块的引擎日志从详情投影的 chunk_reports 取。
+import { ref, computed, watch, onUnmounted } from "vue";
+import { useJobs } from "../composables/useJobs";
+import { useFollowScroll } from "../composables/useFollowScroll";
+import { emptyRun } from "../utils/runStream";
 import { formatTimelineEvent, formatFailureLine, groupTimelineLines } from "../utils/jobTimeline";
 import { executionModeLabel } from "../utils/jobs";
 
@@ -18,26 +23,36 @@ const props = defineProps({
   // 详情投影里的块级报告：失败块展开时取 Gradle 日志尾部作附件
   chunkReports: { type: Array, default: () => [] },
 });
-const emit = defineEmits(["state"]);
 
-const POLL_MS = 2000;
 const TERMINAL = ["done", "failed", "cancelled"];
+const { frameOf, watchJob } = useJobs();
 
-const lines = ref([]);
-const failures = ref({ total: 0, truncated: false, items: [] });
-const expanded = ref("");
+//: 本组件也占一个流的引用：只开明细弹窗不开时间线时，流归弹窗；两个都开也只有一条连接
+let stopWatch = null;
+watch(() => props.jobId, (id) => {
+  if (stopWatch) stopWatch();
+  stopWatch = id ? watchJob(id) : null;
+}, { immediate: true });
+onUnmounted(() => { if (stopWatch) stopWatch(); });
+
+const state = computed(() => frameOf(props.jobId) || emptyRun());
+const status = computed(() => (state.value.job || {}).status || props.status);
 //: 结果态默认收起来：那时用户要读的是变化清单，时间线是排查时才摊开的材料
 const collapsed = ref(false);
-const pollError = ref("");
-const following = ref(true);
+const expanded = ref("");
 const listEl = ref(null);
-let cursor = 0;
-let isDone = false;
-let timer = null;
-let lastKey = "";
-let pollInFlight = false;
-let pollPending = false;
-let pollGeneration = 0;
+
+const lines = computed(() => (state.value.events || []).map((ev) => ({
+  seq: ev.seq, ts: ev.ts, kind: ev.kind, index: ev.index,
+  ...formatTimelineEvent(ev),
+})));
+//: 跟随最新（判据与调试的时间线共用一份，见 composables/useFollowScroll）
+const { following, onScroll, followLatest } = useFollowScroll(listEl, lines);
+const failures = computed(() => ({
+  total: state.value.failuresTotal || 0,
+  truncated: state.value.failuresTruncated,
+  items: state.value.failures || [],
+}));
 
 const hhmmss = (ts) => {
   if (!ts) return "--:--:--";
@@ -60,109 +75,9 @@ const failureTotal = computed(() => failures.value.total || 0);
 const notShown = computed(() =>
   Math.max(failureTotal.value - (failures.value.items || []).length, 0));
 
-function scrollFollow() {
-  if (!following.value) return;
-  nextTick(() => {
-    const el = listEl.value;
-    if (el) el.scrollTop = el.scrollHeight;
-  });
-}
-
-function stopPolling() {
-  if (timer) clearInterval(timer);
-  timer = null;
-}
-
-async function pull() {
-  if (!props.jobId) return;
-  if (pollInFlight) {
-    pollPending = true;
-    return;
-  }
-  const generation = pollGeneration;
-  const jobId = props.jobId;
-  pollInFlight = true;
-  try {
-    const data = await api.get(`/jobs/${jobId}/timeline?after=${cursor}`);
-    if (generation !== pollGeneration || jobId !== props.jobId) return;
-    pollError.value = "";
-    emit("state", {
-      status: data.status,
-      phase: data.phase,
-      progress: data.progress,
-      total: data.total,
-    });
-    if (Array.isArray(data.events) && data.events.length) {
-      lines.value = lines.value.concat(
-        data.events.map((ev) => ({
-          seq: ev.seq, ts: ev.ts, kind: ev.kind, index: ev.index,
-          ...formatTimelineEvent(ev),
-        })));
-    }
-    cursor = data.cursor ?? cursor;
-    if (data.failures) failures.value = data.failures;
-    if (data.done) {
-      isDone = true;
-      stopPolling();
-    }
-    scrollFollow();
-  } catch (e) {
-    if (generation !== pollGeneration || jobId !== props.jobId) return;
-    // 单次轮询失败不终止跟随：下一轮重试；连续失败才提示（后端可能重启了）
-    pollError.value = pollError.value === "" ? "1" : pollError.value + "1";
-    if (pollError.value.length >= 3) pollError.value = "err";
-  } finally {
-    pollInFlight = false;
-    if (pollPending && !isDone) {
-      pollPending = false;
-      void pull();
-    }
-  }
-}
-
-function start() {
-  pollGeneration += 1;
-  const key = `${props.jobId}|${props.status}`;
-  if (key === lastKey) return;
-  // 同一任务由轮询自然收尾（done 已停表）就不重置重来——终态的那几行
-  // 已经在增量里了
-  if (lastKey.startsWith(`${props.jobId}|`) && isDone) {
-    lastKey = key;
-    return;
-  }
-  lastKey = key;
-  stopPolling();
-  pollPending = false;
-  lines.value = [];
-  failures.value = { total: 0, truncated: false, items: [] };
-  expanded.value = "";
-  cursor = 0;
-  isDone = false;
-  pollError.value = "";
-  following.value = true;
-  if (!props.jobId || TERMINAL.includes(props.status)) {
-    // 终态：一次全量即可（后端从 result_json 给，不再碰磁盘）
-    pull();
-    return;
-  }
-  pull();
-  timer = setInterval(() => {
-    if (!isDone) pull();
-  }, POLL_MS);
-}
-
-watch(() => [props.jobId, props.status], start, { immediate: true });
-//: 终态默认收起：结果态的主视线归结论（变化清单），展开时间线是排查动作
-watch(() => props.status, (status) => {
-  collapsed.value = TERMINAL.includes(status);
-}, { immediate: true });
-onUnmounted(stopPolling);
-
-function onScroll() {
-  const el = listEl.value;
-  if (!el) return;
-  following.value = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
-}
+//: 开局与终态都按状态收起：终态时主视线归结论（变化清单），展开时间线是排查动作
+watch(status, (value) => { collapsed.value = TERMINAL.includes(value); },
+      { immediate: true });
 </script>
 
 <template>
@@ -179,7 +94,7 @@ function onScroll() {
            补充说明挂 title 上，不占主视线 -->
       <span v-if="modeLabel" class="chip" :title="executionNote">{{ modeLabel }}</span>
       <span v-if="!collapsed && !following" class="job-timeline-follow"
-            @click="following = true; scrollFollow()">回到最新</span>
+            @click="followLatest">回到最新</span>
     </div>
     <div v-show="!collapsed" ref="listEl" class="job-timeline-list" @scroll="onScroll">
       <div v-for="item in groupedLines" :key="item.key" class="job-timeline-line"
@@ -211,7 +126,6 @@ function onScroll() {
         </div>
       </div>
 
-      <div v-if="pollError === 'err'" class="muted job-timeline-note">时间线暂时取不到（任务仍在后台执行），会继续重试</div>
       <div v-if="!lines.length && !failures.items.length" class="muted job-timeline-note">还没有执行记录</div>
     </div>
   </div>

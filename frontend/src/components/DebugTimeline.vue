@@ -1,28 +1,16 @@
 <script setup>
-import { computed, nextTick, ref, watch } from "vue";
+// 调试过程的事件列表（数据来自观测帧；这里只剩渲染）。
+// 「跟随最新」的判据在 composables/useFollowScroll——与批量校验的时间线共用一份。
+import { computed, ref } from "vue";
+
+import { useFollowScroll } from "../composables/useFollowScroll";
 
 const props = defineProps({
   events: { type: Array, default: () => [] },
 });
 const listEl = ref(null);
-const following = ref(true);
-const hasOlder = ref(false);
 const lines = computed(() => props.events || []);
-
-function onScroll() {
-  const el = listEl.value;
-  if (!el) return;
-  following.value = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
-}
-function followLatest() {
-  following.value = true;
-  nextTick(() => {
-    if (listEl.value) listEl.value.scrollTop = listEl.value.scrollHeight;
-  });
-}
-watch(lines, () => {
-  if (following.value) followLatest();
-}, { deep: true });
+const { following, onScroll, followLatest } = useFollowScroll(listEl, lines);
 </script>
 
 <template>

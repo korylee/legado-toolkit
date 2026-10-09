@@ -65,45 +65,19 @@ CODE_TEXT = {
 #: 只有一侧拿，注释里那句「共用」就成了一个读起来像存在的保护（AGENTS #12）。
 RUN_LOCK = threading.Lock()
 
-#: 失败保留的运行目录上限：诊断现场（manifest/日志/半成品结果）只留最近这么多，
-#: 防止「保留失败现场」变成无限堆积。不是用户可调参数，不进 settings（AGENTS #8）。
-FAILED_RUN_DIR_CAP = 20
-
-
-def prune_stale_run_dirs(cap: int = FAILED_RUN_DIR_CAP,
-                         root: Optional[pathlib.Path] = None) -> None:
-    """runs/ 下只留最近 cap 个目录；只动本工具链创建的 batch-/debug- 目录。
-
-    ``root`` 由调用方显式传（后端经 data_dir 解析，测试才能隔离）；缺省才用
-    core.paths 的解析口。
-    """
-    root = pathlib.Path(root) if root else pathlib.Path(data_path("app_probe", "runs"))
-    try:
-        dirs = [p for p in root.iterdir()
-                if p.is_dir() and p.name[:6] in ("batch-", "debug-")]
-    except OSError:
-        return
-    def _mtime(p: pathlib.Path) -> float:
-        try:
-            return p.stat().st_mtime
-        except OSError:
-            return 0.0
-    dirs.sort(key=_mtime, reverse=True)
-    for stale in dirs[cap:]:
-        shutil.rmtree(str(stale), ignore_errors=True)
-
-
 def _write_debug_manifest(run_dir: pathlib.Path, src: Dict[str, Any], key: str,
                           timeout: int, args_path: pathlib.Path, src_file: str,
-                          ndjson_path: pathlib.Path) -> None:
+                          ndjson_path: pathlib.Path, job_id: str = "") -> None:
     """调试任务也留一份任务信封：这次调试用了哪个源、哪个词、材料写到哪。
 
     与跑批 manifest 同一立场：SQLite/返回体是事实源，这个文件是**崩溃后仍可
-    逐项对出**的复查交付物。
+    逐项对出**的复查交付物。``job_id`` 是运行目录与任务行的关联键——运行目录的
+    过期清理由它决定（`backend/jobs/runner.sweep_run_dirs`）。
     """
     envelope = {
         "schema": 1,
         "kind": "jvm_debug",
+        "job_id": str(job_id or ""),
         "owner_pid": os.getpid(),
         "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "source_url": str(src.get("bookSourceUrl") or ""),
@@ -459,13 +433,18 @@ def run_jvm_debug(source: Dict[str, Any],
                   cache: str = CACHE_AUTO,
                   proxy: str = "",
                   out_path: str = "",
+                  run_dir: Optional[pathlib.Path] = None,
+                  keep_run_dir: bool = False,
+                  job_id: str = "",
                   launcher: Optional[Callable[[], Tuple[int, float, str, str]]] = None,
                   readiness_result: Optional[Dict[str, Any]] = None,
                    ) -> Dict[str, Any]:
     """跑一次 JVM 调试，返回与设备通道同形状的结果。
 
     ``out_path`` 只是给测试用的覆盖口；未指定时会在 `data/app_probe/runs/` 下创建
-    本次调试的独立目录，完成后清理。
+    本次调试的独立目录（``run_dir`` 指定就用它——任务链按任务号定目录，见
+    ``backend/jobs/jvm_debug_job``），``keep_run_dir`` 说不清场：任务链要把
+    ``debug.ndjson`` 与事件账本留着给时间线看，**不删**（删的是 CLI 那条一次性用法）。
 
     ``launcher`` 是**「拉起那一步」的替换口**（签名同 :func:`_run_launcher`）：
     不给就用 :func:`default_launcher`——**优先常驻 daemon、不可用回落 Gradle**（D2）。
@@ -506,7 +485,8 @@ def run_jvm_debug(source: Dict[str, Any],
     # 原来的覆盖口。每个真实请求有自己的目录，daemon 收到的路径也随请求走。
     owns_run_dir = not bool(out_path)
     if owns_run_dir:
-        run_dir = pathlib.Path(data_path("app_probe", "runs")) / ("debug-" + uuid4().hex)
+        run_dir = pathlib.Path(run_dir) if run_dir else (
+            pathlib.Path(data_path("app_probe", "runs")) / ("debug-" + uuid4().hex))
         run_dir.mkdir(parents=True, exist_ok=True)
         ndjson_path = run_dir / "debug.ndjson"
         args_path = run_dir / "args.properties"
@@ -535,7 +515,7 @@ def run_jvm_debug(source: Dict[str, Any],
         _write_args(src_file, key, ndjson, timeout, cookie, proxy, args_path=args_path)
         if owns_run_dir:
             _write_debug_manifest(run_dir, src, key, timeout,
-                                  args_path, src_file, ndjson_path)
+                                  args_path, src_file, ndjson_path, job_id=job_id)
         if launcher:
             launch = launcher
         elif owns_run_dir:
@@ -545,10 +525,9 @@ def run_jvm_debug(source: Dict[str, Any],
             launch = default_launcher(launch_notes, env_snapshot=env_snapshot)
         _, cost, _so, _se = launch()
     except Exception:
-        # 崩溃现场保留：manifest/半成品材料是「这次为什么炸」的唯一证据，
-        # 清理由 prune_stale_run_dirs 的上限兜底
-        if owns_run_dir:
-            prune_stale_run_dirs()
+        # 崩溃现场保留：manifest/半成品材料是「这次为什么炸」的唯一证据。
+        # 过期清理由 `backend/jobs/runner.sweep_run_dirs` 按**任务行**兜底
+        # （目录寿命跟着行走，不在这儿按个数删）。
         raise
     finally:
         # 还原：跑批与调试共用这一个参数文件，别把调试的参数留在里面
@@ -592,7 +571,7 @@ def run_jvm_debug(source: Dict[str, Any],
         else:
             out["error"] = "本机引擎一条事件都没收到。" + out["hint"]
         out["network"] = network_entries(meta.get("network"))
-        if owns_run_dir:
+        if owns_run_dir and not keep_run_dir:
             shutil.rmtree(str(run_dir), ignore_errors=True)
         return out
 
@@ -633,6 +612,8 @@ def run_jvm_debug(source: Dict[str, Any],
             steps[0]["notes"] = list(steps[0]["notes"]) + [
                 "本机调试：%s" % out["code_text"]]
             steps[0]["has_notes"] = True
-    if owns_run_dir:
+    # 清场：CLI/一次性调用不留现场（ndjson 已在返回体里投影过）；任务链
+    # （keep_run_dir=True）留着——时间线读的就是运行目录里的账本
+    if owns_run_dir and not keep_run_dir:
         shutil.rmtree(str(run_dir), ignore_errors=True)
     return out

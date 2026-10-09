@@ -13,7 +13,10 @@
 // （JVM 与批量校验共用一条），取消后马上重新调试要排队等它让出来，文案必须说到这层。
 import { ref, computed, watch } from "vue";
 import { ElMessageBox } from "element-plus";
-import { jvmDebug, appDebug, appPreflight, debugStatus } from "../api/rules";
+import { appDebug, appPreflight, jvmDebug } from "../api/rules";
+import { getJobDetail, listJobs } from "../api/jobs";
+import { useJobs } from "../composables/useJobs";
+import { asRunStatus } from "../utils/runStream";
 import { jvmReadiness } from "../api/jvm.js";
 import { getSettings } from "../api/settings";
 import { nextCompareState } from "../utils/debugCompare";
@@ -56,24 +59,31 @@ watch(result, (cur, old) => {
 // ---------------------------------------------------------------- 运行在途
 
 const running = ref(false);
-const elapsed = ref(0);
 let ticker = 0;
 let abort = null;
 let runPending = null;
-const CANCEL_WAIT_NOTE = "已取消等待；后端那一次仍会跑完，期间重新调试需要排队";
+let stopWatch = null;
+//: 「不再等待」的出口（等结果那一步）。见 `waitForJob`
+let cancelPending = null;
+const CANCEL_WAIT_NOTE = "已不再等待；后端那一次仍会跑完，结果留在那次调试的记录里";
 
 // ---------------------------------------------------------------- 等待观测
 //
-// 调试是**同步长轮询**：`/rules/jvm-debug` 不跑完不返回，而引擎的事件流要等进程退出
-// 才解析——所以等待期界面上没有任何产物可读，只剩一个秒表（用户反馈的「每次调试都是
-// 空等待」）。这里补的是那段空白里**唯一的两条本机事实**：已等多少秒、此刻占着引擎的
-// 是谁（见 `backend/jobs/runner.active_run_snapshot`）。**不做进度、不做 ETA**。
+// 调试是**任务**（`kind="jvm_debug"`）：状态、阶段、已等秒数、谁占着引擎都来自那一条
+// 观测流（`useJobs.watchJob` + `utils/runStream.asRunStatus`）。后端只给码与事实，
+// 中文句子在 `utils/debugRun` 出——**与批量校验共用同一份取词**。不做进度、不做 ETA。
 //
-// 相位码→中文取词在 `utils/debugRun`（与 `core.agent_plan` 同一条约定：后端只给码）。
+// 本地秒表只负责"帧与帧之间让数字继续走"：`debugRunState` 取
+// `max(后端已等, 本地已等)`，所以刷新/重开页面之后前端也不需要记住起点。
 const runId = ref("");
-const runStatus = ref(null);
-//: 秒表的毫秒精度副本。界面既有消费者读的是秒（`elapsed`），而相位交接判据
-//: 与「上次用时」都需要毫秒——两者由**同一次 tick 一起推进**，不另起一个表
+//: 帧里的观测快照（phase / elapsed_ms / phase_ms / lane_holder / lane_waiting）。
+//: **算出来而不是存起来**：它就是那条流当前状态的一个投影，存一份就会有两份真相。
+const runStatus = computed(() => {
+  const frame = frameOf(runId.value);
+  return frame && frame.job ? asRunStatus(frame.job) : null;
+});
+//: 秒表的毫秒精度副本。相位交接判据与「上次用时」都要毫秒——两者由**同一次 tick**
+//: 一起推进，不另起一个表
 const elapsedMs = ref(0);
 let waitStartedAt = 0;
 //: 上一次运行**结束**的墙钟时刻与用时。用途只有一个：抽屉关着的时候跑完的那次，
@@ -81,42 +91,8 @@ let waitStartedAt = 0;
 //: （`null` = 还没有过结果）
 const lastRunAt = ref(null);
 const lastRunMs = ref(0);
-//: 轮询间隔：等待期只有「已等秒数」和 lane 持有者会变，1 秒足够，也不给后端添负载
-const STATUS_POLL_MS = 1000;
-let statusTimer = 0;
 
-function newRunId() {
-  try {
-    if (window.crypto && window.crypto.randomUUID) return window.crypto.randomUUID();
-  } catch (e) { /* 老浏览器 / 非安全上下文：退回下面那条 */ }
-  return "run-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 10);
-}
-
-function stopStatusPolling() {
-  if (statusTimer) window.clearInterval(statusTimer);
-  statusTimer = 0;
-}
-
-async function pullRunStatus() {
-  const id = runId.value;
-  if (!running.value || !id) return;
-  try {
-    const data = await debugStatus(id);
-    // 过期保护：等回来时可能已经换了一次运行（新 runId），旧响应不得覆盖
-    if (runId.value === id) runStatus.value = data;
-  } catch (e) {
-    // 观测口失败**不能**影响这次调试：保留上一次快照（哪怕过期），秒表照走。
-    // 界面上那句「已等待 N 秒」本来就不依赖它
-  }
-}
-
-function startStatusPolling(id) {
-  stopStatusPolling();
-  runStatus.value = null;
-  if (!id) return;
-  void pullRunStatus();
-  statusTimer = window.setInterval(() => { void pullRunStatus(); }, STATUS_POLL_MS);
-}
+const { watchJob } = useJobs();
 
 function errorMessage(e) {
   if (e && e.message) return String(e.message);
@@ -125,31 +101,110 @@ function errorMessage(e) {
   return String(e || "未知错误");
 }
 
+/** 「不再等待」：关掉那条流，后端那一次照跑完（结果留在任务行里）。 */
 function cancelRun() {
+  // 提交还没回来时，abort 掉那次请求；已经拿到任务号之后，中断的是"等结果"这一步
   if (abort) abort.abort();
+  if (cancelPending) cancelPending();
 }
+
+/**
+ * 等一个调试任务跑完，返回它的结果体。
+ *
+ * 状态与失败原因从流里来（`state.job.error` 已含中止原因）；**结果体**走一次
+ * `getJobDetail`——那是 `steps/pages`，不给流推。**取消等待只关流、不杀任务**：
+ * 引擎那一次没有可恢复的中间态，掐掉等于白跑。
+ */
+function waitForJob(jobId) {
+  runId.value = jobId;
+  return new Promise((resolve) => {
+    const stop = watchJob(jobId, async (state) => {
+      if (stopWatch === stop) stopWatch = null;
+      cancelPending = null;
+      stop();
+      const status = (state && state.job && state.job.status) || "";
+      if (status !== "done") {
+        resolve({
+          error: (state && state.job && state.job.error)
+            || (status === "cancelled" ? CANCEL_WAIT_NOTE : errorMessage(status || "任务没有结果")),
+          cancelled: status === "cancelled",
+          status,
+        });
+        return;
+      }
+      try {
+        const detail = await getJobDetail(jobId);
+        resolve(detail.result || { error: "调试没有返回结果" });
+      } catch (e) {
+        resolve({ error: "调试结果读取失败：" + errorMessage(e) });
+      }
+    });
+    stopWatch = stop;
+    //: 这一等的"不看了"出口。**没有它，「不再等待」在提交返回之后就是个空按钮**
+    //: （旧实现靠 abort 掉那个同步长轮询，现在等的是流）
+    cancelPending = () => {
+      cancelPending = null;
+      if (stopWatch) { stopWatch(); stopWatch = null; }
+      resolve({ error: CANCEL_WAIT_NOTE, cancelled: true, status: "detached" });
+    };
+  });
+}
+
+/**
+ * 重新挂上那次还在跑的调试（刷新页面、关掉再打开、另一个标签页都算）。
+ *
+ * 有任务行才挂得上——这正是调试进 jobs 表的收益之一：观测登记放在进程内存里时，
+ * 一次刷新就等于"那次调试从界面上消失了"。
+ */
+async function resumeRunning() {
+  if (running.value) return runId.value;
+  let row = null;
+  try {
+    const page = await listJobs({ kind: "jvm_debug", status: "active" });
+    row = ((page && page.items) || [])[0] || null;
+  } catch (e) {
+    return "";
+  }
+  if (!row || !row.id) return "";
+  beginWait();
+  try {
+    storeResult(await waitForJob(row.id));
+    return row.id;
+  } finally {
+    endWait();
+    lastRunMs.value = elapsedMs.value;
+    lastRunAt.value = Date.now();
+  }
+}
+
+//: 当前这次调试**正在产生**的过程事件（引擎逐条 flush 的那份，已经被搬进事件账本）。
+//: 与结果里的 `events` 同源同形（`{t, text}`），区别只是"现在就能看"——这正是
+//: 同步长轮询时代缺的那个产物：等待期不再是空等待。
+const liveEvents = computed(() => {
+  const frame = frameOf(runId.value);
+  return ((frame && frame.events) || [])
+    .filter((ev) => ev.kind === "debug")
+    .map((ev) => ({ ts: ev.t, text: ev.text }));
+});
 
 function beginWait() {
   running.value = true;
-  elapsed.value = 0;
   elapsedMs.value = 0;
   waitStartedAt = Date.now();
   abort = new AbortController();
   ticker = window.setInterval(() => {
     // 由**钟**算，不由 tick 次数累加：间隔被节流/挂起时读数才仍然是真实的已等时长
     elapsedMs.value = Date.now() - waitStartedAt;
-    elapsed.value = Math.floor(elapsedMs.value / 1000);
   }, 1000);
 }
 
 function endWait() {
   window.clearInterval(ticker);
-  stopStatusPolling();
   abort = null;
+  cancelPending = null;
   running.value = false;
   // 收尾时补一次读数：最后一次 tick 与结束之间可能差半秒，用来显示「上次用时」
   elapsedMs.value = waitStartedAt ? Date.now() - waitStartedAt : elapsedMs.value;
-  elapsed.value = Math.floor(elapsedMs.value / 1000);
 }
 
 // ---------------------------------------------------------------- 通道与入口
@@ -415,19 +470,21 @@ async function executeRun({ source: runSource, target: runTarget, query: runQuer
   const runSourceSnapshot = runSource && typeof runSource === "object"
     ? JSON.parse(JSON.stringify(runSource))
     : runSource;
-  // 本次运行的观测句柄。**只给本机引擎那条**（连 App 走的是设备 WS，没有这条登记）；
-  // 有它界面才能在等待期说出「已等 N 秒 / 谁占着引擎」，没有它就退回原来的秒表
-  const runHandle = runChannel === "jvm" ? newRunId() : "";
-  runId.value = runHandle;
+  // 上一次运行的观测句柄在提交之后才有（本机引擎那条）：它是任务号。
+  // 连 App 走的是设备 WS，没有任务行，等待期只有本地秒表。
+  runId.value = "";
   beginWait();
-  startStatusPolling(runHandle);
   pushed.value = "";
   try {
     if (runChannel === "jvm") {
-      const r = await jvmDebug({ source: runSourceSnapshot, target: runTarget,
-        query: runQuery, cache: runCacheMode, signal: abort?.signal,
-        runId: runHandle });
-      return storeResult(r);
+      const submitted = await jvmDebug({ source: runSourceSnapshot, target: runTarget,
+        query: runQuery, cache: runCacheMode, signal: abort?.signal });
+      const jobId = (submitted && submitted.job_id) || "";
+      if (!jobId) {
+        return storeResult({ error: "调试任务没有拿到任务号，请重试" });
+      }
+      // 结果体走 `getJobDetail`（那是 steps/pages），状态与失败原因走那条流
+      return storeResult(await waitForJob(jobId));
     }
     // 连 App：先预检——调试 WS 对 App 库里查不到的 tag 静默无响应，而且它跑的
     // 始终是 **App 里那份规则**，预检把「是旧版本」一并判掉
@@ -491,10 +548,10 @@ export function useDebugSession() {
     clearPreflight,
     invalidatePreflight,
     running,
-    elapsed,
     elapsedMs,
     runId,
     runStatus,
+    liveEvents,
     lastRunAt,
     lastRunMs,
     budget,
@@ -512,6 +569,7 @@ export function useDebugSession() {
     // 动作
     startRun,
     cancelRun,
+    resumeRunning,
     confirmPush,
     loadEnvironment,
     runPreflight,

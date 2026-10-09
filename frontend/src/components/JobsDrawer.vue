@@ -13,7 +13,7 @@
 // `backend/api/jobs.py` 的 `_job_row`）：结果里有 items[:500]，不能进列表响应。
 import { ref, computed, watch, onMounted, onUnmounted } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { api } from "../api/client";
+import { cancelJob as cancelJobApi, listJobs } from "../api/jobs";
 import {
   jobCancelHint,
   jobIsInFlight,
@@ -79,7 +79,9 @@ function summaryText(row) {
 async function load() {
   loading.value = true;
   try {
-    const page = await api.get("/jobs?scope=" + scope.value);
+    // 调试运行不进这份列表：它由调试页自己观测（一进 jobs 表，点一次调试就多一条，
+    // 任务中心会被刷成流水账）。要回看某次调试的运行，从调试页那条运行条进
+    const page = await listJobs({ scope: scope.value, exclude_kind: "jvm_debug" });
     jobs.value = Array.isArray(page?.items) ? page.items : [];
     //: 上限由后端下发（不在这里写 200）：界面要说明「只显示最近 N 条」
     listLimit.value = Number(page?.limit || 0);
@@ -102,7 +104,7 @@ async function cancelJob(row) {
     await ElMessageBox.confirm(jobCancelHint(row.kind), "取消任务", {
       type: "warning", confirmButtonText: "取消任务", cancelButtonText: "返回",
     });
-    await api.post("/jobs/" + row.id + "/cancel", {});
+    await cancelJobApi(row.id);
     ElMessage.success("已请求取消任务");
     await load();
   } catch (e) {

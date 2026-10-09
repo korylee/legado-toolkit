@@ -8,7 +8,8 @@
 // 进度只报后端给的真实数（不做估算/ETA）；「正在校验某源」这类瞬时状态引擎没上报，不编。
 import { ref, computed, watch, onUnmounted } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { api } from "../api/client";
+import { cancelJob as cancelJobApi, deleteJob as deleteJobApi, getJobDetail,
+         retryJob as retryJobApi } from "../api/jobs";
 import { healthLabel } from "../utils/health";
 import {
   isWorseHealth,
@@ -38,21 +39,22 @@ const visible = computed({
   set: (v) => emit("update:modelValue", v),
 });
 
-const { upsertJob } = useJobs();
+const { watchJob, frameOf } = useJobs();
 
 const detail = ref(null);
-const live = ref(null);
 const detailLoading = ref(false);
 const rawOpen = ref(false);
-//: 「此刻」的锚点：耗时与「多久没更新」都要跟着它走，由每次轮询推进（见 pullStatus）
+//: 「此刻」的锚点：耗时与「多久没更新」都要跟着它走。**这是本地时钟，不是取数**：
+//: 状态本身由那条流推（见 useJobs.watchJob），这里只让它每秒钟涨一格。
 const nowMs = ref(Date.now());
-let timer = null;
+let clockTimer = null;
+let stopWatch = null;
 
-//: 详情给静态字段，轮询帧只覆盖**会变的**那几个。整体展开 live 会把详情里的富字段
-//: 盖成轻量版（比如 summary 丢掉 changed_items）——那是两个端点的不同投影，不能直接叠。
+//: 详情给静态字段，流里的任务行只覆盖**会变的**那几个。整体展开会把详情里的富字段
+//: 盖成轻量版（比如 summary 丢掉 changed_items）——那是两个投影，不能直接叠。
 const job = computed(() => {
   const d = detail.value || {};
-  const l = live.value || {};
+  const l = (frameOf(props.jobId) || {}).job || {};
   return {
     ...d,
     status: l.status || d.status,
@@ -93,9 +95,9 @@ const title = computed(() => {
   return inFlight.value ? kind + "进行中" : kind + "明细";
 });
 
-function stopPoll() {
-  if (timer) window.clearInterval(timer);
-  timer = null;
+function stopClock() {
+  if (clockTimer) window.clearInterval(clockTimer);
+  clockTimer = null;
 }
 
 async function loadDetail() {
@@ -104,7 +106,7 @@ async function loadDetail() {
   nowMs.value = Date.now();
   detailLoading.value = true;
   try {
-    const data = await api.get("/jobs/" + id + "/detail");
+    const data = await getJobDetail(id);
     if (id === props.jobId) detail.value = data;
   } catch (e) {
     ElMessage.error("加载任务结果失败：" + e.message);
@@ -113,46 +115,34 @@ async function loadDetail() {
   }
 }
 
-async function pullStatus() {
-  const id = props.jobId;
-  if (!id) return;
-  // 每轮都推进「此刻」：时间在走，即使这一帧的状态没变（进度停住时那个数会一直涨）
-  nowMs.value = Date.now();
-  try {
-    const row = await api.get("/jobs/" + id);
-    if (id !== props.jobId || !row || row.error) return;
-    live.value = row;
-    if (jobIsTerminal(row.status)) {
-      stopPoll();
-      await loadDetail();   // 终态：结果这一次才写得全
-    }
-  } catch (e) {
-    // 单次拉取失败不提示（本地接口偶发失败很常见），下一轮自己会补上；
-    // 时间线那边有连续失败的提示，这里不重复
-  }
-}
-
 watch(() => [props.modelValue, props.jobId], ([open, id]) => {
-  stopPoll();
+  stopClock();
+  if (stopWatch) { stopWatch(); stopWatch = null; }
   detail.value = null;
-  live.value = null;
   rawOpen.value = false;
   if (!open || !id) return;
-  void pullStatus();
+  nowMs.value = Date.now();
+  // 状态走那一条流（每个任务一条，与时间线共用）；本地时钟只负责让「已跑多久 /
+  // 多久没更新」这两个数自己涨——时间在走，即使状态没变。
+  stopWatch = watchJob(id, async () => {
+    await loadDetail();     // 终态：结果这一次才写得全
+  });
+  clockTimer = window.setInterval(() => { nowMs.value = Date.now(); }, 1000);
   void loadDetail();
-  timer = window.setInterval(pullStatus, 2000);
 }, { immediate: true });
 
-onUnmounted(stopPoll);
+onUnmounted(() => {
+  stopClock();
+  if (stopWatch) stopWatch();
+});
 
 async function cancelJob() {
   try {
     await ElMessageBox.confirm(jobCancelHint(job.value.kind), "取消任务", {
       type: "warning", confirmButtonText: "取消任务", cancelButtonText: "返回",
     });
-    await api.post("/jobs/" + props.jobId + "/cancel", {});
+    await cancelJobApi(props.jobId);
     ElMessage.success("已请求取消任务");
-    await pullStatus();
     emit("changed");
   } catch (e) {
     if (e !== "cancel" && e !== "close") ElMessage.error("取消任务失败：" + e.message);
@@ -167,7 +157,7 @@ async function retryJob() {
       again ? "再次运行" : "重试任务",
       { type: "warning", confirmButtonText: again ? "再次运行" : "重试", cancelButtonText: "返回" },
     );
-    const created = await api.post("/jobs/" + props.jobId + "/retry", {});
+    const created = await retryJobApi(props.jobId);
     ElMessage.success("已创建新任务");
     visible.value = false;
     emit("changed", created.job_id || "");
@@ -181,7 +171,7 @@ async function deleteJob() {
     await ElMessageBox.confirm("删除后将移除任务记录和结果，不能恢复。", "删除任务", {
       type: "warning", confirmButtonText: "删除", cancelButtonText: "返回",
     });
-    await api.del("/jobs/" + props.jobId);
+    await deleteJobApi(props.jobId);
     ElMessage.success("任务已删除");
     visible.value = false;
     emit("changed", "");

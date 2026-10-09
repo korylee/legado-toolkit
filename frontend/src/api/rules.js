@@ -29,8 +29,11 @@ export const appDebug = ({ source, target, query, host, port, push = false,
            signal ? { signal } : {});
 
 // 本机引擎调试（S5-A4）：**App 的真引擎跑在本机**（Robolectric 里跑 App 源码），
-// 不填 IP、不推送、不用预检——本机什么都有。返回体与 /rules/app-debug **同形状**
-// （只有 source 是 "jvm"），所以抽屉与卡片零改动就能吃。
+// 不填 IP、不推送、不用预检——本机什么都有。
+//
+// **这是一次提交**：返回 `{job_id}`（调试已经是任务，kind="jvm_debug"），过程与结果
+// 都从那一条观测流里看（`useJobs.watchJob`），跑完的返回体在 `getJobDetail(job_id)`
+// ——形状与 /rules/app-debug 同（只有 source 是 "jvm"），所以抽屉与卡片零改动就能吃。
 //
 // cookie 留空就按源 URL 从**我们自己的浏览器 profile** 读登录态（A3）：登录墙的源先跑
 // `scripts/jvm_login.py` 在那个 profile 里登一次，之后自动带上。
@@ -42,15 +45,12 @@ export const appDebug = ({ source, target, query, host, port, push = false,
 //
 // timeout **不传**（null）就吃设置里的 debug.timeout——默认值只有后端一份
 // （AGENTS #8）；前端曾经写死 60，与桥的渲染上限同值、互相掐死。
-//
-// runId 是这个请求的**观测句柄**（前端生成）：等待期间 `debugStatus(runId)` 能读到
-// 已等秒数与此刻占着引擎的是谁。它是可选的观测通道，不参与判定，也不影响返回体。
 export const jvmDebug = ({ source, target, query, timeout = null, cookie = "",
-                           cache = "auto", runId = "", signal = null }) =>
+                           cache = "auto", signal = null }) =>
   api.post("/rules/jvm-debug",
            timeout == null
-             ? { source, target, query, cookie, cache, run_id: runId }
-             : { source, target, query, timeout, cookie, cache, run_id: runId },
+             ? { source, target, query, cookie, cache }
+             : { source, target, query, timeout, cookie, cache },
            signal ? { signal } : {});
 
 // 调试前预检：把「静默无响应」拆成 unreachable / missing / ready 三种状态。
@@ -85,13 +85,6 @@ export const rulesMeta = () => api.get("/rules/meta");
 // 结论**（页面上确实没有），不是失败。
 export const ruleCandidates = (html, kind, limit = 6) =>
   api.post("/rules/candidates", { html, kind, limit });
-
-// 在途调试的等待观测口（**只读，不落库**）：已等多少秒 + 此刻占着引擎的是谁。
-// 调试是同步长轮询，等待期间没有任何产物可读——这个口是那段空白时间里唯一的
-// 真实信息源。没登记 / 已收尾时后端返回 `{phase: ""}`，那是「不在途」不是错误。
-// 取词在前端（`utils/debugRun.js`）：后端只给相位码与事实。
-export const debugStatus = (runId) =>
-  api.get("/rules/debug-status?run_id=" + encodeURIComponent(String(runId || "")));
 
 // 首屏五格决策（现状 / 解决 / 取证 / AI 补足）。判据的唯一一份在 `core/agent_plan`：
 // 缺口唯一、fix 与 probe 分栏、AI 只认合格材料。这里**只提交观测到的事实**，

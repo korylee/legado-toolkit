@@ -1,12 +1,17 @@
-// 在途调试的渲染层：**后端只给相位码与事实**（`backend/jobs/runner.active_run_snapshot`
-// 的 phase / elapsed_ms / lane_holder），中文句子在这里出——与 `debugDecision` 同一条
-// 约定：码在一处、词在一处，别在后端拼句子。
+// 在途运行的渲染层：**后端只给相位码与事实**（观测帧里的
+// phase / elapsed_ms / lane_holder，见 `backend/api/job_timeline`），中文句子在这里出
+// ——与 `debugDecision` 同一条约定：码在一处、词在一处，别在后端拼句子。
 //
-// 相位只有两个，因为**只有这两段有事实可依**：
+// **批量校验与调试共用这一份**：两边问的是同一件事（还没开始 / 谁占着引擎 / 等了多久）。
+//
+// 相位码与它们的含义：
 //   queued   等引擎许可（`lane` 被别人占着时，真正的原因在 `lane_holder` 上）
 //   starting 已拿到许可，工作已交给引擎线程
-// 引擎里跑规则那一段（ndjson 要等进程退出才解析）**没有中间产物**：到点接一句
-// 「引擎执行中」，照实转圈。**不编进度、不做 ETA**——那一段的耗时只由引擎自己知道。
+// 引擎里跑规则那一段**没有相位码**：到点接一句「引擎执行中」，照实转圈。
+// **不编进度、不做 ETA**——那一段的耗时只由引擎自己知道。
+//
+// 调试侧现在还能看到**正在跑哪一步**（引擎逐条 flush 的事件进了事件账本，见
+// `useDebugSession.liveEvents`），那是另一条线，不混进这一行状态词。
 
 //: 相位码 → 状态词。空码（不在途）不取词。
 export const PHASE_LABELS = {
@@ -29,10 +34,10 @@ export const PHASE_HANDOFF_MS = 1500;
 const HOLDER_LABELS = { batch: "批量校验", debug: "另一次调试" };
 
 /**
- * 把一次 `/rules/debug-status` 的返回翻成运行条上那一行。
+ * 把一次观测帧里的运行事实翻成运行条上那一行。
  *
- * @param {Object|null} snapshot 后端返回（phase / elapsed_ms / phase_ms / lane_holder / lane_waiting）
- * @param {number} [localMs] 本地秒表的毫秒数——后端登记晚于前端起表时用它兜底
+ * @param {Object|null} snapshot 帧里的（phase / elapsed_ms / phase_ms / lane_holder / lane_waiting）
+ * @param {number} [localMs] 本地秒表的毫秒数——帧还没到时用它兜底
  * @returns {{phase: string, text: string, elapsedSec: number, waiting: boolean}}
  */
 export function debugRunState(snapshot, localMs = 0) {

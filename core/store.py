@@ -75,6 +75,9 @@ ACTIVE_JOB_STATUSES = ("pending", "running", "cancel_requested")
 #: ``malformed JSON``，一条写坏的结果就把整张任务列表带成 500（Python 侧解析时
 #: 是 try/except 兜住的，搬到 SQL 就必须显式补上）。
 _VALID_RESULT = "CASE WHEN json_valid(result_json) THEN result_json END"
+#: ``payload`` 同样要过这道闸门（理由同上）：提交时冻结的清单里带着运行目录，
+#: 抽它的代价本该是"零解析"，一条坏 JSON 不能把整张任务列表带成 500。
+_VALID_PAYLOAD = "CASE WHEN json_valid(payload) THEN payload END"
 
 _JOB_LIGHT_COLUMNS = (
     "id, kind, status, phase, progress, total, retry_of, expires_at,"
@@ -87,7 +90,13 @@ _JOB_LIGHT_COLUMNS = (
     # 中止在列表上就是「已完成 + 空原因」。`ok` 是「只在明确为假时才取 reason」那道
     # 闸门（JSON 的 false 经 json_extract 出来是 0）。
     " json_extract(%s, '$.ok') AS result_ok_flag,"
-    " json_extract(%s, '$.reason') AS result_reason" % ((_VALID_RESULT,) * 6)
+    " json_extract(%s, '$.reason') AS result_reason,"
+    # 运行目录：跑批放在 `payload.manifest.run_dir`、调试 job 放在 `payload.run_dir`
+    # （两处都是提交时冻结的）。SQL 侧一次抽好——观测端不该为了一个路径去解析
+    # 上百 KB 的 result_json。
+    " COALESCE(json_extract(%s, '$.run_dir'),"
+    " json_extract(%s, '$.manifest.run_dir')) AS result_run_dir"
+    % ((_VALID_RESULT,) * 6 + (_VALID_PAYLOAD,) * 2)
 )
 DB_NAME = "sources.sqlite3"
 
@@ -1281,7 +1290,8 @@ class Store:
 
     def list_jobs(self, limit: int = 200,
                   statuses: Optional[Sequence[str]] = None,
-                  kind: str = "", recent_since: str = "") -> List[Dict[str, Any]]:
+                  kind: str = "", recent_since: str = "",
+                  exclude_kind: str = "") -> List[Dict[str, Any]]:
         """按筛选条件取任务行（新的在前），最多 ``limit`` 条。
 
         筛选条件全部由调用方给（见 ``backend/api/jobs.py``）：这里不做口径判断——
@@ -1302,6 +1312,11 @@ class Store:
         if kind:
             where.append("kind = ?")
             args.append(str(kind))
+        if exclude_kind:
+            # 任务中心按**排除**过滤（默认不看调试运行）：白名单会让新增的 kind
+            # 悄悄从列表里消失，而"哪一类不该出现在这里"是明确的
+            where.append("kind != ?")
+            args.append(str(exclude_kind))
         if recent_since:
             marks = ",".join("?" * len(ACTIVE_JOB_STATUSES))
             where.append("(created_at >= ? OR status IN (%s))" % marks)

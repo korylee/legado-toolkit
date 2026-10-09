@@ -67,7 +67,9 @@ app.include_router(llm.router, prefix="/api/llm", tags=["llm"])
 app.include_router(settings.router, prefix="/api/settings", tags=["settings"])
 app.include_router(jvm.router, prefix="/api/jvm", tags=["jvm"])
 
-# 导入即注册 ops 里的 job handler
+# 导入即注册 job handler：ops 里的生成后验证、jvm_debug_job 里的本机调试
+# （调试也是任务：不在这儿导入，`/jobs/{id}/retry` 会因为 HANDLERS 里没有它而 409）
+from backend.jobs import jvm_debug_job  # noqa: E402,F401  导入即注册
 _ = ops
 
 

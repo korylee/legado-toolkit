@@ -33,9 +33,9 @@ import {
   listTags,
   getStats,
 } from "../api/sources";
-import { api, subscribeJob } from "../api/client";
+import { cancelJob as cancelJobApi, getJobDetail } from "../api/jobs";
 import { jvmRun } from "../api/jvm.js";
-import { jobFailReason, jobKindLabel } from "../utils/jobs";
+import { jobKindLabel } from "../utils/jobs";
 import { ensureTagMeta } from "../utils/tags";
 import { countOutOfDomain, keepInDomain, mergePageSelection, toggleSelected } from "../utils/selection";
 import {
@@ -326,52 +326,52 @@ async function runJvmBatch() {
       phase: "queued",
       kind: "jvm_run",
     }); // 徽标立刻反映：不等第一帧 SSE
-    // 跑批是分钟级的：**提交任务 + 订阅**（与本地校验同一条链路）。原来是一个挂到
-    // 跑完的长请求——关掉页面/刷新就白等；结论照落库，但界面不知道它跑完了
+    // 跑批是分钟级的：**提交任务 + 盯住那条流**（与单条校验同一个入口）。原来是一个
+    // 挂到跑完的长请求——关掉页面/刷新就白等；结论照落库，但界面不知道它跑完了。
+    // 状态与时间线都从 `useJobs` 的那条流来（谁盯着就多一个引用，只有一条连接）。
     if (stopJvm) stopJvm();
-    stopJvm = subscribeJob(
-      r.job_id,
-      // 每帧带整个 job（status/progress/total/phase）：交给共享状态就够，
-      // 这里不再单独维护进度 ref
-      (data) => upsertJob(data),
-      async (data) => {
-        jvmRunning.value = false;
-        upsertJob(data); // 终态（或 unknown）都把它从「在跑」里摘掉
-        let res = {};
+    stopJvm = watchJob(r.job_id, async (state) => {
+      jvmRunning.value = false;
+      const status = (state && state.job && state.job.status) || "";
+      upsertJob({ id: r.job_id, status });   // 终态（或 unknown）都把它从「在跑」里摘掉
+      if (status === "done") {
+        // 结论要**原始结果体**（items/transitions）：摘要投影是给界面看的，回填与
+        // 结果条不够用。这一份只在收尾时拉一次（见 api/jobs.js 的 raw）
+        let detail = {};
         try {
-          res = JSON.parse((data && data.result_json) || "{}");
+          detail = await getJobDetail(r.job_id, { raw: true });
         } catch (e) {
-          /* 非 JSON 就当空 */
+          ElMessage.error("跑批结果读取失败：" + (e?.message || e));
+          return;
         }
-        if (data.status === "done") {
-          if (res.ok === false) {
-            ElMessage.warning(res.reason || "跑批没跑成");
-          } else {
-            // 结论写进 checks 与 meta——跑完必须重新拉列表
-            ElMessage.success(
-              "跑批完成：" +
-                (res.count || 0) +
-                " 条结论已入库" +
-                (res.checks ? "（健康档位 " + res.checks + " 条）" : ""),
-            );
-          }
-          // **把结论留在页面上**（复用单条校验那条结果条）：跑批提交时弹的明细弹窗
-          // 一关，这次跑批在页面上就没有痕迹了，用户只能去任务中心翻历史。
-          // 不设 `stale`：下面就是全量重拉，列表是刚查的，没有「排序/筛选过期」问题
-          // （那个标记是就地回填的副产品）。
-          const summary = parseCheckResult(data.result_json);
-          if (summary) {
-            summary.jobId = data.id || jvmJobId.value;
-            checkResult.value = summary;
-          }
-          await load();
-        } else if (data.status === "failed") {
-          ElMessage.error("跑批失败：" + (res.error || "看任务详情"));
-        } else if (data.status === "cancelled") {
-          ElMessage.info("跑批已取消");
+        const res = detail.result || {};
+        if (detail.error) {
+          // 中止批也要说得出原因（后端已把 result["reason"] 接进 error）
+          ElMessage.warning(detail.error);
+        } else {
+          ElMessage.success(
+            "跑批完成：" +
+              (res.count || 0) +
+              " 条结论已入库" +
+              (res.checks ? "（健康档位 " + res.checks + " 条）" : ""),
+          );
         }
-      },
-    );
+        // **把结论留在页面上**（复用单条校验那条结果条）：跑批提交时弹的明细弹窗
+        // 一关，这次跑批在页面上就没有痕迹了，用户只能去任务中心翻历史。
+        const summary = parseCheckResult(res);
+        if (summary) {
+          summary.jobId = r.job_id;
+          checkResult.value = summary;
+        }
+        await load();
+      } else if (status === "failed") {
+        ElMessage.error("跑批失败：" + ((state && state.job && state.job.error) || "看任务详情"));
+      } else if (status === "cancelled") {
+        ElMessage.info("跑批已取消");
+      } else if (status === "unknown") {
+        ElMessage.error((state && state.job && state.job.error) || "任务状态获取失败，请刷新页面");
+      }
+    });
   } catch (e) {
     jvmRunning.value = false;
     ElMessage.error("跑批失败：" + (e?.message || e));
@@ -384,7 +384,7 @@ const jobsVisible = ref(false);
 const jobsRef = ref(null);
 //: 进行中的任务（含实时进度）。任务都是页面自己提交、自己订阅 SSE 的，
 //: 提交成功 / SSE 整帧时 upsert 进 useJobs；徽标、在跑条、任务中心读同一份。
-const { runningCount: jobRunning, activeJobs, upsertJob } = useJobs();
+const { runningCount: jobRunning, activeJobs, upsertJob, watchJob } = useJobs();
 //: 结果条 / 在跑条的「查看」直接开明细弹窗；任务中心（徽标）只做全列表
 
 /** 结果条 / 在跑条上的「查看」：直接打开那一条的明细弹窗（在跑时就是进度条）。 */
@@ -743,13 +743,9 @@ async function applyBatchTags(mode) {
  *
  * 口径与任务抽屉里的摘要同源（都读 result_json），不另算一份。
  */
-function parseCheckResult(resultJson) {
-  let r = null;
-  try {
-    r = resultJson ? JSON.parse(resultJson) : null;
-  } catch (e) {
-    return null;
-  }
+function parseCheckResult(r) {
+  // 入参是**解析好的结果体**（`getJobDetail(id, {raw:true}).result`）：
+  // 流的终态帧里不再带 result_json，那份大对象只在收尾拉一次。
   if (!r || typeof r.checked !== "number") return null;
   const cached = r.cached || 0;
   const t = r.transitions || {};
@@ -801,52 +797,57 @@ async function checkOneSource(url) {
     // **不弹「已提交」的 toast**：统计条那条状态已经在说「正在校验」了，
     // 再来一条浮层只是噪音，而且它挡在统计条旁边，反而盖住了真正的进度
     if (stopCheck) stopCheck();
-    stopCheck = subscribeJob(
-      jobId,
-      // 每帧带整个 job（status/total/progress）：交给共享状态即可，
-      // 统计条与明细弹窗都读那一份
-      (data) => upsertJob(data),
-      async (data) => {
-        resetCheckState();
-        upsertJob(data); // 终态（或 unknown）都把它从「在跑」里摘掉
-        if (data.status === "done") {
-          const summary = parseCheckResult(data.result_json);
-          // 就地回填优先：整表重拉会让滚动位置跳、正在看的行移位。
-          // 回填不了（结果被截断 / 一条都没匹配上）才退回全量刷新
-          const backfilled = applyCheckResults(data.result_json);
-          if (!backfilled) await load();
-          if (summary) {
-            // 行没动 → 排序和筛选项都可能已经不再成立。**只有就地回填时才谈得上
-            // 过期**：退回全量刷新的话列表就是刚查的，没有过期问题。
-            // 健康度与验证结果排序会受新结论影响，名称和校验时间排序不会。
-            summary.stale =
-              backfilled &&
-              (filterCount.value > 0 || /verified/.test(query.order));
-            // **把 job_id 存进摘要**：resetCheckState() 刚把 checkJobId 清空了，
-            // 不存的话结果条上的「查看」点开抽屉不知道要看哪一条
-            summary.jobId = jobId;
-            checkResult.value = summary;          }
-          try {
-            tags.value = await listTags();
-          } catch (e) {
-            /* 忽略 */
-          }
-        } else if (data.status === "cancelled") {
-          ElMessage.info("校验已取消");
-        } else if (data.status === "unknown") {
-          // 兜底出口：SSE 重连到上限仍没拿到终态。**话要说准**——不能说
-          // 「任务失败」，任务很可能早就跑完了，只是我们没收到
-          ElMessage.error(data.error || "任务状态获取失败，请刷新页面");
-        } else {
-          ElMessage.error(
-            "校验任务失败：" +
-              (jobFailReason(data.result_json) || data.status || "unknown"),
-          );
+    stopCheck = watchJob(jobId, async (state) => {
+      resetCheckState();
+      const status = (state && state.job && state.job.status) || "";
+      upsertJob({ id: jobId, status });   // 终态（或 unknown）都把它从「在跑」里摘掉
+      if (status === "done") {
+        // 原始结果体只在收尾拉一次：就地回填要 `items`，结果条要 `transitions`
+        let detail = {};
+        try {
+          detail = await getJobDetail(jobId, { raw: true });
+        } catch (e) {
+          ElMessage.error("校验结果读取失败：" + (e?.message || e));
+          jobsRef.value?.refresh();
+          return;
         }
-        // 任务收尾后让开着的那份抽屉列表跟上（徽标已在上面 upsert 过）
-        jobsRef.value?.refresh();
-      },
-    );
+        const res = detail.result || {};
+        const summary = parseCheckResult(res);
+        // 就地回填优先：整表重拉会让滚动位置跳、正在看的行移位。
+        // 回填不了（结果被截断 / 一条都没匹配上）才退回全量刷新
+        const backfilled = applyCheckResults(res);
+        if (!backfilled) await load();
+        if (summary) {
+          // 行没动 → 排序和筛选项都可能已经不再成立。**只有就地回填时才谈得上
+          // 过期**：退回全量刷新的话列表就是刚查的，没有过期问题。
+          // 健康度与验证结果排序会受新结论影响，名称和校验时间排序不会。
+          summary.stale =
+            backfilled &&
+            (filterCount.value > 0 || /verified/.test(query.order));
+          // **把 job_id 存进摘要**：resetCheckState() 刚把 checkJobId 清空了，
+          // 不存的话结果条上的「查看」点开抽屉不知道要看哪一条
+          summary.jobId = jobId;
+          checkResult.value = summary;
+        }
+        try {
+          tags.value = await listTags();
+        } catch (e) {
+          /* 忽略 */
+        }
+      } else if (status === "cancelled") {
+        ElMessage.info("校验已取消");
+      } else if (status === "unknown") {
+        // 兜底出口：流重连到上限仍没拿到终态。**话要说准**——不能说
+        // 「任务失败」，任务很可能早就跑完了，只是我们没收到
+        ElMessage.error((state && state.job && state.job.error) || "任务状态获取失败，请刷新页面");
+      } else {
+        ElMessage.error(
+          "校验任务失败：" + ((state && state.job && state.job.error) || status || "unknown"),
+        );
+      }
+      // 任务收尾后让开着的那份抽屉列表跟上（徽标已在上面 upsert 过）
+      jobsRef.value?.refresh();
+    });
     // 新任务补进开着的那份抽屉列表；徽标已在提交时 upsert 过
     jobsRef.value?.refresh();
   } catch (e) {
@@ -867,7 +868,7 @@ function resetCheckState() {
 async function cancelCheck() {
   if (!checkJobId.value) return;
   try {
-    await api.post("/jobs/" + checkJobId.value + "/cancel", {});
+    await cancelJobApi(checkJobId.value);
   } catch (e) {
     ElMessage.error("取消失败: " + e.message);
   }

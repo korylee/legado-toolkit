@@ -66,8 +66,8 @@ const props = defineProps({
 // 运行态——弹框与工作台页面挂它，看到的是同一份。运行中的等待/预算/取消
 // 显示在下面那条 sticky 运行条里（唯一一份，入口卡不另设）
 const {
-  result, compare, running, elapsedMs, runStatus,
-  lastRunAt, lastRunMs, budget, channel: debugChannel, cancelRun,
+  result, compare, running, elapsedMs, runStatus, liveEvents,
+  lastRunAt, lastRunMs, budget, channel: debugChannel, cancelRun, resumeRunning,
 } = useDebugSession();
 const rerunning = running;
 const prevResult = computed(() => compare.value.prev);
@@ -148,8 +148,12 @@ const webviewTitle = computed(() => webviewUnsupportedTitle(webviewUnsupported.v
 //: 「用实测值当基准」这些只对真引擎成立
 const isEngineResult = computed(() => channel.value === "app" || channel.value === "jvm");
 //: App 推来的原始事件流。steps[].values 是它去掉耗时前缀后的段内文本，
-//: 排查「哪一步慢」「App 到底推了什么」只能看这里
-const events = computed(() => (result.value && result.value.events) || []);
+//: 排查「哪一步慢」「App 到底推了什么」只能看这里。
+//: **在跑的时候看流里的那份**（引擎逐条 flush，已经被搬进事件账本）——原来的
+//: 同步长轮询要等跑完才有事件可读，等待期是空等待。
+const events = computed(() => (running.value && liveEvents.value.length
+  ? liveEvents.value
+  : (result.value && result.value.events) || []));
 //: 默认子页签：真引擎看事件流；没有事件时看提取结果
 const defaultSubTab = computed(
   () => (isEngineResult.value && events.value.length ? "events" : "values"));
@@ -266,6 +270,9 @@ const segments = computed(() => {
 
 onMounted(() => {
   if (result.value) activeStep.value = props.initialStep || (steps.value[0] && steps.value[0].name) || "";
+  // 刷新/重开页面时把那次**还在跑**的调试重新挂上：任务行还在就挂得上。
+  // 观测登记放在进程内存里时，一次刷新就等于"那次调试从界面上消失了"。
+  void resumeRunning();
 });
 watch(result, (show) => {
   if (!show) return;

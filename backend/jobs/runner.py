@@ -4,11 +4,13 @@
 # 设计：所有耗时操作都不在 HTTP 请求里同步跑，而是
 #   POST /api/jobs -> 立刻返回 job_id
 #   任务在 asyncio task 里跑，进度写进 SQLite 的 jobs 表
-#   前端通过 SSE 订阅 /api/jobs/{id}/events
+#   前端通过 SSE 订阅 /api/jobs/{id}/stream（同一帧也能拉 /timeline）
 #
 # 这样 check 3700 个源、AI 修复循环这类分钟级任务不会让前端超时。
 import asyncio
-import threading
+import json
+import pathlib
+import shutil
 import time
 import traceback
 import uuid
@@ -16,6 +18,7 @@ import weakref
 from contextlib import asynccontextmanager
 from typing import Any, Awaitable, Callable, Dict, Optional
 
+from core.paths import data_dir
 from core.store import Store, now
 
 #: 正在运行的任务 {job_id: asyncio.Task}
@@ -114,9 +117,15 @@ class _Lane:
         self._held = None
         self._grant()
 
-    def snapshot(self) -> Dict[str, Any]:
-        """排队现状（可观测）：持有者与各等待者的 kind/已等秒数/有效优先级。"""
-        now = asyncio.get_running_loop().time()
+    def snapshot(self, now: Optional[float] = None) -> Dict[str, Any]:
+        """排队现状（可观测）：持有者与各等待者的 kind/已等秒数/有效优先级。
+
+        ``now`` 由调用方给：同步端点跑在线程池里，那里**没有事件循环**
+        （见 `lane_snapshot_threadsafe`），而 `get_running_loop().time()` 就是
+        `time.monotonic()`，两个时钟同源，混用只影响"已等秒数"这个展示值。
+        """
+        if now is None:
+            now = asyncio.get_running_loop().time()
         waiting = sorted(
             ({"kind": w.kind, "waiting_seconds": round(now - w.since, 1),
               "priority": self._effective_priority(w, now)}
@@ -124,106 +133,6 @@ class _Lane:
             key=lambda item: item["priority"])
         return {"held": self._held.kind if self._held else None,
                 "waiting": waiting}
-
-
-# ------------------------------------------------------------ 在途调试的观测口
-#
-# **为什么要有它**：调试是同步长轮询（`/rules/jvm-debug` 阻塞到跑完才返回），而本机
-# 引擎的 ndjson 事件流要等进程退出才解析（`_run_launcher` 是 `subprocess.run`，没有
-# 边跑边 tail）——所以等待期间界面上**一个可读的产物都没有**，只剩一个秒表（用户反馈的
-# 「每次调试都是空等待」）。批量校验那边走 jobs 表 + 时间线，调试没有 job 行。
-#
-# 这里**只记两件本机事实**，不记进度、不记阶段史、不做 ETA：
-#   ① 这一等是从什么时候开始的（界面要显示真实已等秒数）；
-#   ② 现在有没有别的任务占着引擎（`lane` 的持有者）——「为什么这么久没动静」的答案
-#      基本都在这一条上，而它本来就是 `lane_snapshot` 的既有事实，不另造一份状态。
-# 相位词只有两个：queued（等引擎）/ starting（已拿到许可、交给引擎线程）。引擎里跑规则
-# 那一段没有中间产物，界面照实转圈（AGENTS #4：编不出来就别编）。
-_ACTIVE_RUNS: Dict[str, Dict[str, Any]] = {}
-_ACTIVE_RUNS_LOCK = threading.Lock()
-
-
-def capture_active_run(run_id: str, lane: str = "jvm") -> str:
-    """登记一次在途调试的开始时刻（空 run_id 不登记）。"""
-    rid = str(run_id or "").strip()
-    if not rid:
-        return ""
-    now = time.monotonic()
-    with _ACTIVE_RUNS_LOCK:
-        _ACTIVE_RUNS[rid] = {"lane": lane, "phase": "queued",
-                             "since": now, "phase_since": now}
-    return rid
-
-
-def note_active_run(run_id: str, phase: str) -> None:
-    """推进相位（queued → starting）。未知/已收尾的 run_id 静默忽略——
-    迟到的那次调用不该凭空造出一条状态。**只写状态码**：中文句子由前端按码取词。"""
-    rid = str(run_id or "").strip()
-    if not rid:
-        return
-    with _ACTIVE_RUNS_LOCK:
-        record = _ACTIVE_RUNS.get(rid)
-        if record is not None:
-            record["phase"] = phase
-            record["phase_since"] = time.monotonic()
-
-
-def _finish_active_run(run_id: str) -> None:
-    if not run_id:
-        return
-    with _ACTIVE_RUNS_LOCK:
-        _ACTIVE_RUNS.pop(run_id, None)
-
-
-@asynccontextmanager
-async def active_debug_run(run_id: str, lane: str = "jvm"):
-    """登记一次在途调试的**整段等待**（进入时开始计时，退出时摘掉）。"""
-    capture_active_run(run_id, lane)
-    try:
-        yield
-    finally:
-        _finish_active_run(str(run_id or "").strip())
-
-
-def active_run_snapshot(run_id: str) -> Optional[Dict[str, Any]]:
-    """读一次在途调试的现状；没登记（没传 run_id / 已收尾）返回 ``None``。
-
-    只给观测到的事实：相位码、已等毫秒数、**当前占着引擎的是谁**。
-    """
-    rid = str(run_id or "").strip()
-    if not rid:
-        return None
-    now = time.monotonic()
-    with _ACTIVE_RUNS_LOCK:
-        record = _ACTIVE_RUNS.get(rid)
-        if record is None:
-            return None
-        out = {
-            "run_id": rid,
-            "phase": record["phase"],
-            "elapsed_ms": round((now - record["since"]) * 1000),
-            # 当前相位已经持续多久：界面用它决定「正在拉起引擎」要不要换成
-            # 「引擎执行中」——**不能用总已等时长**，前面可能排了很久的队
-            "phase_ms": round((now - record["phase_since"]) * 1000),
-            "lane": record["lane"],
-            # 读不到 lane 时保持空串（**不是 None**）：前端只做字符串比较，
-            # 空串的语义就是「没有别的任务占着 / 读不到」，不必再多一个三态
-            "lane_holder": "",
-            "lane_waiting": 0,
-        }
-    if record["lane"]:
-        # 引擎现状：持有者是谁、后面还排着几个。**不额外登记**——lane 自己就有这份账。
-        # lane 是按事件循环分表的，非事件循环上下文（同步调用 / 命令行）读不到：
-        # 那时**留空**而不是抛错——「读不到」不等于「没人占用」，更不能把一次观测
-        # 失败变成 500（AGENTS #12）
-        try:
-            snap = lane_snapshot(record["lane"])
-        except RuntimeError:
-            snap = None
-        if snap is not None:
-            out["lane_holder"] = snap.get("held") or ""
-            out["lane_waiting"] = len(snap.get("waiting") or [])
-    return out
 
 
 def _lane(name: str) -> _Lane:
@@ -239,6 +148,22 @@ def lane(name: str) -> _Lane:
 
 def lane_snapshot(name: str) -> Dict[str, Any]:
     return _lane(name).snapshot()
+
+
+def lane_snapshot_threadsafe(name: str) -> Dict[str, Any]:
+    """任意线程都能读的 lane 现状（观测用）。
+
+    同步端点由 FastAPI 丢进线程池，那里 `get_running_loop()` 会抛——而"谁占着引擎"
+    正是最该读得到的只读事实（界面的**轮询兜底**走的正是同步那条路）。服务进程里只有
+    一条事件循环，所以"所有 lane 表里同名的那条"就是它；读的是持有者与等待者两个
+    只读字段，不加锁、不调度（与观测口同一立场：读不到就留空，不许抛）。
+    """
+    now = time.monotonic()
+    for lanes in list(_LANES.values()):
+        lane = lanes.get(name)
+        if lane is not None:
+            return lane.snapshot(now)
+    return {"held": None, "waiting": []}
 
 
 @asynccontextmanager
@@ -258,23 +183,19 @@ async def run_in_lane(name: str, kind: str, fn: Callable, *args, **kwargs):
 
     客户端断开（刷新/关页）会取消 HTTP 协程；这里用 shield 顶住第一次取消、
     把工作**等完**才放 lane——引擎调用不许被半路掐死（没有可恢复的中间态），
-    lane 也只能跟着真正跑完的那次调用走。调试入口共用这一段（原在
-    ``api/rules.py`` 两处与 ``api/ops.py`` 一处各抄一遍）。
+    lane 也只能跟着真正跑完的那次调用走。连 App 调试与「生成后验证」共用这一段。
 
-    ``run_id`` 非空时登记这段等待（见 `active_run_snapshot`）：界面因此能显示
-    **真实已等秒数**与**此刻占着引擎的是谁**，而不是只有一个空转的秒表。
+    **本机调试不走它了**：调试现在是一个任务（``kind="jvm_debug"``，见
+    ``backend/jobs/jvm_debug_job``），lane 由 ``_run`` 按档位持有，等待观测也从
+    进程内的登记换成了任务行（谁占着引擎由观测帧给）。
     """
-    run_id = str(kwargs.pop("run_id", "") or "")
-    async with active_debug_run(run_id, lane=name):
-        async with acquire_lane(name, kind=kind):
-            # 拿到许可 → 交给工作线程：与「等引擎」分开，界面据此换一次词
-            note_active_run(run_id, "starting")
-            work = asyncio.create_task(asyncio.to_thread(fn, *args, **kwargs))
-            try:
-                return await asyncio.shield(work)
-            except asyncio.CancelledError:
-                await asyncio.shield(work)
-                raise
+    async with acquire_lane(name, kind=kind):
+        work = asyncio.create_task(asyncio.to_thread(fn, *args, **kwargs))
+        try:
+            return await asyncio.shield(work)
+        except asyncio.CancelledError:
+            await asyncio.shield(work)
+            raise
 
 
 def register(kind: str):
@@ -285,8 +206,14 @@ def register(kind: str):
 
 
 def submit(kind: str, payload: Optional[Dict[str, Any]] = None,
-           lane: Optional[str] = None, retry_of: str = "") -> str:
-    # 创建任务记录并交给事件循环执行。必须在运行中的 loop 里调用。
+           lane: Optional[str] = None, retry_of: str = "",
+           lane_kind: str = "batch") -> str:
+    """建任务并交给事件循环执行；必须在运行中的 loop 里调用。
+
+    ``lane`` 给了就在 ``_run`` 里代办 lane 的获取（``jvm_run`` 例外：它自管，块间
+    要让位）。``lane_kind`` 决定**排队的档位**（``LANE_PRIORITY``：调试 0、批量 10）——
+    写死成 "batch" 的话，调试任务会掉进批量档，那条优先级就成了读起来像存在的保护。
+    """
     if kind not in HANDLERS:
         raise ValueError("未知任务类型: %s（可用: %s）" % (kind, ", ".join(sorted(HANDLERS))))
     job_id = uuid.uuid4().hex[:12]
@@ -294,7 +221,7 @@ def submit(kind: str, payload: Optional[Dict[str, Any]] = None,
     with Store() as st:
         st.create_job(job_id, kind, total=int(payload.get("total", 0) or 0),
                       payload=payload, retry_of=retry_of)
-    TASKS[job_id] = asyncio.create_task(_run(job_id, kind, payload, lane))
+    TASKS[job_id] = asyncio.create_task(_run(job_id, kind, payload, lane, lane_kind))
     return job_id
 
 
@@ -315,7 +242,7 @@ def update_progress(job_id: str, progress: int) -> None:
 
 
 async def _run(job_id: str, kind: str, payload: Dict[str, Any],
-               lane: Optional[str] = None) -> None:
+               lane: Optional[str] = None, lane_kind: str = "batch") -> None:
     # jvm_run 的 lane 由任务体自己持有（run_jvm_job）：批量按块交还许可重排队，
     # 块边界在 handler 内部，runner 在外层持锁会让「块间让位」失效。
     lane_obj = _lane(lane) if (lane and kind != "jvm_run") else None
@@ -324,8 +251,13 @@ async def _run(job_id: str, kind: str, payload: Dict[str, Any],
         try:
             if kind == "jvm_run":
                 update_phase(job_id, "waiting_readiness")
+            elif kind == "jvm_debug":
+                # 调试与批量共用一条 lane：排队时就得说得出"在等引擎"（相位码由
+                # `utils/debugRun` 取词：queued → 谁占着引擎，starting → 正在拉起）
+                update_phase(job_id, "queued")
             if lane_obj is not None:
-                await lane_obj.acquire("batch", job_id)
+                # 档位由提交方说了算：调试（0）要排在批量（10）前面
+                await lane_obj.acquire(lane_kind, job_id)
                 acquired = True
             if kind == "jvm_run":
                 manifest = payload.get("manifest") or {}
@@ -371,7 +303,66 @@ def recover_orphans() -> int:
 def sweep_expired() -> int:
     """清理已过期的终态任务，供启动和后台巡检共用。"""
     with Store() as st:
-        return st.sweep_jobs()
+        removed = st.sweep_jobs()
+    sweep_run_dirs()
+    return removed
+
+
+#: 没有任务行的运行目录（跑之前就早退、或崩在写行之前）留多久。
+#: 它们在界面上没有任何入口，留着只占磁盘；但也不能立刻删——正跑着的那一瞬
+#: 可能还没写行（实际做不到，这里只是留出余量）。
+ORPHAN_RUN_DIR_HOURS = 24
+
+
+def _run_dir_job_id(entry: pathlib.Path) -> str:
+    """目录属于哪个任务：跑批写在信封 ``manifest.json`` 里，调试目录名里就带。"""
+    try:
+        data = json.loads((entry / "manifest.json").read_text(encoding="utf-8"))
+        if isinstance(data, dict) and data.get("job_id"):
+            return str(data["job_id"])
+    except (OSError, ValueError):
+        pass
+    if entry.name.startswith("debug-"):
+        return entry.name[len("debug-"):]
+    return ""
+
+
+def sweep_run_dirs() -> int:
+    """清运行目录，返回删了几个。
+
+    **目录的寿命跟着它的任务行走**：行被 TTL 清掉了，目录一起删；行还在（含
+    正在跑的）就留着——时间线读的就是目录里的两本账，按"目录个数上限"删会让
+    任务列表里那条的时间线凭空空掉。没有任务行的目录按 mtime 超期删。
+
+    只认本工具链创建的 ``batch-*`` / ``debug-*``，不碰别的目录。
+    """
+    root = pathlib.Path(data_dir()) / "app_probe" / "runs"
+    if not root.is_dir():
+        return 0
+    cutoff = time.time() - ORPHAN_RUN_DIR_HOURS * 3600
+    removed = 0
+    # 只读连接：巡检只查任务行在不在（写权限留给 sweep_jobs）
+    with Store(readonly=True) as st:
+        for entry in sorted(root.glob("*")):
+            try:
+                if not entry.is_dir():
+                    continue
+            except OSError:
+                continue
+            if not entry.name.startswith(("batch-", "debug-")):
+                continue
+            try:
+                job_id = _run_dir_job_id(entry)
+                if job_id:
+                    if st.get_job_summary(job_id) is not None:
+                        continue
+                elif entry.stat().st_mtime > cutoff:
+                    continue
+            except OSError:
+                continue          # 单个目录读不动不带走整轮巡检
+            shutil.rmtree(entry, ignore_errors=True)
+            removed += 1
+    return removed
 
 
 async def start_job_sweeper() -> None:

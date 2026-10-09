@@ -27,7 +27,8 @@ from fastapi.concurrency import run_in_threadpool
 
 from backend.api.check_summary import (ITEMS_LIMIT, check_items_from_checks,
                                        summarize_transitions)
-from backend.jobs import runner
+from backend.jobs import run_events, runner
+from backend.jobs.run_events import append_event as _append_event
 from core import settings_store
 from core.jvm_direct import execution_readiness
 from core.jvm_env import process_environment
@@ -52,18 +53,26 @@ def _args_file() -> Path:
     return Path(data_dir()).joinpath(*ARGS_PARTS)
 
 
+def _runs_root() -> Path:
+    """运行目录的根。**调用时算**：测试会换 `data_dir`（同 `_args_file` 的理由）。"""
+    return Path(data_dir()) / "app_probe" / "runs"
+
+
 def _cleanup_run_dir(run_dir: Optional[Path]) -> None:
-    """只清理本模块创建的单次运行目录，缺失目录时绝不把当前目录当目标。"""
-    if run_dir is None:
-        return
-    root = (data_dir() / "app_probe" / "runs").resolve()
-    try:
-        target = run_dir.resolve()
-    except OSError:
-        return
-    if target.parent != root or target == root:
-        return
-    shutil.rmtree(target, ignore_errors=True)
+    """整目录删除：只碰本模块创建的运行目录，缺失目录时绝不把当前目录当目标。
+
+    用在**跑之前就早退**的路径上（那时没有任何事件可留）。
+    """
+    run_events.remove_run_dir(run_dir, _runs_root())
+
+
+def _trim_run_dir(run_dir: Optional[Path]) -> None:
+    """成功清场：只留事件与失败两本账（口径与理由见 ``backend/jobs/run_events``）。
+
+    比整目录删除多留一个事实：这批是怎么跑的、哪几块失败——上一版清掉之后，
+    跑成功的批在界面上就只剩 ``result_json`` 里 500 条尾巴。
+    """
+    run_events.trim_run_dir(run_dir, _runs_root())
 
 
 def _build_jvm_manifest(*, run_dir: Path, source_file: Path, args_file: Path,
@@ -472,48 +481,14 @@ def _read_results(path: Path) -> List[Dict[str, Any]]:
     return [json.loads(l) for l in text.splitlines() if l.strip()]
 
 
-_EVENT_LOCK = threading.Lock()
-_EVENT_TAIL_CAP = 500
+def _record_failures(run_dir: Optional[Path], rows: List[Dict[str, Any]],
+                     chunk: str = "") -> None:
+    """把这一批结论里的失败源记进运行目录的失败清单（**在产生处写一次**）。
 
-
-def _append_event(run_dir: Optional[Path], kind: str, **fields: Any) -> None:
-    """骨架事件追加到运行目录 ``events.jsonl``（jvm-batch-timeline）。
-
-    **行号即游标**（消费端按行号增量读，见 backend/api/job_timeline），所以
-    一行一条、坏行也占号；模块锁防块线程与任务协程交错写。
-    事件是辅助证据：写不进去（OSError）不拦校验本身，也不算源失败。
+    消费端（时间线面板）因此不必每拍重扫各块 ``results.jsonl``——那些行我们
+    刚读进内存，重扫是把已知的事重算。
     """
-    if run_dir is None:
-        return
-    record = {"ts": round(time.time(), 3), "kind": kind, **fields}
-    with _EVENT_LOCK:
-        try:
-            with open(run_dir / "events.jsonl", "a", encoding="utf-8") as f:
-                f.write(json.dumps(record, ensure_ascii=False) + "\n")
-        except OSError:
-            pass
-
-
-def _read_events_tail(run_dir: Optional[Path]) -> List[Dict[str, Any]]:
-    """终态合并用：读事件尾部（cap 后仍按原始行号编 seq），进 result 长存——
-    成功会清运行目录，时间线在合并后就靠 result_json。"""
-    if run_dir is None:
-        return []
-    try:
-        lines = (run_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return []
-    lines = [l for l in lines if l.strip()]
-    out: List[Dict[str, Any]] = []
-    start = max(len(lines) - _EVENT_TAIL_CAP, 0)
-    for idx, line in enumerate(lines[start:], start=start + 1):
-        try:
-            ev = json.loads(line)
-        except ValueError:
-            continue
-        if isinstance(ev, dict):
-            out.append(ev)
-    return out
+    run_events.record_failures(run_dir, rows, chunk)
 
 
 def _write_meta(rows: List[Dict[str, Any]]) -> str:
@@ -744,10 +719,9 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
                 _append_event(run_dir, "startup_stage", stage="queue_wait",
                               status="done", cost_sec=queue_wait_sec)
             result = _execute_single(tail_stop, tail)
-            # 终态事件在读尾合并之前落盘，才能进 result["events"]
+            # 终态事件在**读尾之前**落盘：时间线靠运行目录的文件，不再合并进结果
             _append_event(run_dir, "done" if result.get("ok") else "failed",
                           reason=str(result.get("reason") or "")[:300])
-            result["events"] = _read_events_tail(run_dir)
             return result
         finally:
             # 早退路径（如 daemon 失败不回退）也从这里停轮询；set/join 可重入，
@@ -847,6 +821,7 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
         tail.join(5)
         job_runner.update_phase(job_id, "reading_results")
         rows = _read_results(out_path)
+        _record_failures(run_dir, rows, "")
         job_runner.update_progress(job_id, len(rows))
         batch = _write_meta(rows)
         # **上一版结论的快照必须在落库之前读**：跑完再读，每条源都是 old == new，
@@ -1041,6 +1016,7 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
             tail.join(5)
             job_runner.update_phase(job_id, "reading_results")
             rows = _read_results(chunk_out)
+            _record_failures(run_dir, rows, chunk_dir.name if chunk_dir else "")
             job_runner.update_progress(job_id, base_done + len(rows))
             job_runner.update_phase(job_id, "saving_results")
             from core import jvm_health
@@ -1303,11 +1279,9 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
         if cancelled.is_set():
             # 批量取消**保留**运行目录：已完成块的 DONE/results 是重试恢复的依据
             _append_event(run_dir, "cancelled")
-            from core.jvm_debug import prune_stale_run_dirs
-            prune_stale_run_dirs(root=data_dir() / "app_probe" / "runs")
             raise asyncio.CancelledError()
 
-        # 终态事件必须在读尾合并**之前**落盘，才能进 result["events"]
+        # 终态事件只**落盘**（读它的地方是 backend/api/job_timeline，不再合并进结果）
         if abort_reason:
             _append_event(run_dir, "failed", reason=abort_reason)
         else:
@@ -1347,15 +1321,13 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
                 "outcome": str(daemon_prepare.get("outcome") or "failed"),
                 "reason": str(daemon_prepare.get("reason") or ""),
             }
-        result["events"] = _read_events_tail(run_dir)
         if abort_reason:
             result["reason"] = abort_reason
-        # 成功清现场；失败/取消保留——已完成块的 DONE/results 是重试恢复的依据
+        # 成功**只清执行产物**（留事件与失败两本账）；失败/取消整目录保留——
+        # 已完成块的 DONE/results 是重试恢复的依据。目录的过期清理由
+        # `runner.sweep_run_dirs` 按任务行兜底（启动 + 每小时）。
         if result["ok"]:
-            _cleanup_run_dir(run_dir)
-        else:
-            from core.jvm_debug import prune_stale_run_dirs
-            prune_stale_run_dirs(root=data_dir() / "app_probe" / "runs")
+            _trim_run_dir(run_dir)
         return result
 
     # jvm_run 自管 lane（runner._run 不再代持）：批量按块交还许可重排队
@@ -1369,24 +1341,20 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
             try:
                 result = await asyncio.shield(work)
             except asyncio.CancelledError:
-                # 单条取消沿用「不遗留」：结论没入库，现场没有复查价值
+                # 单条取消：结论没入库，执行产物没有复查价值；事件与失败仍留着
+                # （取消的那一刻跑到哪一步，只有这两本账说得清）
                 cancelled.set()
                 await asyncio.shield(work)
-                _cleanup_run_dir(run_dir)
+                _trim_run_dir(run_dir)
                 raise
             if result.get("ok"):
-                _cleanup_run_dir(run_dir)
-            else:
-                from core.jvm_debug import prune_stale_run_dirs
-                prune_stale_run_dirs(root=data_dir() / "app_probe" / "runs")
+                _trim_run_dir(run_dir)
             return result
         try:
             return await _run_batch()
         except asyncio.CancelledError:
             # 批量取消**保留**运行目录：已完成块的 DONE/results 是重试恢复的依据
             cancelled.set()
-            from core.jvm_debug import prune_stale_run_dirs
-            prune_stale_run_dirs(root=data_dir() / "app_probe" / "runs")
             raise
     finally:
         lane.release()

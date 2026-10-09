@@ -30,6 +30,7 @@ from unittest import mock
 
 from backend.api import jvm as jvm_api
 from backend.jobs import jvm_exec
+from backend.jobs import runner as jobs_runner
 from backend.schemas import JvmRunRequest
 from core import jvm_direct
 from core.checker import CACHE_VERSION
@@ -57,6 +58,10 @@ class _Base(unittest.TestCase):
             mock.patch.object(jvm_exec, "_AGSVC", self.probe / "appservice"),
             mock.patch.object(jvm_api, "data_dir", lambda: self.probe / "data"),
             mock.patch.object(jvm_exec, "data_dir", lambda: self.probe / "data"),
+            # 运行目录巡检（runner.sweep_run_dirs）按**任务行**决定目录生死：
+            # 不隔离它就会拿真库当真依据，还会去动真 data/ 目录
+            mock.patch.object(jobs_runner, "data_dir", lambda: self.probe / "data"),
+            mock.patch.object(jobs_runner, "Store", lambda *a, **kw: Store(self.db)),
             mock.patch.object(jvm_api, "readiness", lambda repo, sdk="": {"ok": True, "checks": [], "runtime": {"app_repo": "X:/repo", "java_home": "X:/jdk", "android_sdk": "X:/sdk", "gradle_user_home": "X:/.gradle"}}),
             mock.patch.object(jvm_api, "execution_readiness", lambda dump=None: {"ok": True, "checks": [], "reason": "", "source_sig": "sig"}),
             mock.patch.object(jvm_exec, "execution_readiness", lambda dump=None: {"ok": True, "checks": [], "reason": "", "source_sig": "sig"}),
@@ -744,18 +749,29 @@ class RunDirRetentionTests(_Base):
             (self._latest_batch_dir() / "manifest.json").read_text(encoding="utf-8"))
         self.assertEqual(envelope["retry_of"], "orig-job")
 
-    def test_failed_run_dirs_are_pruned_to_the_cap(self) -> None:
-        from core.jvm_debug import FAILED_RUN_DIR_CAP
+    def test_run_dirs_follow_their_job_row(self) -> None:
+        """运行目录的寿命跟着**任务行**走：行没了才删，行还在（含在跑的）不许删。
+
+        时间线读的就是目录里的两本账：按"目录个数上限"删，会让任务列表里那条的
+        时间线凭空空掉；而没有任务行的目录在界面上根本没有入口，按 mtime 超期删。
+        """
         runs = self.probe / "data" / "app_probe" / "runs"
-        runs.mkdir(parents=True, exist_ok=True)
-        for i in range(FAILED_RUN_DIR_CAP + 3):
-            (runs / ("batch-%06d" % i)).mkdir()
-        self.no_output = True
-        self.gradle_result = 1
-        self._call()
-        self.assertLessEqual(len(list(runs.glob("batch-*"))), FAILED_RUN_DIR_CAP)
-        # 保留的必须是最新那个（本次失败现场），而不是任意 cap 个
-        self.assertTrue(self._latest_batch_dir().exists())
+        dead = runs / "batch-dead"
+        alive = runs / "batch-alive"
+        orphan = runs / "batch-orphan"
+        for d, job_id in ((dead, "gone"), (alive, "alive"), (orphan, "")):
+            d.mkdir(parents=True, exist_ok=True)
+            if job_id:
+                (d / "manifest.json").write_text(
+                    json.dumps({"job_id": job_id}), encoding="utf-8")
+        with Store(self.db) as st:
+            st.create_job("alive", "jvm_run")
+
+        self.assertEqual(jobs_runner.sweep_run_dirs(), 1)
+
+        self.assertFalse(dead.exists(), "任务行没了的目录要删")
+        self.assertTrue(alive.exists(), "任务行还在：时间线还要读它")
+        self.assertTrue(orphan.exists(), "没有任务行、又是刚建的：留出余量")
 
 
 class ChunkExecutionTests(_Base):
@@ -1212,18 +1228,28 @@ class EventTimelineTests(_Base):
         return asyncio.run(go())
 
     @staticmethod
-    def _kinds(run_dir) -> list:
+    def _events(run_dir) -> list:
+        """运行目录里的事件。**事实在文件里**（不再合并进 ``result_json``）：
+        成功清场只清执行产物，两本账留着。"""
         text = (pathlib.Path(run_dir) / "events.jsonl").read_text(
             encoding="utf-8")
-        return [json.loads(l)["kind"] for l in text.splitlines() if l.strip()]
+        return [json.loads(l) for l in text.splitlines() if l.strip()]
+
+    @staticmethod
+    def _kinds(run_dir) -> list:
+        return [e["kind"] for e in EventTimelineTests._events(run_dir)]
+
+    @staticmethod
+    def _run_dir(payload) -> str:
+        return payload["manifest"]["run_dir"]
 
     def test_queue_wait_is_not_reported_when_nothing_queued(self) -> None:
         """没排队就不发那行：每次跑都来一条「任务排队完成（0 秒）」是噪声。"""
-        _payload, result = self._run_batch(self._QUIET)
+        payload, result = self._run_batch(self._QUIET)
         self.assertTrue(result["ok"], result)
-        self.assertEqual(
-            [], [e for e in result["events"] if e.get("stage") == "queue_wait"],
-            result["events"])
+        events = self._events(self._run_dir(payload))
+        self.assertEqual([], [e for e in events if e.get("stage") == "queue_wait"],
+                         events)
 
     def test_queue_wait_is_reported_when_the_lane_makes_it_wait(self) -> None:
         """真排队时必须留下那一行，且秒数来自 lane 的实际等待。"""
@@ -1242,10 +1268,11 @@ class EventTimelineTests(_Base):
 
         lane_stub = _SlowFirstLane()
         with mock.patch.object(jvm_exec.runner, "lane", lambda name: lane_stub):
-            _payload, result = self._run_batch(self._QUIET)
+            payload, result = self._run_batch(self._QUIET)
         self.assertTrue(result["ok"], result)
-        queue = [e for e in result["events"] if e.get("stage") == "queue_wait"]
-        self.assertEqual(1, len(queue), result["events"])
+        events = self._events(self._run_dir(payload))
+        queue = [e for e in events if e.get("stage") == "queue_wait"]
+        self.assertEqual(1, len(queue), events)
         self.assertGreaterEqual(queue[0]["cost_sec"], jvm_exec._QUEUE_NOTICE_MIN_SEC)
 
     def test_batch_reports_engine_wait_while_daemon_busy(self) -> None:
@@ -1262,10 +1289,11 @@ class EventTimelineTests(_Base):
             mock.patch("core.jvm_validate_daemon.prepare",
                         side_effect=fake_prepare), \
             mock.patch("core.jvm_validate_daemon.probe", return_value=None):
-            _payload, result = self._run_batch(self._QUIET)
+            payload, result = self._run_batch(self._QUIET)
         self.assertEqual(jvm_exec._DAEMON_BUSY_WAIT_SEC, seen["busy_wait_sec"])
-        waits = [e for e in result["events"] if e.get("kind") == "waiting_engine"]
-        self.assertEqual(1, len(waits), result["events"])
+        events = self._events(self._run_dir(payload))
+        waits = [e for e in events if e.get("kind") == "waiting_engine"]
+        self.assertEqual(1, len(waits), events)
         self.assertEqual(10.0, waits[0]["elapsed_sec"])
 
     def test_stalled_chunk_survives_successful_isolation(self) -> None:
@@ -1300,7 +1328,7 @@ class EventTimelineTests(_Base):
              mock.patch("core.jvm_validate_daemon.probe", return_value=None), \
              mock.patch("core.jvm_validate_daemon.stop", return_value=True), \
              mock.patch("core.jvm_validate_daemon.run", side_effect=hung_run):
-            _payload, result = self._run_batch(self._QUIET)
+            payload, result = self._run_batch(self._QUIET)
         self.assertTrue(result["ok"], result)
         self.assertEqual(3, len(result["chunk_reports"]), result["chunk_reports"])
         self.assertTrue(all(r.get("ok") for r in result["chunk_reports"]),
@@ -1308,7 +1336,7 @@ class EventTimelineTests(_Base):
         # 每块 1 条源：判死的那条也要作为结论留在文件里被读回，不能被整块丢掉
         self.assertEqual([1, 1, 1],
                          [r.get("count") for r in result["chunk_reports"]])
-        self.assertEqual("done", result["events"][-1]["kind"])
+        self.assertEqual("done", self._kinds(self._run_dir(payload))[-1])
 
     def test_batch_stale_snapshot_skips_daemon_and_keeps_reason(self) -> None:
         """改了 Kotlin 未刷新 snapshot：批量不碰 daemon、全部走 Gradle，原因可见。
@@ -1341,10 +1369,10 @@ class EventTimelineTests(_Base):
         gradle.assert_not_called()
 
     def test_batch_event_sequence_and_terminal_merge(self) -> None:
-        """成功批清运行目录，时间线靠 result["events"] 长存（合并的意义）。"""
-        _payload, result = self._run_batch(self._QUIET)
+        """成功批只清执行产物：事件留在运行目录里，跑完也读得到（时间线的事实源）。"""
+        payload, result = self._run_batch(self._QUIET)
         self.assertTrue(result["ok"], result)
-        self.assertEqual([e["kind"] for e in result["events"]],
+        self.assertEqual(self._kinds(self._run_dir(payload)),
                          ["batch_started", "prepare", "chunk_started", "chunk_done",
                           "chunk_started", "chunk_done", "chunk_started", "chunk_done",
                           "done"])
@@ -1368,7 +1396,7 @@ class EventTimelineTests(_Base):
             mock.patch("core.jvm_validate_daemon.run", side_effect=fake_run):
             _payload, result = self._run_batch(self._BUSY3)
         self.assertTrue(result["ok"], result)
-        self.assertEqual([e["kind"] for e in result["events"]],
+        self.assertEqual(self._kinds(_payload["manifest"]["run_dir"]),
                          ["batch_started", "prepare", "chunk_started", "chunk_done",
                           "chunk_started", "chunk_done", "recovered",
                           "chunk_started", "chunk_done", "done"])
@@ -1424,23 +1452,31 @@ class EventTimelineTests(_Base):
             r2 = asyncio.run(jvm_exec.run_jvm_job(
                 "ev-job-2", Store(self.db), submitted["payload"]))
         self.assertTrue(r2["ok"], r2)
-        # 事件文件跨轮**追加**：恢复批的时间线包含上一轮的完整历史，
-        # resumed 行标记了两次运行的边界（成功后目录清场，断言走合并结果）
-        self.assertEqual([e["kind"] for e in r2["events"]],
+        # 事件**只落盘**（不再合并进 result_json）：成功清场也只清执行产物，
+        # 事件文件跨轮追加，所以恢复批的时间线包含上一轮的完整历史，
+        # resumed 行标记了两次运行的边界
+        self.assertNotIn("events", r2)
+        self.assertEqual(self._kinds(run_dir),
                          ["batch_started", "prepare", "chunk_started", "chunk_done",
                           "chunk_started", "chunk_failed", "failed",
                           "batch_started", "resumed", "prepare", "chunk_started",
                           "chunk_done", "done"])
 
-    def test_events_tail_merge_is_bounded(self) -> None:
-        run_dir = self.probe / "data" / "app_probe" / "runs" / "ev-cap"
-        run_dir.mkdir(parents=True)
-        with (run_dir / "events.jsonl").open("a", encoding="utf-8") as f:
-            for i in range(5):
-                f.write(json.dumps({"kind": "e%d" % i}) + "\n")
-        with mock.patch.object(jvm_exec, "_EVENT_TAIL_CAP", 3):
-            got = jvm_exec._read_events_tail(run_dir)
-        self.assertEqual([e["kind"] for e in got], ["e2", "e3", "e4"])
+    def test_success_trim_keeps_the_two_accounts(self) -> None:
+        """成功清场只清**执行产物**：DONE/results 留着会让「再次运行」跳过所有块。"""
+        run_dir = self.probe / "data" / "app_probe" / "runs" / "batch-trim"
+        (run_dir / "chunk-01").mkdir(parents=True)
+        (run_dir / "chunk-01" / "DONE").write_text("", encoding="utf-8")
+        (run_dir / "chunk-01" / "results.jsonl").write_text("{}\n", encoding="utf-8")
+        (run_dir / "sources.json").write_text("[]", encoding="utf-8")
+        jvm_exec._append_event(run_dir, "batch_started", chunks=1)
+        jvm_exec._record_failures(run_dir, [{"url": "https://b.com", "state": "error"}],
+                                  "chunk-01")
+
+        jvm_exec._trim_run_dir(run_dir)
+
+        self.assertEqual(sorted(p.name for p in run_dir.iterdir()),
+                         ["events.jsonl", "failures.jsonl"])
 
 
 if __name__ == "__main__":
