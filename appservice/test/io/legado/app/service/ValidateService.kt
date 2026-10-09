@@ -222,6 +222,12 @@ object ValidateService {
             // 引擎自身没跑成（我们桩的环境缺口 / OOM）：不是源的结论
             cls.contains("NoDefinitionFound") || cls.contains("ExceptionInInitializer") ||
                 cls == "OutOfMemoryError" || cls.contains("Koin") -> "self"
+            // 源要人机校验而本机过不去（ShadowSourceVerification 抛的 BrowserRequiredException）
+            // →**不是规则错**，下一步是换通道。两种形态都要认：最深层的 cause 就是它（实测走这条），
+            // 或者被 Rhino 包成 ScriptException 后只在**消息**里留下类名。这条必须排在
+            // 下面那条规则判定**之前**（否则实测判成「源的规则有问题，下一步是修」）
+            cls.contains("BrowserRequiredException") ||
+                msg.contains("BrowserRequiredException") -> "browser"
             // 源的规则/配置错（JS 语法、取值路径不存在…）：下一步是修，不是重跑
             root is javax.script.ScriptException || cls.contains("EcmaError") ||
                 cls.contains("PathNotFoundException") || msg.contains("Expected URL scheme") ||
@@ -434,6 +440,11 @@ object ValidateService {
         // 一个慢源能把整场拖成 O(源数 × 段数 × timeout)（lessons §五十四）
         val deadline = startedAt + timeoutSec * 1000
         fun remaining(): Long = (deadline - System.currentTimeMillis()).coerceAtLeast(1L)
+
+        //: JS 里的 `java.startBrowserAwait` 落到 ShadowSourceVerification——它在调用栈另一侧
+        //: 拿不到这里的 remaining()，所以把本源的**总预算**交过去（同 validateByRendering 的口径：
+        //: 浏览器那一段不许额外多花时间）。同一块的源共用一个 timeout，值相同。
+        ShadowSourceVerification.budgetSec = timeoutSec
 
         return try {
             val books = withTimeout(remaining()) {

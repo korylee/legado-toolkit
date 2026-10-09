@@ -6,7 +6,7 @@
 一个词，而一个该落「待验证」、一个该落「需翻墙」；`NoDefinitionFoundException`
 的栈里还带着 `Socket…` 字样。
 
-守的是三条边界（为什么这么定写在 `core/jvm_health` 与 TODO §一点九）：
+守的是三条边界（为什么这么定写在 `core/jvm_health`）：
 
 1. 失败分因，但**不把「这次没验成」判成「源坏了」**（传输层一律保守）
 2. **DNS 要交叉验证**：两个公共 DNS 都说不存在才判死（probe 注入，测试不联网）
@@ -39,6 +39,11 @@ REAL_REASONS = [
     ("SSLHandshakeException: Read error: ssl=00000223B9686408: Failure in SSL library",
      H.CAUSE_TLS),
     ("NoStackTraceException: 搜索url不能为空", H.CAUSE_RULE),
+    # 源要人机校验、本机过不去（2026-10-09 真库那条：Rhino 把它包成 ScriptException，
+    # 消息里同时有 ScriptException 与我们的类名 → 必须判 browser，不能落到 rule）
+    ("ScriptException: org.mozilla.javascript.WrappedException: Wrapped "
+     "io.legado.app.service.BrowserRequiredException: 本机引擎要过该源的人机校验但没成功",
+     H.CAUSE_BROWSER),
     ('ScriptException: org.mozilla.javascript.EcmaError: TypeError: Cannot read property "1" from null',
      H.CAUSE_RULE),
     ("PathNotFoundException: Expected to find an object with property ['data']", H.CAUSE_RULE),
@@ -131,6 +136,16 @@ class HealthTests(unittest.TestCase):
         health, note = H.health_for({"state": "error", "reason": "NoStackTraceException: 搜索url不能为空"})
         self.assertEqual(health, Health.PENDING)
         self.assertIn("修", note)
+
+    def test_browser_required_points_at_the_other_channel(self) -> None:
+        """需要人机校验 ≠ 源的规则错：动作是换通道，不是去改规则（实测曾判反）。"""
+        health, note = H.health_for({
+            "state": "error",
+            "reason": "ScriptException: Wrapped io.legado.app.service.BrowserRequiredException: x",
+        })
+        self.assertEqual(health, Health.PENDING)
+        self.assertIn("连 App 调试", note)
+        self.assertNotIn("修", note)
 
     def test_dns_needs_two_agreeing_resolvers(self) -> None:
         row = {"state": "error", "reason": "UnknownHostException: Unable to resolve host"}

@@ -9,7 +9,7 @@ import org.robolectric.annotation.Config
 /** 通过现有测试 JVM 启动常驻 ValidateService。 */
 @RunWith(RobolectricTestRunner::class)
 @Config(application = android.app.Application::class, sdk = [35],
-    shadows = [WindowsPathAssetManagerShadow::class])
+    shadows = [WindowsPathAssetManagerShadow::class, ShadowSourceVerification::class])
 class ValidateServiceDaemonLauncher {
 
     @Test

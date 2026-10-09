@@ -47,6 +47,10 @@ CAUSE_OTHER = "other"
 CAUSE_RULE = "rule"
 #: 引擎自身没跑成（Koin 缺绑定、OOM、环境缺口）：**不是源的结论**。
 CAUSE_SELF = "self"
+#: 源要求人机校验（要人在浏览器里点、或认图片验证码），本机校验无人可等：
+#: **不是源的规则错**，下一步是换通道（连 App 调试），不是去改规则。
+#: 对应 Kotlin 的 `io.legado.app.service.BrowserRequiredException`。
+CAUSE_BROWSER = "browser"
 
 #: `reason` / `root` / `root_stack` 里的特征 → 归因。**顺序有意义**：更具体的先判
 #: ——`NoDefinitionFoundException` 的栈里也可能带 `Socket…` 字样；而 `Socket closed`
@@ -54,6 +58,9 @@ CAUSE_SELF = "self"
 _CAUSE_PATTERNS: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
     (CAUSE_SELF, ("NoDefinitionFoundException", "ExceptionInInitializerError",
                   "OutOfMemoryError", "Koin")),
+    # **必须排在 rule 之前**：Rhino 把它包成 ScriptException，消息里同时有 `ScriptException`
+    # 与我们的类名；顺序反了就会判成"源的规则有问题，下一步是修"（实测 2026-10-09）
+    (CAUSE_BROWSER, ("BrowserRequiredException",)),
     (CAUSE_RULE, ("ScriptException", "EcmaError", "搜索url不能为空",
                   "PathNotFoundException", "Expected URL scheme",
                   "json string can not be null")),
@@ -90,6 +97,7 @@ _STATE_HEALTH = {
 #: 落 CAUSE_OTHER。
 _ROOT_KIND_TO_CAUSE: Dict[str, str] = {
     "self": CAUSE_SELF,
+    "browser": CAUSE_BROWSER,
     "rule": CAUSE_RULE,
     "cert": CAUSE_CERT,
     "tls": CAUSE_TLS,
@@ -164,6 +172,8 @@ def health_for(row: Dict[str, Any], *, host: str = "",
     cause = classify_cause(row)
     if cause == CAUSE_SELF:
         return Health.PENDING, "本机引擎这次没跑成（不是源的问题）：%s" % _brief(row)
+    if cause == CAUSE_BROWSER:
+        return Health.PENDING, "需要浏览器/人工完成人机校验，本机引擎过不去（下一步：连 App 调试）：%s" % _brief(row)
     if cause == CAUSE_RULE:
         return Health.PENDING, "源的规则/配置有问题（下一步是修）：%s" % _brief(row)
     if cause == CAUSE_DNS:

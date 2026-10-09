@@ -48,6 +48,16 @@ class ValidateServiceClassifyRootTest {
         assertEquals("rule", kind(IllegalArgumentException("json string can not be null or empty")))
     }
 
+    @Test fun browser_required_is_not_a_rule_error() {
+        // 形态①（实测走的就是这条）：最深层的 cause 就是它，消息里没有类名
+        assertEquals("browser", kind(BrowserRequiredException(
+            "该源要人工图片验证码，本机引擎无人可认——请用「连 App 调试」")))
+        // 形态②：被 Rhino 包成 ScriptException 后只剩消息里有类名
+        assertEquals("browser", kind(ScriptException(
+            "org.mozilla.javascript.WrappedException: Wrapped io.legado.app.service." +
+                "BrowserRequiredException: 本机引擎要过该源的人机校验但没成功")))
+    }
+
     @Test fun self_for_engine_side_gaps() {
         assertEquals("self", kind(RuntimeException(ExceptionInInitializerError())))
         assertEquals("self", kind(OutOfMemoryError("Java heap space")))

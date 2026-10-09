@@ -19,7 +19,7 @@ import io.legado.app.probe.WindowsPathAssetManagerShadow
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(application = android.app.Application::class, sdk = [35],
-    shadows = [WindowsPathAssetManagerShadow::class])
+    shadows = [WindowsPathAssetManagerShadow::class, ShadowSourceVerification::class])
 class ValidateServiceLauncher {
 
     @Test
