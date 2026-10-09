@@ -680,53 +680,40 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
     """
     from core.jvm_debug import RUN_LOCK
 
-    # 新任务只从提交时生成的 manifest 取输入/输出。**不带 manifest 的旧调用只支持单条**
-    # （那条路有测试钉着，靠 payload 里的显式路径跑）；批量必须带清单——它的参数、分块与
-    # 运行身份全在清单里，放它继续走只会在块线程里 KeyError，而不是一条可读的失败原因。
-    manifest_value = payload.get("manifest")
-    if manifest_value is None and not payload.get("single"):
+    # 执行只从提交时生成的 manifest 取输入/输出：参数、分块与运行身份全在清单里。
+    # 没有清单就直接给一条可读失败——放它继续走只会在块线程里 KeyError。
+    manifest = payload.get("manifest")
+    if not isinstance(manifest, dict):
         return dict(payload.get("prep") or {}, **{
             "ok": False, "execution_mode": "unknown",
-            "reason": "JVM 任务缺少 manifest：批量执行必须带清单"})
-    manifest_reason = _manifest_error(manifest_value) if manifest_value is not None else ""
-    has_manifest = isinstance(manifest_value, dict)
-    manifest = manifest_value if has_manifest else {}
-    run_dir_value = str(manifest.get("run_dir") if has_manifest
-                        else payload.get("run_dir") or "").strip()
+            "reason": "JVM 任务缺少 manifest：执行必须带清单"})
+    manifest_reason = _manifest_error(manifest)
+    run_dir_value = str(manifest.get("run_dir") or "").strip()
     run_dir = Path(run_dir_value) if run_dir_value else None
     if run_dir is None:
         out_path = data_dir() / "app_probe" / "jvm_results.jsonl"
         args_path = None
     else:
-        out_path = Path(str(manifest.get("out_path") if has_manifest
-                            else payload.get("out_path") or run_dir / "results.jsonl"))
-        args_path = Path(str(manifest.get("args_file") if has_manifest
-                            else payload.get("args_file") or run_dir / "args.properties"))
+        out_path = Path(str(manifest.get("out_path") or run_dir / "results.jsonl"))
+        args_path = Path(str(manifest.get("args_file") or run_dir / "args.properties"))
     prep = dict(payload.get("prep") or {})
     if manifest_reason:
         _cleanup_run_dir(run_dir)
         return dict(prep, **{"ok": False, "reason": manifest_reason,
                              "execution_mode": "unknown"})
 
-    single = bool(manifest.get("single") if has_manifest else payload.get("single"))
-    allow_gradle_fallback = bool(
-        manifest.get("allow_gradle_fallback") if has_manifest
-        else payload.get("allow_gradle_fallback", True))
-    runtime = (dict(manifest.get("runtime") or {}) if has_manifest
-               else payload.get("runtime"))
-    execution_readiness_snapshot = (
-        manifest.get("execution_readiness") if has_manifest
-        else payload.get("execution_readiness"))
-    readiness_snapshot = (manifest.get("readiness") if has_manifest
-                          else payload.get("readiness"))
-    source_file_value = str((manifest.get("source_file") if has_manifest
-                             else payload.get("source_file")) or "").strip()
+    single = bool(manifest.get("single"))
+    allow_gradle_fallback = bool(manifest.get("allow_gradle_fallback", True))
+    runtime = dict(manifest.get("runtime") or {})
+    execution_readiness_snapshot = manifest.get("execution_readiness")
+    readiness_snapshot = manifest.get("readiness")
+    source_file_value = str(manifest.get("source_file") or "").strip()
 
     if run_dir is not None:
         # 重试的运行目录可能已被清理（成功/单条取消）：就地重建，旧块（若有）
         # 的 DONE/results 不受影响——那是重试恢复要扫的
         run_dir.mkdir(parents=True, exist_ok=True)
-        if has_manifest and single and args_path is not None:
+        if single and args_path is not None:
             params = (manifest.get("params") or {})
             _write_manifest_args(manifest, out_path,
                                 Path(source_file_value or (run_dir / "sources.json")),
@@ -749,7 +736,7 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
             # 任务信封 + runtime 快照：执行一开始就落盘。inputs 是提交时冻结的
             # manifest（带 sha256），信封上的 job/owner/chunk 是执行身份——崩溃后
             # 凭这个目录就能逐项对出「这次用了什么输入、依赖哪份快照、写到哪」。
-            if run_dir is not None and has_manifest:
+            if run_dir is not None:
                 _write_run_manifest(run_dir, manifest, job_id)
                 _persist_runtime_snapshot(run_dir)
             _append_event(run_dir, "single_started")
@@ -916,7 +903,7 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
         started = time.monotonic()
         per_source_budget = int(manifest["params"]["timeout"])
         try:
-            if has_manifest and chunk_dir is not None:
+            if chunk_dir is not None:
                 _write_run_manifest(chunk_dir, manifest, job_id,
                                     chunk="%d/%d" % (idx + 1, total))
             # 块级 daemon 路径：与单条同形——省掉每块一次 Gradle+JVM 冷启动。
@@ -1187,7 +1174,7 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
             chunks.append(rows_all[pos:pos + n])
             pos += n
 
-        if run_dir is not None and has_manifest:
+        if run_dir is not None:
             _write_run_manifest(run_dir, manifest, job_id)
             _persist_runtime_snapshot(run_dir)
         batch_t0 = time.monotonic()
@@ -1217,7 +1204,7 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
                 abort_reason = abort_reason or "用户取消，剩余块未启动"
                 break
             chunk_dir = (run_dir / ("chunk-%02d" % (idx + 1))
-                         if (run_dir is not None and has_manifest) else None)
+                         if run_dir is not None else None)
             if chunk_dir is not None and _chunk_completed(chunk_dir):
                 # 重试恢复：DONE 标记在 → 该块结论已在库，只汇总不重跑
                 rows = _read_results(chunk_dir / "results.jsonl")

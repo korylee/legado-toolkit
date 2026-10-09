@@ -170,7 +170,6 @@ async def jvm_run(body: Optional[JvmRunRequest] = None):
         "started": True,
         "count": len(rows),
         "execution_plan": "validate_daemon" if single else "gradle",
-        "preparation_ready": preparation_ready,
     }
     execution_plan = "validate_daemon" if single else "gradle"
     # 分块大小（提交即冻结）：settings 的 jvm.chunk_size，越界值已被 coerce 收敛

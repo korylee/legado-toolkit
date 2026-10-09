@@ -136,47 +136,26 @@ class _Base(unittest.TestCase):
 
 
 class ScopeTests(_Base):
-    def test_legacy_payload_without_manifest_keeps_its_run_paths(self) -> None:
+    def test_payload_without_manifest_is_rejected_with_reason(self) -> None:
+        """没有清单就拒绝：连带显式路径的旧 payload 也不放行（生产只走清单）。
+
+        放它继续走只会有两种结局——拿 payload 里的旧路径兜底（兼容层，已删），
+        或者在块线程里 KeyError（不可读的失败）。这里钉的是第三种：一条能读的原因。
+        """
         run_dir = self.probe / "data" / "app_probe" / "runs" / "legacy"
         run_dir.mkdir(parents=True)
-        source_file = run_dir / "sources.json"
-        args_file = run_dir / "args.properties"
-        out_path = run_dir / "results.jsonl"
-        source_file.write_text("[]", encoding="utf-8")
-        args_file.write_text("file=%s\nout=%s\n" % (source_file, out_path), encoding="utf-8")
-
         payload = {
             "prep": {"started": True},
             "run_dir": str(run_dir),
-            "source_file": str(source_file),
-            "args_file": str(args_file),
-            "out_path": str(out_path),
             "single": True,
             "allow_gradle_fallback": False,
-            "execution_readiness": {"ok": True},
-            "readiness": {"ok": False},
         }
-
-        async def go():
-            def fake_daemon(_dump, _args):
-                out_path.write_text(json.dumps({"url": "https://a.com", "state": "ok"}),
-                                    encoding="utf-8")
-                return {"code": 0, "cost_ms": 1, "error": ""}
-
-            with mock.patch("core.jvm_direct.load_dump", return_value={
-                    "workingDir": "C:/repo", "classpath": "x", "maxHeapSize": "3g",
-                    "environment": {}, "jvmArgs": [], "systemProperties": {},
-                    "javaHomeEnv": "C:/jdk"}), \
-                 mock.patch("core.jvm_validate_daemon.run", side_effect=fake_daemon), \
-                 mock.patch.object(jvm_exec, "execution_readiness", return_value={"ok": True}), \
-                 mock.patch.object(jvm_exec, "_read_results", return_value=[]), \
-                 mock.patch.object(jvm_exec, "_write_meta", return_value="legacy-batch"), \
-                 mock.patch("core.jvm_health.store_checks", return_value=0):
-                return await jvm_exec.run_jvm_job("legacy-job", Store(self.db), payload)
-
-        result = asyncio.run(go())
-        self.assertEqual(result["execution_mode"], "validate_daemon")
-        self.assertFalse(run_dir.exists())
+        with mock.patch.object(jvm_exec, "_run_gradle") as gradle:
+            result = asyncio.run(jvm_exec.run_jvm_job(
+                "legacy-job", Store(self.db), payload))
+        self.assertFalse(result["ok"])
+        self.assertIn("manifest", result["reason"])
+        gradle.assert_not_called()
 
     async def _cancelled_job(self, payload):
         task = asyncio.create_task(jvm_exec.run_jvm_job(
