@@ -25,7 +25,7 @@ import org.robolectric.annotation.Config
 import splitties.init.injectAsAppCtx
 
 /**
- * JVM 校验服务方案的成败探针（TODO §2 待实测点 6）。
+ * JVM 校验服务方案的成败探针。
  *
  * 判据只有一条：**Robolectric 下对一条真源调 `searchBookAwait` 能不能出结果**。
  * 通了 → 「App 源码进项目、脚本起 JVM 服务」的技术前提成立；

@@ -5,7 +5,7 @@
 
 **逻辑全在 `core/jvm_debug.py`**：界面（`POST /api/rules/jvm-debug`）走的是同一份。
 两处各写一遍参数拼装与结果解析就会漂，而漂的表现是「界面上跑出来的和命令行跑出来的
-不一样」——排查时根本想不到是两份实现（lessons §二十三、§六十四）。
+不一样」——排查时根本想不到是两份实现（lessons §二十三）。
 
 产物两个，都落在 `-o`（默认 `data/app_probe/debug_run.ndjson`）旁边：
 

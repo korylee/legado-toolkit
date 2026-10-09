@@ -26,7 +26,7 @@ from core.store import Store
 async def _lifespan(_app: FastAPI):
     # 单实例哨兵：第二个后端进程到此为止。误开 `--workers`、旧进程没退干净，
     # 都会表现为「两个进程各自认为自己拿到了 JVM」（8787 曾被旧进程抢答那次）。
-    # 判死交给内核：持有者一死锁就没了，不用心跳/TTL 去猜（lessons §二十八）。
+    # 判死交给内核：持有者一死锁就没了，不用心跳/TTL 去猜。
     # 锁路径**调用时**解析——测试用 LEGADO_DATA_DIR 换数据目录，import 时算死
     # 会把它钉在真目录上（同 core.paths.ARGS_PARTS 注释的理由）。
     sentinel = ProcLock(data_path("locks", "backend.lock"))

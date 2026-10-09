@@ -25,9 +25,9 @@ import kotlin.coroutines.Continuation
  *
  * S3-4 的校验通道可以「CDP 渲染 → 喂 `BookList.analyzeBookList`」，因为**校验只要终态**。
  * **调试通道不行**：要验的正是 App 自己那条不透明的管线（`Debug` → `WebBook` →
- * `AnalyzeUrl` → 这里），重实现它等于把 App 的调试语义抄一遍（TODO §一点八 的既定结论）。
+ * `AnalyzeUrl` → 这里），重实现它等于把 App 的调试语义抄一遍。
  *
- * 而 `BackstageWebView` 本来就只是**替换取数那一步**（lessons §四十九），它干两件事：
+ * 而 `BackstageWebView` 本来就只是**替换取数那一步**，它干两件事：
  * ① 加载页面（loadUrl / loadDataWithBaseURL），② 在渲染结果上执行 `js` 选项
  * （无则默认 `document.documentElement.outerHTML`），**非空才收，空则重试**。
  * 所以正确接法就是 shadow 掉它、把这两步委托给 [BrowserBridge]，**App 管线一行不改**。

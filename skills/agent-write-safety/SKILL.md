@@ -67,7 +67,7 @@ description: 在受限 agent 沙箱里安全写文件、改代码的传输通道
   判据：`os.mkdir(d, 0o700)` 失败、`os.mkdir(d, 0o777)` 正常，就是它——**与在哪个目录无关**
   （换到仓库内一样失败），所以「用仓库内临时目录」这个绕法**不成立**。`tempfile.mkdtemp()`
   硬编码 `0o700`（`TemporaryDirectory` 同理），于是**直接跑全量**会倒出一片 `PermissionError`
-  （本仓实测 82 个），**看着像代码坏了，其实是 harness**——绕行配方见本节末尾。
+  （数量随测试规模增长，别把它当契约），**看着像代码坏了，其实是 harness**——绕行配方见本节末尾。
   `dsh-python-tempfile-shim` 正是修这个的：给**经过插件 shell executor 的受限命令**注入
   `sitecustomize`，让 `os.mkdir` 忽略 mode。**判断它有没有生效只看一处**：`python -c "import os; print(os.mkdir)"` ——
   打出 `<built-in function mkdir>` 就是没生效（此时 `PYTHONPATH` 也是空的）。
@@ -98,8 +98,9 @@ description: 在受限 agent 沙箱里安全写文件、改代码的传输通道
     tempfile.TemporaryDirectory._mkdtemp = staticmethod(_patched_mkdtemp)
     unittest.TextTestRunner().run(unittest.TestLoader().discover("tests", top_level_dir="."))
 
-**沙箱导致的残留失败**目前只有 `tests.test_frontend_utils`：`node --test` 要为每个测试文件
-spawn 子进程，本沙箱拦 spawn（`EPERM`），与代码无关。单独验证：
+**沙箱导致的残留失败目前是两类**：① `node --test` 要为每个测试文件 spawn 子进程，本沙箱拦
+spawn（`EPERM`）；② 用例要在仓库 `data/` 下自建临时目录（`os.makedirs`），同样被拒
+（`WinError 5`）。两类都与代码无关，逐条判归属时先看失败信息是不是指向被测代码。①单独验证：
 
     node --test --experimental-test-isolation=none frontend/src/utils/*.test.js
 

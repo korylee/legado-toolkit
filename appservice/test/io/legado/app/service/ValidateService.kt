@@ -165,7 +165,7 @@ object ValidateService {
         }
     }
 
-    /** JS 壳页特征（与 TODO §2.1 的 (a2) 一致：拿到页面但规则跑空时的判别依据）。 */
+    /** JS 壳页特征（拿到页面但规则跑空时的判别依据）。 */
     private val JS_SHELL_MARKERS = listOf(
         "enable javascript", "enable javascript and cookies", "请开启javascript",
         "请开启 javascript", "需要开启javascript", "<noscript",
@@ -685,7 +685,7 @@ object ValidateService {
      * 为什么需要它：剥掉 webView 选项之后，若页面是 JS 壳，规则自然跑空——
      * 判 `empty_js_shell`（unknown）是"不冤枉"，但那批源仍然进不了验证。
      * 这里把「取数」换成真浏览器，**解析仍然走 App 自己的 `BookList`**：
-     * `BackstageWebView` 本来就只是替换取数那一步（lessons §四十九），
+     * `BackstageWebView` 本来就只是替换取数那一步，
      * 而解析层收 `body: String?`——所以不必 shadow WebView，喂渲染后的 HTML 即可。
      *
      * 链路照抄 `WebBook.searchBookAwait`，只有 `body` 换成渲染结果：

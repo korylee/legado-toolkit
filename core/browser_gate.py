@@ -85,7 +85,7 @@ def wait_port_gone(port: int, timeout: float = 10.0) -> bool:
     """调试端口是否已经消失——**收尾的判据是它，不是进程**。
 
     Chromium 启动后会把活**移交给另一个进程**，我们 Popen 的那个随时可能已经退出：
-    按它的 pid `taskkill` 等于没杀（lessons §六十，实测留过 2 个进程占着 profile）。
+    按它的 pid `taskkill` 等于没杀（实测留过 2 个进程占着 profile）。
     """
     deadline = time.time() + timeout
     while time.time() < deadline:

@@ -15,7 +15,7 @@ import java.util.concurrent.TimeUnit
  * 浏览器桥（S3-4）：把「页面渲染」这一步交给本机已装的 Edge / Chrome。
  *
  * **为什么这样接**：App 的 `BackstageWebView` 只替换**取数那一步**——加载页面、
- * 执行 JS、把渲染后的 DOM 当响应体返回（lessons §四十九）。而 App 的解析层
+ * 执行 JS、把渲染后的 DOM 当响应体返回。而 App 的解析层
  * （`BookList.analyzeBookList` / `BookChapterList` / `BookContent.analyzeContent`）
  * 都收 `body: String?`，所以**不需要 shadow WebView**：我们自己拿渲染后的 HTML，
  * 再喂给同一套解析器即可。同为「零入侵」，且少一层易碎的影子实现。

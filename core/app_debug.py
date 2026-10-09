@@ -644,7 +644,7 @@ def build_steps(events: Sequence[Any], matched: Optional[Dict[str, Dict[str, str
     """**纯函数**：事件列表 → ``steps[]``（只做分段与判定，不抓页面）。
 
     ``matched``：``{url: {step: html}}``——**本机引擎**把每段规则命中的 DOM 记下来带回来
-    （第三期 `matched_html` 回填，见 TODO §一点八）。按**每段自己的 url + 段名**取，
+    （第三期 `matched_html` 回填）。按**每段自己的 url + 段名**取，
     所以分段语义只有这一份（Kotlin 那边只记 URL，不认段）。
 
     ``events`` 可以是 ``collect_debug_events`` 的返回值（``{"t","text"}``），

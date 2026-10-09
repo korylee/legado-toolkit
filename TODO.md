@@ -150,7 +150,7 @@
 背景：口袋漫画正文页的图片地址在 WebView 执行后的 `params.chapter_images`，静态 HTML 没有图片，运行时图片还可能变成 `blob:` URL；图片签名会过期，目录选错还会导致重复章节。第一版应验证运行时数据，不应让用户配置 AES 或复制旧图片地址。
 约束：入口要求用户选择具体章节；Agent 只生成 `requires_webview / runtime_field / content_mode` 策略；本机/App 实测确认 `params` 已为对象、`chapter_images` 非空且图片可访问后，才生成 ES5 `webJs + content + imageStyle`；调试工作台明确标出 L2/L3，静态网页视图不能框选时给出**取证**动作（「用本机引擎 / 连 App 取运行时材料」），不许写成解决方案（口径见 AGENTS #24）；运行时 DOM、命中片段和框选高亮必须来自同一份运行时材料，不能把静态补抓冒充 App 页面；每次调试重新获取图片地址；跑批不能可靠覆盖这类源时必须明确标注；章节与图片失败原因不得压成“解密失败”。
 验收：选定一章能显示页面、WebView、运行时字段、图片数量和可访问性；成功时生成源草稿正文规则并由 App 实测复验；params 仍为字符串、图片为空、签名过期、目录地址不具体、静态页面无运行时材料时分别给出对应下一步；若取得运行时 DOM，命中源码与框选高亮使用同一份材料；跑批对这类源要么同样能验，要么结论明确标「这类源跑批不可信」；不在源中硬编码站点 AES 或图片 URL。
-指针：skills/legado-book-source/SKILL.md，core/js_hints.py，tests/test_page_layer.py，data/app_probe/source.json，lessons §四十九 / §六十 / §七十五
+指针：skills/legado-book-source/SKILL.md，core/js_hints.py，tests/test_page_layer.py，data/app_probe/source.json，lessons §七十五
 
 ### 条目：agent-evidence-budget · 限制 Agent 取证范围与调用次数
 状态：todo
@@ -165,7 +165,7 @@
 
 ### 条目：webview-isrule-shim · 浏览器 + 少量 shim（最后手段）
 状态：todo
-依赖：webview-isrule-split
+依赖：无
 优先级：P2
 背景：若某天必须在浏览器里跑依赖页面环境的 `webJs`，宿主 API 只能用**页内 JS shim**——CDP `Runtime.addBinding` 是异步通知，而规则里的 `java.ajax(url)` 是同步调用，逐个桥回 Kotlin 会做成「看起来能跑、偶尔拿空」的半支持。
 约束：只实现高频低风险的 shim（`source.getKey`、`result`、cookie 读取、base64 / md5 / url 编码、log、简单缓存），**不要**一上来桥 `ajax` / `connect` / `get`；若将来真做同步网络，前提是浏览器启动参数带 `--disable-web-security --user-data-dir=<临时目录>` 并用页内同步 XHR（跨域同步 XHR 会被拦，缺这个前提会稳定拿空）；前奏照搬 App 的 `getInjectionString`；**明确不做**「在浏览器里重建 App 的 JS 运行时」。
@@ -195,7 +195,7 @@
   全量重跑；**未评估前不要动手**。
 阻塞于：未评估（要先量「换语义会翻多少条结论」）
 验收：评估结论 + 用户拍板；若做，全量重跑一次并记 `CACHE_VERSION`。
-指针：lessons §六十 / §七十三 / §八十七
+指针：lessons §七十三 / §八十七
 
 ### 条目：pair-probe · 同源裁定：任意两条源的成对比对
 状态：blocked
@@ -286,7 +286,7 @@
 约束：别在 Python 侧再补一个 XPath 判断（那正是这次删掉的东西）；结论以引擎实测为准，
   取不到时原因要一路走到用户眼前（AGENTS #4）。
 验收：一条带 `//` 规则的源在本机引擎下的实测结论 + 界面上的归因。
-指针：lessons §二十六，core/jvm_debug.py
+指针：core/jvm_debug.py
 
 ### 条目：explore-depth · 跑批要不要加「发现页」深度档
 状态：todo

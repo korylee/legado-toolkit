@@ -575,7 +575,7 @@ def run_jvm_debug(source: Dict[str, Any],
             shutil.rmtree(str(run_dir), ignore_errors=True)
         return out
 
-    # 第三期 matched_html 回填（TODO §一点八）：本机引擎会把每段规则命中的 DOM 带回来，
+    # 第三期 matched_html 回填：本机引擎会把每段规则命中的 DOM 带回来，
     # 形状 {url: {step: html}}——**过一道显式闸门**（AGENTS #22），不合法就整块忽略并留日志
     steps = build_steps(events_raw, matched=matched_map(meta.get("matched_html")))
     # 拉起方式的痕迹进附注（回落了要说出来；正常走常驻时这里是空的）。

@@ -87,8 +87,7 @@
      枚举与默认值都在 `core/`（`models.HEALTH_NAMES`、`settings_store`、
      `dns_check` 的判定常量与 `checker` 的归因函数），文档要用就给符号名。同一张表、同一份清单、
      同一句告诫**只在一处维护**，另一处留一行指针。
-     判据是实测的：同一份内容两处写，**腐烂只发生在一侧**；读者无从判断该信哪一份
-     （当年的论证见 lessons §二十）。
+     判据是实测的：同一份内容两处写，**腐烂只发生在一侧**；读者无从判断该信哪一份。
 11. **判定逻辑里不能放「我们自己写进去的结论」当输入。**
     `organizer` 按 `bookSourceType` 生成分组标签；凡是把分组当特征文本读的判据，
     都会「类型错 → 分组写成 📖小说 → 判据读到小说字样 → 再判成小说」——
@@ -176,7 +175,7 @@
     `bookUrl` / `tocUrl` / `chapterUrl` 都在其中。
     见 lessons §五十八。
 
-21. **取值规则末段是「属性名或取值动作」，不是选择器**（`_is_attr_or_action_name`）。
+21. **取值规则末段是「属性名或取值动作」，不是选择器**。
     Legado 的取值路径是 `getResultList` → 末段交给 `getResultLast`，那里除
     `text`/`textNodes`/`ownText`/`html`/`all` 外**一律**取属性。
     `title` / `style` / `label` **同时**是 HTML 标签名与常见属性名，一旦按标签判，

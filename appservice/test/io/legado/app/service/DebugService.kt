@@ -327,7 +327,7 @@ object DebugService {
         // **请求之间要把 `Debug` 的静态态清干净**：`debugSource` 只在 `cancel` 与下一次
         // `replaceSession` 时才变，而 `Debug.log` 的判据正是 `debugSource == sourceUrl`
         // ——常驻时同一条源再跑，上一轮遗留的协程会把事件打进新一轮的事件流。
-        // 一次性进程不需要（进程都没了），常驻需要（TODO §一点八「请求间清状态」）。
+        // 一次性进程不需要（进程都没了），常驻需要「请求间清状态」。
         // 无条件调用：`cancel` 内部按 session id 判重，重复/已取消都是 no-op。
         runCatching { session.cancel() }
 
@@ -352,7 +352,7 @@ object DebugService {
         // ——另一个 JVM（跑批、一次性调试）撞上占用就「自愈」换临时 profile，
         // **cookie 静默全丢**（实测：同一条源从 3 段变 1 段，还白等 18s 超时）。
         // 那种错长得像「源坏了」（AGENTS #4），拿 0.65s 换掉它是划算的。
-        // 真要留着，正确做法是「谁要用谁先让 daemon 交出来」（还没做，见 TODO §一点八），
+        // 真要留着，正确做法是「谁要用谁先让 daemon 交出来」（还没做），
         // 而不是默认占着。
         runCatching { BrowserSession.close() }
 

@@ -121,7 +121,7 @@ EMPTY_CONTENT_SAMPLE = [
 EMPTY_CONTENT_CHAPTER_URL = "https://a.com/book/1/c1.html"
 
 class MatchedHtmlTests(unittest.TestCase):
-    """第三期 `matched_html` 回填（TODO §一点八）：**按每段自己的 url + 段名取**。
+    """第三期 `matched_html` 回填：**按每段自己的 url + 段名取**。
 
     引擎那侧只记 `{url: {step: html}}`（Kotlin 不认"段"这个语义，分段逻辑只有一份、
     在 Python 这边），所以这两条钉的是：填对了段、以及**段名对不上的不许乱填**。

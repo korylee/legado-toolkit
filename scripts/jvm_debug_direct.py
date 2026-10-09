@@ -153,7 +153,7 @@ def measure(src: dict, key: str, timeout: int, cookie: str) -> int:
     show_fp("bat", bat_fp)
     show_fp("直起", direct_fp)
     compare("直起 vs bat", bat_fp, direct_fp)
-    print("\n=== 判据（TODO §一点八：②b ≥ 5s 就做 daemon）===")
+    print("\n=== 判据（②b ≥ 5s 就做 daemon）===")
     print("  ①−② = Gradle 配置阶段 %.1fs；②−②b = 站点耗时 %.1fs"
           % (rows[1][1] - rows[2][1], rows[2][1] - boot))
     print("  入场费 ②b = %.1fs → **%s**" % (boot, "做" if boot >= 5 else "不做（改量 matched_html）"))
@@ -210,7 +210,7 @@ def daemon_measure(src: dict, key: str, timeout: int, cookie: str) -> int:
     show_fp("常驻#2", daemon_fps[1])
     same = compare("常驻两次", daemon_fps[0], daemon_fps[1]) and same
 
-    print("\n=== 判据（TODO §一点八 D1）===")
+    print("\n=== 判据（D1）===")
     ok_fast = daemon_costs[1] <= 2.0
     print("  第二次墙钟 %.1fs ≤ 2s：**%s**" % (daemon_costs[1], "达标" if ok_fast else "未达标"))
     print("  形状与「各起一次」一致：**%s**" % ("是" if same else "**否**"))
