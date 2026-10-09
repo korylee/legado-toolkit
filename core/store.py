@@ -206,6 +206,22 @@ def resolve_db_path(path: Optional[str] = None) -> str:
     return path or data_path(DB_NAME)
 
 
+def _latest_check_id_sql(correlate: str = "") -> str:
+    """「每源最新一条（当前缓存版本）」的 id——**四处共用这一份判据**。
+
+    谁在用：`VIEW_DDL`（外层别名 `s`）、`checks_map`（`c`）、`sweep_checks`（`c`）、
+    `last_check`（独立形态，不给别名）。**必须共用**：口径一旦不一致，`sweep_checks`
+    会删掉 `checks_map` 正要返回的那一行——表现是列表健康度莫名回退，且不报错。
+
+    `id DESC` 是必须的兜底：`checked_at` 只到秒，同一秒里写了两条时只按时间排的顺序
+    不确定（实测走索引返回先写入的那条），「最新结论」会变成上一轮的——列表显示旧
+    health，而缓存判定拿旧的 `search_probed` 判成「没验过搜索」，每次校验都白打请求。
+    """
+    source_url = ("%s.source_url" % correlate) if correlate else "?"
+    return ("SELECT id FROM checks WHERE source_url = %s AND cache_version = %d"
+            " ORDER BY checked_at DESC, id DESC LIMIT 1" % (source_url, CACHE_VERSION))
+
+
 class Store:
     """SQLite 管理库。支持 with 语句。"""
 
@@ -280,10 +296,7 @@ class Store:
                c.health, c.checked_at, c.probe_depth,
                c.toc_complete, c.content_ok, c.search_hit, c.quality_tags, c.engine
         FROM sources s
-        LEFT JOIN checks c ON c.id = (
-            SELECT id FROM checks
-            WHERE source_url = s.source_url AND cache_version = %d
-            ORDER BY checked_at DESC, id DESC LIMIT 1)""" % CACHE_VERSION
+        LEFT JOIN checks c ON c.id = (%s)""" % _latest_check_id_sql("s")
 
     def _schema_ok(self) -> bool:
         """表和视图都在，才算这个库已经建好。
@@ -339,6 +352,13 @@ class Store:
             self.conn.close()
         except Exception:
             pass
+
+    def __del__(self):
+        # 裸 `Store()` 不关连接时只能等 GC 去关，而 GC 关会打 `ResourceWarning:
+        # unclosed database`（测试里成片），Windows 上还会一直占住库文件——`__init__`
+        # 里「建 schema 失败先把连接关掉再抛」那条注释记的就是这个坑。
+        # `close()` 自己吞异常，所以这里不用再判 `conn` 在不在。
+        self.close()
 
     def __enter__(self) -> "Store":
         return self
@@ -788,32 +808,42 @@ class Store:
         keys = self._tag_urls(urls)
         if not value or not keys:
             return 0
-        n = 0
-        with self.conn:
-            for key in keys:
-                cur = self.conn.execute(
-                    "UPDATE sources SET group_name=?, system_tags_locked=1, updated_at=? "
-                    "WHERE source_url=?", (value, now(), key))
-                n += cur.rowcount or 0
-        return n
+        return self._update_many(
+            "UPDATE sources SET group_name=?, system_tags_locked=1, updated_at=?"
+            " WHERE source_url IN", (value, now()), keys)
 
     def clear_system_tags_override(self, urls) -> int:
         """解除人工锁定，并按最近校验结果重建系统标签。"""
         keys = self._tag_urls(urls)
         if not keys:
             return 0
-        n = 0
-        with self.conn:
-            for key in keys:
-                cur = self.conn.execute(
-                    "UPDATE sources SET system_tags_locked=0 WHERE source_url=?", (key,))
-                n += cur.rowcount or 0
+        n = self._update_many(
+            "UPDATE sources SET system_tags_locked=0 WHERE source_url IN", (), keys)
         self.rebuild_system_tags(keys)
         return n
 
     def _tag_urls(self, urls):
         from core.loader import _normalize_url
         return [_normalize_url(u) for u in (urls or []) if u]
+
+    #: `IN (...)` 的参数个数随 SQLite 版本变（3.50 实测 4000 可以、40000 报
+    #: `too many SQL variables`）。分块让这件事与「用户一次选了多少条」无关。
+    _SQL_VAR_CHUNK = 900
+
+    def _update_many(self, sql: str, values: tuple, keys: Sequence[str]) -> int:
+        """对一组 URL 写**同一份取值**：`sql` 写到 `... IN` 为止，其余部分由这里拼。
+
+        值随行变的（加 / 减 / 改名 / 合并标签）不适用——那一族必须逐行读改写，
+        见 `add_user_tags`。
+        """
+        n = 0
+        with self.conn:
+            for i in range(0, len(keys), self._SQL_VAR_CHUNK):
+                chunk = keys[i:i + self._SQL_VAR_CHUNK]
+                cur = self.conn.execute("%s (%s)" % (sql, ",".join("?" * len(chunk))),
+                                        (*values, *chunk))
+                n += cur.rowcount or 0
+        return n
 
     def add_user_tags(self, urls, tags) -> int:
         """批量追加用户标签；系统标签会被忽略。"""
@@ -843,14 +873,9 @@ class Store:
         keys = self._tag_urls(urls)
         if not keys:
             return 0
-        n = 0
-        with self.conn:
-            for key in keys:
-                cur = self.conn.execute(
-                    "UPDATE sources SET user_tags=?, updated_at=? WHERE source_url=?",
-                    (value, now(), key))
-                n += cur.rowcount or 0
-        return n
+        return self._update_many(
+            "UPDATE sources SET user_tags=?, updated_at=? WHERE source_url IN",
+            (value, now()), keys)
 
     def remove_user_tags(self, urls, tags) -> int:
         """批量移除用户标签。"""
@@ -1119,33 +1144,25 @@ class Store:
         with self.conn:
             cur = self.conn.execute(
                 "DELETE FROM checks WHERE cache_version = ? AND id NOT IN ("
-                " SELECT id FROM checks c WHERE c.cache_version = ? AND c.id = ("
-                "  SELECT id FROM checks WHERE source_url = c.source_url "
-                "    AND cache_version = ? "
-                "  ORDER BY checked_at DESC, id DESC LIMIT 1))",
-                (CACHE_VERSION, CACHE_VERSION, CACHE_VERSION))
+                " SELECT id FROM checks c WHERE c.cache_version = ? AND c.id = (%s))"
+                % _latest_check_id_sql("c"),
+                (CACHE_VERSION, CACHE_VERSION))
         return cur.rowcount or 0
 
     def last_check(self, url: str) -> Optional[Dict[str, Any]]:
+        # 先取「最新一条」的 id 再取行：判据只有一份（`_latest_check_id_sql`），
+        # 多一次 rowid 查换「不可能与 checks_map / sweep 漂」
         row = self.conn.execute(
-            # id DESC 的兜底理由同 checks_map()
-            "SELECT * FROM checks WHERE source_url = ? AND cache_version = ? "
-            "ORDER BY checked_at DESC, id DESC LIMIT 1",
-            (url, CACHE_VERSION)).fetchone()
+            "SELECT * FROM checks WHERE id = (%s)" % _latest_check_id_sql(),
+            (url,)).fetchone()
         return dict(row) if row else None
 
     def checks_map(self) -> Dict[str, Dict[str, Any]]:
         # 返回 {url: 最近一条缓存}；字段与旧 check_cache 的 NDJSON 完全兼容，
         # 可直接顶替 AsyncChecker.load_cache() 的返回值。
         out: Dict[str, Dict[str, Any]] = {}
-        # id DESC 是**必须的兜底**：checked_at 只到秒，同一秒里写了两条时，
-        # 只按时间排的话顺序不确定（实测走索引返回先写入的那条），「最新结论」
-        # 会变成上一轮的——列表显示旧 health，而缓存判定会拿旧的 search_probed
-        # 判成「没验过搜索」，每次校验都白打请求
-        sql = ("SELECT * FROM checks c WHERE c.id = ("
-               "SELECT id FROM checks WHERE source_url = c.source_url "
-               "AND cache_version = %d "
-               "ORDER BY checked_at DESC, id DESC LIMIT 1)" % CACHE_VERSION)
+        # 「最新一条」的判据只有一份：见 `_latest_check_id_sql`
+        sql = "SELECT * FROM checks c WHERE c.id = (%s)" % _latest_check_id_sql("c")
         for r in self.conn.execute(sql):
             d = dict(r)
             d["url"] = d.pop("source_url", "")

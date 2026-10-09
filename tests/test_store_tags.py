@@ -248,6 +248,47 @@ class StoreTagTests(unittest.TestCase):
             self.assertEqual(st.export_sources()[1]["bookSourceGroup"], "📖小说,待验证,R18,精排,原创")
 
 
+class BulkTagWriteTests(unittest.TestCase):
+    """三处「同一份取值写一批源」的路径（`_update_many`）。
+
+    逐 key 一条 UPDATE 时，全选几千条就是几千条语句。这里钉两件事：**跨分块边界
+    仍把每一行都写到**（`n` 用 `_SQL_VAR_CHUNK` 推出来，所以常量怎么改都跨边界），
+    以及重复 URL **只算一条**（逐行写法会数两次）。
+    """
+
+    def setUp(self) -> None:
+        self.root = os.path.join(_ROOT, "tmp_store_bulk_" + uuid.uuid4().hex[:8])
+        os.makedirs(self.root)
+        self.db = os.path.join(self.root, "sources.sqlite3")
+        self._old_data_dir = os.environ.get("LEGADO_DATA_DIR")
+        os.environ["LEGADO_DATA_DIR"] = self.root
+
+    def tearDown(self) -> None:
+        if self._old_data_dir is None:
+            os.environ.pop("LEGADO_DATA_DIR", None)
+        else:
+            os.environ["LEGADO_DATA_DIR"] = self._old_data_dir
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def test_bulk_writes_span_chunks(self) -> None:
+        n = Store._SQL_VAR_CHUNK + 5
+        urls = ["https://bulk%d.example" % i for i in range(n)]
+        with Store(self.db) as st:
+            st.upsert_sources([make_source("", url=u) for u in urls])
+            self.assertEqual(st.set_user_tags(urls, ["自用"]), n)
+            self.assertEqual(st.set_system_tags_override(urls, "📖小说"), n)
+            written = st.conn.execute(
+                "SELECT COUNT(*) AS c FROM sources WHERE user_tags = '自用'"
+                " AND group_name LIKE '%📖小说%' AND system_tags_locked = 1").fetchone()["c"]
+            self.assertEqual(written, n)
+
+    def test_duplicate_url_counts_once(self) -> None:
+        with Store(self.db) as st:
+            st.upsert_sources([make_source("", url="https://a.example")])
+            self.assertEqual(
+                st.set_user_tags(["https://a.example", "https://a.example"], ["自用"]), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
 

@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import os
+import pathlib
 import shutil
 import unittest
 import uuid
@@ -245,8 +246,9 @@ class LatestCheckTests(unittest.TestCase):
         st.save_checks([make_check("https://a.com", "ok")])   # checked_at 完全相同
         return st
 
-    # 三处「取最新」是**三份独立实现**（各一条 SQL），必须逐个断言：
-    # 合成一条的话，第一个失败后面的就不执行了，另外两处漏改也看不出来
+    # 三处调用点共用同一份判据（`_latest_check_id_sql`），但每条 SQL 是各自拼的
+    # （外层别名 s / c / 不给），**接错一处不报错、只取错行**，所以仍逐处断言：
+    # 合成一条的话，第一个失败后面的不执行，另外两处接错也看不出来
     def test_checks_map_takes_the_later_row(self):
         with self._seed() as st:
             self.assertEqual(st.checks_map()["https://a.com"]["health"], "ok")
@@ -299,6 +301,42 @@ class LatestCheckTests(unittest.TestCase):
             self.assertEqual([(r["cache_version"], r["health"]) for r in rows], [
                 (CACHE_VERSION - 1, "dead"), (CACHE_VERSION, "ok")])
 
+    def test_sweep_keeps_exactly_what_checks_map_returns(self):
+        """sweep 与 checks_map 必须同口径（`_latest_check_id_sql` 那份）。
+
+        漂了的症状是：列表上显示 A 行、而它刚被这次清理删掉 → 健康度莫名回退，且
+        不报错（`sweep_checks` 的 docstring 记的就是这个）。同秒两行是判据最容易
+        分叉的地方，所以这里专门用它当夹具。
+        """
+        with Store(self.db) as st:
+            st.upsert_sources([make_source("https://a.com")])
+            st.save_checks([make_check("https://a.com", "dead")])
+            st.save_checks([make_check("https://a.com", "ok")])   # 与上一条同秒
+            keep = st.checks_map()["https://a.com"]["id"]
+            older = make_check("https://a.com", "dead")
+            older["checked_at"] = "2026-09-14 10:00:00"           # 更早的当前版本行
+            st.save_checks([older])
+            # 删两条：更早那条，以及同秒里 id 更小的那条（判据是 `id DESC`，取后写入的）
+            self.assertEqual(st.sweep_checks(), 2)
+            self.assertEqual(st.checks_map()["https://a.com"]["id"], keep,
+                             "sweep 删掉了 checks_map 返回的那条")
+            self.assertEqual(st.last_check("https://a.com")["id"], keep)
+
+
+class LatestCheckJudgeSingleSourceTests(unittest.TestCase):
+    """判据只许有一份：`ORDER BY checked_at DESC, id DESC` 在 store.py 里只出现一次。
+
+    上面那条行为钉子能抓住「改坏一处实现」；抓不住的是**有人把 SQL 又抄回某个方法里**
+    ——那份抄本此刻行为相同，下次改判据时才会分叉，而分叉的症状不报错。
+    """
+
+    def test_the_latest_check_sql_is_written_once(self):
+        path = pathlib.Path(__file__).resolve().parent.parent / "core" / "store.py"
+        src = path.read_text(encoding="utf-8")
+        self.assertEqual(src.count("ORDER BY checked_at DESC, id DESC"), 1,
+                         "「每源最新一条」的判据被抄成了第二份：应改走 _latest_check_id_sql")
+
+
 if __name__ == "__main__":
     unittest.main()
 
@@ -307,9 +345,15 @@ if __name__ == "__main__":
 # 以下为实测（改坏 → `python -B -m unittest tests.test_store_query.LatestCheckTests`
 # → 确认变红 → 还原）。
 #
-#  M1  三处「取最新」一起去掉 `, id DESC`
+#  M1  把共用判据（`_latest_check_id_sql`）里的 `, id DESC` 去掉
 #        → test_checks_map_takes_the_later_row /
 #          test_last_check_takes_the_later_row /
 #          test_list_view_takes_the_later_row **三条各自红**
 #          （拆成三条独立断言就是为了这个：合成一条的话，第一个失败后面的不再执行，
-#            另外两处漏改看不出来）
+#            另外两处接错看不出来）
+#
+#  M2  只把 `sweep_checks` 那份的 `, id DESC` 换成 `, id ASC`（与 checks_map 不再同口径）
+#        → test_sweep_keeps_exactly_what_checks_map_returns **红**
+#          （`1 != 2`：它删掉了 checks_map 正要返回的那条——正是「健康度莫名回退」）
+#        → LatestCheckJudgeSingleSourceTests 仍绿：它守的是「判据被抄第二份」，
+#          而这次变异是**改**了那一份，不是抄
