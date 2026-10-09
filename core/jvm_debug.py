@@ -353,6 +353,38 @@ def _header_map(source: Dict[str, Any]):
     return out
 
 
+def webview_unsupported(value: Any) -> List[Dict[str, str]]:
+    """保留 App 实际撞上的 WebView 能力边界；**逐条**校验，形状不对的丢弃并打日志。
+
+    「丢弃」在这里等于把一条原因从用户眼前拿掉（AGENTS #4），所以不许静默：条数进日志。
+    整块不是 list 只有一种正常情形——侧车没这个键（`None`），其余都值得留痕。
+    """
+    if not isinstance(value, list):
+        if value is not None:
+            print("警告：侧车 webview_unsupported 不是列表（%s），整块丢弃"
+                  % type(value).__name__, flush=True)
+        return []
+    out: List[Dict[str, str]] = []
+    dropped = 0
+    for item in value:
+        if not isinstance(item, dict):
+            dropped += 1
+            continue
+        code = item.get("code")
+        url = item.get("url")
+        phase = item.get("phase")
+        if not isinstance(code, str) or not code.strip():
+            dropped += 1
+            continue
+        if not isinstance(url, str) or phase not in ("debug", "matched"):
+            dropped += 1
+            continue
+        out.append({"code": code, "url": url, "phase": phase})
+    if dropped:
+        print("警告：侧车 webview_unsupported 有 %d 条形状不对，已丢弃（保留 %d 条）"
+              % (dropped, len(out)), flush=True)
+    return out
+
 def apply_proxy_header(source: Dict[str, Any], proxy: str) -> Dict[str, Any]:
     """把代理写进**源的 header**（JSON），返回副本（不改调用方那份）。
 
@@ -536,6 +568,10 @@ def run_jvm_debug(source: Dict[str, Any],
     out["code_text"] = CODE_TEXT.get(code, "未知（没产出侧车）")
     out["cost_sec"] = round(cost, 1)
     out["cookie_len"] = int(meta.get("cookie_len") or 0)
+    # WebView 能力边界是运行级证据，不参与步骤判定；类型不对时显式降级为空。
+    out["webview_unsupported"] = webview_unsupported(
+        meta.get("webview_unsupported")
+    )
     out["hint"] = str(meta.get("hint") or "")
     # L4 诊断：network 是过滤后的可用材料，下面三项说明「浏览器发过什么」以及
     # 「为什么材料没有留下」。只进排障，不参与调试结论。

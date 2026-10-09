@@ -36,6 +36,20 @@ POCKET_COMIC = {
 }
 
 
+#: 本机引擎跑不了的那一段（WebView 能力边界）：规则非空、页面在、取值 0——与
+#: 「规则一条都没选中」形状相同，区别只在调用方给了 `webview_unsupported` 这个事实。
+WEBVIEW_STEP = {
+    "layer": "L2",
+    "target": {"step": "toc", "want": "link", "rule_empty": False},
+    "step": {"verdict": "fail", "values_count": 0,
+             "page_id": "p1", "url": "https://a.com/toc"},
+    "page": {"present": True, "has_wanted": True,
+             "stats": {"links": 3, "images": 0, "images_with_src": 0}},
+    "channel": "jvm",
+    "signals": {"can_suggest": True, "llm_ready": True},
+}
+
+
 def plan_for(snapshot, **changes):
     data = dict(snapshot)
     data.update(changes)
@@ -43,6 +57,24 @@ def plan_for(snapshot, **changes):
 
 
 class DecisionGapTests(unittest.TestCase):
+
+    def test_webview_unsupported_wins_over_rule_gaps_and_probes(self):
+        """本机跑不了的这一段：给「换通道取证」，不给「改规则」。
+
+        它的语义与 `no_url` / `runtime_missing` 同族（本机引擎拿不到材料），所以必须
+        排在 `no_hit` 之前——否则界面会说「改选择器」，用户照着改还是跑不了这一段。
+        """
+        plan = plan_for(WEBVIEW_STEP, webview_unsupported=True)
+        self.assertEqual(plan["gap"]["code"], "webview_unsupported")
+        self.assertEqual(plan["probe"], {"kind": "app"})
+        self.assertIsNone(plan["fix"])
+        self.assertIn("no_hit", [g["code"] for g in plan["deferred_gaps"]],
+                      "规则类缺口要降级进折叠，不许抢主动作")
+
+    def test_webview_unsupported_absent_means_no_such_gap(self):
+        """没给这个事实就不许出现（读不到 ≠ 有，AGENTS #12），按原来的判据走。"""
+        plan = plan_for(WEBVIEW_STEP)
+        self.assertEqual(plan["gap"]["code"], "no_hit")
 
     def test_rule_empty_is_the_global_prefix(self):
         """规则为空压过一切：只留一条缺口，且不给取证、不给 AI。"""

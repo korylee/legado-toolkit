@@ -23,6 +23,7 @@ GAP_CODES = (
     "page_not_recorded",   # App 没为这一步记录页面
     "no_url",              # App 没请求这一步的页面，也没有可用的章节链接
     "page_fetch_missing",  # 页面没抓回来
+    "webview_unsupported", # 这一段走的 WebView 能力本机没覆盖：拿不到材料，不是规则错
     "no_wanted_nodes",     # 这一页没有目标这类节点（改选择器没用）
     "runtime_missing",     # 动态层 + 本机引擎，缺运行时材料
     "no_hit",              # 规则在这份页面上一条都没选中
@@ -46,7 +47,7 @@ MATERIAL_KINDS = {
 #: 需要换通道取材料的缺口：本机引擎拿不到运行时材料的那些
 _PROBE_GAPS = frozenset((
     "no_url", "page_fetch_missing", "no_wanted_nodes",
-    "runtime_missing", "unknown",
+    "runtime_missing", "webview_unsupported", "unknown",
 ))
 
 #: 「改源就是声明这一层的取数方式」的层
@@ -79,6 +80,10 @@ def _decision_gaps(context: Mapping[str, Any]) -> List[Dict[str, Any]]:
         add("no_url")
     elif "has_url" in step and context.get("page_present") is False:
         add("page_fetch_missing")
+    if context.get("webview_unsupported") is True:
+        # 这一段 App 走了 WebView 的某条能力边界，本机引擎**跑不了**它：给换通道的动作，
+        # 不给「改规则」。与上面同族——判据只认显式给的事实（读不到 ≠ 有，见文件头约定）
+        add("webview_unsupported")
     if context.get("has_wanted") is False:
         add("no_wanted_nodes")
     if (channel == "jvm" and step.get("verdict") == "unknown"

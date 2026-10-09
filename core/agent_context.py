@@ -375,6 +375,10 @@ def build_agent_context(snapshot: Mapping[str, Any] | None) -> dict[str, Any]:
     signals = {key: bool(signals_raw[key])
                for key in ("login_wall", "llm_ready", "can_suggest")
                if key in signals_raw}
+    #: 「这一步的页面撞过本机的 WebView 能力边界吗」也是**事实**（谁给的：调用方按 URL 归因，
+    #: 见 `frontend/src/utils/webviewCapability.unsupportedForStep`）。它是白名单外的键，
+    #: 不在这里显式带出去就被丢掉——那会让判据永远收不到，界面上却「看着接好了」。
+    webview_unsupported = snapshot.get("webview_unsupported")
     context: dict[str, Any] = {
         "schema_version": 1,
         "layer": layer,
@@ -393,6 +397,8 @@ def build_agent_context(snapshot: Mapping[str, Any] | None) -> dict[str, Any]:
         "network": network,
         "gaps": gaps,
     }
+    if isinstance(webview_unsupported, bool):
+        context["webview_unsupported"] = webview_unsupported
     return context
 
 

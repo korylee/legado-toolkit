@@ -9,68 +9,73 @@ import { LAYER_INFO } from "./layers.js";
 
 const layerFixTodo = (layer) => (LAYER_INFO[layer] || {}).action || "对照「整页源码」改规则";
 
-//: 判定档：这两类不是「坏了」，是「还没法判」——标签用中性色
-const INFO_GAPS = new Set(["fail_content", "stale", "unknown"]);
-
 /**
- * 缺口码 → 现状句 + 下一步。**键必须与后端 `core/agent_plan.GAP_CODES` 一致**：
+ * 缺口码 → 现状句 + 下一步 + 档位。**键必须与后端 `core/agent_plan.GAP_CODES` 一致**：
  * 少一个键，那条缺口在界面上就只剩一句兜底话（契约测试会拦住）。
+ *
+ * 档位也写在这张表里：以前另有一份 `INFO_GAPS`，两张表要同时改，漏一处只是颜色变了、
+ * 没有任何测试会发现。现在一个码只有一行。
  */
 export const GAP_TEXT = {
-  rule_missing: (c) => ({
+  rule_missing: { tone: "warn", text: (c) => ({
     reason: "这条源没配「" + c.label + "」规则",
     todo: c.stepName === "content" && !c.hasPage
       ? "小说源没配正文规则时，App 会把章节链接当正文，必须补一条"
       : "补一条规则后重新调试",
-  }),
-  no_engine: () => ({
+  }) },
+  no_engine: { tone: "warn", text: () => ({
     reason: "这一步还没有真实引擎结果",
     todo: "先跑一次调试：本机引擎或连 App",
-  }),
-  page_not_recorded: () => ({
+  }) },
+  page_not_recorded: { tone: "warn", text: () => ({
     reason: "App 没为这一步记录页面",
     todo: "只能看 App 事件流，本地调试不了这一步",
-  }),
-  no_url: (c) => ({
+  }) },
+  no_url: { tone: "warn", text: (c) => ({
     reason: "App 没有请求这一步的页面，也没有可用的章节链接",
     todo: c.stepName === "content"
       ? "正文规则为空时 App 拿章节链接当正文，不请求新页面；"
         + "连章节链接都没有说明上一步没走通"
       : "先确认这一步的规则是否为空，补上后重新调试",
-  }),
-  page_fetch_missing: (c) => ({
+  }) },
+  page_fetch_missing: { tone: "warn", text: (c) => ({
     reason: c.note || "这一步的页面没抓回来",
     todo: "没有页面就无法本地复盘，先按 App 的结果判断",
-  }),
-  no_wanted_nodes: (c) => ({
+  }) },
+  // 本机引擎的能力边界：动作是**换通道**，不是改规则（与 `core.agent_plan._PROBE_GAPS` 同族）
+  webview_unsupported: { tone: "info", text: () => ({
+    reason: "这一段 App 走了 WebView 的能力边界，本机引擎跑不了它，拿不到材料",
+    todo: "换通道取证：连 App 再观测一次，再判断规则要不要改",
+  }) },
+  no_wanted_nodes: { tone: "warn", text: (c) => ({
     reason: "这一页没有「" + c.label + "」这类节点。链接 " + c.stats.links + " 个，图片 "
       + c.stats.images + " 个，其中带 src 的只有 " + c.stats.images_with_src + " 个",
     todo: c.layerFixTodo,
-  }),
-  runtime_missing: (c) => ({
+  }) },
+  runtime_missing: { tone: "warn", text: (c) => ({
     reason: c.layer === "L5"
       ? "本机引擎缺少登录态或运行环境材料，当前不能判定"
       : "本机引擎没拿到渲染 / 解密后的运行时材料",
     todo: c.layerFixTodo,
-  }),
-  no_hit: (c) => ({
+  }) },
+  no_hit: { tone: "warn", text: (c) => ({
     reason: "规则在这份页面上一条都没选中",
     todo: c.wantKind === "link"
       ? "页面里有 " + c.stats.links + " 个链接，可对照「整页源码」里的真实 class/id 改选择器"
       : "对照「整页源码」里的真实 class/id 改选择器",
-  }),
-  fail_content: (c) => ({
+  }) },
+  fail_content: { tone: "info", text: (c) => ({
     reason: "取到了 " + c.valuesCount + " 条，但判定不达标：" + c.detail,
     todo: "问题在取到的内容而不是选择器，别在这里反复改选择器",
-  }),
-  stale: () => ({
+  }) },
+  stale: { tone: "info", text: () => ({
     reason: "规则改过，这一步的结论已过期",
     todo: "重新调试本步，拿新结论再判断",
-  }),
-  unknown: (c) => ({
+  }) },
+  unknown: { tone: "info", text: (c) => ({
     reason: c.stateReason || "这一步暂时无法判定",
     todo: "看事件流与证据；确实缺材料时换通道再取",
-  }),
+  }) },
 };
 
 //: AI 那块的说明：材料不对（material_mismatch）与规则为空时**整块不渲染**——
@@ -111,13 +116,21 @@ export function probeView(probe) {
   return null;
 }
 
+/**
+ * 缺口码 → 视图。
+ *
+ * `ctx` 的形状（12 条句子的全部输入，改 `buildDecision` 时对照这里）：
+ * `{ label, wantKind, stepName, hasPage, stats, note, detail, valuesCount,
+ *    layer, layerFixTodo, stateReason }`
+ */
 function gapView(gap, ctx) {
   const code = String((gap && gap.code) || "");
-  const text = GAP_TEXT[code];
-  const words = text ? text(ctx) : { reason: "这一步的判定没有可执行的原因", todo: "看证据与事件流" };
+  const entry = GAP_TEXT[code];
+  const words = entry ? entry.text(ctx)
+    : { reason: "这一步的判定没有可执行的原因", todo: "看证据与事件流" };
   return {
     code,
-    level: INFO_GAPS.has(code) ? "info" : "warn",
+    level: entry && entry.tone === "info" ? "info" : "warn",
     reason: words.reason,
     todo: words.todo,
   };

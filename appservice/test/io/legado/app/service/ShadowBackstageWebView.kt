@@ -6,6 +6,7 @@ import org.robolectric.annotation.Implementation
 import org.robolectric.annotation.Implements
 import org.robolectric.annotation.RealObject
 import org.robolectric.util.ReflectionHelpers
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
@@ -59,6 +60,17 @@ class ShadowBackstageWebView {
         val lastCookieNote = AtomicReference("")
         val lastRenderMs = AtomicLong(0)
         val lastReason = AtomicReference("")
+        /** 本次调试实际撞上的 WebView 能力边界；只记录不支持分支，不把源声明当结论。 */
+        val webviewUnsupported = CopyOnWriteArrayList<Map<String, Any?>>()
+        val phase = AtomicReference("debug")
+
+        private fun recordUnsupported(code: String, url: String) {
+            webviewUnsupported += mapOf(
+                "code" to code,
+                "url" to url,
+                "phase" to phase.get(),
+            )
+        }
         /** L4 的材料：这一页**实际发过的接口请求**（XHR / Fetch，见 `BrowserBridge.networkRequests`）。
          *  写进侧车的 `network` 键；Python 侧只认形状（形状不对整块丢掉）。 */
         @Volatile
@@ -91,6 +103,8 @@ class ShadowBackstageWebView {
             rendered.set(0); lastRenderMs.set(0L); lastReason.set("")
             lastNetwork = null; lastNetworkEvents = 0; lastNetworkTypes = ""; lastNetworkDrops = ""
             lastCookieLen.set(0); lastCookieNote.set("")
+            webviewUnsupported.clear()
+            phase.set("debug")
         }
     }
 
@@ -121,18 +135,21 @@ class ShadowBackstageWebView {
         }
         // ---- 本批边界：显式报不支持（理由见类注释）----
         if (isRule) {
+            recordUnsupported("unsupported_is_rule", url)
             lastReason.set("unsupported_is_rule")
             throw IllegalStateException(
                 "webview_shadow_unsupported: 这条规则走的是 isRule 注入路径" +
                     "（需要 java/source 等绑定），本机调试暂不支持——不是源的问题")
         }
         if (sourceRegex.isNotBlank()) {
+            recordUnsupported("unsupported_source_regex", url)
             lastReason.set("unsupported_source_regex")
             throw IllegalStateException(
                 "webview_shadow_unsupported: 源声明了 sourceRegex（嗅探路径），" +
                     "本机调试暂不支持——不是源的问题")
         }
         if (html.isNotBlank() && url.isBlank()) {
+            recordUnsupported("unsupported_html_only", url)
             lastReason.set("unsupported_html_only")
             throw IllegalStateException(
                 "webview_shadow_unsupported: 只给了 html 没给 url（loadDataWithBaseURL），" +

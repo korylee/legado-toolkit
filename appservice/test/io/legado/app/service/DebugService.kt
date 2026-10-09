@@ -133,9 +133,6 @@ object DebugService {
             "不一致（调试用的是表单态那份，URL 被规范化过就对不上）；② 协程 scope 的 " +
             "dispatcher 不对（Robolectric 主 looper 默认不自动跑）。都不是「源坏了」。"
 
-    private val webViewPattern =
-        Regex("\"?webView\"?\\s*:\\s*(?:true|1|\"true\")", RegexOption.IGNORE_CASE)
-
     @JvmStatic
     fun main(args: Array<String>): Int {
         ServiceJson.writeRuntimeSnapshot("debug")
@@ -226,21 +223,8 @@ object DebugService {
             return BAD_INPUT
         }
 
-        // 带 webView 的源在这里**必须显式说出来**：取数那一步现在由 A2 的 shadow 桥委托给
-        // 真浏览器，但它有**三条明确不支持的边界**（`ShadowBackstageWebView` 的类注释：
-        // `isRule` 注入路径 / `sourceRegex` 嗅探 / 只给 html 的 loadDataWithBaseURL）——
-        // 撞上边界时那几段会被读成「取不到」，看着像源坏了（AGENTS #4 的同一类错）。
-        // 所以这里只警告不拦：搜索段这类不受 webView 影响的段仍有价值。
-        // 同一个判据进侧车（`webview_unsupported`）；**那个字段目前没有程序化消费方**
-        // （前端不读它），留着是给排障的人看的那份原始事实。
-        val webviewSeen = webViewPattern.containsMatchIn(sourceJson)
-        if (webviewSeen) {
-            System.err.println(
-                "[appservice] ⚠ 该源的 URL 规则带 webView：取值交给浏览器桥，" +
-                    "但 isRule / sourceRegex / 只给 html 这三种形态**本机不支持**，" +
-                    "撞上时那几段结果不可信（原因见侧车 webview_unsupported）。")
-        }
-
+        // WebView 的能力边界由 ShadowBackstageWebView 在实际分支中记录；这里只消费
+        // 运行时事实，不按源 JSON 的声明提前把整次调试标成不可信。
         ValidateService.ensureStarted()
 
         // A3：调试前把该源域上的 cookie 注入 App 的 cookie 通道（手工 `--cookie` 优先，
@@ -360,7 +344,7 @@ object DebugService {
         // 浏览器收掉之前做：URL 带 webView 选项时要用它，此时还热着（省一次 0.65s 的
         // 启动）；收尾那段的取舍见下面。
         val matchedResult = if (urls.isEmpty()) MatchedResult.empty()
-        else runMatched(source, urls.toList(), engineHtml.pages())
+        else runMatchedWithPhase(source, urls.toList(), engineHtml.pages())
         val matched = matchedResult.html
 
         // 浏览器进程要收掉：A2 起它可能被 shadow 拉起过。**常驻也收**（实测取舍见下）：
@@ -393,7 +377,7 @@ object DebugService {
             "dropped_payload" to dropped.get(),
             "saw_terminal" to sawTerminal.get(),
             "timed_out" to timedOut.get(),
-            "webview_unsupported" to webviewSeen,
+            "webview_unsupported" to ShadowBackstageWebView.webviewUnsupported.toList(),
             // A3：这次带没带登录态（0 = 没带：该域没登录过，或浏览器不可用）
             "cookie_len" to cookieInj.len,
             "cookie_note" to cookieInj.note,
@@ -588,6 +572,19 @@ object DebugService {
     ) {
         companion object {
             fun empty() = MatchedResult(emptyMap(), MatchStats(), emptyList())
+        }
+    }
+
+    private fun runMatchedWithPhase(
+        source: BookSource,
+        urls: List<String>,
+        enginePages: Map<String, EnginePage>,
+    ): MatchedResult {
+        ShadowBackstageWebView.phase.set("matched")
+        return try {
+            runMatched(source, urls, enginePages)
+        } finally {
+            ShadowBackstageWebView.phase.set("debug")
         }
     }
 

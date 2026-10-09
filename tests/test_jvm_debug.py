@@ -11,6 +11,8 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import io
 import json
 import pathlib
 import shutil
@@ -61,6 +63,47 @@ class WriteArgsTests(_ArgsCase):
     def test_cookie_line_when_given(self) -> None:
         jvm_debug._write_args("D:/x/src.json", "我", "D:/x/out.ndjson", 60, cookie="a=1; b=2")
         self.assertIn("cookie=a=1; b=2", self._text())
+
+
+class WebviewUnsupportedShapeTests(unittest.TestCase):
+    def test_keeps_valid_entries_including_empty_url(self) -> None:
+        value = [{"code": "unsupported_html_only", "url": "", "phase": "matched"},
+                 {"code": "unsupported_is_rule", "url": "https://例.test/a", "phase": "debug"}]
+        self.assertEqual(jvm_debug.webview_unsupported(value), value)
+
+    def test_non_list_and_invalid_entries_are_dropped(self) -> None:
+        self.assertEqual(jvm_debug.webview_unsupported(True), [])
+        self.assertEqual(jvm_debug.webview_unsupported(False), [])
+        self.assertEqual(jvm_debug.webview_unsupported({}), [])
+        self.assertEqual(jvm_debug.webview_unsupported([
+            {"code": "", "url": "x", "phase": "debug"},
+            {"code": "ok", "url": "x", "phase": "other"},
+            {"code": "ok", "phase": "debug"},
+            "not-an-object",
+        ]), [])
+
+    def test_preserves_code_and_url_without_coercing_them(self) -> None:
+        value = [{"code": " custom-code ", "url": "  ", "phase": "debug"}]
+        self.assertEqual(jvm_debug.webview_unsupported(value), value)
+
+    def test_dropped_entries_are_logged_not_silent(self) -> None:
+        """丢掉一条原因等于把它从用户眼前拿掉：条数必须进日志（AGENTS #4）。"""
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            kept = jvm_debug.webview_unsupported([
+                {"code": "unsupported_is_rule", "url": "x", "phase": "debug"},
+                {"code": "", "url": "x", "phase": "debug"},
+                "not-an-object",
+            ])
+        self.assertEqual(len(kept), 1)
+        self.assertIn("2 条形状不对", out.getvalue())
+
+    def test_absent_key_is_normal_and_silent(self) -> None:
+        """侧车没这个键（None）是正常情形，不该刷日志。"""
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(jvm_debug.webview_unsupported(None), [])
+        self.assertEqual("", out.getvalue())
 
 
 class _RunCase(unittest.TestCase):

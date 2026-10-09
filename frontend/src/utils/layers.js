@@ -28,8 +28,9 @@ export const LAYER_INFO = {
 };
 
 //: 源里带 webView 标记的判据（URL 规则的选项 `,{"webView":true}`）。
-//: **与 `DebugService.kt` 的 `webViewPattern` 逐字相同**——同一个结论两个语言各判一次，
-//: 漂了就分家（`tests/test_jvm_debug_contract.py` 有一条逐字比对的测试）。
+//: **只有这一侧判，没有对端**：App 那侧不再按源 JSON 预判能力边界，改成记录实际撞上的
+//: 那几条（`ShadowBackstageWebView.recordUnsupported` → 侧车 → `webviewCapability.js`）。
+//: 这里判的是「源自己声明要交给 WebView 渲染」，只服务编辑表单的层归属，所以不必逐词比对。
 export const WEBVIEW_RE = /"?webView"?\s*:\s*(?:true|1|"true")/i;
 
 //: 「页面读不出来的东西在全局对象里」的痕迹：webJs 脚本引用页面上的全局。

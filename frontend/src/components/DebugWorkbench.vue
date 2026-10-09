@@ -32,6 +32,8 @@ import { classifyLayer } from "../utils/layers";
 // `diagnosis` / `aiLayerBlock` 与 `debugOutlets` / `debugNextAction` / `debugEvidence`
 // 各判一遍，同一件事说三遍、动作互相覆盖——现在收敛进 `buildDecision`。
 import { buildDecision, decisionLines } from "../utils/debugDecision";
+// WebView 能力边界是**运行级事实**（与五格判据分开）：这里只渲染，并把可归因的那份交给判据
+import { unsupportedForStep, webviewUnsupportedTitle, webviewUnsupportedView } from "../utils/webviewCapability";
 // 「这一步 App 实际拿到了什么」：从引擎带回的命中 DOM 里取样本（事件流水不是值）
 import { matchedSampleValues } from "../utils/debugEvidence";
 // 点选（九-2a）：元素 → 候选选择器 + 实测三个数。**只是提议**，验收仍走真引擎
@@ -140,6 +142,8 @@ const pages = computed(() => (result.value && result.value.pages) || []);
 //: 本地调试不再是结果来源；命中源码只显示引擎返回的片段。
 const channel = computed(() => String((result.value || {}).source || ""));
 const isAppResult = computed(() => channel.value === "app");
+const webviewUnsupported = computed(() => webviewUnsupportedView(result.value) || []);
+const webviewTitle = computed(() => webviewUnsupportedTitle(webviewUnsupported.value));
 //: 跑的是不是「App 的真引擎」——连 App 与本机引擎都算。事件流页签、分段重跑、
 //: 「用实测值当基准」这些只对真引擎成立
 const isEngineResult = computed(() => channel.value === "app" || channel.value === "jvm");
@@ -890,6 +894,8 @@ function planBody() {
     candidates: candidatesUsable.value
       ? candidates.value.map((c) => ({ rule: c.rule || "" }))
       : [],
+    // 事实而非判据：这一步的页面撞过本机的 WebView 能力边界（归因不了就不说）
+    webview_unsupported: unsupportedForStep(result.value, s.url),
     capabilities: { jvm_debug: true, app_debug: true },
     model_available: canSuggest.value && llmReady.value && !loginWall.value,
   };
@@ -1036,6 +1042,12 @@ function copyPage() {
     <el-alert v-if="result && result.error" :type="result.cancelled ? 'warning' : 'error'"
               :closable="false" show-icon style="margin-bottom: 10px"
               :title="String(result.error)" />
+    <el-alert v-if="webviewUnsupported.length" type="warning" :closable="false" show-icon
+              style="margin-bottom: 10px" :title="webviewTitle">
+      <div v-for="item in webviewUnsupported" :key="item.phase + item.code">
+        {{ item.phase === "matched" ? "命中回填" : "调试主链" }}：{{ item.text }}<span v-if="item.where">（{{ item.where }}）</span>
+      </div>
+    </el-alert>
     <el-empty v-if="!steps.length" description="没有调试结果；可先检查上面的原因或重新调试" :image-size="80" />
 
     <template v-else>
