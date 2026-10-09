@@ -11,7 +11,6 @@ import { ElMessage, ElMessageBox } from "element-plus";
 import { api } from "../api/client";
 import { healthLabel } from "../utils/health";
 import {
-  daemonPrepareLabel,
   isWorseHealth,
   jobAgoText,
   jobCancelHint,
@@ -44,7 +43,6 @@ const { upsertJob } = useJobs();
 const detail = ref(null);
 const live = ref(null);
 const detailLoading = ref(false);
-const technicalOpen = ref(false);
 const rawOpen = ref(false);
 //: 「此刻」的锚点：耗时与「多久没更新」都要跟着它走，由每次轮询推进（见 pullStatus）
 const nowMs = ref(Date.now());
@@ -138,7 +136,6 @@ watch(() => [props.modelValue, props.jobId], ([open, id]) => {
   stopPoll();
   detail.value = null;
   live.value = null;
-  technicalOpen.value = false;
   rawOpen.value = false;
   if (!open || !id) return;
   void pullStatus();
@@ -208,6 +205,8 @@ async function deleteJob() {
         <span class="muted">{{ jobPhaseLabel(job.phase) }}</span>
         <span v-if="job.retry_of" class="muted">· 由 {{ job.retry_of }} 重试而来</span>
         <span class="grow" />
+        <!-- 任务号是标识、不是技术细节：报障时要把它交出去，放在头上一行里 -->
+        <span v-if="jobId" class="muted td-jid" :title="jobId">{{ jobId }}</span>
         <el-button v-if="inFlight" size="small" type="warning" plain @click="cancelJob">
           取消任务
         </el-button>
@@ -251,37 +250,21 @@ async function deleteJob() {
       </template>
 
       <div v-if="job.error" class="td-warn">{{ job.error }}</div>
+      <!-- 回退原因不是「技术细节」：它说明这次为什么没走常驻引擎、为什么慢，
+           有值就该露出来，不该等人去展开一个折叠块 -->
+      <div v-if="detail && detail.daemon_fallback_reason" class="td-warn">
+        {{ detail.daemon_fallback_reason }}
+      </div>
 
-      <!-- 只有 JVM 校验有执行时间线：其余 kind 后端没有事件源（见 job_timeline.py） -->
+      <!-- 只有 JVM 校验有执行时间线：其余 kind 后端没有事件源（见 job_timeline.py）。
+           执行方式交给时间线头部：它决定这次会不会慢，与逐块明细是同一件事 -->
       <JobTimeline v-if="job.kind === 'jvm_run'" :job-id="jobId" :status="job.status"
+                   :execution-mode="(detail && detail.execution_mode) || ''"
+                   :execution-note="(detail && detail.execution_note) || ''"
                    :chunk-reports="(detail && detail.chunk_reports) || []" />
 
       <div v-if="!summary && !job.error && !inFlight" class="muted td-empty">
         这次任务没有可展示的结果。
-      </div>
-
-      <!-- 技术细节：执行方式/回退原因这些是排查用的，默认收着，不占主视线 -->
-      <div v-if="detail && (detail.execution_mode || detail.daemon_prepare || job.retry_of)"
-           class="td-fold">
-        <span class="td-fold-toggle" @click="technicalOpen = !technicalOpen">
-          技术细节 {{ technicalOpen ? "▲" : "▼" }}
-        </span>
-        <el-descriptions v-if="technicalOpen" :column="1" border size="small">
-          <el-descriptions-item v-if="detail.execution_mode" label="执行方式">
-            {{ { validate_daemon: "常驻校验引擎", gradle_fallback: "Gradle 回退", unknown: "未确定" }[detail.execution_mode] || detail.execution_mode }}
-          </el-descriptions-item>
-          <el-descriptions-item v-if="detail.execution_note" label="执行说明">
-            {{ detail.execution_note }}
-          </el-descriptions-item>
-          <el-descriptions-item v-if="detail.daemon_fallback_reason" label="回退原因">
-            {{ detail.daemon_fallback_reason }}
-          </el-descriptions-item>
-          <el-descriptions-item v-if="detail.daemon_prepare" label="批前准备">
-            {{ daemonPrepareLabel(detail.daemon_prepare.outcome)
-            }}<span v-if="detail.daemon_prepare.reason">：{{ detail.daemon_prepare.reason }}</span>
-          </el-descriptions-item>
-          <el-descriptions-item label="任务号">{{ jobId }}</el-descriptions-item>
-        </el-descriptions>
       </div>
 
       <!-- 原始结果：生成/导入类任务要核对返回值时才有用，默认收起 -->
@@ -321,6 +304,12 @@ async function deleteJob() {
 }
 .td-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .td-head .grow { flex: 1 1 auto; }
+/* 任务号：等宽、可整体选中（报障时要复制它）；窄屏靠省略号让位 */
+.td-jid {
+  font-family: Consolas, Monaco, monospace; font-size: 12px;
+  max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  user-select: all;
+}
 /* 一屏灰的进度里唯一的动静：它在动，就说明引擎还活着 */
 .td-pulse {
   width: 6px; height: 6px; border-radius: 50%;
@@ -409,7 +398,6 @@ async function deleteJob() {
 .td-fold-toggle:hover { background: var(--el-fill-color-light); }
 .td-fold-chevron { transition: transform .15s; }
 .td-fold-chevron.is-open { transform: rotate(90deg); }
-.td-fold .el-descriptions { margin-top: 8px; }
 .td-raw {
   max-height: 300px; overflow: auto; margin-top: 8px; padding: 10px;
   background: var(--el-fill-color-light); border-radius: 4px;

@@ -6,10 +6,15 @@
 import { ref, computed, watch, onUnmounted, nextTick } from "vue";
 import { api } from "../api/client";
 import { formatTimelineEvent, formatFailureLine, groupTimelineLines } from "../utils/jobTimeline";
+import { executionModeLabel } from "../utils/jobs";
 
 const props = defineProps({
   jobId: { type: String, default: "" },
   status: { type: String, default: "" },
+  // 任务级的执行方式（详情投影）。它决定这次会不会慢，所以摆在时间线头上，
+  // 和逐块明细同一处——原来它收在「技术细节」折叠块的最底下，等于看不见
+  executionMode: { type: String, default: "" },
+  executionNote: { type: String, default: "" },
   // 详情投影里的块级报告：失败块展开时取 Gradle 日志尾部作附件
   chunkReports: { type: Array, default: () => [] },
 });
@@ -47,6 +52,8 @@ const logOf = (index) => {
   return report.gradle.stderr || report.gradle.stdout || "";
 };
 
+//: 执行方式的中文词（「Gradle 回退」是最要紧的那一档——它意味着这次会慢）
+const modeLabel = computed(() => executionModeLabel(props.executionMode));
 //: 渲染前先归组：块结构是模板与样式共用的判据（见 utils/jobTimeline 的 groupTimelineLines）
 const groupedLines = computed(() => groupTimelineLines(lines.value));
 const failureTotal = computed(() => failures.value.total || 0);
@@ -167,6 +174,9 @@ function onScroll() {
         执行时间线<span class="job-timeline-chevron" :class="{ 'is-open': !collapsed }">▸</span>
         <span v-if="collapsed && lines.length">{{ lines.length }} 行</span>
       </button>
+      <!-- 执行方式是时间线的摘要：它决定这次会不会慢，与逐块明细同一处；
+           补充说明挂 title 上，不占主视线 -->
+      <span v-if="modeLabel" class="job-timeline-mode" :title="executionNote">{{ modeLabel }}</span>
       <span v-if="!collapsed && !following" class="job-timeline-follow"
             @click="following = true; scrollFollow()">回到最新</span>
     </div>
@@ -230,6 +240,12 @@ function onScroll() {
 .job-timeline-toggle:hover { background: var(--el-fill-color-light); }
 .job-timeline-chevron { transition: transform .15s; color: var(--el-text-color-secondary); }
 .job-timeline-chevron.is-open { transform: rotate(90deg); }
+/* 执行方式胶囊：与任务抽屉的 stat-chip 同一套视觉（同一个东西不长两种样子） */
+.job-timeline-mode {
+  font-size: 12px; color: var(--el-text-color-secondary);
+  padding: 1px 8px; border-radius: 999px;
+  background: var(--el-fill-color-light);
+}
 .job-timeline-follow, .job-timeline-log-toggle {
   font-size: 12px; color: var(--el-color-primary); cursor: pointer; user-select: none;
 }

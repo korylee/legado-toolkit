@@ -7,6 +7,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  executionModeLabel,
   isWorseHealth,
   jobAgoText,
   jobCancelHint,
@@ -96,4 +97,12 @@ test("变坏只看后端下发的档位名单，名单没到位时不标红", ()
   assert.equal(isWorseHealth("pending", needs), false);   // 没结论不算坏
   assert.equal(isWorseHealth("dead", []), false);          // meta 还没回来
   assert.equal(isWorseHealth("dead", undefined), false);
+});
+
+test("执行方式有中文词，未知值原样透出不伪装", () => {
+  assert.equal(executionModeLabel("validate_daemon"), "常驻引擎");
+  assert.equal(executionModeLabel("gradle_fallback"), "Gradle 回退");
+  assert.equal(executionModeLabel("unknown"), "未确定");
+  assert.equal(executionModeLabel("mystery"), "mystery");
+  assert.equal(executionModeLabel(""), "");
 });

@@ -29,14 +29,17 @@ export function jobPhaseLabel(phase) {
   return PHASE_LABELS[phase] || phase || "准备中";
 }
 
-//: daemon 批前准备的四档结果：后端给的是 outcome 枚举，界面上说人话
-export function daemonPrepareLabel(outcome) {
-  return {
-    ready: "热复用",
-    started: "已启动",
-    busy: "忙，本批未准备",
-    failed: "启动失败",
-  }[outcome] || outcome || "";
+//: 任务的执行方式（结果里的 `execution_mode`，取值定义在 backend/jobs/jvm_exec.py）。
+//: 「Gradle 回退」是最要紧的一档——它意味着这次没走常驻引擎、比预期慢，
+//: 而这正是用户在进度迟迟不动时想知道的。
+const EXECUTION_MODE_LABELS = {
+  validate_daemon: "常驻引擎",
+  gradle_fallback: "Gradle 回退",
+  unknown: "未确定",
+};
+
+export function executionModeLabel(mode) {
+  return EXECUTION_MODE_LABELS[mode] || mode || "";
 }
 
 //: 任务状态与类型（**唯一一份**）：任务中心列表、明细弹窗、列表页在跑条都读这里。
