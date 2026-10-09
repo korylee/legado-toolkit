@@ -78,6 +78,41 @@ export function jobProgressStatus(status) {
   return undefined;   // 排队 / 在跑 / unknown：中性
 }
 
+/** 后端时间戳是**本地时间字符串**（无时区）。自己按字段解析，不用 Date 解析字符串：
+ *  各浏览器对 `YYYY-MM-DD HH:mm:ss` 的解释不一致。解析不了返回 0——
+ *  调用方据此不出文案，宁可不说，也不要猜出一个「刚刚」。 */
+const STAMP_RE = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})/;
+
+function stampMs(stamp) {
+  const m = STAMP_RE.exec(String(stamp || ""));
+  if (!m) return 0;
+  const at = new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]).getTime();
+  return Number.isNaN(at) ? 0 : at;
+}
+
+function durationText(sec) {
+  if (sec < 60) return sec + " 秒";
+  const min = Math.floor(sec / 60);
+  if (min < 60) return min + " 分 " + (sec % 60) + " 秒";
+  return Math.floor(min / 60) + " 小时 " + (min % 60) + " 分";
+}
+
+/** 「已经跑了多久」。跑批是分钟级，这是用户最想知道的数，且是**已发生的耗时**，
+ *  不是 ETA（编 ETA 在组件注释里是明令禁止的）。时钟对不上（负数）时取 0。 */
+export function jobSpentText(createdAt, now = Date.now()) {
+  const start = stampMs(createdAt);
+  if (!start) return "";
+  return durationText(Math.max(0, Math.floor((now - start) / 1000)));
+}
+
+/** 「多久以前更新过」：进度停住时这个数会一直涨，它就是「还在推进吗」的判据。 */
+export function jobAgoText(stamp, now = Date.now()) {
+  const at = stampMs(stamp);
+  if (!at) return "";
+  const sec = Math.max(0, Math.floor((now - at) / 1000));
+  return sec < 5 ? "刚刚" : durationText(sec) + "前";
+}
+
 /** 终态：不会再变的状态（删除、重试只对这些开放）。
  *
  *  `unknown` 也算终态：它是 SSE 重连到上限仍没拿到终态时的兜底，而库里那条很可能

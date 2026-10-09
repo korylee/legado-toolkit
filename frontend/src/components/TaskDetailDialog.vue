@@ -12,12 +12,14 @@ import { api } from "../api/client";
 import { healthLabel } from "../utils/health";
 import {
   daemonPrepareLabel,
+  jobAgoText,
   jobCancelHint,
   jobIsInFlight,
   jobIsTerminal,
   jobKindLabel,
   jobPhaseLabel,
   jobProgressStatus,
+  jobSpentText,
   jobStatusLabel,
   jobStatusType,
 } from "../utils/jobs";
@@ -42,6 +44,8 @@ const live = ref(null);
 const detailLoading = ref(false);
 const technicalOpen = ref(false);
 const rawOpen = ref(false);
+//: 「此刻」的锚点：耗时与「多久没更新」都要跟着它走，由每次轮询推进（见 pullStatus）
+const nowMs = ref(Date.now());
 let timer = null;
 
 //: 详情给静态字段，轮询帧只覆盖**会变的**那几个。整体展开 live 会把详情里的富字段
@@ -61,6 +65,10 @@ const job = computed(() => {
 });
 const summary = computed(() => (detail.value || {}).summary || null);
 const inFlight = computed(() => jobIsInFlight(job.value.status));
+//: 耗时与「多久没更新」都是相对**此刻**的数，不是 detail 里的静态字段：每 2 秒的
+//: 轮询把 nowMs 顶一次，computed 才会跟着涨（Date.now() 自己不是响应式的）。
+const spentText = computed(() => jobSpentText(job.value.created_at, nowMs.value));
+const agoText = computed(() => jobAgoText(job.value.updated_at, nowMs.value));
 const pct = computed(() => {
   const total = Number(job.value.total || 0);
   const progress = Number(job.value.progress || 0);
@@ -85,6 +93,7 @@ function stopPoll() {
 async function loadDetail() {
   const id = props.jobId;
   if (!id) return;
+  nowMs.value = Date.now();
   detailLoading.value = true;
   try {
     const data = await api.get("/jobs/" + id + "/detail");
@@ -99,6 +108,8 @@ async function loadDetail() {
 async function pullStatus() {
   const id = props.jobId;
   if (!id) return;
+  // 每轮都推进「此刻」：时间在走，即使这一帧的状态没变（进度停住时那个数会一直涨）
+  nowMs.value = Date.now();
   try {
     const row = await api.get("/jobs/" + id);
     if (id !== props.jobId || !row || row.error) return;
@@ -182,6 +193,8 @@ async function deleteJob() {
         <el-tag size="small" :type="jobStatusType(job.status)">
           {{ jobStatusLabel(job.status) }}
         </el-tag>
+        <!-- 在跑时给阶段配一个呼吸点：文字说「编译中」，可一屏灰看不出它还活着 -->
+        <span v-if="inFlight" class="td-pulse" />
         <span class="muted">{{ jobPhaseLabel(job.phase) }}</span>
         <span v-if="job.retry_of" class="muted">· 由 {{ job.retry_of }} 重试而来</span>
         <span class="grow" />
@@ -192,12 +205,15 @@ async function deleteJob() {
 
       <!-- 在跑：这一段就是「进度弹窗」；结束后同一位置换成结论 -->
       <div class="td-progress">
-        <el-progress :percentage="pct" :stroke-width="10"
+        <!-- 数字在前、百分比让位：12 / 40 才是信息，百分比只是它的换算 -->
+        <div class="td-progress-top">
+          <span v-if="progressText" class="td-progress-num">{{ progressText }}</span>
+          <span v-if="spentText" class="muted td-progress-spent">已跑 {{ spentText }}</span>
+        </div>
+        <el-progress :percentage="pct" :stroke-width="10" :show-text="false"
                      :status="jobProgressStatus(job.status)" />
-        <p class="muted td-progress-text">
-          <span v-if="progressText">{{ progressText }}</span>
-          <span v-if="job.updated_at"> · 更新于 {{ job.updated_at }}</span>
-        </p>
+        <!-- 绝对时间对分钟级跑批没用（还得自己减时钟）；这个数停住不动就是「卡住了」 -->
+        <p v-if="inFlight && agoText" class="muted td-progress-text">{{ agoText }}更新</p>
       </div>
 
       <template v-if="summary">
@@ -293,12 +309,32 @@ async function deleteJob() {
 }
 .td-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .td-head .grow { flex: 1 1 auto; }
+/* 一屏灰的进度里唯一的动静：它在动，就说明引擎还活着 */
+.td-pulse {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--el-color-primary);
+  animation: td-pulse 1.4s ease-in-out infinite;
+}
+@keyframes td-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: .25; }
+}
 .td-progress {
   margin-top: 12px; padding: 10px 12px;
   background: var(--el-fill-color-lighter);
   border: 1px solid var(--el-border-color-extra-light);
   border-radius: 6px;
 }
+.td-progress-top {
+  display: flex; align-items: baseline; gap: 8px;
+  margin-bottom: 8px;
+}
+.td-progress-num {
+  font-size: 20px; font-weight: 600; line-height: 1.2;
+  /* 等宽数字：每 2 秒重算一次，不等宽整行会左右抖 */
+  font-variant-numeric: tabular-nums;
+}
+.td-progress-spent { margin-left: auto; white-space: nowrap; }
 .td-progress-text { margin: 6px 0 0; font-size: 12px; }
 /* 结论统计用轻胶囊：和任务抽屉的 stat-chip 是同一套视觉语言 */
 .td-summary {

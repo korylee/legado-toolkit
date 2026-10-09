@@ -7,11 +7,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  jobAgoText,
   jobCancelHint,
   jobIsInFlight,
   jobIsTerminal,
   jobKindLabel,
   jobProgressStatus,
+  jobSpentText,
   jobStatusLabel,
   jobStatusType,
 } from "./jobs.js";
@@ -63,4 +65,24 @@ test("进度条状态：取消不许画成成功，unknown 不猜", () => {
   for (const status of ["pending", "running", "cancel_requested", "unknown"]) {
     assert.equal(jobProgressStatus(status), undefined, status + " 应取中性档");
   }
+});
+
+test("耗时只报已发生的数：起点缺失或时钟对不上都不编", () => {
+  const t0 = "2026-10-05 10:00:00";
+  const at = (sec) => new Date(2026, 9, 5, 10, 0, sec).getTime();
+  assert.equal(jobSpentText(t0, at(12)), "12 秒");
+  assert.equal(jobSpentText(t0, at(192)), "3 分 12 秒");
+  assert.equal(jobSpentText(t0, at(3720)), "1 小时 2 分");
+  assert.equal(jobSpentText("", at(12)), "");
+  assert.equal(jobSpentText("不是时间", at(12)), "");
+  assert.equal(jobSpentText(t0, at(-30)), "0 秒");
+});
+
+test("多久以前更新过：进度停住时这个数会一直涨", () => {
+  const t0 = "2026-10-05 10:00:00";
+  const at = (sec) => new Date(2026, 9, 5, 10, 0, sec).getTime();
+  assert.equal(jobAgoText(t0, at(3)), "刚刚");
+  assert.equal(jobAgoText(t0, at(45)), "45 秒前");
+  assert.equal(jobAgoText(t0, at(200)), "3 分 20 秒前");
+  assert.equal(jobAgoText("", at(45)), "");
 });
