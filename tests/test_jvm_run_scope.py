@@ -1268,6 +1268,48 @@ class EventTimelineTests(_Base):
         self.assertEqual(1, len(waits), result["events"])
         self.assertEqual(10.0, waits[0]["elapsed_sec"])
 
+    def test_stalled_chunk_survives_successful_isolation(self) -> None:
+        """停滞块的隔离重跑成功后，这一块必须算成功、余下块继续跑。
+
+        2026-10-09 实测（相隔一小时的**两批**都死在这里）：隔离已把结论并回块文件，
+        块却被判「没有产出结果文件」——因为块级退出码还是隔离之前那次 Gradle 尝试的。
+        后果不是少几条结论：那一块的全部结论被丢，整批按「环境级失败」中止（3279 条只跑
+        了 825 条、2454 条只跑了 25 条）。
+        """
+        from core import jvm_validate_daemon
+
+        prepare_calls = {"n": 0}
+
+        def fake_prepare(dump, **kwargs):
+            prepare_calls["n"] += 1
+            # 第一声是批量开跑前的准备：daemon 还被上一批那条挂死的 op 占着（真机形状）
+            if prepare_calls["n"] == 1:
+                return {"outcome": "busy", "reason": "daemon 忙"}
+            return {"outcome": "started", "info": {"pid": 1, "port": 1, "sig": "s"}}
+
+        def stalled_gradle(args_path=None, runtime=None, **kwargs):
+            return {"exit": 1, "stalled": True, "stdout": "", "stderr": "块内输出停滞"}
+
+        def hung_run(_dump, args_file, socket_timeout=None):
+            # 隔离重跑那一条源：引擎无响应（真机形状，客户端到点判它死）
+            raise jvm_validate_daemon.ValidateDaemonError("引擎对该源无响应")
+
+        with mock.patch.object(jvm_exec, "_run_gradle", stalled_gradle), \
+             mock.patch("core.jvm_direct.load_dump", return_value=self._DUMP), \
+             mock.patch("core.jvm_validate_daemon.prepare", side_effect=fake_prepare), \
+             mock.patch("core.jvm_validate_daemon.probe", return_value=None), \
+             mock.patch("core.jvm_validate_daemon.stop", return_value=True), \
+             mock.patch("core.jvm_validate_daemon.run", side_effect=hung_run):
+            _payload, result = self._run_batch(self._QUIET)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(3, len(result["chunk_reports"]), result["chunk_reports"])
+        self.assertTrue(all(r.get("ok") for r in result["chunk_reports"]),
+                        result["chunk_reports"])
+        # 每块 1 条源：判死的那条也要作为结论留在文件里被读回，不能被整块丢掉
+        self.assertEqual([1, 1, 1],
+                         [r.get("count") for r in result["chunk_reports"]])
+        self.assertEqual("done", result["events"][-1]["kind"])
+
     def test_batch_stale_snapshot_skips_daemon_and_keeps_reason(self) -> None:
         """改了 Kotlin 未刷新 snapshot：批量不碰 daemon、全部走 Gradle，原因可见。
 

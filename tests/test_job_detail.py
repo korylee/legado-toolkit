@@ -4,7 +4,7 @@
 import json
 import unittest
 
-from backend.api.jobs import _job_detail
+from backend.api.jobs import _job_detail, _job_row
 
 
 class JobDetailShapeTests(unittest.TestCase):
@@ -98,6 +98,33 @@ class JobDetailShapeTests(unittest.TestCase):
         got = detail["chunk_reports"][0]["reason"]
         self.assertTrue(got.startswith("daemon 返回 code=2："))
         self.assertLessEqual(len(got), 1201)
+
+    def test_aborted_batch_reason_reaches_error(self):
+        """中止批的原因写在 ``reason``：只读 ``error`` 时，界面只剩「已完成 + 空原因」，
+        而同一个任务已经停在一半（跑批中止不再启动余下块）。"""
+        detail = _job_detail({**self._job({
+            "ok": False, "checked": 0,
+            "reason": "第 34/132 块失败：没有产出结果文件",
+        }), "kind": "jvm_run"})
+        self.assertIn("第 34/132 块失败", detail["error"])
+
+    def test_light_row_carries_abort_reason(self):
+        """列表行也要说得出一批为什么停在一半：``error`` 空而 ``reason`` 有值时取后者，
+        且只在 ``ok`` 明确为假时取（SQLite 的 ``json_extract`` 把 false 给成 0）。"""
+        self.assertIn("第 1/99 块失败", _job_row({
+            "id": "j1", "kind": "jvm_run", "status": "done", "result_ok_flag": 0,
+            "result_reason": "第 1/99 块失败：没有产出结果文件"})["error"])
+        self.assertEqual("", _job_row({
+            "id": "j2", "kind": "jvm_run", "result_ok_flag": 1,
+            "result_reason": "块间交还调度权"})["error"])
+        # 结果里没有 ok 这根轴：不猜，宁可不说
+        self.assertEqual("", _job_row({
+            "id": "j3", "result_reason": "过程说明"})["error"])
+
+    def test_successful_result_reason_is_not_an_error(self):
+        """成功结果里的 ``reason`` 只是过程说明，不许被当成失败原因画出来。"""
+        detail = _job_detail(self._job({"ok": True, "reason": "块间交还调度权"}))
+        self.assertEqual("", detail["error"])
 
     def test_other_job_keeps_structured_result(self):
         result = {"source_url": "https://a.example", "saved": True}

@@ -138,16 +138,27 @@ def _load_result(job: Dict[str, Any]) -> Any:
         return None
 
 
-def _result_error(job: Dict[str, Any], parsed: Any) -> str:
-    """任务失败的原因（**唯一一份**）：列表行与详情共用。
+def _error_text(error: Any, ok_flag: Any, reason: Any) -> str:
+    """「为什么看不到结果」的文本（**唯一一份**：轻量行与详情共用）。
 
-    两处各写一遍时，列表说「失败」而详情说得出原因，用户就得点开每个失败任务去找。
-    坏 JSON 给一句固定说明：它同样是「为什么看不到结果」的答案。
+    ``error`` 是异常出口，``reason`` 是中止那条链——只读前者时，一次中止在界面上
+    就是「已完成 + 空原因」。``reason`` 只在 ``ok`` 明确为假时才取：成功的结果里
+    它可能只是过程说明（``ok_flag`` 来自 ``json_extract``，JSON 的 false 是 0）。
     """
+    if error:
+        return _bounded_text(error)
+    if ok_flag in (0, False) and reason:
+        return _bounded_text(reason)
+    return ""
+
+
+def _result_error(job: Dict[str, Any], parsed: Any) -> str:
+    """任务失败的原因（详情侧）：坏 JSON 单独给一句固定说明——它同样是
+    「为什么看不到结果」的答案。文本本身的口径在 ``_error_text``。"""
     if (job.get("result_json") or "") and parsed is None:
         return "任务结果不是有效 JSON"
     if isinstance(parsed, dict):
-        return _bounded_text(parsed.get("error"))
+        return _error_text(parsed.get("error"), parsed.get("ok"), parsed.get("reason"))
     return ""
 
 
@@ -200,7 +211,8 @@ def _job_row(job: Dict[str, Any]) -> Dict[str, Any]:
         "created_at": job.get("created_at", ""),
         "updated_at": job.get("updated_at", ""),
         #: 失败/部分失败的原因。**要有界**：它可能是一整段 Gradle 报错
-        "error": _bounded_text(job.get("result_error")),
+        "error": _error_text(job.get("result_error"), job.get("result_ok_flag"),
+                             job.get("result_reason")),
         "summary": summary,
     }
 

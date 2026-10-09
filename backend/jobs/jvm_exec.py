@@ -1001,6 +1001,11 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
                 if iso.get("ok"):
                     daemon_mode = True
                     daemon_response = {"code": 0}
+                    # 隔离重跑成功 = 本块已有完整结论，**上一次 Gradle 尝试的退出码
+                    # 不能再判它失败**：判失败会丢掉这一块的全部结论，并且按「环境级
+                    # 失败」把整批中止（2026-10-09 实测两批都死在这里——文件里明明有
+                    # 25 行结论，却报「没有产出结果文件」）
+                    code = 0
                     daemon_failure = (daemon_failure + "；已隔离重跑剩余 %d 条"
                                       "（判死 %d 条）"
                                       % (iso.get("isolated", 0), iso.get("dead", 0)))

@@ -65,7 +65,7 @@ ACTIVE_JOB_STATUSES = ("pending", "running", "cancel_requested")
 #: 任务的**轻量行**：状态/进度 + 从结果里抽出来的几个标量。
 #:
 #: 为什么不把 ``result_json`` 取出来再在 Python 里解析：列表最多 200 行，而一次全量
-#: 校验的结果带着 ``items[:500]``（一条上百 KB）——为了四个数把几十 MB 的 JSON 都解析
+#: 校验的结果带着 ``items[:500]``（一条上百 KB）——为了几个数把几十 MB 的 JSON 都解析
 #: 一遍，打开任务中心、每 5 秒的刷新都要付一次。``json_extract`` 让 SQLite 只把需要的
 #: 标量交出来；``result_changed`` 是 ``{档位: 条数}`` 那个小对象（只有它还需要求和）。
 #:
@@ -82,7 +82,12 @@ _JOB_LIGHT_COLUMNS = (
     " json_extract(%s, '$.checked') AS result_checked,"
     " json_extract(%s, '$.dist.ok') AS result_ok,"
     " json_extract(%s, '$.transitions.changed') AS result_changed,"
-    " json_extract(%s, '$.error') AS result_error" % ((_VALID_RESULT,) * 4)
+    " json_extract(%s, '$.error') AS result_error,"
+    # 中止那条链的原因在 `reason`（`error` 留给异常出口）：行里要能显示它，否则一次
+    # 中止在列表上就是「已完成 + 空原因」。`ok` 是「只在明确为假时才取 reason」那道
+    # 闸门（JSON 的 false 经 json_extract 出来是 0）。
+    " json_extract(%s, '$.ok') AS result_ok_flag,"
+    " json_extract(%s, '$.reason') AS result_reason" % ((_VALID_RESULT,) * 6)
 )
 DB_NAME = "sources.sqlite3"
 
