@@ -21,36 +21,9 @@
 > 当前排期：引擎与调试执行链的基础设施已完成；后续调试体验以“入口降噪 → 工作台闭环 → 证据前置 → 编辑能力合入 → DOM 意图化生成”为主线。worker 的 lane、分块恢复、daemon 复用与冷启动批前准备、任务详情的块级证据与执行时间线均已交付（lessons §六十五 / §六十六）。
 > P0 的 unknown 出口与可执行提示已交付，当前前端待办集中在新调试页的视觉层级、编辑闭环和证据可信度；本机引擎的启动耗时治理已完成（分段观测、排队可见、自适应忙等待、批前按需准备）。
 
-### 条目：webview-isrule-split · isRule 分流：不需要页面环境的 webJs 走 App 自己的 JS 引擎
-状态：doing
-依赖：无
-优先级：P1
-背景：`isRule` 不是一条边界，而是「在页面里跑 App 的 webJs 规则」整件事——上游 `AnalyzeRule.getWebJsResult` 注入 `getInjectionString` 前奏与 `WebCacheManager` / `source` / `java`（`WebJsExtensions`，16 个公开方法）后 `evaluateJavascript`。其中**不需要页面环境**的那部分（只用 `java` / `source` / `result` 做数据变换与取 URL）可以走 App 自带的 JS 引擎加真绑定：同步、语义最接近 App、**零浏览器工作**。**实现已落地**：`ShadowBackstageWebView` 里按静态判据分流，数据类走 `runRuleWithoutPage`（`java` 显式绑 `WebJsExtensions`、`result` 照上游进 `CacheManager["webview_result"]`、返回值不做 unescape），求值失败归 `unsupported_is_rule_local`；`--refresh` 编译通过。**待运行验证**：库里 3761 条源**没有一条含 `@webJs`**，两个分支的运行时行为只能用合成源或真实设备对拍。
-约束：分流判据是**静态**的——规则 JS 里有没有 `document` / `window` / `location` / `localStorage` / `getElementsBy*` 这类页面环境用法；不按频率统计决定先做哪支。要用页面环境的仍报缺口、仍路由到 App（`webview_unsupported` 已接进五格：fix 为空、probe=连 App）。**不许半支持**：语义不确定的一律报未覆盖，不猜。新增或改名的边界码必须配一条 Kotlin↔JS 逐词比对（`tests/test_jvm_debug_contract.py` 的 `TestLoginMarkerParity` 是现成套路），否则改名只会静默降级成兜底文案。
-验收：一支只用 `@webJs` 做数据变换的规则，本机与连 App 结果逐字一致；要用页面环境的规则仍明确报「本机未覆盖 + 连 App 取证」，不产生假结论；边界码两侧逐词一致。
-指针：appservice/test/io/legado/app/service/ShadowBackstageWebView.kt，core/jvm_debug.py，frontend/src/utils/webviewCapability.js，tests/test_jvm_debug_contract.py，上游 `AnalyzeRule.kt:173-188` / `BackstageWebView.kt:108-119`
-
 ---
 
 ## 1 · 排队
-
-### 条目：webview-html-only · 补齐「只给 html」的渲染
-状态：doing
-依赖：无
-优先级：P1
-背景：上游 `BackstageWebView.load()` **先看 html**：`html` 有且 `url` 空走 `loadData(html, "text/html", enc)`（无 baseUrl），`html` 有且 `url` 有走 `loadDataWithBaseURL(url, html, …, url)`（帧地址与来源都是它）。**实现已落地并离线验证**：桥加了 `render(content=…)` 入口（前者 `Page.setDocumentContent`、后者 `Fetch.enable` + `Page.navigate` + `Fetch.fulfillRequest`，跑完 `Fetch.disable`），shadow 的 html 分支改走它；合成源实测两种形态都渲染出 HTML、`location.origin` 等于 baseUrl、同一页签连续两次都成功，`webview_unsupported` 为空。**待做**：拿库里真实源对拍（`java.webView(script, source.key, "")` 那 13 条调用点、POST ≤20 条）；`setDocumentContent` 那一支无法控制 charset（html 自带 `gbk` 声明时会乱码——`Fetch` 那支可用响应头声明 utf-8），以及上游的 `blockNetworkImage`、UA（`headerMap`）、`cacheFirst` 三条保真缺口仍未补。
-约束：MIME 与编码照上游；等待语义照上游（`onPageFinished` 之后 `1000 + delayTime` 才注入 JS）；能力到位后产出侧不再记这两个码。
-验收：同一源本机与连 App 材料逐字一致；未撞边界的情形行为不变。
-指针：appservice/test/io/legado/app/service/ShadowBackstageWebView.kt，appservice/test/io/legado/app/service/BrowserBridge.kt，上游 `BackstageWebView.kt:100-133` / `222-246`
-
-### 条目：webview-url-sniff · 补齐 sourceRegex / overrideUrlRegex 的 URL 嗅探
-状态：todo
-依赖：无
-优先级：P1
-背景：上游两条正则**匹配的是加载过程中的 URL**，命中就把那个 URL 本身当 body 返回（`StrResponse(url!!, requestUrl)`）并销毁 WebView，**不是读响应体**（`SnifferWebClient:309-337`）。侧车已经在记 `networkRequests`，因此本机不需要重写 `SnifferWebClient`，只差「用同一套正则匹配已记录的 URL」。
-约束：匹配用**全串**语义（Kotlin `matches`，不是 `find`）；两个时机不同（`overrideUrlRegex` 在导航、`sourceRegex` 在子资源），迁到「加载完成后在请求列表上匹配」时**两条都命中时的先后必须与上游一致**，否则会安静地取错 URL；**不能用 `networkRequests` 做匹配**——它只留 XHR / Fetch 且有上界，而上游 `onLoadResource` 看到的是**所有**资源，用它会漏命中并静默回落到整页 body；要么从 `tapped`（全量 CDP 消息副本）取 `Network.requestWillBeSent` 的 URL，要么把匹配做在桥上。`overrideUrlRegex` 现在**连边界码都没有**（`java.webViewGetOverrideUrl` 库里 1 条），走普通导航、嗅探被静默忽略，要一起处理或先给它一个显式码。命中返回 URL 字符串，未命中走普通页面结果；补齐后不再记 `unsupported_source_regex`。
-验收：构造一个两条正则都会命中的页面，本机选中的 URL 与连 App 一致；未命中时行为与现在相同。
-指针：appservice/test/io/legado/app/service/ShadowBackstageWebView.kt，appservice/test/io/legado/app/service/BrowserBridge.kt，上游 `BackstageWebView.kt:289-337`
 
 ### 条目：webview-material-fallback · 本机渲染取材料（设备不在场时的退路）
 状态：todo
@@ -71,18 +44,6 @@
 指针：core/agent_plan.py，frontend/src/components/DebugWorkbench.vue，frontend/src/utils/webviewCapability.js
 
 ## 2 · 按需
-
-### 条目：site-req-opt · 站点请求那一段的优化（都未评估）
-状态：todo
-依赖：无
-优先级：P2
-背景：四个候选动作——① 重放优先于重跑（用 App 真看到的那份 HTML 本地重放）；
-  ② 给 OkHttp 装 Cache（重复抓同一页第二条起秒回，必须配「忽略缓存重抓」）；
-  ③ 分段重跑再把上一轮的 book/chapter 传回去；④ 别把 `fetch_debug_pages` 的
-  补抓算进调试耗时（记账口径）。
-约束：**先做哪个要看「编辑循环里重复抓同一页的比例」——没量过，别先动手**。
-验收：先给出那个比例的一次实测，再按结果选一条动手，并给出改动前后的对比。
-指针：lessons §七十五，core/jvm_debug.py
 
 ### 条目：s5a-a32 · S5-A3-2 表单登录入口
 状态：todo
@@ -111,7 +72,7 @@
   **用户主动触发的「复检」**，不是校验主力。接口能力与协议细节见 lessons §五十一。
 约束：**优先做只读的那条**（`WS /searchBook` + 读回 App 自带结论，一行 App 数据
   都不写）；回推路线只在设备兼职日常使用时才保留。判定时真机结论证据等级最高，
-  落 `checks` 要按来源阶梯标注，别和另外两条混成一个数。别抄会过期的计数。
+  落 `checks` 要按来源阶梯标注，别和本机引擎的结论混成一个数。别抄会过期的计数。
 验收：只读路线跑通——每个关键词开一条新连接打 `/searchBook`，按 `origin` 去重数源，
   两侧都过宽松归一后对账一致；要读回 App 自带结论时，读回后立刻映射入库再让
   organizer 重建分组。
@@ -138,23 +99,6 @@
 验收：点变化数后列表筛到对应子集，且 chip 状态同步。
 指针：frontend/src/views/SourcesView.vue
 
-### 条目：job-detail-poll-consolidate · 合并任务详情与时间线轮询
-状态：todo
-依赖：无
-优先级：P2
-背景：任务详情弹窗同时轮询任务状态、详情和执行时间线；这不改变 JVM 实际启动时间，但会增加弹窗打开时的请求、SQLite 读取和前端刷新竞争。
-约束：不能复制任务状态判据；终态后必须停止所有轮询；时间线增量游标和结果详情的静态字段要保持现有语义；接口失败仍需保留具体原因。
-验收：进行中任务打开详情时，状态/详情/时间线不再为同一任务重复建立独立轮询；进度、时间线增量、终态结果和取消行为与现有测试一致。
-指针：frontend/src/components/TaskDetailDialog.vue，frontend/src/components/JobTimeline.vue，backend/api/jobs.py，backend/api/job_timeline.py
-
-### 条目：timeline-scan-incremental · 时间线失败源改为增量消费
-状态：todo
-依赖：无
-优先级：P2
-背景：时间线轮询每次都重新扫描各块 `results.jsonl` 统计失败源；批量结果越大，弹窗轮询成本越高。失败源当前来自结果快照，不应伪装成逐源实时引擎事件。
-约束：执行线程追加的骨架事件仍按游标消费；失败源计数必须精确，截断清单不能改变总数；终态仍以 `result_json` 为唯一事实；不能把文件尚未写完整的行判成源失败。
-验收：运行中不再每轮从头扫描全部结果文件；大批量时间线轮询的读取量随新增数据增长而非随全量结果重复增长；失败总数、截断提示和终态清单与现有口径一致。
-指针：backend/api/job_timeline.py，backend/jobs/jvm_exec.py，tests/test_job_timeline.py，lessons §二 / §二十八
 ### 条目：ux-timeline · 校验历史时间线
 状态：todo
 依赖：无
@@ -174,16 +118,6 @@
 验收：回收站的批量恢复与列表页行为一致（同一 URL 的选中 / 恢复语义）。
 指针：frontend/src/components/TrashDrawer.vue
 
-### 条目：dup-bc · 合并重复源：B/C 档并排显示可用性
-状态：todo
-依赖：无
-优先级：P2
-背景：只读的三档（镜像 / 同域名 / 同名）只展示不动作；B/C 档要并排显示可用性来
-  辅助判断留哪条。
-约束：口径与写路径见 lessons §三十四；**不自动合并**、不按域名批量去重。
-验收：B/C 档每组能看到并排的可用性对比。
-指针：lessons §三十四，core/dups.py
-
 ### 条目：source-edges · 源关系边表：合并 / 换址 / 忽略记成一张账
 状态：todo
 依赖：无
@@ -201,40 +135,6 @@
 验收：三种动词各能写入并撤销一条边；重启与 settings reset 后边还在；列表与
   导出正确过滤正典行，软删 / 回收站行为不变。
 指针：lessons §三十四 / §十，core/store.py，services/merge_sources.py
-
-### 条目：pair-probe · 同源裁定：任意两条源的成对比对
-状态：todo
-依赖：source-edges
-优先级：P2
-背景：整理源的五档（rules / mergeable / host / name / mirror）都是单键聚类的
-  线索，「这两条是不是同一个源」没有判定工具——同名不同域（换址转发）尤其
-  没人管。分工：候选靠人眼与现有分档，裁定靠引擎——同一个搜索词两边各跑一次，
-  diff 返回书目，结论落库可追溯，不是弹窗即焚。
-约束：列表页多选两条发起；两侧差异与比对结论要落库（复盘要能翻）；「同一个源」
-  的结论只能人点确认后写进 source-edges，机器不下结论（AGENTS #3 / #11）；
-  name / host / mirror 三档保持只读线索（可用性展示归 dup-bc），不为裁定再造
-  相似度分档。
-验收：任选两条源能发起比对、看到两侧结果差异与证据出处；确认后写入对应边；
-  比对记录重启后可查。
-指针：core/checker.py，core/dups.py，frontend/src/components/TidyDrawer.vue，lessons §三十四
-
-### 条目：import-preview-coalesce · 导入预演标出同站同指纹源
-状态：todo
-依赖：无
-优先级：P2
-背景：导入只拦同 URL；同站且行为指纹全等、URL 只差署名或端口写法的转发源仍会照单全收，之后才靠整理抽屉清理。
-约束：只提示同站 + 指纹全等的候选并默认建议归并；跨站同名照旧走人工；预演不静默合并或删除用户数据。
-验收：导入含署名转发源的批次，预演标出候选归并对；确认后不产生重复在用行，未确认时原导入行为不变。
-指针：backend/api/imports.py，core/dups.py，lessons §三十四
-
-### 条目：batch-fingerprint-coalesce · 批量校验按同站同指纹复用探测
-状态：todo
-依赖：无
-优先级：P2
-背景：同站且行为指纹全等的转发源可共享一次探测，但现有批量按源逐条执行。**收益已实测**（2026-10-08，3761 条启用源 / chunk_size 25 / 151 块）：同站同指纹 374 组、涉及 778 条、上限可省 404 次探测；**按当前导出顺序分块只剩 196 次（5.2%）**，因为 374 组里有 202 组跨块；改成按组聚合分块可回到上限 404（10.7%）。**JVM 的块数不变**（仍 151 块），省的是块内每源那一次站点请求与解析。
-约束：①**分组键必须用完整源记录算**——批量导出会裁掉 14 个行为字段（`loginUrl` / `loginCheckJs` / `ruleExplore` / `concurrentRate` / `jsLib` 等），拿批次载荷算指纹会把「登录要求不同」的源并成一组，那是错的共享；②要不只省 5.2% 就得同时做分组感知分块，否则收益被顺序吃一半；③仅组内指纹全等时复用，跨站同名不合并；④每条结论标明共享来源，**一次失败不许静默扩散到整组**；不复用旧批次结果；开关纳入 settings_store，默认值与限幅只定义一处。
-验收：同组只探测一次、每行结论均带来源（可追溯到被共享的那条），任一行为字段不同则独立执行，显式关闭开关时不共享探测；失败组必须逐个独立执行并各自带原因。
-指针：backend/api/jvm.py，core/dups.py，AGENTS.md #5b，lessons §五十三
 
 ### 条目：agent-layer-orchestration · 按 Layer 编排受限调试 Agent
 状态：open
@@ -281,6 +181,15 @@
 验收：覆盖不到的 API 一律报「未覆盖」而不是返回空值假结果；补上的 shim 用「同源两通道材料一致」对拍。
 指针：appservice/test/io/legado/app/service/BrowserBridge.kt，appservice/test/io/legado/app/service/ShadowBackstageWebView.kt，core/agent_plan.py
 
+### 条目：webview-render-fidelity · 渲染自有 html 时上游语义还没对齐的几处
+状态：todo
+依赖：无
+优先级：P2
+背景：`render(content=…)` 的两条分支里，**无 baseUrl 那一支（`Page.setDocumentContent`）没法声明编码**：CDP 这个命令没有 charset 参数，而 html 自带 `<meta charset="gbk">` 时浏览器会按 gbk 解析我们送去的 UTF-8 字节 → 乱码。`Fetch` 那一支不受影响（响应头 `Content-Type: …; charset=utf-8` 在 HTML 的编码判定里优先于 meta）。同主题还有三处上游语义没对齐，都是**所有渲染共用**的老缺口、不是这次引入：`blockNetworkImage = true`（上游拦图片）、UA 取自 `headerMap`、`cacheFirst` 的缓存优先。
+约束：修编码要**始终按 UTF-8 送**并用前 1024 字节内的 `<meta charset="utf-8">` 强制解析——照搬 `encode` 去转码反而会把已解码的字符串弄坏；图片/UA/缓存三处要么照上游实现、要么在注释里写明是近似，别让人读成「已完全对齐」。
+验收：一个自带 gbk 声明的 html 走无 baseUrl 分支，取回的文本与原文逐字一致；另三处各自有明确的「实现或标注为近似」的结论。
+指针：appservice/test/io/legado/app/service/BrowserBridge.kt，上游 `BackstageWebView.kt:100-155`
+
 ## 3 · 待决策
 
 ### 条目：s5a-a2 · A2 之后可评估：跑批不再剥 webView 选项
@@ -297,34 +206,59 @@
 验收：评估结论 + 用户拍板；若做，全量重跑一次并记 `CACHE_VERSION`。
 指针：lessons §六十 / §七十三 / §八十七
 
+### 条目：pair-probe · 同源裁定：任意两条源的成对比对
+状态：blocked
+依赖：source-edges
+优先级：P2
+背景：整理源的五档（rules / mergeable / host / name / mirror）都是单键聚类的
+  线索，「这两条是不是同一个源」没有判定工具——同名不同域（换址转发）尤其没人管。
+  **评估结论（2026-10-09 只读统计）**：同名 + 跨宿主 + 指纹不同的候选配对 446 对
+  （2–4 条的小同名组），其中两侧都有结论的只有 14 对；而「两侧首条命中」拿现有
+  `checks.search_hit` 就能出（相同 5 / 不同 9），这个信号两个方向都有反例——
+  同 CMS 的克隆站会撞上，同站不同子域也会岔开；调试事件流的搜索段只带「列表大小 +
+  第一条书」，做不到「diff 返回书目」。
+约束：列表页多选两条发起；两侧差异与比对结论要落库（复盘要能翻）；「同一个源」
+  的结论只能人点确认后写进 source-edges，机器不下结论（AGENTS #3 / #11）；
+  name / host / mirror 三档保持只读线索，不为裁定再造相似度分档。
+验收：任选两条源能发起比对、看到两侧结果差异与证据出处；确认后写入对应边；
+  比对记录重启后可查。
+阻塞于：评估结论待拍板——「首条命中」不足以支撑「同一个源」的判定，前置
+  source-edges 也未落地；若要做，先让 `keyword_used` 落进结论行（现在没落）。
+指针：core/checker.py，core/dups.py，frontend/src/components/TidyDrawer.vue，lessons §三十四
+
+### 条目：batch-fingerprint-coalesce · 批量校验按同站同指纹复用探测
+状态：blocked
+依赖：无
+优先级：P2
+背景：同站且行为指纹全等的转发源可共享一次探测，但现有批量按源逐条执行。**收益已实测**（2026-10-08，3761 条启用源 / chunk_size 25 / 151 块）：同站同指纹 374 组、涉及 778 条、上限可省 404 次探测；**按当前导出顺序分块只剩 196 次（5.2%）**，因为 374 组里有 202 组跨块；改成按组聚合分块可回到上限 404（10.7%）。**JVM 的块数不变**（仍 151 块），省的是块内每源那一次站点请求与解析。
+约束：①**分组键必须用完整源记录算**——批量导出会裁掉 14 个行为字段（`loginUrl` / `loginCheckJs` / `ruleExplore` / `concurrentRate` / `jsLib` 等），拿批次载荷算指纹会把「登录要求不同」的源并成一组，那是错的共享；②要不只省 5.2% 就得同时做分组感知分块，否则收益被顺序吃一半；③仅组内指纹全等时复用，跨站同名不合并；④每条结论标明共享来源，**一次失败不许静默扩散到整组**；不复用旧批次结果；开关纳入 settings_store，默认值与限幅只定义一处。
+验收：同组只探测一次、每行结论均带来源（可追溯到被共享的那条），任一行为字段不同则独立执行，显式关闭开关时不共享探测；失败组必须逐个独立执行并各自带原因。
+阻塞于：收益与实现成本不成比例——上限 10.7%（2026-10-09 实测吞吐 195 条 / 5.5 分钟，
+  全量约 1.7 小时，故约 10 分钟），却要同时改分组感知分块、结论来源与开关；未获拍板。
+指针：backend/api/jvm.py，core/dups.py，AGENTS.md #5b，lessons §五十三
+
 ### 条目：norl-ambig · 「没结果」的二义性
 状态：todo
 依赖：无
 优先级：P2
 背景：JVM 搜索对单关键词跑，某源没结果可能是「没这本书」。源自带的
-  `checkKeyWord` 已被跑批采纳（结论带 `keyword_used`）：声明了关键词的源
-  不再因通用词误判 no_result，本条只剩「源没声明关键词」的场景。
-约束：缓解靠多词复核（全不命中才判坏），落地点在做 `no_result` 复核批次时。
+  `checkKeyWord` 跑批会采纳，但**它没落库**（引擎侧产出、`core/jvm_health.checks_row`
+  丢掉），结论行分不出这次用的是哪个词。实测 2026-10-09：1100/3761 条声明了
+  `checkKeyWord`；库里 359 条结论是「搜索真跑过、没命中」（health=pending 且
+  `search_probed=1`）——本条要复核的就是这一批。
+约束：缓解靠多词复核（全不命中才判坏），落地点在做 `no_result` 复核批次时；
+  **先把当次用的词落进结论行**，否则复核结论同样不可追溯（AGENTS #5b 的轴）。
 验收：做一个 `no_result` 复核批次，单关键词无结果的源经多词复核后才判坏。
 指针：lessons §五十三，core/checker.py
-
-### 条目：concl-feed · JVM 结论要不要反向喂给本地口径
-状态：todo
-依赖：无
-优先级：P2
-背景：health / stars 的映射与来源标注——那是「结论互通」的事，等三段结论稳定后
-  再议。
-约束：**动本地口径才涉及 `CACHE_VERSION`**。
-验收：先给出「三段结论是否稳定」的判断，再决定要不要互通。
-指针：lessons §七十二 / §七十三
 
 ### 条目：ua-axis · UA 要与设备对齐，得先给结论行加一根 UA 轴
 状态：todo
 依赖：无
 优先级：P2
 背景：UA 是三条通道各一条。要「与设备对齐」得先给结论行加一根 UA 轴（把当次实际
-  用的那条记进结论；行里已有 `webview_stripped` 这个「当次条件」的先例），否则历史
-  结论与新结论不是同一口径却看不出来（与 AGENTS #5b 同构）。
+  用的那条记进结论）。**结论行今天没有任何「当次条件」轴**：`webview_stripped` /
+  `keyword_used` 都只在引擎侧产出，`core/jvm_health.checks_row` 落库时丢掉了——
+  于是历史结论与新结论不是同一口径却看不出来（与 AGENTS #5b 同构）。
 约束：**现在不动**——改 UA 值会改变站点返回的页面，与库里已有结论不可比。
 验收：UA 轴落地（结论行记录当次 UA），且能区分新老口径。
 指针：AGENTS.md #5b，lessons §五十一
@@ -334,7 +268,8 @@
 依赖：无
 优先级：P2
 背景：JVM 面会带「正文较短」的附注；「疑似错误页」那一半要**全文**匹配
-  `CONTENT_NOISE_MARKERS`，而结论行的 `content_sample` 只有 60 字。
+  `CONTENT_NOISE_MARKERS`，而引擎侧只留 `content_sample`（60 字，`content_len`
+  是全文长度）——**结论行里没有 `content_sample` 这一列**，别去库里找。
 约束：要做得先把它放宽（上限 `SHORT_CONTENT_CHARS`）；报告与列表要用**同一个函数**。
 验收：疑似错误页的附注在报告与列表上都出现，且用的是同一个函数。
 指针：lessons §二，core/quality.py
@@ -350,30 +285,6 @@
 约束：判据照 `core/checker.is_login_wall` 那套，**别新造**。
 验收：这类源不再被判成 no_result，而是有一个「需人工过一下」的状态。
 指针：lessons §五十八，core/checker.py
-
-### 条目：research-type · 调研一：类型判定补齐
-状态：blocked
-依赖：无
-优先级：P2
-背景：`infer_type_static` 判不出音频 / 下载源；真正的解法是 `book.isWebFile`
-  （`downloadUrls` 决定）。
-约束：**先摸清库里有哪些能定案的结构信号，再谈判据换不换**；在那之前不要动出口
-  （没有信号就加出口 = 把「猜域名」换成「猜别的东西」）。换判据时顺手拿掉「被审
-  对象给自己投票」（declared 参与计分，AGENTS #11）。
-阻塞于：库里能定案的结构信号尚未摸清（要先做一次只读统计）
-验收：一次实测统计给出可定案的信号清单，据此决定换不换判据。
-指针：lessons §五十五，AGENTS.md #11
-
-### 条目：research-postproc · 调研二：正文后处理字段
-状态：blocked
-依赖：无
-优先级：P2
-背景：App 用、我们不用，构成「同源不同判」。`replaceRegex` 风险方向单一（替换后
-  变空才误放），低风险高覆盖。
-约束：**未评估前不要动手**。
-阻塞于：未评估（覆盖与风险要先量）
-验收：评估结论 + 用户拍板。
-指针：lessons §五十五
 
 ### 条目：xa-1111 · XPath 规则在引擎侧的结论
 状态：todo
