@@ -8,7 +8,6 @@
 export const WEBVIEW_UNSUPPORTED_TEXT = {
   unsupported_is_rule: "本机调试暂不支持需要页面环境的 webJs 规则",
   unsupported_is_rule_local: "这条 webJs 规则本机求值失败，需连 App 取证",
-  unsupported_source_regex: "本机调试暂不支持 sourceRegex 嗅探路径",
 };
 
 const FALLBACK_TEXT = "本机调试有一项 WebView 能力未覆盖";

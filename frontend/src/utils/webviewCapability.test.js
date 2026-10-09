@@ -10,7 +10,7 @@ test("debug 与 matched 两个阶段都保留", () => {
     source: "jvm",
     webview_unsupported: [
       { code: "unsupported_is_rule", url: "https://a.test", phase: "debug" },
-      { code: "unsupported_source_regex", url: "", phase: "matched" },
+      { code: "unsupported_is_rule_local", url: "", phase: "matched" },
     ],
   });
   assert.equal(view.length, 2);
@@ -23,15 +23,15 @@ test("同一条边界撞多次只出一条，url 去重、空 url 报次数", ()
   const view = webviewUnsupportedView({
     source: "jvm",
     webview_unsupported: [
-      { code: "unsupported_html_only", url: "", phase: "debug" },
-      { code: "unsupported_html_only", url: "", phase: "debug" },
+      { code: "unsupported_is_rule_local", url: "", phase: "debug" },
+      { code: "unsupported_is_rule_local", url: "", phase: "debug" },
       { code: "unsupported_is_rule", url: "https://a.test", phase: "debug" },
       { code: "unsupported_is_rule", url: "https://a.test", phase: "debug" },
       { code: "unsupported_is_rule", url: "https://b.test", phase: "debug" },
     ],
   });
   assert.equal(view.length, 2, "同码同阶段必须聚合成一条");
-  const htmlOnly = view.find((item) => item.code === "unsupported_html_only");
+  const htmlOnly = view.find((item) => item.code === "unsupported_is_rule_local");
   assert.equal(htmlOnly.count, 2);
   assert.deepEqual(htmlOnly.urls, []);
   assert.equal(htmlOnly.where, "2 处");
@@ -59,7 +59,7 @@ test("只有能归因到这一步的缺口才算这一步的事实", () => {
     source: "jvm",
     webview_unsupported: [
       { code: "unsupported_is_rule", url: "https://a.test", phase: "debug" },
-      { code: "unsupported_source_regex", url: "", phase: "matched" },
+      { code: "unsupported_is_rule_local", url: "", phase: "matched" },
     ],
   };
   assert.equal(unsupportedForStep(result, "https://a.test"), true);

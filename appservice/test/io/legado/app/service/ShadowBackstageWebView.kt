@@ -154,6 +154,7 @@ class ShadowBackstageWebView {
         val js = ReflectionHelpers.getField<String?>(real, "javaScript") ?: ""
         val isRule = ReflectionHelpers.getField<Boolean>(real, "isRule") ?: false
         val sourceRegex = ReflectionHelpers.getField<String?>(real, "sourceRegex") ?: ""
+        val overrideUrlRegex = ReflectionHelpers.getField<String?>(real, "overrideUrlRegex") ?: ""
         val timeoutMs = ReflectionHelpers.getField<Long?>(real, "timeout") ?: 60_000L
         lastUrl.set(url); lastJsLen.set(js.length); lastIsRule.set(isRule)
 
@@ -184,13 +185,11 @@ class ShadowBackstageWebView {
                 "webview_shadow_unsupported: 这条规则要用页面环境（document/window 之类），" +
                     "本机调试暂不支持——不是源的问题")
         }
-        if (sourceRegex.isNotBlank()) {
-            recordUnsupported("unsupported_source_regex", url)
-            lastReason.set("unsupported_source_regex")
-            throw IllegalStateException(
-                "webview_shadow_unsupported: 源声明了 sourceRegex（嗅探路径），" +
-                    "本机调试暂不支持——不是源的问题")
-        }
+        // **嗅探（`sourceRegex` / `overrideUrlRegex`）不在这里挡**：上游 `SnifferWebClient`
+        // 就是在加载过程中嗅探，命中把那个地址当响应体——所以它交给桥（`sniffHit`），与
+        // 「html 形态 / 导航形态」都无关。早先那版在这里直接报不支持，等于把有真实调用的源
+        // （`java.webViewGetOverrideUrl`）静默变成「取整页」。
+        //
         // 上游 `load()` **先看 html**：html 有就分两条——url 空走 `loadData(html, …)`（没有 baseUrl），
         // url 有走 `loadDataWithBaseURL(url, html, …, url)`（按这个地址渲染这份 html）。
         // 两条都交给桥的 `content` 入口：前者 `setDocumentContent`，后者 `Fetch.fulfillRequest`
@@ -209,7 +208,9 @@ class ShadowBackstageWebView {
             val r = BrowserBridge.renderContent(
                 session, html, baseUrl = url.takeIf { it.isNotBlank() }, timeoutMs = timeoutMs,
                 waitAfterLoadMs = 1000L + delayTime, js = js.takeIf { it.isNotBlank() },
-                jsRetryTimes = JS_RETRY_TIMES, jsRetryIntervalMs = JS_RETRY_INTERVAL_MS)
+                jsRetryTimes = JS_RETRY_TIMES, jsRetryIntervalMs = JS_RETRY_INTERVAL_MS,
+                sourceRegex = sourceRegex.takeIf { it.isNotBlank() },
+                overrideUrlRegex = overrideUrlRegex.takeIf { it.isNotBlank() })
             lastRenderMs.set(System.currentTimeMillis() - t0)
             if (!r.ok) {
                 lastReason.set(r.reason.substringBefore(':'))
@@ -217,6 +218,9 @@ class ShadowBackstageWebView {
             }
             rendered.incrementAndGet()
             lastReason.set("")
+            // 嗅探命中：上游 `StrResponse(url!!, requestUrl)`——**响应地址是页面地址**，
+            // 响应体才是那个命中的地址（不是落地地址，也没发生导航）
+            if (r.sniffed) return StrResponse(url, r.body)
             return StrResponse(if (url.isNotBlank()) r.url.ifBlank { url } else "", r.body)
         }
         if (url.isBlank()) {
@@ -242,7 +246,9 @@ class ShadowBackstageWebView {
             session, urlAbs, timeoutMs,
             js = js.takeIf { it.isNotBlank() },
             jsRetryTimes = JS_RETRY_TIMES,
-            jsRetryIntervalMs = JS_RETRY_INTERVAL_MS)
+            jsRetryIntervalMs = JS_RETRY_INTERVAL_MS,
+            sourceRegex = sourceRegex.takeIf { it.isNotBlank() },
+            overrideUrlRegex = overrideUrlRegex.takeIf { it.isNotBlank() })
         lastRenderMs.set(System.currentTimeMillis() - t0)
         if (!r.ok) {
             lastReason.set(r.reason.substringBefore(':'))
@@ -250,6 +256,8 @@ class ShadowBackstageWebView {
         }
         rendered.incrementAndGet()
         lastReason.set("")
+        // 嗅探命中：响应体是命中的地址本身，响应地址仍是**页面地址**（上游同款）
+        if (r.sniffed) return StrResponse(url, r.body)
         lastNetwork = r.network
         lastNetworkEvents = r.networkEvents
         lastNetworkTypes = r.networkTypes

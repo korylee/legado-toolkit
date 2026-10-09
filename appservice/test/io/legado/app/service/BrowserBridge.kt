@@ -71,7 +71,12 @@ object BrowserBridge {
                       /** 请求按类型的计数（`XHR=0,Document=1,…`）：让「没抓到接口」自解释。 */
                       val networkTypes: String = "",
                       /** 请求被响应材料闸门过滤的原因计数（`status=1,mime=2,…`）。 */
-                      val networkDrops: String = "")
+                      val networkDrops: String = "",
+                      /** 这一份 `body` 是**嗅探命中的地址**（`sourceRegex` / `overrideUrlRegex`），
+                       *  不是页面——上游 `SnifferWebClient` 命中时就是把那个 URL 当响应体返回。 */
+                      val sniffed: Boolean = false,
+                      /** 嗅探时因上界被丢掉的请求条数（>0 = 可能有命中被漏，不许静默）。 */
+                      val sniffDrops: Int = 0)
 
     fun findBrowser(): String? = CANDIDATES.firstOrNull { File(it).isFile }
 
@@ -271,7 +276,21 @@ object BrowserBridge {
                /** 非 null = **渲染这份 HTML**（上游 `loadData` / `loadDataWithBaseURL` 的对应物），
                 *  不去取 `url`。配合 `url` 用：空 = 无 baseUrl（`loadData`），非空 = 按它作
                 *  帧地址与来源（`loadDataWithBaseURL(url, html, …, url)`）。 */
-               content: String? = null): Result {
+               content: String? = null,
+               /** 嗅探（S2）：命中就**返回那个地址本身**当响应体（上游 `SnifferWebClient`）。 */
+               sourceRegex: String? = null,
+               overrideUrlRegex: String? = null): Result {
+        // 正则**先编译**：无效正则要显式失败，不能静默跳过（AGENTS #4）
+        val sourceRe = sourceRegex?.takeIf { it.isNotBlank() }?.let {
+            runCatching { Regex(it) }.getOrElse { e ->
+                return Result(false, reason = "sniff_regex_invalid: sourceRegex / ${e.message?.take(80)}")
+            }
+        }
+        val overrideRe = overrideUrlRegex?.takeIf { it.isNotBlank() }?.let {
+            runCatching { Regex(it) }.getOrElse { e ->
+                return Result(false, reason = "sniff_regex_invalid: overrideUrlRegex / ${e.message?.take(80)}")
+            }
+        }
         // **复用启动时那个 about:blank 页签**（/json/list 的第一个 page），
         // 不每次 `/json/new`：少一个端点就少一类失败（实测 /json/new 偶发拿不到页签），
         // 而且只有一个页签时，渲染天然是串行的——不必再操心多页签互相干扰。
@@ -445,6 +464,22 @@ object BrowserBridge {
                 seq++
                 body = eval(ws, seq, expr, tapQueue, timeoutMs)
                 seq++
+            }
+            // ---- 嗅探（S2）：上游 `SnifferWebClient` 命中时返回的是**那个地址本身** ----
+            // 放在这里（页面稳定之后）而不是「命中即中止」：返回的材料完全相同，而上游 destroy
+            // 只是为了省时间。晚一点扫还能覆盖 load 之后才发出的请求（XHR 那类）。
+            if (sourceRe != null || overrideRe != null) {
+                val (lines, dropped) = requestLines(tapped.toList())
+                val hit = sniffHit(lines, sourceRe, overrideRe, navigationAllowed = content == null)
+                if (hit != null) {
+                    val sniffed = collectNetwork(ws, tapped.toList(), tapQueue, 5000)
+                    return Result(true, body = hit, url = url, sniffed = true,
+                        network = sniffed.entries,
+                        networkEvents = networkEventCount(tapped.toList()),
+                        networkTypes = networkTypeCount(tapped.toList()),
+                        networkDrops = sniffed.drops,
+                        sniffDrops = dropped)
+                }
             }
             // 落地地址：App 的 buildStrResponse 用的是 WebView 跳转后的地址（`res.url`），
             // 事件流里的 `≡获取成功:<URL>` 就是它——不取这个的话，重定向的站点会报
@@ -712,10 +747,12 @@ object BrowserBridge {
                      js: String? = null,
                      jsRetryTimes: Int = 0,
                      jsRetryIntervalMs: Long = 1000,
-                     content: String? = null): Result =
+                     content: String? = null,
+                     sourceRegex: String? = null,
+                     overrideUrlRegex: String? = null): Result =
         synchronized(renderLock) {
             render(session, url, timeoutMs, waitAfterLoadMs, js, jsRetryTimes, jsRetryIntervalMs,
-                   content = content)
+                   content = content, sourceRegex = sourceRegex, overrideUrlRegex = overrideUrlRegex)
         }
 
     /**
@@ -725,9 +762,12 @@ object BrowserBridge {
     fun renderContent(session: Session, html: String, baseUrl: String? = null,
                       timeoutMs: Long = 30000, waitAfterLoadMs: Long = 800,
                       js: String? = null, jsRetryTimes: Int = 0,
-                      jsRetryIntervalMs: Long = 1000): Result =
+                      jsRetryIntervalMs: Long = 1000,
+                      sourceRegex: String? = null,
+                      overrideUrlRegex: String? = null): Result =
         renderSerial(session, baseUrl?.trim().orEmpty(), timeoutMs, waitAfterLoadMs, js,
-                     jsRetryTimes, jsRetryIntervalMs, content = html)
+                     jsRetryTimes, jsRetryIntervalMs, content = html,
+                     sourceRegex = sourceRegex, overrideUrlRegex = overrideUrlRegex)
 
     /**
      * 读浏览器 profile 里**这个 URL 适用的 cookie**（CDP `Network.getCookies`）。
@@ -858,6 +898,55 @@ object BrowserBridge {
         messages.asSequence()
             .mapNotNull { runCatching { JSONObject(it) }.getOrNull() }
             .firstOrNull { it.optInt("id", -1) == id }
+
+    /** 嗅探用的请求上限：只留 URL 与类型，比 L4 材料那条（`NET_LIMIT`）宽得多。 */
+    internal const val NET_SNIFF_LIMIT = 500
+
+    /** 一页发出过的请求（只留 URL 与类型），**按时间顺序**。 */
+    internal data class RequestLine(val url: String, val type: String)
+
+    /** 取请求序列；返回值第二项 = 因上界被丢掉的条数（不许静默，命中可能正落在被丢的那段）。 */
+    internal fun requestLines(messages: List<String>, limit: Int = NET_SNIFF_LIMIT):
+        Pair<List<RequestLine>, Int> {
+        val out = ArrayList<RequestLine>()
+        var dropped = 0
+        for (msg in messages) {
+            val o = runCatching { JSONObject(msg) }.getOrNull() ?: continue
+            if (o.optString("method") != "Network.requestWillBeSent") continue
+            val p = o.optJSONObject("params") ?: continue
+            val req = p.optJSONObject("request") ?: continue
+            if (out.size >= limit) {
+                dropped++
+                continue
+            }
+            out.add(RequestLine(req.optString("url"), p.optString("type")))
+        }
+        return out to dropped
+    }
+
+    /**
+     * 第一个命中的地址；没有命中返回 null。
+     *
+     * 判据照上游两个回调：`overrideUrlRegex` 只看**导航**（`shouldOverrideUrlLoading`，上游
+     * `StrResponse(url!!, requestUrl)`），`sourceRegex` 看**任何资源**（`onLoadResource`）；
+     * 按时间顺序，先命中先算。**全串匹配**（Kotlin `matches`），与上游 `it.toRegex()` +
+     * `requestUrl.matches(...)` 一致，不是 `find`。
+     *
+     * `navigationAllowed = false`（正在渲染我们自己给的那份 HTML）时跳过导航判据：那种形态
+     * 上游走 `loadDataWithBaseURL`，**不会**触发 `shouldOverrideUrlLoading`，我们那次合成
+     * 导航请求若参与判定就是假命中。
+     */
+    internal fun sniffHit(lines: List<RequestLine>, sourceRegex: Regex?, overrideUrlRegex: Regex?,
+                          navigationAllowed: Boolean): String? {
+        for (line in lines) {
+            if (line.type == "Document" && navigationAllowed && overrideUrlRegex != null
+                && overrideUrlRegex.matches(line.url)) {
+                return line.url
+            }
+            if (sourceRegex != null && sourceRegex.matches(line.url)) return line.url
+        }
+        return null
+    }
 
     /**
      * 在**全量消息副本**里找一条事件。
