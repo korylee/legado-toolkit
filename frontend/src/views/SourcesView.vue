@@ -22,6 +22,7 @@ import {
   MagicStick,
   Operation,
   Close,
+  WarningFilled,
 } from "@element-plus/icons-vue";
 import {
   listSources,
@@ -36,6 +37,7 @@ import { api, subscribeJob } from "../api/client";
 import { jvmRun } from "../api/jvm.js";
 import { jobFailReason, jobKindLabel } from "../utils/jobs";
 import { ensureTagMeta } from "../utils/tags";
+import { countOutOfDomain, keepInDomain, mergePageSelection, toggleSelected } from "../utils/selection";
 import {
   HEALTH_OPTIONS,
   describeChanges,
@@ -229,7 +231,13 @@ const filterTotal = computed(() => total.value || 0);
 
 const checkDialogHint = computed(() => {
   if (checkScope.value === "selected") {
-    return "将校验勾选的 " + pendingCheckUrls.value.length + " 条源。";
+    return (
+      "将校验勾选的 " +
+      pendingCheckUrls.value.length +
+      " 条源" +
+      outOfFilterNote.value +
+      "。"
+    );
   }
   if (checkScope.value === "filtered") {
     return (
@@ -429,6 +437,49 @@ async function loadStats() {
 //: 「选中全部 N 条筛选结果」拿回来的那批源根本不在当前页、也不在 DOM 里，
 //: 行对象既拿不到也用不上；统一成 URL 之后，批量删除/加标签/校验/导出都只认它，
 //: 判断某一行是否选中走这个 Set
+//: 选中的源里有几条**不在当前筛选内**（`null` = 还没算 / 算不出来）。
+//: 为什么要有它：选中是跨页、跨筛选累积的，而「已选 N 条」在任何筛选下都长得一样——
+//: 用户看不出接下来会操作哪些源，而删除是不可逆的。两个真实场景靠它解释：
+//: ①「未校验」下勾 50 条 → 批量校验改了状态 → 刷新后它们离开该域；
+//: ②「未校验」下勾 50 条 → 切到「可用」→ 那 50 条一条都不在眼前。
+//: 判据与「选中全部 N 条」同一个口子（`/sources/urls`：按筛选返回全部 URL、忽略分页）。
+//: **读不到就保持 null**，不许当成 0（读不到 ≠ 没有，AGENTS #12）。
+const outOfFilter = ref(null);
+let outOfFilterSeq = 0;
+
+//: 「（其中 M 条不在当前筛选内）」——**不可逆动作的确认框**与校验范围文案共用这一处口径。
+//: 读不到（null）时为空串：不确定就不说数字（AGENTS #12）。
+const outOfFilterNote = computed(() =>
+  outOfFilter.value ? "（其中 " + outOfFilter.value + " 条不在当前筛选内）" : "",
+);
+
+async function refreshOutOfFilter() {
+  if (!selected.value.length) {
+    outOfFilter.value = 0;
+    return;
+  }
+  const seq = ++outOfFilterSeq;
+  try {
+    const res = await listSourceUrls(query);
+    if (seq !== outOfFilterSeq) return; // 迟到的旧响应不许覆盖新结论
+    outOfFilter.value = countOutOfDomain(selected.value, res.urls);
+  } catch (e) {
+    if (seq === outOfFilterSeq) outOfFilter.value = null;
+  }
+}
+
+/** 「只保留当前筛选内的」：把看不见的那些移出选中（想「就拿眼前这些」时的正门）。 */
+async function keepVisibleSelection() {
+  try {
+    const res = await listSourceUrls(query);
+    selected.value = keepInDomain(selected.value, res.urls);
+    outOfFilter.value = 0;
+    syncTableSelection();
+  } catch (e) {
+    ElMessage.error("按当前筛选收窄选中失败：" + e.message);
+  }
+}
+
 const selectedUrls = computed(() => new Set(selected.value));
 const filterCount = computed(() => {
   const f = query;
@@ -457,6 +508,8 @@ async function load() {
   // 翻页/刷新后把 selected 的状态同步回表格勾选（表格只渲染当前页，翻页会忘掉）
   await nextTick();
   syncTableSelection();
+  // 刷新/换筛选之后重算「选中里有几条不在当前筛选内」：批量条上的数字才与眼前一致
+  refreshOutOfFilter();
 }
 
 //: 上一次校验的结果摘要。**做成持久条而不是 toast**：校验是长时任务，
@@ -525,57 +578,49 @@ function onPage(p) {
   load();
 }
 
-//: 程序化改表格勾选时置位。
-//:
-//: `toggleRowSelection` / `clearSelection` 都会触发 `selection-change`，而那个事件
-//: 处理**拿"当前表格状态"重算 selected** —— 不挡掉的话，同步过程会被自己的事件
-//: 反过来覆盖：点「选中全部 N 条」后表格一格都不勾、翻页回来也全丢，而批量条上的
-//: 数字还停在 N（selected 里有 URL，表格里没有）。
-let syncingSelection = false;
-
 function clearSelection() {
   selected.value = [];
-  if (!tableRef.value) return;
-  syncingSelection = true;
-  try {
-    tableRef.value.clearSelection();
-  } finally {
-    syncingSelection = false;
-  }
+  outOfFilter.value = 0;
+  tableRef.value?.clearSelection();
 }
 function isSelected(row) {
   return selectedUrls.value.has(row.source_url);
 }
 function toggleCard(row) {
-  const key = row.source_url;
-  selected.value = isSelected(row)
-    ? selected.value.filter((u) => u !== key)
-    : [...selected.value, key];
+  selected.value = toggleSelected(selected.value, row.source_url, !isSelected(row));
 }
 
-//: 表格勾选 → selected。**当前页的行以表格为准，不在当前页的保持原样**。
-//: 写成 `selected = v.map((r) => r.source_url)` 的话，「选中全部 800 条」之后
-//: 取消勾选一行，会变成「已选 49 条」——其余 750 条无声消失，界面上看不出丢过东西
-function onTableSelect(picked) {
-  if (syncingSelection) return; // 这是程序设的，不是用户勾的
-  const onPage = new Set(rows.value.map((r) => r.source_url));
-  const kept = selected.value.filter((u) => !onPage.has(u));
-  selected.value = [...kept, ...picked.map((r) => r.source_url)];
+//: 表格勾选 → selected。**挂在 `@select`（点行）/ `@select-all`（点表头）上**，
+//: 不挂 `selection-change`——那个事件在「翻页替换数据」时也会发，载荷里分不出是不是
+//: 用户操作，拿它重算就会把当前页的选中全删掉（症状：页 1 全选 → 去页 2 → 回页 1，
+//: 勾选没了）。而这两个事件只在用户点击时触发，程序化 `toggleRowSelection`
+//: 不会触发它们（Element Plus 内部给公开方法传的是 emitChange=false）。
+//: 规则本身在 `utils/selection.js`，离线可钉。
+function onRowSelect(picked, row) {
+  const key = row.source_url;
+  selected.value = toggleSelected(
+    selected.value,
+    key,
+    picked.some((r) => r.source_url === key),
+  );
+}
+function onSelectAll(picked) {
+  selected.value = mergePageSelection(
+    selected.value,
+    rows.value.map((r) => r.source_url),
+    picked.map((r) => r.source_url),
+  );
 }
 
 //: 把 selected 的状态同步回表格勾选。表格只渲染当前页，翻页后它自己会忘掉勾选
-//: 状态——不同步的话，翻回来看见的是「批量条说选了 800 条、表格上一个都没勾」
+//: 状态——不同步的话，翻回来看见的是「批量条说选了 800 条、表格上一个都没勾」。
+//: 这里只**读**集合、只写表格；翻页本身不改 selected。
 function syncTableSelection() {
   const t = tableRef.value;
   if (!t || !selected.value.length) return; // 常态（没选任何行）直接跳过
-  syncingSelection = true;
-  try {
-    rows.value.forEach((row) => {
-      t.toggleRowSelection(row, selectedUrls.value.has(row.source_url));
-    });
-  } finally {
-    syncingSelection = false;
-  }
+  rows.value.forEach((row) => {
+    t.toggleRowSelection(row, selectedUrls.value.has(row.source_url));
+  });
 }
 
 //: 「选中全部 N 条筛选结果」，N 取 total（后端与列表同一套筛选口径）。
@@ -586,6 +631,7 @@ async function selectAllFiltered() {
   try {
     const res = await listSourceUrls(query);
     selected.value = res.urls;
+    outOfFilter.value = 0; // 这一批就是当前筛选域，域外为 0
     syncTableSelection();
     ElMessage.success("已选中全部 " + selected.value.length + " 条");
   } catch (e) {
@@ -600,9 +646,11 @@ async function selectAllFiltered() {
 //: 从不传它，于是从界面删的全部是空原因，备份里那份审计信息形同虚设。
 //:
 //: 单条与批量共用这一处：各写一遍的话，同一件事会慢慢变成两种说法。
-async function askTrashReason(n) {
+//: `scope` 是作用域补充（形如 `outOfFilterNote`）——**不可逆动作必须在动手前点名**
+//: 那些看不见、却会被一起删掉的源；单条删除传空（那一行就在眼前）。
+async function askTrashReason(n, scope = "") {
   const res = await ElMessageBox.prompt(
-    "将把 " + n + " 条源移入回收站。不会再导出到 App，可随时恢复。",
+    "将把 " + n + " 条源移入回收站" + scope + "。不会再导出到 App，可随时恢复。",
     "移入回收站",
     {
       type: "warning",
@@ -633,7 +681,7 @@ async function removeOne(row) {
 async function removeSelected() {
   if (!selected.value.length) return ElMessage.warning("先勾选源");
   try {
-    const reason = await askTrashReason(selected.value.length);
+    const reason = await askTrashReason(selected.value.length, outOfFilterNote.value);
     const res = await deleteSources(selected.value, reason);
     ElMessage.success("已移入回收站 " + res.deleted + " 条");
     clearSelection();
@@ -646,6 +694,25 @@ async function removeSelected() {
 async function applyBatchTags(mode) {
   if (!selected.value.length) return ElMessage.warning("先勾选源");
   if (!batchTags.value.length) return ElMessage.warning("先选择或输入标签");
+  // 作用域要让人看见：看不见的那些也会一起被打上/去掉标签。标签可逆，所以**只在有域外
+  // 选中时**加这一步（常态不打扰），但一旦有就必须说清是哪些之外的。
+  if (outOfFilter.value) {
+    try {
+      await ElMessageBox.confirm(
+        "将给 " +
+          selected.value.length +
+          " 条源" +
+          (mode === "add" ? "加" : "去") +
+          "标签" +
+          outOfFilterNote.value +
+          "。",
+        mode === "add" ? "批量加标签" : "批量去标签",
+        { type: "warning", confirmButtonText: "确定", cancelButtonText: "取消" },
+      );
+    } catch (e) {
+      return; // 取消
+    }
+  }
   const urls = selected.value;
   try {
     await patchTags(
@@ -1071,14 +1138,38 @@ onUnmounted(() => {
     </div>
 
     <!-- 批量操作条：**勾选之后要干什么**都在这儿（校验选中 / 移入回收站 / 取消选择），
-         桌面上还多一排「加/去标签」。这条 bar 的前提是「有勾选」，它只在有勾选时出现、
-         同屏还写着「已选 N 条」——所以它的动作**不必变脸**，按钮只说这一种范围。
+         桌面上还多一排「加/去标签」。这条 bar 的前提是「有勾选」，它只在有勾选时出现。
+         **作用域不铺在 bar 上**：选中是跨页、跨筛选累积的，写全句「其中 M 条不在当前
+         筛选内」会把「移入回收站」挤出视口（bar 是 nowrap + 横滑，动作被推进滚动区
+         等于要点两次）。所以只留一个警示图标，全文与「只保留当前筛选内的」在点开的
+         浮层里；不可逆动作还会在确认框里再点名一次。
          手机上动作只留图标（文字在窄屏藏掉）：一行放得下五个元素，而且图标与桌面同款、
          aria-label 保命名不变，两种形态不会各写一套 -->
     <div class="batch-bar" v-if="selected.length">
       <span class="batch-text"
         >已选 <b>{{ selected.length }}</b> 条</span
       >
+      <el-popover
+        v-if="outOfFilter"
+        trigger="click"
+        :width="250"
+        popper-class="batch-scope-pop"
+      >
+        <template #reference>
+          <el-icon class="batch-scope-icon"><WarningFilled /></el-icon>
+        </template>
+        <div class="scope-pop-line">
+          其中 <b>{{ outOfFilter }}</b> 条不在当前筛选内
+        </div>
+        <el-button
+          size="small"
+          link
+          type="primary"
+          @click="keepVisibleSelection"
+        >
+          只保留当前筛选内的
+        </el-button>
+      </el-popover>
       <!-- 入口是「先在表头（或移动端卡片）上勾一条」——批量条本身只在有勾选时出现。
            跨页勾选做不了（表格只渲染当前页），所以这一步走显式 URL 列表。
            文案短：手机上一行要放五个元素，长文案（「选中全部 N 条筛选结果」）
@@ -1182,7 +1273,7 @@ onUnmounted(() => {
             <span class="tip-text">{{ checkTipText }}</span>
           </el-tooltip>
           <span class="grow" />
-          <el-button link type="primary" size="small" @click="openJobDetail"
+          <el-button link type="primary" size="small" @click="openJobDetail()"
             >查看</el-button
           >
           <el-button
@@ -1233,7 +1324,8 @@ onUnmounted(() => {
         stripe
         size="small"
         height="100%"
-        @selection-change="onTableSelect"
+        @select="onRowSelect"
+        @select-all="onSelectAll"
       >
         <el-table-column type="selection" width="42" />
         <el-table-column
@@ -1621,6 +1713,17 @@ onUnmounted(() => {
 .batch-bar .batch-text b {
   font-size: 15px;
   margin: 0 2px;
+}
+/* 域外条数的入口：只在有域外选中时出现的警示图标（全文在浮层里，见模板注释）。
+   刻意做得小：bar 是 nowrap + 横滑，长了会把「移入回收站」推进滚动区 */
+.batch-bar .batch-scope-icon {
+  font-size: 15px;
+  color: var(--el-color-warning);
+  cursor: pointer;
+}
+.scope-pop-line {
+  font-size: 13px;
+  margin-bottom: 6px;
 }
 .w-batch {
   width: 240px;
