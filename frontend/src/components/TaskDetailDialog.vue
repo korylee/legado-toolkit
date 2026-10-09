@@ -192,7 +192,7 @@ async function deleteJob() {
 </script>
 
 <template>
-  <el-dialog v-model="visible" :title="title" width="720px" top="6vh"
+  <el-dialog v-model="visible" :title="title" width="min(880px, 92vw)" top="6vh"
              append-to-body class="task-detail-dialog" modal-class="task-detail-overlay"
              :close-on-click-modal="false">
     <div v-loading="detailLoading" class="td-body">
@@ -227,9 +227,9 @@ async function deleteJob() {
 
       <template v-if="summary">
         <div class="td-summary">
-          <span>通过 <b>{{ summary.ok }}</b></span>
-          <span>未通过 <b :class="{ bad: summary.fail > 0 }">{{ summary.fail }}</b></span>
-          <span v-if="summary.changed_total">
+          <span class="chip">通过 <b>{{ summary.ok }}</b></span>
+          <span class="chip">未通过 <b :class="{ bad: summary.fail > 0 }">{{ summary.fail }}</b></span>
+          <span v-if="summary.changed_total" class="chip">
             相对上次变化 <b>{{ summary.changed_total }}</b> 条
           </span>
           <span v-else class="muted">相对上次无变化</span>
@@ -321,10 +321,10 @@ async function deleteJob() {
   50% { opacity: .25; }
 }
 .td-progress {
-  margin-top: 12px; padding: 10px 12px;
+  margin-top: var(--app-space-3); padding: 10px 12px;
   background: var(--el-fill-color-lighter);
   border: 1px solid var(--el-border-color-extra-light);
-  border-radius: 6px;
+  border-radius: var(--app-radius-md);
 }
 .td-progress-top {
   display: flex; align-items: baseline; gap: 8px;
@@ -337,27 +337,18 @@ async function deleteJob() {
 }
 .td-progress-spent { margin-left: auto; white-space: nowrap; }
 .td-progress-text { margin: 6px 0 0; font-size: 12px; }
-/* 结论统计用轻胶囊：和任务抽屉的 stat-chip 是同一套视觉语言 */
+/* 结论统计是全局 `.chip` 胶囊（任务抽屉、执行方式、统计条筛选都用同一个） */
 .td-summary {
-  display: flex; gap: 8px; flex-wrap: wrap;
-  margin-top: 12px;
+  display: flex; gap: var(--app-space-2); flex-wrap: wrap;
+  margin-top: var(--app-space-3);
 }
-.td-summary span {
-  display: inline-flex; align-items: baseline; gap: 4px;
-  padding: 3px 10px; border-radius: 999px;
-  background: var(--el-fill-color-lighter);
-  border: 1px solid var(--el-border-color-extra-light);
-  font-size: 12px;
-}
-.td-summary b { font-weight: 650; font-size: 13px; }
-.td-summary b.bad { color: var(--el-color-danger); }
 /* 错误与告警从裸红字升级成警示容器：读得出来「这是一条消息」而不是普通文本 */
 .td-warn {
   margin-top: 10px; padding: 8px 12px; line-height: 1.6; font-size: 13px;
   color: var(--el-color-danger); word-break: break-all;
   background: var(--el-color-danger-light-9, #fef0f0);
   border: 1px solid var(--el-color-danger-light-7, #fde2e2);
-  border-radius: 6px;
+  border-radius: var(--app-radius-md);
 }
 .td-section-title { margin: 14px 0 6px; font-size: 12px; }
 .td-changes { max-height: 40vh; overflow-y: auto; margin-top: 4px; }

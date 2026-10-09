@@ -861,7 +861,7 @@ onUnmounted(() => {
         <button
           type="button"
           class="chip"
-          :class="{ active: !filterCount }"
+          :class="{ 'is-active': !filterCount }"
           @click="reset"
         >
           源 <b>{{ stats ? stats.sources : "—" }}</b>
@@ -871,7 +871,7 @@ onUnmounted(() => {
           :key="h.value"
           type="button"
           class="chip"
-          :class="{ active: query.health === h.value }"
+          :class="{ 'is-active': query.health === h.value }"
           @click="onHealthChip(h.value)"
         >
           {{ h.label }} <b>{{ healthCount(h.value) }}</b>
@@ -882,7 +882,7 @@ onUnmounted(() => {
           v-if="healthCount('None') > 0"
           type="button"
           class="chip"
-          :class="{ active: query.health === 'none' }"
+          :class="{ 'is-active': query.health === 'none' }"
           @click="onHealthChip('none')"
         >
           未校验 <b>{{ healthCount("None") }}</b>
@@ -1610,13 +1610,13 @@ onUnmounted(() => {
   align-items: center;
   overflow-x: auto;
   padding: 8px 12px;
-  background: #ecf5ff;
-  border: 1px solid #d9ecff;
+  background: var(--el-color-primary-light-9);
+  border: 1px solid var(--el-color-primary-light-8);
   border-radius: 6px;
 }
 .batch-bar .batch-text {
   font-size: 13px;
-  color: #409eff;
+  color: var(--app-primary);
 }
 .batch-bar .batch-text b {
   font-size: 15px;
@@ -1685,8 +1685,8 @@ onUnmounted(() => {
   align-items: center;
   gap: 8px;
   padding: 8px 12px;
-  background: #fff;
-  border: 1px solid #e4e7ed;
+  background: var(--app-surface);
+  border: 1px solid var(--app-border-light);
   border-radius: 6px;
 }
 .stats-bar .grow {
@@ -1699,31 +1699,21 @@ onUnmounted(() => {
   align-items: center;
   min-width: 0;
 }
+/* 胶囊的骨架视觉在全局 `.chip`（任务抽屉/明细/执行方式也用它）；这里只留筛选
+   按钮自己的：可点、单行不折，以及命中态的加强——同族的东西不该有两种样子。 */
 .stats-bar .chip {
   flex: 0 0 auto;
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 3px 10px;
   font: inherit;
-  font-size: 12px;
   line-height: 20px;
-  color: #606266;
-  background: #f4f6f9;
-  border: 1px solid #e4e7ed;
-  border-radius: 12px;
   cursor: pointer;
-  white-space: nowrap;
 }
 .stats-bar .chip:hover {
-  border-color: #409eff;
-  color: #409eff;
+  border-color: var(--app-primary);
+  color: var(--app-primary);
 }
-/* 当前生效的 chip：与 query.health 同步高亮 */
-.stats-bar .chip.active {
-  background: #ecf5ff;
-  border-color: #409eff;
-  color: #409eff;
+/* 当前生效的 chip：与 query.health 同步高亮（字与边由全局的 is-active 给） */
+.stats-bar .chip.is-active {
+  background: var(--el-color-primary-light-9);
   font-weight: 600;
 }
 

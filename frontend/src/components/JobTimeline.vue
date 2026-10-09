@@ -175,8 +175,9 @@ function onScroll() {
         <span v-if="collapsed && lines.length">{{ lines.length }} 行</span>
       </button>
       <!-- 执行方式是时间线的摘要：它决定这次会不会慢，与逐块明细同一处；
+           胶囊视觉用全局 .chip（与统计条筛选、结果统计是同一件东西）；
            补充说明挂 title 上，不占主视线 -->
-      <span v-if="modeLabel" class="job-timeline-mode" :title="executionNote">{{ modeLabel }}</span>
+      <span v-if="modeLabel" class="chip" :title="executionNote">{{ modeLabel }}</span>
       <span v-if="!collapsed && !following" class="job-timeline-follow"
             @click="following = true; scrollFollow()">回到最新</span>
     </div>
@@ -240,12 +241,6 @@ function onScroll() {
 .job-timeline-toggle:hover { background: var(--el-fill-color-light); }
 .job-timeline-chevron { transition: transform .15s; color: var(--el-text-color-secondary); }
 .job-timeline-chevron.is-open { transform: rotate(90deg); }
-/* 执行方式胶囊：与任务抽屉的 stat-chip 同一套视觉（同一个东西不长两种样子） */
-.job-timeline-mode {
-  font-size: 12px; color: var(--el-text-color-secondary);
-  padding: 1px 8px; border-radius: 999px;
-  background: var(--el-fill-color-light);
-}
 .job-timeline-follow, .job-timeline-log-toggle {
   font-size: 12px; color: var(--el-color-primary); cursor: pointer; user-select: none;
 }

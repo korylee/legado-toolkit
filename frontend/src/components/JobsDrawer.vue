@@ -159,7 +159,7 @@ defineExpose({ refresh: load });
         }}</el-radio-button>
         <el-radio-button value="all">全部</el-radio-button>
       </el-radio-group>
-      <span class="stat-chip active"><b>{{ inFlightCount }}</b> 进行中</span>
+      <span class="chip is-active"><b>{{ inFlightCount }}</b> 进行中</span>
       <span class="grow" />
       <el-button size="small" :loading="loading" @click="load">刷新</el-button>
     </div>
@@ -255,13 +255,9 @@ defineExpose({ refresh: load });
   margin-bottom: 12px;
 }
 .jobs-toolbar .grow { flex: 1 1 auto; }
-.stat-chip {
-  display: inline-flex; align-items: center; gap: 4px;
-  padding: 3px 8px; border-radius: 999px; font-size: 12px;
-  border: 1px solid var(--el-color-primary-light-7);
-  color: var(--el-color-primary);
-}
-.stat-chip b { font-weight: 650; }
+/* 统计胶囊用全局 `.chip` 的骨架视觉（任务明细、执行方式、统计条筛选共用）：
+   原来这里另写一份，padding 与那边漂成 3px 8px / 3px 10px，
+   还挂着一个没定义的 active class */
 .jobs-table { height: calc(100% - 52px); }
 .jobs-table :deep(.el-table__body tr) { cursor: pointer; }
 .jobs-table :deep(.el-button) { padding: 2px 3px; }

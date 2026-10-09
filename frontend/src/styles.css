@@ -106,6 +106,26 @@ body {
 .mono { font-family: Consolas, Monaco, monospace; font-size: 12px; }
 .nowrap { white-space: nowrap; }
 
+/* 胶囊：可点筛选的 chip（统计条，button）与纯展示的统计（任务抽屉/明细/执行方式，
+   span）**共用**这一套视觉——骨架是同一件东西，差异只在行为（hover、命中高亮、
+   焦点环），所以行为态留在各自组件里。三处各写一份时已经漂过：圆角 999px 与 12px、
+   色值一份用令牌一份硬编码、内层 b 的字重也不一样。跨组件共用，按既有规矩上全局。 */
+.chip {
+  display: inline-flex; align-items: baseline; gap: 4px;
+  padding: 3px 10px; border-radius: 999px;
+  border: 1px solid var(--app-border-light);
+  background: var(--el-fill-color-lighter);
+  font-size: 12px; color: var(--app-text-secondary);
+  white-space: nowrap;
+}
+.chip b { font-weight: 650; font-size: 13px; }
+.chip b.bad { color: var(--app-status-fail); }
+/* 命中/生效：字与边跟着主色走；加强的表现（底色、加粗）由各自组件按行为补 */
+.chip.is-active {
+  color: var(--app-primary);
+  border-color: var(--app-primary);
+}
+
 /* 状态圆点：编辑弹窗页签与调试抽屉**两个组件都用**，所以留在全局——各写一份必然漂。
    别按"弹窗/抽屉内部样式"去理解它：`<i class="dot">` 是我们写进各自模板的元素，
    谁写的谁管，scoped 本来也够得到自己那份（AGENTS #15）。 */
