@@ -43,10 +43,16 @@ const nameResult = ref(null);
 const nameUndone = ref(false);
 
 
-//: 默认只看高置信那一档：1651 条一次性铺开会把「我到底在批什么」淹掉
-const listRows = computed(() => showAll.value
-  ? rows.value
-  : rows.value.filter((r) => Number(r.confidence) >= AUTO_CONFIDENCE));
+//: 默认只看高置信那一档：1651 条一次性铺开会把「我到底在批什么」淹掉。
+//: 理由文本在这里一次算好：原来在模板里逐行调 reasonText()，每次渲染都要为
+//: 1651 行重算并拼字符串；顺带让 v-memo 的依赖能覆盖 reasonLabels —— 它变了
+//: 这里就重算，行对象换新引用，memo 自然失效，理由不会卡在旧值上。
+const listRows = computed(() => {
+  const items = showAll.value
+    ? rows.value
+    : rows.value.filter((r) => Number(r.confidence) >= AUTO_CONFIDENCE);
+  return items.map((r) => ({ ...r, why: reasonText(r) }));
+});
 const highCount = computed(
   () => rows.value.filter((r) => Number(r.confidence) >= AUTO_CONFIDENCE).length);
 const checkedRows = computed(() => rows.value.filter((r) => checked.value.has(r.url)));
@@ -318,7 +324,10 @@ watch(() => props.modelValue, (v) => {
       </div>
 
       <div v-loading="loading" class="list tidy-main">
-        <div v-for="r in listRows" :key="r.url" class="row"
+        <!-- v-memo 的两个依赖覆盖这一行**全部**的可变来源：行数据（重新预演会换成
+             一整批新对象）与它在 checked 里的成员状态。少了前者，重新预演后这行
+             不刷新；少了后者，勾选一次就要整表 patch 1651 行。 -->
+        <div v-for="r in listRows" :key="r.url" v-memo="[r, checked.has(r.url)]" class="row"
              :class="{ on: checked.has(r.url) }" @click="toggle(r)">
           <el-checkbox :model-value="checked.has(r.url)" @click.prevent.stop="toggle(r)" />
           <div class="names">
@@ -333,7 +342,7 @@ watch(() => props.modelValue, (v) => {
                       placement="top">
             <el-tag size="small" type="danger">同名</el-tag>
           </el-tooltip>
-          <span class="muted why">{{ reasonText(r) }}</span>
+          <span class="muted why">{{ r.why }}</span>
         </div>
         <el-empty v-if="!loading && !listRows.length"
                   description="没有需要清洗的名字" :image-size="70" />
@@ -493,9 +502,16 @@ watch(() => props.modelValue, (v) => {
 }
 /* 列表只是那个「框」：滚动交给 .tidy-main，免得一层套一层两个滚动条 */
 .list { border: 1px solid #ebeef5; border-radius: 4px; }
+/* 第 1 步一次铺 1651 行（每行十几个节点 ≈ 两万节点），滚动时每帧都有新行要
+   layout + paint。`content-visibility: auto` 让浏览器跳过**视口外**那些行的布局与
+   绘制，只按 contain-intrinsic-size 的占位算滚动条长度；前缀 `auto` 会记住实测
+   行高，滚动条不会一直跳。行高是固定的（flex 单行 + 上下 padding 12 + 边框）。
+   第 2 步的 .card/.member 不加：它们高度随内容变，占位估错反而让滚动条抖。 */
 .row {
   display: flex; align-items: center; gap: 8px;
   padding: 6px 10px; border-bottom: 1px solid #f5f7fa; cursor: pointer;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 33px;
 }
 .row:last-child { border-bottom: 0; }
 .row:hover { background: #fafcff; }
