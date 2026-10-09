@@ -21,9 +21,54 @@
 > 当前排期：引擎与调试执行链的基础设施已完成；后续调试体验以“入口降噪 → 工作台闭环 → 证据前置 → 编辑能力合入 → DOM 意图化生成”为主线。worker 的 lane、分块恢复、daemon 复用与冷启动批前准备、任务详情的块级证据与执行时间线均已交付（lessons §六十五 / §六十六）。
 > P0 的 unknown 出口与可执行提示已交付，当前前端待办集中在新调试页的视觉层级、编辑闭环和证据可信度；本机引擎的启动耗时治理已完成（分段观测、排队可见、自适应忙等待、批前按需准备）。
 
+### 条目：webview-isrule-split · isRule 分流：不需要页面环境的 webJs 走 App 自己的 JS 引擎
+状态：doing
+依赖：无
+优先级：P1
+背景：`isRule` 不是一条边界，而是「在页面里跑 App 的 webJs 规则」整件事——上游 `AnalyzeRule.getWebJsResult` 注入 `getInjectionString` 前奏与 `WebCacheManager` / `source` / `java`（`WebJsExtensions`，16 个公开方法）后 `evaluateJavascript`。其中**不需要页面环境**的那部分（只用 `java` / `source` / `result` 做数据变换与取 URL）可以走 App 自带的 JS 引擎加真绑定：同步、语义最接近 App、**零浏览器工作**。**实现已落地**：`ShadowBackstageWebView` 里按静态判据分流，数据类走 `runRuleWithoutPage`（`java` 显式绑 `WebJsExtensions`、`result` 照上游进 `CacheManager["webview_result"]`、返回值不做 unescape），求值失败归 `unsupported_is_rule_local`；`--refresh` 编译通过。**待运行验证**：库里 3761 条源**没有一条含 `@webJs`**，两个分支的运行时行为只能用合成源或真实设备对拍。
+约束：分流判据是**静态**的——规则 JS 里有没有 `document` / `window` / `location` / `localStorage` / `getElementsBy*` 这类页面环境用法；不按频率统计决定先做哪支。要用页面环境的仍报缺口、仍路由到 App（`webview_unsupported` 已接进五格：fix 为空、probe=连 App）。**不许半支持**：语义不确定的一律报未覆盖，不猜。新增或改名的边界码必须配一条 Kotlin↔JS 逐词比对（`tests/test_jvm_debug_contract.py` 的 `TestLoginMarkerParity` 是现成套路），否则改名只会静默降级成兜底文案。
+验收：一支只用 `@webJs` 做数据变换的规则，本机与连 App 结果逐字一致；要用页面环境的规则仍明确报「本机未覆盖 + 连 App 取证」，不产生假结论；边界码两侧逐词一致。
+指针：appservice/test/io/legado/app/service/ShadowBackstageWebView.kt，core/jvm_debug.py，frontend/src/utils/webviewCapability.js，tests/test_jvm_debug_contract.py，上游 `AnalyzeRule.kt:173-188` / `BackstageWebView.kt:108-119`
+
 ---
 
 ## 1 · 排队
+
+### 条目：webview-html-only · 补齐「只给 html」的渲染
+状态：doing
+依赖：无
+优先级：P1
+背景：上游 `BackstageWebView.load()` **先看 html**：`html` 有且 `url` 空走 `loadData(html, "text/html", enc)`（无 baseUrl），`html` 有且 `url` 有走 `loadDataWithBaseURL(url, html, …, url)`（帧地址与来源都是它）。**实现已落地并离线验证**：桥加了 `render(content=…)` 入口（前者 `Page.setDocumentContent`、后者 `Fetch.enable` + `Page.navigate` + `Fetch.fulfillRequest`，跑完 `Fetch.disable`），shadow 的 html 分支改走它；合成源实测两种形态都渲染出 HTML、`location.origin` 等于 baseUrl、同一页签连续两次都成功，`webview_unsupported` 为空。**待做**：拿库里真实源对拍（`java.webView(script, source.key, "")` 那 13 条调用点、POST ≤20 条）；`setDocumentContent` 那一支无法控制 charset（html 自带 `gbk` 声明时会乱码——`Fetch` 那支可用响应头声明 utf-8），以及上游的 `blockNetworkImage`、UA（`headerMap`）、`cacheFirst` 三条保真缺口仍未补。
+约束：MIME 与编码照上游；等待语义照上游（`onPageFinished` 之后 `1000 + delayTime` 才注入 JS）；能力到位后产出侧不再记这两个码。
+验收：同一源本机与连 App 材料逐字一致；未撞边界的情形行为不变。
+指针：appservice/test/io/legado/app/service/ShadowBackstageWebView.kt，appservice/test/io/legado/app/service/BrowserBridge.kt，上游 `BackstageWebView.kt:100-133` / `222-246`
+
+### 条目：webview-url-sniff · 补齐 sourceRegex / overrideUrlRegex 的 URL 嗅探
+状态：todo
+依赖：无
+优先级：P1
+背景：上游两条正则**匹配的是加载过程中的 URL**，命中就把那个 URL 本身当 body 返回（`StrResponse(url!!, requestUrl)`）并销毁 WebView，**不是读响应体**（`SnifferWebClient:309-337`）。侧车已经在记 `networkRequests`，因此本机不需要重写 `SnifferWebClient`，只差「用同一套正则匹配已记录的 URL」。
+约束：匹配用**全串**语义（Kotlin `matches`，不是 `find`）；两个时机不同（`overrideUrlRegex` 在导航、`sourceRegex` 在子资源），迁到「加载完成后在请求列表上匹配」时**两条都命中时的先后必须与上游一致**，否则会安静地取错 URL；**不能用 `networkRequests` 做匹配**——它只留 XHR / Fetch 且有上界，而上游 `onLoadResource` 看到的是**所有**资源，用它会漏命中并静默回落到整页 body；要么从 `tapped`（全量 CDP 消息副本）取 `Network.requestWillBeSent` 的 URL，要么把匹配做在桥上。`overrideUrlRegex` 现在**连边界码都没有**（`java.webViewGetOverrideUrl` 库里 1 条），走普通导航、嗅探被静默忽略，要一起处理或先给它一个显式码。命中返回 URL 字符串，未命中走普通页面结果；补齐后不再记 `unsupported_source_regex`。
+验收：构造一个两条正则都会命中的页面，本机选中的 URL 与连 App 一致；未命中时行为与现在相同。
+指针：appservice/test/io/legado/app/service/ShadowBackstageWebView.kt，appservice/test/io/legado/app/service/BrowserBridge.kt，上游 `BackstageWebView.kt:289-337`
+
+### 条目：webview-material-fallback · 本机渲染取材料（设备不在场时的退路）
+状态：todo
+依赖：无
+优先级：P2
+背景：把 `isRule` 路由到 App 依赖通道可用；设备不在场时用户会卡住。而 CDP 桥本来就在渲染、`EngineHtmlCollector` 本来就在收整页——把**渲染后的运行时 DOM** 当材料交出去几乎零新基建，且正对 L3（口袋漫画正文）那类「要材料、不要本机结论」的目标。
+约束：这条**只出材料、不判结论**（判定仍回 App 或交人工 / AI）；材料口径用 `MATERIAL_KINDS` 的 `runtime_dom`，不新造第三种语义；不许把「材料」说成「验证」。
+验收：设备不在场时，撞边界的源仍能拿到渲染后的运行时 DOM 材料，界面明确标这是取证而不是结论。
+指针：appservice/test/io/legado/app/service/BrowserBridge.kt，appservice/test/io/legado/app/service/DebugService.kt，core/agent_plan.py
+
+### 条目：webview-gap-routing · 能力缺口的动作与阶段分流
+状态：todo
+依赖：webview-material-fallback
+优先级：P2
+背景：能力缺口已进五格判据（`webview_unsupported`：不给「改规则」、给「连 App 取证」），但还有两处不完整：撞边界而 App 通道不可用时那个按钮点了没用；`matched`（命中回填）阶段的缺口只影响证据、不影响结论，不该占首屏判据位。
+约束：App 通道不可用时改给「本机渲染取材料」或明说原因，不给点了没用的动作（判据 context 里已有 `capabilities`）；`matched` 阶段缺口只进证据区提示；判据仍然只有 `core/agent_plan` 一处。
+验收：撞边界且 App 通道不可用时，界面给的是能执行的动作或明确原因；`matched` 阶段缺口不出现在五格主动作位。
+指针：core/agent_plan.py，frontend/src/components/DebugWorkbench.vue，frontend/src/utils/webviewCapability.js
 
 ## 2 · 按需
 
@@ -226,6 +271,15 @@
 指针：backend/api/rules.py，core/js_hints.py，frontend/src/components/DebugWorkbench.vue
 
 ---
+
+### 条目：webview-isrule-shim · 浏览器 + 少量 shim（最后手段）
+状态：todo
+依赖：webview-isrule-split
+优先级：P2
+背景：若某天必须在浏览器里跑依赖页面环境的 `webJs`，宿主 API 只能用**页内 JS shim**——CDP `Runtime.addBinding` 是异步通知，而规则里的 `java.ajax(url)` 是同步调用，逐个桥回 Kotlin 会做成「看起来能跑、偶尔拿空」的半支持。
+约束：只实现高频低风险的 shim（`source.getKey`、`result`、cookie 读取、base64 / md5 / url 编码、log、简单缓存），**不要**一上来桥 `ajax` / `connect` / `get`；若将来真做同步网络，前提是浏览器启动参数带 `--disable-web-security --user-data-dir=<临时目录>` 并用页内同步 XHR（跨域同步 XHR 会被拦，缺这个前提会稳定拿空）；前奏照搬 App 的 `getInjectionString`；**明确不做**「在浏览器里重建 App 的 JS 运行时」。
+验收：覆盖不到的 API 一律报「未覆盖」而不是返回空值假结果；补上的 shim 用「同源两通道材料一致」对拍。
+指针：appservice/test/io/legado/app/service/BrowserBridge.kt，appservice/test/io/legado/app/service/ShadowBackstageWebView.kt，core/agent_plan.py
 
 ## 3 · 待决策
 
