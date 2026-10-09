@@ -7,6 +7,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  isWorseHealth,
   jobAgoText,
   jobCancelHint,
   jobIsInFlight,
@@ -85,4 +86,14 @@ test("多久以前更新过：进度停住时这个数会一直涨", () => {
   assert.equal(jobAgoText(t0, at(45)), "45 秒前");
   assert.equal(jobAgoText(t0, at(200)), "3 分 20 秒前");
   assert.equal(jobAgoText("", at(45)), "");
+});
+
+test("变坏只看后端下发的档位名单，名单没到位时不标红", () => {
+  const needs = ["auth", "gfw", "dead"];
+  assert.equal(isWorseHealth("dead", needs), true);
+  assert.equal(isWorseHealth("auth", needs), true);
+  assert.equal(isWorseHealth("ok", needs), false);
+  assert.equal(isWorseHealth("pending", needs), false);   // 没结论不算坏
+  assert.equal(isWorseHealth("dead", []), false);          // meta 还没回来
+  assert.equal(isWorseHealth("dead", undefined), false);
 });

@@ -157,7 +157,7 @@ def tags_meta():
     （书源类型一度把 3 当成视频、还编出了 Legado 不存在的 4）。
     """
     from core.constants import TYPE_MAP
-    from core.models import BOOK_SOURCE_TYPE_NAMES, HEALTH_NAMES
+    from core.models import BOOK_SOURCE_TYPE_NAMES, HEALTH_NAMES, HEALTH_NEEDS_ACTION
     from core.tags import (
         SYSTEM_QUALITY_TAG_ORDER,
         SYSTEM_STATUS_TAG_ORDER,
@@ -182,6 +182,9 @@ def tags_meta():
         # 「✅可用」这类词要在 core/models 与 health.js 各改一遍，漂了就是
         # 同一档两个名字。顺序即 models 里的定义序，界面下拉沿用
         "health_names": [{"value": h, "label": n} for h, n in HEALTH_NAMES.items()],
+        # 「需要动手」的档。与词表同理：前端要判「这次变坏了哪几条」，而「哪些档
+        # 算坏」是语义、不是显示——前端另抄一份的话，多一个档就少报一批，且不报错
+        "health_needs_action": list(HEALTH_NEEDS_ACTION),
     }
 
 

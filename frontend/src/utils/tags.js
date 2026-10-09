@@ -17,8 +17,12 @@ const userTagAliases = ref({});
 // 健康度显示名（[{value: "ok", label: "✅可用"}, ...]）。真源 core/models.HEALTH_NAMES，
 // 前端 health.js 从这里取——那份逐字副本已删
 const healthNames = ref([]);
+// 「需要动手」的健康档（真源 core/models.HEALTH_NEEDS_ACTION）。任务明细里判
+// 「这批校验后变坏了哪几条」读它——判据只此一份，前端另抄一份的话多一个档
+// 就是安静地少报一批
+const healthNeedsAction = ref([]);
 
-export { sourceTypes, statusTags, qualityTags, userTagAliases, healthNames };
+export { sourceTypes, statusTags, qualityTags, userTagAliases, healthNames, healthNeedsAction };
 
 let metaPromise = null;
 
@@ -29,6 +33,7 @@ async function fetchTagMeta() {
   qualityTags.value = meta.quality_tags || [];
   userTagAliases.value = meta.user_tag_aliases || {};
   healthNames.value = meta.health_names || [];
+  healthNeedsAction.value = meta.health_needs_action || [];
 }
 
 /**

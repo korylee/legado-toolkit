@@ -12,6 +12,7 @@ import { api } from "../api/client";
 import { healthLabel } from "../utils/health";
 import {
   daemonPrepareLabel,
+  isWorseHealth,
   jobAgoText,
   jobCancelHint,
   jobIsInFlight,
@@ -24,6 +25,7 @@ import {
   jobStatusType,
 } from "../utils/jobs";
 import { useJobs } from "../composables/useJobs";
+import { healthNeedsAction } from "../utils/tags";
 import JobTimeline from "./JobTimeline.vue";
 
 const props = defineProps({
@@ -65,6 +67,14 @@ const job = computed(() => {
 });
 const summary = computed(() => (detail.value || {}).summary || null);
 const inFlight = computed(() => jobIsInFlight(job.value.status));
+//: 变坏的那几条排在最前：结果态真正的入口是「哪些源坏了」，不是「有几条变化」——
+//: 顺序本身就是权重。哪档算坏由后端下发，见 isWorseHealth。
+const changedItems = computed(() => {
+  const items = (summary.value && summary.value.changed_items) || [];
+  return [...items].sort((a, b) =>
+    Number(isWorseHealth(b.to, healthNeedsAction.value))
+    - Number(isWorseHealth(a.to, healthNeedsAction.value)));
+});
 //: 耗时与「多久没更新」都是相对**此刻**的数，不是 detail 里的静态字段：每 2 秒的
 //: 轮询把 nowMs 顶一次，computed 才会跟着涨（Date.now() 自己不是响应式的）。
 const spentText = computed(() => jobSpentText(job.value.created_at, nowMs.value));
@@ -226,11 +236,12 @@ async function deleteJob() {
           <span v-else class="muted">相对上次无变化</span>
         </div>
         <div v-for="(w, i) in summary.warnings" :key="'warn' + i" class="td-warn">{{ w }}</div>
-        <div v-if="summary.changed_items.length" class="td-changes">
+        <div v-if="changedItems.length" class="td-changes">
           <div class="muted td-section-title">
             状态变化（{{ summary.changed_items.length }} / {{ summary.changed_total }} 条）
           </div>
-          <div v-for="(c, i) in summary.changed_items" :key="'item' + i" class="td-change">
+          <div v-for="(c, i) in changedItems" :key="'item' + i" class="td-change"
+               :class="{ 'is-worse': isWorseHealth(c.to, healthNeedsAction.value) }">
             <span class="td-name" :title="c.name">{{ c.name || "（无名）" }}</span>
             <span class="muted td-url" :title="c.url">{{ c.url }}</span>
             <span class="muted">{{ healthLabel(c.from) }} → </span>
@@ -275,9 +286,10 @@ async function deleteJob() {
 
       <!-- 原始结果：生成/导入类任务要核对返回值时才有用，默认收起 -->
       <div v-if="detail && detail.result != null" class="td-fold">
-        <span class="td-fold-toggle" @click="rawOpen = !rawOpen">
-          原始结果 {{ rawOpen ? "▲" : "▼" }}
-        </span>
+        <button type="button" class="td-fold-toggle" :aria-expanded="rawOpen"
+                @click="rawOpen = !rawOpen">
+          原始结果<span class="td-fold-chevron" :class="{ 'is-open': rawOpen }">▸</span>
+        </button>
         <pre v-if="rawOpen" class="td-raw">{{ JSON.stringify(detail.result, null, 2) }}</pre>
       </div>
     </div>
@@ -363,8 +375,15 @@ async function deleteJob() {
 .td-change {
   display: flex; gap: 7px; align-items: baseline;
   line-height: 1.8; font-size: 12px;
+  /* 透明边占位：恶化行加红边时整行不会右移 */
+  padding-left: 8px; border-left: 2px solid transparent;
 }
 .td-change + .td-change { border-top: 1px solid var(--el-border-color-extra-light); }
+/* 变坏的先看：结果态真正的入口是「哪些源坏了」，不是「有几条变化」 */
+.td-change.is-worse {
+  border-left-color: var(--el-color-danger);
+  background: var(--el-color-danger-light-9, #fef0f0);
+}
 .td-name {
   flex: 0 1 auto; max-width: 150px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -380,7 +399,16 @@ async function deleteJob() {
 .td-change .to-gfw, .td-change .to-pending { color: var(--el-color-info); }
 .td-empty { padding: 20px 0; text-align: center; font-size: 13px; }
 .td-fold { margin-top: 14px; font-size: 12px; }
-.td-fold-toggle { color: var(--el-color-primary); cursor: pointer; user-select: none; }
+/* 折叠入口是按钮：键盘可达、有焦点环；原来是 span，只有鼠标能点 */
+.td-fold-toggle {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 2px 6px; margin-left: -6px;
+  border: none; border-radius: 4px; background: none;
+  color: var(--el-color-primary); font: inherit; cursor: pointer;
+}
+.td-fold-toggle:hover { background: var(--el-fill-color-light); }
+.td-fold-chevron { transition: transform .15s; }
+.td-fold-chevron.is-open { transform: rotate(90deg); }
 .td-fold .el-descriptions { margin-top: 8px; }
 .td-raw {
   max-height: 300px; overflow: auto; margin-top: 8px; padding: 10px;

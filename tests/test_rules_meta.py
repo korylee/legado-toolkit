@@ -11,7 +11,7 @@ import unittest
 
 from backend.api.rules import rules_meta
 from backend.api.sources import tags_meta
-from core.models import HEALTH_NAMES
+from core.models import HEALTH_NAMES, HEALTH_NEEDS_ACTION, Health
 from core.verify import RULE_GROUP_TO_STEPS
 
 
@@ -34,12 +34,27 @@ class RulesMetaTests(unittest.TestCase):
 
 
 class TagsMetaHealthTests(unittest.TestCase):
-    """``GET /api/sources/tags/meta`` 的 health_names：前端词表副本的唯一替代。"""
+    """``GET /api/sources/tags/meta`` 的 health 词表与「需要动手」的档：
+    前端健康判据的唯一替代（前端不再各抄一份）。"""
 
     def test_health_names_match_models_verbatim(self):
         meta = tags_meta()
         self.assertEqual([(x["value"], x["label"]) for x in meta["health_names"]],
                          list(HEALTH_NAMES.items()))
+
+    def test_needs_action_matches_models_verbatim(self):
+        meta = tags_meta()
+        self.assertEqual(meta["health_needs_action"], list(HEALTH_NEEDS_ACTION))
+
+    def test_needs_action_excludes_ok_and_pending(self):
+        """判据本身要被钉住：PENDING 是「我们没结论」（没校验过 / 超时），算成坏档
+        就是把一次请求都没发过的源凭空标成坏的；OK 更不该进来。前端「这批变坏了
+        哪几条」直接吃这张表，多一个或少一个档都是**不报错**的少报/多报。"""
+        self.assertIn(Health.OK, HEALTH_NAMES)
+        self.assertNotIn(Health.OK, HEALTH_NEEDS_ACTION)
+        self.assertNotIn(Health.PENDING, HEALTH_NEEDS_ACTION)
+        for health in HEALTH_NEEDS_ACTION:
+            self.assertIn(health, HEALTH_NAMES)
 
 
 if __name__ == "__main__":

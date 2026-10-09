@@ -78,6 +78,14 @@ export function jobProgressStatus(status) {
   return undefined;   // 排队 / 在跑 / unknown：中性
 }
 
+/** 「这批校验后变坏了」：目标档在**后端下发的**需要动手档里（需登录 / 需翻墙 /
+ *  已失效）。档位名单走 `GET /api/sources/tags/meta`（真源 core/models 的
+ *  HEALTH_NEEDS_ACTION），前端不另存一份——多一个档就是少报一批，且不报错。
+ *  名单还没到位时返回 false：宁可不标红，也不乱标。 */
+export function isWorseHealth(to, needsAction) {
+  return (Array.isArray(needsAction) ? needsAction : []).includes(to);
+}
+
 /** 后端时间戳是**本地时间字符串**（无时区）。自己按字段解析，不用 Date 解析字符串：
  *  各浏览器对 `YYYY-MM-DD HH:mm:ss` 的解释不一致。解析不了返回 0——
  *  调用方据此不出文案，宁可不说，也不要猜出一个「刚刚」。 */

@@ -21,6 +21,8 @@ const TERMINAL = ["done", "failed", "cancelled"];
 const lines = ref([]);
 const failures = ref({ total: 0, truncated: false, items: [] });
 const expanded = ref("");
+//: 结果态默认收起来：那时用户要读的是变化清单，时间线是排查时才摊开的材料
+const collapsed = ref(false);
 const pollError = ref("");
 const following = ref(true);
 const listEl = ref(null);
@@ -143,6 +145,10 @@ function start() {
 }
 
 watch(() => [props.jobId, props.status], start, { immediate: true });
+//: 终态默认收起：结果态的主视线归结论（变化清单），展开时间线是排查动作
+watch(() => props.status, (status) => {
+  collapsed.value = TERMINAL.includes(status);
+}, { immediate: true });
 onUnmounted(stopPolling);
 
 function onScroll() {
@@ -153,12 +159,18 @@ function onScroll() {
 </script>
 
 <template>
-  <div class="job-timeline">
+  <div class="job-timeline" :class="{ 'is-collapsed': collapsed }">
     <div class="job-timeline-head">
-      <span class="muted detail-section-title">执行时间线</span>
-      <span v-if="!following" class="job-timeline-follow" @click="following = true; scrollFollow()">回到最新</span>
+      <!-- 折叠入口是**按钮**：原来那个 span 键盘到不了、也没有焦点环 -->
+      <button type="button" class="muted job-timeline-toggle" :aria-expanded="!collapsed"
+              @click="collapsed = !collapsed">
+        执行时间线<span class="job-timeline-chevron" :class="{ 'is-open': !collapsed }">▸</span>
+        <span v-if="collapsed && lines.length">{{ lines.length }} 行</span>
+      </button>
+      <span v-if="!collapsed && !following" class="job-timeline-follow"
+            @click="following = true; scrollFollow()">回到最新</span>
     </div>
-    <div ref="listEl" class="job-timeline-list" @scroll="onScroll">
+    <div v-show="!collapsed" ref="listEl" class="job-timeline-list" @scroll="onScroll">
       <div v-for="item in groupedLines" :key="item.key" class="job-timeline-line"
            :class="['is-' + item.line.tone, { 'is-nested': item.depth > 0 }]">
         <span class="job-timeline-ts">{{ hhmmss(item.line.ts) }}</span>
@@ -205,7 +217,19 @@ function onScroll() {
   flex: 1 1 0; min-height: 96px; margin-top: 12px;
   display: flex; flex-direction: column;
 }
+/* 收起时不再吃剩余空间：结果态把高度让给结论（变化清单），自己只留一行标题 */
+.job-timeline.is-collapsed { flex: 0 0 auto; min-height: 0; }
 .job-timeline-head { display: flex; align-items: baseline; gap: 12px; flex: 0 0 auto; }
+/* 折叠入口是按钮：键盘可达、有焦点环；原来那个 span 只有鼠标能点 */
+.job-timeline-toggle {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 2px 6px; margin-left: -6px;
+  border: none; border-radius: 4px; background: none;
+  font: inherit; cursor: pointer;
+}
+.job-timeline-toggle:hover { background: var(--el-fill-color-light); }
+.job-timeline-chevron { transition: transform .15s; color: var(--el-text-color-secondary); }
+.job-timeline-chevron.is-open { transform: rotate(90deg); }
 .job-timeline-follow, .job-timeline-log-toggle {
   font-size: 12px; color: var(--el-color-primary); cursor: pointer; user-select: none;
 }
