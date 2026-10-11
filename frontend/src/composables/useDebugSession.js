@@ -91,6 +91,7 @@ let waitStartedAt = 0;
 //: （`null` = 还没有过结果）
 const lastRunAt = ref(null);
 const lastRunMs = ref(0);
+const lastRunInput = ref(null);
 
 const { watchJob } = useJobs();
 
@@ -467,6 +468,12 @@ async function executeRun({ source: runSource, target: runTarget, query: runQuer
   const runHost = String(host.value || "").trim();
   const runCacheMode = cacheMode.value;
   activeResultRevision = draftRevision;
+  lastRunInput.value = {
+    channel: runChannel,
+    target: String(runTarget || ""),
+    query: String(runQuery || ""),
+    cache: runCacheMode,
+  };
   const runSourceSnapshot = runSource && typeof runSource === "object"
     ? JSON.parse(JSON.stringify(runSource))
     : runSource;
@@ -554,6 +561,7 @@ export function useDebugSession() {
     liveEvents,
     lastRunAt,
     lastRunMs,
+    lastRunInput,
     budget,
     channel,
     target,

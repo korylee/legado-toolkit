@@ -11,6 +11,7 @@ const props = defineProps({
   rerunning: { type: Boolean, default: false },
   rerunTooltip: { type: String, default: "" },
   aiLoading: { type: Boolean, default: false },
+  showPrimaryActions: { type: Boolean, default: true },
 });
 
 const emit = defineEmits(["fix", "probe", "ai", "rerun", "gotoBasic"]);
@@ -41,7 +42,7 @@ const VERDICT_TYPE = { pass: "success", fail: "danger", unknown: "info" };
     </p>
 
     <!-- 解决（改源）与取证（换通道）分栏：没有可改的东西时，取证才顶到主动作位 -->
-    <div class="dec-actions">
+    <div v-if="showPrimaryActions" class="dec-actions">
       <el-button v-if="decision.fix" size="small" type="primary"
                  @click="emit('fix', decision.fix)">{{ decision.fix.label }}</el-button>
       <el-button v-if="decision.probe" size="small" plain

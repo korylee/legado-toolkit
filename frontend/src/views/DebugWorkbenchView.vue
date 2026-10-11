@@ -311,6 +311,7 @@ onUnmounted(() => {
       :initial-step="initialStep"
       :source="source || {}"
       :enabled-cookie-jar="!!((source || {}).enabledCookieJar)"
+      :draft-revision="workspace.state.draftRevision"
       @apply-rule="onApplyRule"
       @rerun-from="rerunFromStep"
       @goto="focusRuleField"
