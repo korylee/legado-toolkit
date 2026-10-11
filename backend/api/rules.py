@@ -122,7 +122,9 @@ async def jvm_debug(body: JvmDebugRequest):
     key = _debug_key(body, dict(body.source or {}), keyword)
     payload = debug_payload(dict(body.source or {}), key=key, timeout=timeout,
                             cookie=body.cookie or "", cache=cache,
-                            proxy=resolve_proxy(), readiness=readiness_result)
+                            proxy=resolve_proxy(), readiness=readiness_result,
+                            target=body.target, query=body.query,
+                            key_override=bool(str(body.key or "").strip()))
     # JVM 与批量校验共用一条 lane，**调试档优先**（LANE_PRIORITY：debug=0 / batch=10）
     job_id = runner.submit("jvm_debug", payload, lane="jvm", lane_kind="debug")
     return {"job_id": job_id, "kind": "jvm_debug",

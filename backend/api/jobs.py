@@ -215,6 +215,36 @@ def _job_row(job: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _debug_run_input(job: Dict[str, Any]) -> Dict[str, Any]:
+    """只投影刷新后摘要所需的调试条件，不回传完整 payload。"""
+    payload = job.get("payload")
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except ValueError:
+            payload = None
+    if not isinstance(payload, dict):
+        return {"available": False}
+    target = payload.get("target")
+    query = payload.get("query")
+    cache = payload.get("cache")
+    key_override = payload.get("key_override")
+    if (not all(isinstance(value, str) for value in (target, query, cache))
+            or not isinstance(key_override, bool)):
+        return {"available": False}
+    if key_override:
+        key = payload.get("key")
+        if not isinstance(key, str):
+            return {"available": False}
+        target, query = "custom_key", key
+    return {
+        "available": True,
+        "target": _bounded_text(target, 80),
+        "query": query[:1000],
+        "cache": _bounded_text(cache, 40),
+    }
+
+
 def _job_detail(job: Dict[str, Any], raw: bool = False) -> Dict[str, Any]:
     """把数据库任务行转换成前端唯一使用的明细形状。
 
@@ -257,6 +287,8 @@ def _job_detail(job: Dict[str, Any], raw: bool = False) -> Dict[str, Any]:
         "error": error,
         "result": parsed if (summary is None or raw) else None,
     }
+    if job.get("kind") == "jvm_debug":
+        detail["debug_input"] = _debug_run_input(job)
     if job.get("kind") == "jvm_run" and isinstance(parsed, dict):
         detail.update(_chunk_detail_reports(parsed))
         prepared = parsed.get("daemon_prepare")

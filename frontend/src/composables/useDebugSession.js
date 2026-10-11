@@ -157,6 +157,23 @@ function waitForJob(jobId) {
  * 有任务行才挂得上——这正是调试进 jobs 表的收益之一：观测登记放在进程内存里时，
  * 一次刷新就等于"那次调试从界面上消失了"。
  */
+function restoredRunInput(detail) {
+  const input = detail && detail.debug_input;
+  if (!detail || detail.kind !== "jvm_debug" || !input || input.available !== true
+      || typeof input.target !== "string"
+      || typeof input.query !== "string"
+      || typeof input.cache !== "string") {
+    return { available: false };
+  }
+  return {
+    available: true,
+    channel: "jvm",
+    target: input.target,
+    query: input.query,
+    cache: input.cache,
+  };
+}
+
 async function resumeRunning() {
   if (running.value) return runId.value;
   let row = null;
@@ -169,6 +186,11 @@ async function resumeRunning() {
   if (!row || !row.id) return "";
   beginWait();
   try {
+    try {
+      lastRunInput.value = restoredRunInput(await getJobDetail(row.id));
+    } catch (_e) {
+      lastRunInput.value = { available: false };
+    }
     storeResult(await waitForJob(row.id));
     return row.id;
   } finally {
@@ -469,6 +491,7 @@ async function executeRun({ source: runSource, target: runTarget, query: runQuer
   const runCacheMode = cacheMode.value;
   activeResultRevision = draftRevision;
   lastRunInput.value = {
+    available: true,
     channel: runChannel,
     target: String(runTarget || ""),
     query: String(runQuery || ""),

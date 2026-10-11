@@ -153,8 +153,12 @@ async def run_jvm_debug_job(job_id: str, st: Any, payload: Dict[str, Any]) -> Di
 
 def debug_payload(body_source: Dict[str, Any], *, key: str, timeout: int, cookie: str = "",
                   cache: str = "auto", proxy: str = "",
-                  readiness: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """提交时的 payload（**唯一一份**）：URL 校验与 readiness 都在路由里做过了。"""
+                  readiness: Optional[Dict[str, Any]] = None,
+                  target: str = "search", query: str = "",
+                  key_override: bool = False) -> Dict[str, Any]:
+    """提交时的 payload（**唯一一份**）：保留重挂任务所需的运行条件。"""
     return {"source": body_source, "key": key, "timeout": int(timeout),
             "cookie": cookie, "cache": cache, "proxy": proxy,
+            "target": str(target), "query": str(query),
+            "key_override": bool(key_override),
             "readiness": readiness or {}}

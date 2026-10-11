@@ -567,10 +567,14 @@ class EndpointTests(_RunCase):
         return asyncio.run(jvm_debug_endpoint(body))
 
     def test_endpoint_submits_a_debug_job_with_the_params(self) -> None:
-        r = self._call(key="斗破", timeout=90, cookie="a=1", cache="only")
+        r = self._call(target="toc", query="++https://a.test/t", timeout=90,
+                       cookie="a=1", cache="only")
         self.assertEqual(r["job_id"], "debug-job")
         self.assertEqual(self.seen["kind"], "jvm_debug")
-        self.assertEqual(self.seen["key"], "斗破")
+        self.assertEqual(self.seen["key"], "++https://a.test/t")
+        self.assertEqual(self.seen["target"], "toc")
+        self.assertEqual(self.seen["query"], "++https://a.test/t")
+        self.assertFalse(self.seen["key_override"])
         self.assertEqual(self.seen["timeout"], 90)
         self.assertEqual(self.seen["cookie"], "a=1")
         self.assertEqual(self.seen["cache"], "only")

@@ -18,6 +18,43 @@ class JobDetailShapeTests(unittest.TestCase):
             "result_json": json.dumps(result, ensure_ascii=False),
         }
 
+    def test_jvm_debug_detail_projects_persisted_run_input_only(self):
+        job = {
+            **self._job({}),
+            "kind": "jvm_debug",
+            "payload": json.dumps({
+                "target": "toc", "query": "++https://a.example/t", "cache": "only",
+                "key_override": False,
+                "source": {"bookSourceUrl": "https://a.example"},
+                "cookie": "secret-cookie",
+            }, ensure_ascii=False),
+        }
+        detail = _job_detail(job)
+        self.assertEqual(detail["debug_input"], {
+            "available": True, "target": "toc",
+            "query": "++https://a.example/t", "cache": "only",
+        })
+        self.assertNotIn("payload", detail)
+        self.assertNotIn("cookie", detail)
+        self.assertNotIn("source", detail)
+
+    def test_jvm_debug_manual_key_is_projected_as_custom_input(self):
+        job = {
+            **self._job({}),
+            "kind": "jvm_debug",
+            "payload": json.dumps({
+                "target": "search", "query": "unused", "cache": "auto",
+                "key_override": True, "key": "++https://a.example/t",
+            }, ensure_ascii=False),
+        }
+        detail = _job_detail(job)
+        self.assertEqual(detail["debug_input"]["target"], "custom_key")
+        self.assertEqual(detail["debug_input"]["query"], "++https://a.example/t")
+
+    def test_old_jvm_debug_job_reports_run_input_unavailable(self):
+        detail = _job_detail({**self._job({}), "kind": "jvm_debug"})
+        self.assertEqual(detail["debug_input"], {"available": False})
+
     def test_check_result_is_reduced_to_summary(self):
         detail = _job_detail(self._job({
             "checked": 2, "cached": 1, "fetched": 1,

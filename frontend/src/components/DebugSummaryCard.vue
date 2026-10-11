@@ -21,12 +21,18 @@ const emit = defineEmits(["action", "probe", "evidence"]);
         <span v-if="summary.run.targetLabel" class="muted">
           入口：{{ summary.run.targetLabel }}
         </span>
+        <span v-if="summary.run.cacheLabel" class="muted">
+          缓存：{{ summary.run.cacheLabel }}
+        </span>
         <span v-if="summary.run.lastRunMs" class="muted">
           用时 {{ Math.max(1, Math.round(summary.run.lastRunMs / 1000)) }} 秒
         </span>
       </div>
     </div>
     <p class="debug-summary-reason">{{ summary.reason }}</p>
+    <p v-if="summary.run.inputAvailable === false" class="muted">
+      运行条件不可读取
+    </p>
     <div v-if="summary.run.query" class="debug-summary-query mono" :title="summary.run.query">
       {{ summary.run.query }}
     </div>

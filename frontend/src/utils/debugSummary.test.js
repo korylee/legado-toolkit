@@ -17,6 +17,34 @@ const step = {
   matched_html: "<p>正文</p>",
 };
 
+test("刷新恢复的运行条件包含缓存档，缺失记录时显式不可读取", () => {
+  const restored = buildDebugSummary({
+    result: { source: "jvm" },
+    channel: "jvm",
+    target: "toc",
+    targetLabel: "目录",
+    query: "https://example.test/toc",
+    cacheLabel: "只读缓存",
+    runInputAvailable: true,
+  });
+  assert.equal(restored.run.targetLabel, "目录");
+  assert.equal(restored.run.query, "https://example.test/toc");
+  assert.equal(restored.run.cacheLabel, "只读缓存");
+  assert.equal(restored.run.inputAvailable, true);
+
+  const missing = buildDebugSummary({
+    result: { source: "jvm" },
+    channel: "",
+    target: "",
+    query: "",
+    runInputAvailable: false,
+  });
+  assert.equal(missing.run.channel, "");
+  assert.equal(missing.run.target, "");
+  assert.equal(missing.run.query, "");
+  assert.equal(missing.run.inputAvailable, false);
+});
+
 test("完成结果：主动作来自 decision.fix，取证动作独立保留", () => {
   const summary = buildDebugSummary({
     result: { source: "jvm" },

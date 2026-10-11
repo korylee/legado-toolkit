@@ -25,7 +25,7 @@ import { getLLMStatus } from "../api/llm";
 // 步骤名 → 中文的**唯一**一份（编辑视图共用），别再在本组件里写第二份。
 // RULE_FIELD_DEFS 是规则字段的唯一词表（内联编辑框的标签/占位符也从它取）
 import { FIELD_OF_STEP, STEP_LABELS, RULE_FIELD_DEFS } from "../utils/steps";
-import { DEBUG_TARGETS, useDebugSession } from "../composables/useDebugSession";
+import { DEBUG_CACHE_MODES, DEBUG_TARGETS, useDebugSession } from "../composables/useDebugSession";
 import { compareRuns, statusLabel } from "../utils/debugCompare";
 // 第 1 层「在页面上找目标」：候选规则由后端 core/candidates 在补抓的原文上算出来
 // （启发式的唯一一份；不发请求、不调模型），见下方 watch
@@ -1182,12 +1182,18 @@ const debugSummary = computed(() => {
       props.draftRevision != null &&
       resultRevision.value != null &&
       props.draftRevision !== resultRevision.value,
-    channel: runInput.channel || channel.value,
-    target: runInput.target || "",
+    channel: runInput.available === false ? "" : (runInput.channel || debugChannel.value),
+    target: runInput.available === false ? "" : (runInput.target || ""),
     targetLabel:
-      (DEBUG_TARGETS.find((item) => item.value === runInput.target) || {})
+      runInput.target === "custom_key" ? "自定义 key"
+        : (DEBUG_TARGETS.find((item) => item.value === runInput.target) || {})
+          .label || "",
+    query: runInput.available === false ? "" : (runInput.query || ""),
+    runInputAvailable: runInput.available === true ? true
+      : runInput.available === false ? false : null,
+    cacheLabel:
+      (DEBUG_CACHE_MODES.find((item) => item.value === runInput.cache) || {})
         .label || "",
-    query: runInput.query || "",
     elapsedMs: elapsedMs.value,
     lastRunMs: lastRunMs.value,
     lastRunAt: lastRunAt.value,
