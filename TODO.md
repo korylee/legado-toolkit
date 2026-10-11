@@ -18,30 +18,55 @@
 
 ## 0 · 现在做
 
-> 当前排期：引擎与调试执行链的基础设施已完成；后续调试体验以“入口降噪 → 工作台闭环 → 证据前置 → 编辑能力合入 → DOM 意图化生成”为主线。worker 的 lane、分块恢复、daemon 复用与冷启动批前准备、任务详情的块级证据与执行时间线均已交付（lessons §六十五 / §六十六）。
-> P0 的 unknown 出口与可执行提示已交付，当前前端待办集中在新调试页的视觉层级、编辑闭环和证据可信度；本机引擎的启动耗时治理已完成（分段观测、排队可见、自适应忙等待、批前按需准备）。
+> 当前排期：引擎与调试执行链的基础设施已完成；后续调试体验以“入口降噪 → 工作台闭环 → 证据前置 → 编辑能力合入 → DOM 意图化生成”为主线。worker 的 lane、分块恢复、daemon 复用、批量 daemon-only、块级失败原因和操作归属观测均已交付；自动识别并回收失去任务所有者的 daemon 操作仍待做。
+> P0 的 unknown 出口与可执行提示已交付，当前前端待办集中在新调试页的视觉层级、编辑闭环和证据可信度；批量校验不再隐式启动 Gradle。
+
+### 条目：daemon-orphan-recovery · 自动回收失去任务所有者的 Validate 操作
+状态：todo
+依赖：无
+优先级：P1
+背景：设置页现在展示 daemon PID/响应/签名和当前 job / chunk / source，并允许停止**有响应、身份已验证、且无活跃 owner**的 daemon。剩余缺口是：后端中途退出后 marker/job 可能变成孤儿，而 daemon 若已不响应，当前入口会拒绝停止；系统尚不能安全判定并回收这类操作。
+约束：活跃 job 的 daemon 操作不得被杀；不能只凭 ping 或端口行为判死；必须核对 daemon PID/进程身份、marker 的 job 状态与 stale 时长，优先协议 stop，再确认进程退出；owner 缺失、任务仍活跃或进程身份不明时只报告、不自动杀；批量失败不回退 Gradle。
+验收：活跃 owner 场景不杀进程；owner 已终态且 marker 超过租约时，daemon 被安全停止并验证退出后才能重启；owner 未知或无法验证进程身份时不执行停止；marker 只清理匹配当前 operation id 的记录；补齐不联网生命周期测试。
+指针：core/jvm_validate_daemon.py，core/jvm_daemon.py，backend/api/jvm.py，backend/jobs/jvm_exec.py，core/store.py，lessons §六十六 / §七十四
+
+### 条目：debug-run-condition-recovery · 刷新后恢复本次调试的运行条件
+状态：todo
+依赖：无
+优先级：P2
+背景：`useDebugSession.lastRunInput` 只在提交那次运行（`executeRun`）时写入，而且是模块级内存；
+刷新页面后 `resumeRunning()` 挂回任务，运行条件（入口 / 查询 / 缓存）随之丢失，摘要只剩结果
+自带的来源通道。当前**不回落表单值**（那是「下一次跑哪儿」，不是这份结论的条件），所以既不报错
+也不说谎，但「这次跑的是什么」问不出来。
+约束：运行条件的权威来源是那次运行的记录，不是前端内存——`core/jvm_debug` 已经写
+`data/app_probe/runs/<run>/` 的任务信封，恢复要走它（或让 `GET /api/jobs/{id}/detail` 带上当时
+的入参），不在前端重算；**取不到就说取不到**，不许用当前表单值补位；
+详情接口给界面的仍是有界投影，不要把整份源塞进响应。
+验收：刷新页面后挂回那次调试，摘要能显示当时的入口 / 查询 / 缓存；记录确实缺失时显示
+「运行条件不可读取」而不是留空或显示当前表单值；补一条不联网的形状钉子。
+指针：frontend/src/composables/useDebugSession.js，backend/api/jobs.py，core/jvm_debug.py
 
 ---
 
 ## 1 · 排队
 
-### 条目：webview-material-fallback · 本机渲染取材料（设备不在场时的退路）
+### 条目：debug-apply-rerun · 应用并重调的失败路径与跨层形状
 状态：todo
 依赖：无
 优先级：P2
-背景：把 `isRule` 路由到 App 依赖通道可用；设备不在场时用户会卡住。而 CDP 桥本来就在渲染、`EngineHtmlCollector` 本来就在收整页——把**渲染后的运行时 DOM** 当材料交出去几乎零新基建，且正对 L3（口袋漫画正文）那类「要材料、不要本机结论」的目标。
-约束：这条**只出材料、不判结论**（判定仍回 App 或交人工 / AI）；材料口径用 `MATERIAL_KINDS` 的 `runtime_dom`，不新造第三种语义；不许把「材料」说成「验证」。
-验收：设备不在场时，撞边界的源仍能拿到渲染后的运行时 DOM 材料，界面明确标这是取证而不是结论。
-指针：appservice/test/io/legado/app/service/BrowserBridge.kt，appservice/test/io/legado/app/service/DebugService.kt，core/agent_plan.py
+背景：动作协议与统一执行器已经落地（`frontend/src/utils/debugAction.js` 的 `apply_and_rerun` 与工作台的 `dispatchDebugAction`），「改草稿 → 旧结论过期 → 重调」主链能跑通；剩下的是**没人钉过的失败路径**：提交失败、lane 忙、取消等待、结果读取失败时，草稿必须原样保留、状态停在「已修改、未验证」，原因要看得见。
+约束：**不回滚草稿**（重调失败不是规则错）；运行完成 ≠ 验证通过 ≠ 已保存，三者不许在界面上合并成一个「成功」；跨层形状的钉子加进**现有的** `tests/test_agent_plan.py` 逐项比对里（那里已经在比对 gap code 与前端文案），不新开一份契约测试；不引入第二个模拟引擎。
+验收：四条失败路径各有一条断言，证明草稿未回滚且原因可见；保存动作不被渲染成验证；`agent_plan` 产出的 fix / probe 种类与前端 `ACTION_KINDS` 逐项对齐，缺一个就红。
+指针：frontend/src/utils/debugAction.js，frontend/src/composables/useDebugSession.js，frontend/src/utils/debugCompare.js，tests/test_agent_plan.py
 
-### 条目：webview-gap-routing · 能力缺口的动作与阶段分流
+### 条目：webview-material-fallback · 能力缺口：本机渲染取材料与动作分流
 状态：todo
-依赖：webview-material-fallback
+依赖：无
 优先级：P2
-背景：能力缺口已进五格判据（`webview_unsupported`：不给「改规则」、给「连 App 取证」），但还有两处不完整：撞边界而 App 通道不可用时那个按钮点了没用；`matched`（命中回填）阶段的缺口只影响证据、不影响结论，不该占首屏判据位。
-约束：App 通道不可用时改给「本机渲染取材料」或明说原因，不给点了没用的动作（判据 context 里已有 `capabilities`）；`matched` 阶段缺口只进证据区提示；判据仍然只有 `core/agent_plan` 一处。
-验收：撞边界且 App 通道不可用时，界面给的是能执行的动作或明确原因；`matched` 阶段缺口不出现在五格主动作位。
-指针：core/agent_plan.py，frontend/src/components/DebugWorkbench.vue，frontend/src/utils/webviewCapability.js
+背景：把 `isRule` 路由到 App 依赖通道可用；设备不在场时用户会卡住。而 CDP 桥本来就在渲染、`EngineHtmlCollector` 本来就在收整页——把**渲染后的运行时 DOM** 当材料交出去几乎零新基建，且正对 L3（口袋漫画正文）那类「要材料、不要本机结论」的目标。同一族还差两处：撞边界而 App 通道不可用时那个按钮点了没用；`matched`（命中回填）阶段的缺口只影响证据、不影响结论，不该占首屏判据位。
+约束：这条**只出材料、不判结论**（判定仍回 App 或交人工 / AI）；材料口径用 `MATERIAL_KINDS` 的 `runtime_dom`，不新造第三种语义；不许把「材料」说成「验证」；App 通道不可用时改给「本机渲染取材料」或明说原因，不给点了没用的动作（判据 context 里已有 `capabilities`）；`matched` 阶段缺口只进证据区提示；判据仍然只有 `core/agent_plan` 一处。
+验收：设备不在场时，撞边界的源仍能拿到渲染后的运行时 DOM 材料，界面明确标这是取证而不是结论；撞边界且 App 通道不可用时，界面给的是能执行的动作或明确原因；`matched` 阶段缺口不出现在五格主动作位。
+指针：appservice/test/io/legado/app/service/BrowserBridge.kt，appservice/test/io/legado/app/service/DebugService.kt，core/agent_plan.py，frontend/src/utils/webviewCapability.js
 
 ## 2 · 按需
 
@@ -78,17 +103,6 @@
   organizer 重建分组。
 指针：lessons §五十一，core/app_debug.py
 
-### 条目：perf-conc · 并发上调实测
-状态：todo
-依赖：无
-优先级：P2
-背景：`ValidateService.validateBatch` 已是 `Semaphore(concurrency)`；上调一档实测
-  再决定值不值。单源预算默认已提到 75s（>App okhttp callTimeout 60s）；
-  估整批耗时按 新预算×源数÷并发。
-约束：受「频繁跑全量会被封 IP」这条硬约束，等下次真要跑量时顺带量（skills/legado-source-toolchain §四）。
-验收：给出上调前后的一档实测对比（时长与失败率）。
-指针：lessons §七十四，appservice/test/io/legado/app/service/ValidateService.kt
-
 ### 条目：ux-chip-jump · 点击摘要里的变化数跳到对应筛选
 状态：todo
 依赖：无
@@ -98,7 +112,6 @@
   拆成独立组件，别再往 SourcesView 续写。
 验收：点变化数后列表筛到对应子集，且 chip 状态同步。
 指针：frontend/src/views/SourcesView.vue
-
 
 ### 条目：ux-trash-url · `TrashDrawer` 的批量恢复对齐同一套 URL 语义
 状态：todo
@@ -148,8 +161,8 @@
 依赖：agent-layer-router, agent-action-schema
 优先级：P1
 背景：口袋漫画正文页的图片地址在 WebView 执行后的 `params.chapter_images`，静态 HTML 没有图片，运行时图片还可能变成 `blob:` URL；图片签名会过期，目录选错还会导致重复章节。第一版应验证运行时数据，不应让用户配置 AES 或复制旧图片地址。
-约束：入口要求用户选择具体章节；Agent 只生成 `requires_webview / runtime_field / content_mode` 策略；本机/App 实测确认 `params` 已为对象、`chapter_images` 非空且图片可访问后，才生成 ES5 `webJs + content + imageStyle`；调试工作台明确标出 L2/L3，静态网页视图不能框选时给出**取证**动作（「用本机引擎 / 连 App 取运行时材料」），不许写成解决方案（口径见 AGENTS #24）；运行时 DOM、命中片段和框选高亮必须来自同一份运行时材料，不能把静态补抓冒充 App 页面；每次调试重新获取图片地址；跑批不能可靠覆盖这类源时必须明确标注；章节与图片失败原因不得压成“解密失败”。
-验收：选定一章能显示页面、WebView、运行时字段、图片数量和可访问性；成功时生成源草稿正文规则并由 App 实测复验；params 仍为字符串、图片为空、签名过期、目录地址不具体、静态页面无运行时材料时分别给出对应下一步；若取得运行时 DOM，命中源码与框选高亮使用同一份材料；跑批对这类源要么同样能验，要么结论明确标「这类源跑批不可信」；不在源中硬编码站点 AES 或图片 URL。
+约束：入口要求用户选择具体章节；Agent 只生成 `requires_webview / runtime_field / content_mode` 策略；本机/App 实测确认 `params` 已为对象、`chapter_images` 非空且图片可访问后，才生成 ES5 `webJs + content + imageStyle`；调试工作台明确标出 L2/L3，静态网页视图不能框选时给出**取证**动作（「用本机引擎 / 连 App 取运行时材料」），不许写成解决方案（口径见 AGENTS #24）；运行时 DOM、命中片段和框选高亮必须来自同一份运行时材料，不能把静态补抓冒充 App 页面；每次调试重新获取图片地址；批量校验不能可靠覆盖这类源时必须明确标注；章节与图片失败原因不得压成“解密失败”。
+验收：选定一章能显示页面、WebView、运行时字段、图片数量和可访问性；成功时生成源草稿正文规则并由 App 实测复验；params 仍为字符串、图片为空、签名过期、目录地址不具体、静态页面无运行时材料时分别给出对应下一步；若取得运行时 DOM，命中源码与框选高亮使用同一份材料；批量校验对这类源要么同样能验，要么结论明确标「这类源批量校验不可信」；不在源中硬编码站点 AES 或图片 URL。
 指针：skills/legado-book-source/SKILL.md，core/js_hints.py，tests/test_page_layer.py，data/app_probe/source.json，lessons §七十五
 
 ### 条目：agent-evidence-budget · 限制 Agent 取证范围与调用次数
@@ -160,8 +173,6 @@
 约束：只允许读取证据行附近片段、运行时键摘要、字段类型/长度、网络响应形状和指定脚本命中片段；禁止读取完整 Cookie、密钥和无界 bundle；每轮最多一次模型调用和有限次取证，超过预算转为用户动作；预算与错误原因写入结果，不静默截断。
 验收：完整 HTML/脚本不会默认进入模型请求；超出预算时界面显示具体原因和手动入口；同一失败不会自动循环调用；脱敏与截断有单测覆盖。
 指针：backend/api/rules.py，core/js_hints.py，frontend/src/components/DebugWorkbench.vue
-
----
 
 ### 条目：webview-isrule-shim · 浏览器 + 少量 shim（最后手段）
 状态：todo
@@ -183,15 +194,15 @@
 
 ## 3 · 待决策
 
-### 条目：s5a-a2 · A2 之后可评估：跑批不再剥 webView 选项
+### 条目：s5a-a2 · A2 之后可评估：批量校验不再剥 webView 选项
 状态：blocked
 依赖：无
 优先级：P2
-背景：跑批那条路（`ValidateService`）今天仍是「剥掉 webView 选项 → 渲染 → 另喂
-  `BookList`」。shadow 到位后跑批也可以不剥、直接走 App 自己的链路——能删掉一整条
+背景：批量校验那条路（`ValidateService`）今天仍是「剥掉 webView 选项 → 渲染 → 另喂
+  `BookList`」。shadow 到位后批量校验也可以不剥、直接走 App 自己的链路——能删掉一整条
   支路。同一道选项工序上还有 retry 钳制；本条若落地，钳制要跟着搬到
   新的请求路径。
-约束：**会改变跑批结论**（真 webView 语义 ≠ 渲染后喂解析器）→ 要配 `CACHE_VERSION`
+约束：**会改变批量校验结论**（真 webView 语义 ≠ 渲染后喂解析器）→ 要配 `CACHE_VERSION`
   全量重跑；**未评估前不要动手**。
 阻塞于：未评估（要先量「换语义会翻多少条结论」）
 验收：评估结论 + 用户拍板；若做，全量重跑一次并记 `CACHE_VERSION`。
@@ -217,42 +228,31 @@
   source-edges 也未落地；若要做，先让 `keyword_used` 落进结论行（现在没落）。
 指针：core/checker.py，core/dups.py，frontend/src/components/TidyDrawer.vue，lessons §三十四
 
-### 条目：batch-fingerprint-coalesce · 批量校验按同站同指纹复用探测
+### 条目：batch-reuse-after-condition-axis · 批量结果复用与同站指纹探测
 状态：blocked
-依赖：无
+依赖：batch-condition-axis
 优先级：P2
-背景：同站且行为指纹全等的转发源可共享一次探测，但现有批量按源逐条执行。**收益已实测**（2026-10-08，3761 条启用源 / chunk_size 25 / 151 块）：同站同指纹 374 组、涉及 778 条、上限可省 404 次探测；**按当前导出顺序分块只剩 196 次（5.2%）**，因为 374 组里有 202 组跨块；改成按组聚合分块可回到上限 404（10.7%）。**JVM 的块数不变**（仍 151 块），省的是块内每源那一次站点请求与解析。
-约束：①**分组键必须用完整源记录算**——批量导出会裁掉 14 个行为字段（`loginUrl` / `loginCheckJs` / `ruleExplore` / `concurrentRate` / `jsLib` 等），拿批次载荷算指纹会把「登录要求不同」的源并成一组，那是错的共享；②要不只省 5.2% 就得同时做分组感知分块，否则收益被顺序吃一半；③仅组内指纹全等时复用，跨站同名不合并；④每条结论标明共享来源，**一次失败不许静默扩散到整组**；不复用旧批次结果；开关纳入 settings_store，默认值与限幅只定义一处。
-验收：同组只探测一次、每行结论均带来源（可追溯到被共享的那条），任一行为字段不同则独立执行，显式关闭开关时不共享探测；失败组必须逐个独立执行并各自带原因。
-阻塞于：收益与实现成本不成比例——上限 10.7%（2026-10-09 实测吞吐 195 条 / 5.5 分钟，
-  全量约 1.7 小时，故约 10 分钟），却要同时改分组感知分块、结论来源与开关；未获拍板。
-指针：backend/api/jvm.py，core/dups.py，AGENTS.md #5b，lessons §五十三
-
-### 条目：norl-ambig · 「没结果」的二义性
+背景：同站且行为指纹完全相同的源理论上可以共享一次探测；已有统计显示上限收益约 10.7%，但按当前顺序实际约 5.2%。
+约束：必须先记录 `keyword_used` / `depth` / UA / `webview_stripped` 等当次条件；分组键使用完整源记录；共享失败不得扩散；每条结论保留共享来源；不复用不同批次的旧结论。
+验收：条件轴完成且 daemon 稳定后，重新评估收益；只有收益仍值得时才实现分组感知分块、共享来源和失败隔离。
+阻塞于：当前收益不足以抵消分组、分块、来源追踪和失败传播的实现成本。
+指针：core/dups.py，core/jvm_health.py，backend/api/jvm.py，lessons §五十三
+### 条目：batch-condition-axis · 结论行记录当次执行条件
 状态：todo
 依赖：无
 优先级：P2
-背景：JVM 搜索对单关键词跑，某源没结果可能是「没这本书」。源自带的
-  `checkKeyWord` 跑批会采纳，但**它没落库**（引擎侧产出、`core/jvm_health.checks_row`
-  丢掉），结论行分不出这次用的是哪个词。实测 2026-10-09：1100/3761 条声明了
-  `checkKeyWord`；库里 359 条结论是「搜索真跑过、没命中」（health=pending 且
-  `search_probed=1`）——本条要复核的就是这一批。
-约束：缓解靠多词复核（全不命中才判坏），落地点在做 `no_result` 复核批次时；
-  **先把当次用的词落进结论行**，否则复核结论同样不可追溯（AGENTS #5b 的轴）。
-验收：做一个 `no_result` 复核批次，单关键词无结果的源经多词复核后才判坏。
-指针：lessons §五十三，core/checker.py
-
-### 条目：ua-axis · UA 要与设备对齐，得先给结论行加一根 UA 轴
-状态：todo
-依赖：无
-优先级：P2
-背景：UA 是三条通道各一条。要「与设备对齐」得先给结论行加一根 UA 轴（把当次实际
-  用的那条记进结论）。**结论行今天没有任何「当次条件」轴**：`webview_stripped` /
-  `keyword_used` 都只在引擎侧产出，`core/jvm_health.checks_row` 落库时丢掉了——
-  于是历史结论与新结论不是同一口径却看不出来（与 AGENTS #5b 同构）。
-约束：**现在不动**——改 UA 值会改变站点返回的页面，与库里已有结论不可比。
-验收：UA 轴落地（结论行记录当次 UA），且能区分新老口径。
-指针：AGENTS.md #5b，lessons §五十一
+背景：结论行今天**没有任何「当次条件」轴**：`keyword_used` / `webview_stripped` / UA 都只在
+  引擎侧产出，`core/jvm_health.checks_row` 落库时丢掉了——历史结论与新结论不是同一口径却看不出来
+  （AGENTS #5b）。两个下游都在等它：① JVM 搜索对单关键词跑，某源没结果可能是「没这本书」，
+  源自带的 `checkKeyWord` 被采纳但没落库，结论行分不出这次用的是哪个词（实测 2026-10-09：
+  1100/3761 条声明了 `checkKeyWord`；库里 359 条是「搜索真跑过、没命中」，health=pending 且
+  `search_probed=1`）；② UA 要与设备对齐，得先把当次实际用那条记进结论。
+约束：**记录轴 ≠ 改值**——加轴不改变任何请求条件，UA 取值仍不动（改值会让站点返回的页面变，
+  与库里已有结论不可比）；轴新增或编号含义平移都要 bump `CACHE_VERSION`（AGENTS #5b）；
+  落库只加列、不改判词。
+验收：结论行能记下当次关键词与 UA（以及 `webview_stripped`），新旧口径可区分；在此之上做一次
+  `no_result` 复核批次——单关键词无结果的源经多词复核后才判坏。
+指针：AGENTS.md #5b，core/jvm_health.py，core/checker.py，lessons §五十一 / §五十三
 
 ### 条目：note-half · 正文附注只做了一半：疑似错误页
 状态：todo
@@ -288,7 +288,7 @@
 验收：一条带 `//` 规则的源在本机引擎下的实测结论 + 界面上的归因。
 指针：core/jvm_debug.py
 
-### 条目：explore-depth · 跑批要不要加「发现页」深度档
+### 条目：explore-depth · 批量校验要不要加「发现页」深度档
 状态：todo
 依赖：无
 优先级：P2
