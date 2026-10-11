@@ -22,6 +22,7 @@ import json
 import os
 import shutil
 import unittest
+from unittest import mock
 import uuid
 
 from core.store import Store
@@ -74,7 +75,7 @@ class FailOrphanJobsTests(_DataDirCase):
         """终态的两条不能动——它们的结论是用户要看的东西。"""
         self._seed()
         with Store() as st:
-            self.assertEqual(st.fail_orphan_jobs(), 2)
+            self.assertEqual(set(st.fail_orphan_jobs()), {"running", "pending"})
         self.assertEqual(self._statuses(),
                          {"running": "failed", "pending": "failed",
                           "done": "done", "failed": "failed"})
@@ -93,11 +94,30 @@ class FailOrphanJobsTests(_DataDirCase):
         写回**已经收尾过的**行上，而那行本来可能已经有真实结论了。"""
         self._seed()
         with Store() as st:
-            self.assertEqual(st.fail_orphan_jobs(), 2)
-            self.assertEqual(st.fail_orphan_jobs(), 0)
+            self.assertEqual(set(st.fail_orphan_jobs()), {"running", "pending"})
+            self.assertEqual(st.fail_orphan_jobs(), [])
 
 
 class StartupWiringTests(_DataDirCase):
+    def test_recovered_daemon_operation_is_reported_without_stopping(self) -> None:
+        from backend.app import _report_recovered_daemon_operation
+
+        with mock.patch("core.jvm_validate_daemon.status",
+                        return_value={"current_operation": {"job_id": "job-1"}}), \
+             mock.patch("core.jvm_validate_daemon.stop_idle") as stop, \
+             mock.patch("builtins.print") as output:
+            _report_recovered_daemon_operation(["job-1"])
+        self.assertIn("未自动停止", output.call_args.args[0])
+        stop.assert_not_called()
+
+    def test_daemon_status_read_error_does_not_escape_startup_report(self) -> None:
+        from backend.app import _report_recovered_daemon_operation
+
+        with mock.patch("core.jvm_validate_daemon.status", side_effect=OSError("unavailable")), \
+             mock.patch("builtins.print") as output:
+            _report_recovered_daemon_operation(["job-1"])
+        self.assertIn("unavailable", output.call_args.args[0])
+
     def test_lifespan_sweeps_orphans(self) -> None:
         """服务进程启动时要真的调它。
 
@@ -118,6 +138,8 @@ class StartupWiringTests(_DataDirCase):
         self.assertEqual(statuses["running"], "failed")
         self.assertEqual(statuses["pending"], "failed")
         self.assertEqual(statuses["done"], "done", "终态任务不能被启动流程改写")
+        from backend.jobs import runner
+        self.assertEqual(runner.recover_orphans(), [])
 
 
 if __name__ == "__main__":

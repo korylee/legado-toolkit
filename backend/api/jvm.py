@@ -57,6 +57,92 @@ STATE_LABEL = {
 JVM_RUN_PARAMS = ("keyword", "timeout", "concurrency", "depth")
 
 
+def _classify_validate_operation(daemon: Dict[str, Any], active_jobs: list,
+                                 owner_job: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """保守判断是否可安全停止；证据不完整或冲突时拒绝停止。"""
+    operation = daemon.get("current_operation")
+    if not operation:
+        if active_jobs:
+            return {"owner_inactive": False,
+                    "reason": "存在活跃 JVM 任务但没有对应 daemon operation marker"}
+        if daemon.get("process_alive") and not daemon.get("responsive"):
+            return {"owner_inactive": False,
+                    "reason": "daemon 进程存活但无响应，无法确认是否正在执行操作"}
+        if daemon.get("process_alive") and daemon.get("responsive") is not True:
+            return {"owner_inactive": False,
+                    "reason": "daemon 响应状态未知，不能确认空闲"}
+        if daemon.get("process_alive") and daemon.get("signature_matches") is not True:
+            return {"owner_inactive": False,
+                    "reason": "daemon 签名不匹配，不能确认当前实例空闲"}
+        if daemon.get("process_alive") and daemon.get("identity_verified") is not True:
+            return {"owner_inactive": False,
+                    "reason": "daemon 进程身份未知，不能确认空闲"}
+        return {"owner_inactive": True,
+                "reason": "没有操作 marker，也没有活跃 JVM 任务"}
+
+    operation_id = str(operation.get("operation_id") or "").strip()
+    job_id = str(operation.get("job_id") or "").strip()
+    owner_pid = operation.get("pid")
+    owner_created = str(operation.get("process_created") or "").strip()
+    if not operation_id or not job_id or not owner_pid or not owner_created:
+        return {"owner_inactive": False,
+                "reason": "daemon operation marker 缺少 operation_id、job_id 或 owner 实例身份"}
+    if daemon.get("owner_process_alive") not in (True, False):
+        return {"owner_inactive": False,
+                "reason": "owner 进程状态未知"}
+    if daemon.get("owner_process_alive") and daemon.get("owner_instance_matches") is not True:
+        return {"owner_inactive": False,
+                "reason": "owner PID 活着但进程实例身份不匹配"}
+
+    matching_active = [job for job in active_jobs if str(job.get("id") or "") == job_id]
+    if len(matching_active) > 1:
+        return {"owner_inactive": False,
+                "reason": "同一 job 出现多条活跃记录，owner 状态冲突"}
+    if matching_active:
+        job = matching_active[0]
+        if job.get("kind") != "jvm_run":
+            return {"owner_inactive": False,
+                    "reason": "marker 对应的活跃 job 类型不是 jvm_run"}
+        if owner_job is None or str(owner_job.get("id") or "") != job_id:
+            return {"owner_inactive": False,
+                    "reason": "活跃 job 与 owner job 读取结果不一致"}
+        if daemon.get("owner_process_alive") is True:
+            return {"owner_inactive": False,
+                    "reason": "marker 对应的 job 与 owner 进程实例仍活跃"}
+        if daemon.get("owner_process_alive") is False:
+            return {"owner_inactive": False,
+                    "reason": "job 仍活跃但 marker owner 进程已退出，状态冲突"}
+        return {"owner_inactive": False,
+                "reason": "owner 进程状态未知"}
+
+    if owner_job is None:
+        return {"owner_inactive": False,
+                "reason": "marker 对应 job 不存在，不能证明 owner 已结束"}
+    if str(owner_job.get("id") or "") != job_id:
+        return {"owner_inactive": False,
+                "reason": "查询到的 job ID 与 marker 不一致"}
+    if owner_job.get("kind") != "jvm_run":
+        return {"owner_inactive": False,
+                "reason": "marker 对应的终态 job 类型不是 jvm_run"}
+    if owner_job.get("status") not in ("done", "failed", "cancelled"):
+        return {"owner_inactive": False,
+                "reason": "owner job 状态缺失或不是已知终态"}
+    if daemon.get("owner_process_alive") is not False:
+        return {"owner_inactive": False,
+                "reason": "owner 后端进程尚存活或进程身份状态未知"}
+    if daemon.get("owner_identity_verified") is not True:
+        return {"owner_inactive": False,
+                "reason": "owner 实例身份无法验证"}
+    if not operation.get("instance_id"):
+        return {"owner_inactive": False,
+                "reason": "operation marker 缺少 owner instance_id"}
+    if daemon.get("owner_instance_exited") is not True:
+        return {"owner_inactive": False,
+                "reason": "owner 后端进程实例身份无法验证，不能排除 PID 复用"}
+    return {"owner_inactive": True,
+            "reason": "owner 后端进程实例已退出且对应 job 已终态"}
+
+
 def _daemon_status_with_jobs() -> Dict[str, Any]:
     from core import jvm_validate_daemon
 
@@ -71,27 +157,14 @@ def _daemon_status_with_jobs() -> Dict[str, Any]:
         owner_job_id = str(operation.get("job_id") or "")
         owner_job = st.get_job_summary(owner_job_id) if owner_job_id else None
 
-    if not operation:
-        owner_inactive, owner_state = True, "none"
-    elif owner_job is not None and owner_job.get("status") in ACTIVE_JOB_STATUSES:
-        owner_inactive, owner_state = False, str(owner_job.get("status"))
-    elif owner_job is not None:
-        owner_inactive, owner_state = True, str(owner_job.get("status") or "terminal")
-    elif not daemon.get("owner_process_alive"):
-        owner_inactive, owner_state = True, "owner_process_exited"
-    else:
-        owner_inactive, owner_state = False, "unknown"
-
-    no_active_jobs = not active_jobs
+    classified = _classify_validate_operation(daemon, active_jobs, owner_job)
     process_alive = bool(daemon.get("process_alive"))
     identity_ready = bool(daemon.get("responsive") and daemon.get("identity_verified"))
     has_daemon_record = bool(daemon.get("pid"))
-    stop_allowed = (has_daemon_record and no_active_jobs and owner_inactive
+    stop_allowed = (has_daemon_record and classified["owner_inactive"]
                     and (not process_alive or identity_ready))
-    if active_jobs:
-        stop_reason = "有本机引擎任务未结束，不停止 daemon"
-    elif not owner_inactive:
-        stop_reason = "当前操作归属未确认，不停止 daemon"
+    if not classified["owner_inactive"]:
+        stop_reason = classified["reason"]
     elif process_alive and not identity_ready:
         stop_reason = "进程仍存活但 daemon 未响应或身份无法验证，不停止 daemon"
     elif not has_daemon_record:
@@ -101,8 +174,7 @@ def _daemon_status_with_jobs() -> Dict[str, Any]:
     return {
         **daemon,
         "active_jobs": active_jobs,
-        "owner_state": owner_state,
-        "owner_inactive": owner_inactive,
+        "owner_inactive": classified["owner_inactive"],
         "stop_allowed": stop_allowed,
         "stop_reason": stop_reason,
     }
@@ -110,7 +182,9 @@ def _daemon_status_with_jobs() -> Dict[str, Any]:
 
 @router.get("/daemon/status")
 def jvm_daemon_status():
-    return _daemon_status_with_jobs()
+    snapshot = _daemon_status_with_jobs()
+    snapshot.pop("owner_inactive", None)
+    return snapshot
 
 
 @router.post("/daemon/stop")

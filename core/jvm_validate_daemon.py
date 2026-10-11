@@ -21,6 +21,39 @@ from uuid import uuid4
 from core import jvm_daemon, jvm_direct
 from core.paths import data_path
 
+
+def process_created(pid: int) -> str:
+    """返回 OS 可验证的进程创建时间，防止 PID 复用被当成旧 owner。"""
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        handle = kernel32.OpenProcess(0x1000, False, int(pid))
+        if not handle:
+            raise OSError(ctypes.get_last_error(), "OpenProcess failed")
+        try:
+            created = wintypes.FILETIME()
+            exited = wintypes.FILETIME()
+            kernel = wintypes.FILETIME()
+            user = wintypes.FILETIME()
+            if not kernel32.GetProcessTimes(handle, ctypes.byref(created),
+                                            ctypes.byref(exited), ctypes.byref(kernel),
+                                            ctypes.byref(user)):
+                raise OSError(ctypes.get_last_error(), "GetProcessTimes failed")
+            return "%08x%08x" % (created.dwHighDateTime, created.dwLowDateTime)
+        finally:
+            kernel32.CloseHandle(handle)
+    stat_path = "/proc/%d/stat" % int(pid)
+    with open(stat_path, encoding="ascii") as stream:
+        fields = stream.read().rsplit(")", 1)[1].split()
+    try:
+        return fields[19]
+    except IndexError as exc:
+        raise OSError("process stat 没有 starttime") from exc
+
 DAEMON_CLASS = "io.legado.app.service.ValidateServiceDaemonLauncher"
 INFO_NAME = "validate_daemon.json"
 LOG_NAME = "validate_daemon.log"
@@ -61,7 +94,12 @@ def _begin_current_operation(owner: Optional[Dict[str, Any]]) -> str:
             if k in {"job_id", "chunk", "source_count", "source_name"}}
     if "source_name" in data:
         data["source_name"] = str(data["source_name"]).replace("\r", " ").replace("\n", " ")[:120]
+    try:
+        process_identity = process_created(os.getpid())
+    except (OSError, ValueError, IndexError) as exc:
+        raise ValidateDaemonError("无法记录 operation owner 的进程实例身份：%s" % exc) from exc
     data.update({"operation_id": operation_id, "pid": os.getpid(),
+                 "process_created": process_identity,
                  "started_at": time.time()})
     path = current_operation_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -290,7 +328,18 @@ def status() -> Dict[str, Any]:
         owner_pid = int(owner.get("pid") or 0)
     except (TypeError, ValueError):
         owner_pid = 0
-    owner_alive = _pid_alive(owner_pid) if owner_pid else False
+    owner_alive = _pid_alive(owner_pid) if owner_pid else None
+    owner_identity_matches = False
+    owner_instance_matches = False
+    if owner_alive:
+        try:
+            owner_instance_matches = (
+                bool(owner.get("process_created"))
+                and process_created(owner_pid) == owner.get("process_created"))
+            owner_identity_matches = bool(owner_instance_matches)
+        except (OSError, ValueError, IndexError):
+            owner_instance_matches = False
+            owner_identity_matches = False
     try:
         owner_age = (max(0.0, time.time() - float(owner.get("started_at") or time.time()))
                      if owner else None)
@@ -309,6 +358,9 @@ def status() -> Dict[str, Any]:
         "signature_matches": sig_matches,
         "current_operation": owner or None,
         "owner_process_alive": owner_alive if owner else None,
+        "owner_identity_verified": bool(owner_identity_matches),
+        "owner_instance_matches": bool(owner_instance_matches),
+        "owner_instance_exited": bool(owner.get("process_created") and not owner_alive),
         "owner_age_seconds": round(owner_age, 1) if owner_age is not None else None,
     }
 
@@ -331,7 +383,7 @@ def stop_idle(owner_inactive: bool = False,
             pid = int(state.get("pid") or 0)
             if pid and _pid_alive(pid):
                 return {"stopped": False, "reason": "daemon 进程身份无法确认，拒绝停止"}
-            if info:
+            if info and (not pid or not _pid_alive(pid)):
                 try:
                     info_path().unlink()
                 except OSError:
@@ -342,8 +394,15 @@ def stop_idle(owner_inactive: bool = False,
         if not state.get("identity_verified") or not state.get("responsive"):
             return {"stopped": False,
                     "reason": "daemon 未响应，无法确认空闲和进程身份；未发送停止或强杀"}
+        try:
+            expected_pid = int(_read_info().get("pid") or 0)
+            expected_process_created = process_created(expected_pid) if expected_pid else ""
+        except (OSError, TypeError, ValueError, IndexError):
+            return {"stopped": False, "reason": "daemon 进程实例身份无法验证；拒绝停止"}
         pid = int(state["pid"])
         port = int(state["port"])
+        if not expected_process_created or process_created(pid) != expected_process_created:
+            return {"stopped": False, "reason": "daemon 进程实例身份变化，拒绝停止"}
         try:
             response = _exchange({"id": 0, "op": "stop"}, port, timeout=10)
         except ValidateDaemonError as exc:
@@ -355,23 +414,37 @@ def stop_idle(owner_inactive: bool = False,
         while time.monotonic() < deadline:
             if not _pid_alive(pid):
                 break
+            try:
+                if process_created(pid) != expected_process_created:
+                    return {"stopped": False, "reason": "daemon PID 已被其他进程复用；不清理新实例记录"}
+            except (OSError, ValueError, IndexError):
+                return {"stopped": False, "reason": "停止后无法确认 daemon 进程实例；不清理记录"}
             time.sleep(0.1)
-        if _pid_alive(pid):
+        try:
+            process_still_alive = _pid_alive(pid)
+            if process_still_alive and process_created(pid) != expected_process_created:
+                return {"stopped": False, "reason": "daemon PID 已被其他进程复用；不清理新实例记录"}
+            still_same_instance = process_still_alive
+        except (OSError, ValueError, IndexError):
+            still_same_instance = True
+        if still_same_instance:
             return {"stopped": False, "reason": "daemon 收到停止指令但进程仍存活；未强杀"}
 
         global _PROC, _LOG
         if _PROC is not None and _PROC.pid == pid:
             _PROC = None
-        if _LOG is not None:
-            try:
-                _LOG.close()
-            except OSError:
-                pass
-            _LOG = None
+            if _LOG is not None:
+                try:
+                    _LOG.close()
+                except OSError:
+                    pass
+                _LOG = None
         latest = _read_info()
         if not isinstance(latest, dict):
             latest = {}
-        if int(latest.get("pid") or 0) == pid and int(latest.get("port") or 0) == port:
+        if (int(latest.get("pid") or 0) == pid
+                and int(latest.get("port") or 0) == port
+                and not _pid_alive(pid)):
             try:
                 info_path().unlink()
             except OSError:

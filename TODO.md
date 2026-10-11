@@ -18,33 +18,7 @@
 
 ## 0 · 现在做
 
-> 当前排期：引擎与调试执行链的基础设施已完成；后续调试体验以“入口降噪 → 工作台闭环 → 证据前置 → 编辑能力合入 → DOM 意图化生成”为主线。worker 的 lane、分块恢复、daemon 复用、批量 daemon-only、块级失败原因和操作归属观测均已交付；自动识别并回收失去任务所有者的 daemon 操作仍待做。
-> P0 的 unknown 出口与可执行提示已交付，当前前端待办集中在新调试页的视觉层级、编辑闭环和证据可信度；批量校验不再隐式启动 Gradle。
-
-### 条目：daemon-orphan-recovery · 自动回收失去任务所有者的 Validate 操作
-状态：todo
-依赖：无
-优先级：P1
-背景：设置页现在展示 daemon PID/响应/签名和当前 job / chunk / source，并允许停止**有响应、身份已验证、且无活跃 owner**的 daemon。剩余缺口是：后端中途退出后 marker/job 可能变成孤儿，而 daemon 若已不响应，当前入口会拒绝停止；系统尚不能安全判定并回收这类操作。
-约束：活跃 job 的 daemon 操作不得被杀；不能只凭 ping 或端口行为判死；必须核对 daemon PID/进程身份、marker 的 job 状态与 stale 时长，优先协议 stop，再确认进程退出；owner 缺失、任务仍活跃或进程身份不明时只报告、不自动杀；批量失败不回退 Gradle。
-验收：活跃 owner 场景不杀进程；owner 已终态且 marker 超过租约时，daemon 被安全停止并验证退出后才能重启；owner 未知或无法验证进程身份时不执行停止；marker 只清理匹配当前 operation id 的记录；补齐不联网生命周期测试。
-指针：core/jvm_validate_daemon.py，core/jvm_daemon.py，backend/api/jvm.py，backend/jobs/jvm_exec.py，core/store.py，lessons §六十六 / §七十四
-
-### 条目：debug-run-condition-recovery · 刷新后恢复本次调试的运行条件
-状态：todo
-依赖：无
-优先级：P2
-背景：`useDebugSession.lastRunInput` 只在提交那次运行（`executeRun`）时写入，而且是模块级内存；
-刷新页面后 `resumeRunning()` 挂回任务，运行条件（入口 / 查询 / 缓存）随之丢失，摘要只剩结果
-自带的来源通道。当前**不回落表单值**（那是「下一次跑哪儿」，不是这份结论的条件），所以既不报错
-也不说谎，但「这次跑的是什么」问不出来。
-约束：运行条件的权威来源是那次运行的记录，不是前端内存——`core/jvm_debug` 已经写
-`data/app_probe/runs/<run>/` 的任务信封，恢复要走它（或让 `GET /api/jobs/{id}/detail` 带上当时
-的入参），不在前端重算；**取不到就说取不到**，不许用当前表单值补位；
-详情接口给界面的仍是有界投影，不要把整份源塞进响应。
-验收：刷新页面后挂回那次调试，摘要能显示当时的入口 / 查询 / 缓存；记录确实缺失时显示
-「运行条件不可读取」而不是留空或显示当前表单值；补一条不联网的形状钉子。
-指针：frontend/src/composables/useDebugSession.js，backend/api/jobs.py，core/jvm_debug.py
+> 后续调试体验主线：“入口降噪 → 工作台闭环 → 证据前置 → 编辑能力合入 → DOM 意图化生成”。
 
 ---
 

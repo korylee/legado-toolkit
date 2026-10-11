@@ -32,6 +32,8 @@ class _Store:
 
 
 class DaemonStatusTests(unittest.TestCase):
+    """状态判定只依赖 job 终态与 OS 进程实例证据，不依赖年龄猜测。"""
+
     def _status(self, daemon, jobs=None, owner=None):
         with mock.patch("core.jvm_validate_daemon.status", return_value=daemon), \
              mock.patch.object(jvm_api, "Store", lambda: _Store(jobs, owner)):
@@ -44,9 +46,19 @@ class DaemonStatusTests(unittest.TestCase):
             "current_operation": None, "owner_process_alive": None,
         })
         self.assertTrue(result["stop_allowed"])
+        self.assertNotIn("owner_state", result)
+        self.assertNotIn("owner_reason", result)
         self.assertEqual(result["stop_reason"], "没有活跃 owner，且 daemon 身份可确认，可以安全停止")
 
-    def test_active_jvm_job_blocks_stop(self):
+    def test_idle_daemon_with_signature_mismatch_is_unknown(self):
+        result = self._status({
+            "state": "idle", "pid": 42, "port": 1234, "process_alive": True,
+            "responsive": True, "identity_verified": True, "signature_matches": False,
+            "current_operation": None, "owner_process_alive": None,
+        })
+        self.assertFalse(result["stop_allowed"])
+
+    def test_active_jvm_job_without_marker_is_unknown_and_blocks_stop(self):
         result = self._status({
             "state": "idle", "pid": 42, "port": 1234, "process_alive": True,
             "responsive": True, "identity_verified": True, "signature_matches": True,
@@ -55,17 +67,90 @@ class DaemonStatusTests(unittest.TestCase):
                  "phase": "running_validate", "progress": 2, "total": 10}])
         self.assertFalse(result["stop_allowed"])
         self.assertEqual(result["active_jobs"][0]["id"], "job-1")
-        self.assertIn("任务未结束", result["stop_reason"])
+        self.assertIn("活跃 JVM 任务", result["stop_reason"])
 
-    def test_unknown_live_operation_owner_blocks_stop(self):
+    def test_marker_missing_operation_id_is_unknown(self):
         result = self._status({
             "state": "idle", "pid": 42, "port": 1234, "process_alive": True,
             "responsive": True, "identity_verified": True, "signature_matches": True,
-            "current_operation": {"job_id": "missing-job", "chunk": "2/4"},
-            "owner_process_alive": True,
+            "current_operation": {"job_id": "job-1", "pid": 100,
+                                  "process_created": "owner-start"},
+            "owner_process_alive": True, "owner_instance_matches": True,
+        }, owner={"id": "job-1", "kind": "jvm_run", "status": "running"})
+        self.assertFalse(result["stop_allowed"])
+
+    def test_missing_job_with_live_owner_blocks_stop(self):
+        result = self._status({
+            "state": "idle", "pid": 42, "port": 1234, "process_alive": True,
+            "responsive": True, "identity_verified": True, "signature_matches": True,
+            "current_operation": {"operation_id": "op-1", "job_id": "missing-job",
+                                  "pid": 100, "process_created": "owner-start"},
+            "owner_process_alive": True, "owner_instance_matches": True,
         })
         self.assertFalse(result["stop_allowed"])
-        self.assertEqual(result["owner_state"], "unknown")
+
+    def test_active_job_with_exited_owner_is_conflict(self):
+        result = self._status({
+            "state": "idle", "pid": 42, "port": 1234, "process_alive": True,
+            "responsive": True, "identity_verified": True, "signature_matches": True,
+            "current_operation": {"operation_id": "op-1", "job_id": "job-1", "pid": 100,
+                                  "process_created": "owner-start"},
+            "owner_process_alive": False, "owner_instance_exited": True,
+        }, jobs=[{"id": "job-1", "kind": "jvm_run", "status": "running"}],
+           owner={"id": "job-1", "kind": "jvm_run", "status": "running"})
+        self.assertFalse(result["stop_allowed"])
+
+    def test_terminal_job_with_live_backend_process_is_not_orphan(self):
+        result = self._status({
+            "state": "idle", "pid": 42, "port": 1234, "process_alive": True,
+            "responsive": True, "identity_verified": True, "signature_matches": True,
+            "current_operation": {"operation_id": "op-1", "job_id": "job-1", "pid": 100,
+                                  "process_created": "owner-start"},
+            "owner_process_alive": True, "owner_instance_matches": True,
+            "owner_identity_verified": True,
+        }, owner={"id": "job-1", "kind": "jvm_run", "status": "failed"})
+        self.assertFalse(result["stop_allowed"])
+
+    def test_terminal_job_and_missing_owner_process_state_is_unknown(self):
+        result = self._status({
+            "state": "idle", "pid": 42, "port": 1234, "process_alive": True,
+            "responsive": True, "identity_verified": True, "signature_matches": True,
+            "current_operation": {"operation_id": "op-1", "job_id": "job-1", "pid": 100,
+                                  "process_created": "owner-start", "instance_id": "owner-instance"},
+            "owner_process_alive": None, "owner_identity_verified": False,
+            "owner_instance_exited": False,
+        }, owner={"id": "job-1", "kind": "jvm_run", "status": "failed"})
+        self.assertFalse(result["stop_allowed"])
+
+    def test_terminal_job_and_exited_backend_is_confirmed_orphan(self):
+        """Job 终态、owner 实例退出且 marker 完整 → 只允许进入安全停止闸。"""
+        result = self._status({
+            "state": "idle", "pid": 42, "port": 1234, "process_alive": True,
+            "responsive": True, "identity_verified": True, "signature_matches": True,
+            "current_operation": {"operation_id": "op-1", "job_id": "job-1", "pid": 100,
+                                  "process_created": "owner-start", "instance_id": "owner-instance"},
+            "owner_process_alive": False, "owner_identity_verified": True,
+            "owner_instance_exited": True,
+        }, owner={"id": "job-1", "kind": "jvm_run", "status": "failed"})
+        self.assertTrue(result["stop_allowed"])
+
+    def test_marker_without_job_id_is_unknown(self):
+        result = self._status({
+            "state": "idle", "pid": 42, "port": 1234, "process_alive": True,
+            "responsive": True, "identity_verified": True, "signature_matches": True,
+            "current_operation": {"operation_id": "op-1", "pid": 100},
+            "owner_process_alive": False,
+        })
+        self.assertFalse(result["owner_inactive"])
+        self.assertFalse(result["stop_allowed"])
+
+    def test_unresponsive_process_without_marker_is_unknown(self):
+        result = self._status({
+            "state": "unresponsive", "pid": 42, "port": 1234, "process_alive": True,
+            "responsive": False, "identity_verified": False, "signature_matches": False,
+            "current_operation": None, "owner_process_alive": None,
+        })
+        self.assertFalse(result["stop_allowed"])
 
     def test_unresponsive_process_cannot_be_stopped_from_ui(self):
         result = self._status({
@@ -74,7 +159,15 @@ class DaemonStatusTests(unittest.TestCase):
             "current_operation": None, "owner_process_alive": None,
         })
         self.assertFalse(result["stop_allowed"])
-        self.assertIn("未响应", result["stop_reason"])
+        self.assertIn("无响应", result["stop_reason"])
+
+    def test_status_endpoint_omits_internal_owner_flag(self):
+        snapshot = {"state": "idle", "owner_inactive": True,
+                    "stop_allowed": True, "stop_reason": "idle"}
+        with mock.patch.object(jvm_api, "_daemon_status_with_jobs", return_value=snapshot):
+            result = jvm_api.jvm_daemon_status()
+        self.assertNotIn("owner_inactive", result)
+        self.assertTrue(result["stop_allowed"])
 
     def test_stop_endpoint_calls_only_after_safety_gate(self):
         class _Lane:

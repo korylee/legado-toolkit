@@ -16,6 +16,8 @@ from core import jvm_validate_daemon
 
 
 class ValidateDaemonProtocolTests(unittest.TestCase):
+    """Validate 请求记录可关联到独一的 OS owner 进程实例。"""
+
     def test_params_from_args_keeps_validate_arguments(self) -> None:
         path = pathlib.Path(".tmp_validate_args.properties")
         try:
@@ -79,6 +81,8 @@ class ValidateDaemonProtocolTests(unittest.TestCase):
             def fake_request(cfg, port, timeout):
                 current = json.loads(marker.read_text(encoding="utf-8"))
                 self.assertEqual(current["job_id"], "job-7")
+                self.assertTrue(current.get("process_created"))
+                self.assertTrue(current.get("operation_id"))
                 self.assertEqual(current["chunk"], "3/8")
                 self.assertEqual(cfg["owner_source_name"], "example source")
                 return {"code": 0}
@@ -94,6 +98,40 @@ class ValidateDaemonProtocolTests(unittest.TestCase):
                     {}, "args.properties", socket_timeout=90, owner=owner)
             self.assertEqual(result["code"], 0)
             self.assertFalse(marker.exists())
+
+    def test_current_operation_records_os_process_identity(self) -> None:
+        marker = pathlib.Path("validate_identity_test_current.json")
+        with mock.patch.object(jvm_validate_daemon, "current_operation_path",
+                               return_value=marker), \
+             mock.patch.object(jvm_validate_daemon, "process_created",
+                               return_value="process-start-1"), \
+             mock.patch.object(jvm_validate_daemon, "uuid4",
+                               return_value=mock.Mock(hex="operation-1")), \
+             mock.patch.object(pathlib.Path, "write_text") as write_text:
+            operation_id = jvm_validate_daemon._begin_current_operation(
+                {"job_id": "job-9", "chunk": "1/1"})
+            recorded = json.loads(write_text.call_args.args[0])
+        self.assertEqual(recorded["operation_id"], "operation-1")
+        self.assertEqual(recorded["process_created"], "process-start-1")
+        self.assertEqual(recorded["pid"], os.getpid())
+
+    def test_stop_idle_cleans_info_for_exited_daemon_without_identity_lookup(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="validate_stopped_") as tmp:
+            info_file = pathlib.Path(tmp) / "validate_daemon.json"
+            info_file.write_text(json.dumps({"pid": 42, "port": 1234}), encoding="utf-8")
+            info = {"pid": 42, "port": 1234}
+            state = {"process_alive": False, "current_operation": None,
+                     "pid": 42, "port": 1234}
+            with mock.patch.object(jvm_validate_daemon, "status", return_value=state), \
+                 mock.patch.object(jvm_validate_daemon, "_read_info", return_value=info), \
+                 mock.patch.object(jvm_validate_daemon, "info_path", return_value=info_file), \
+                 mock.patch.object(jvm_validate_daemon, "_pid_alive", return_value=False), \
+                 mock.patch.object(jvm_validate_daemon, "process_created") as process_created:
+                result = jvm_validate_daemon.stop_idle()
+                self.assertFalse(info_file.exists())
+        self.assertTrue(result["stopped"], result)
+        self.assertTrue(result["already_stopped"])
+        process_created.assert_not_called()
 
     def test_stop_idle_refuses_unresponsive_or_unverified_process(self) -> None:
         state = {"process_alive": True, "responsive": False,
@@ -114,6 +152,43 @@ class ValidateDaemonProtocolTests(unittest.TestCase):
         self.assertFalse(result["stopped"])
         exchange.assert_not_called()
 
+    def test_stop_idle_rejects_daemon_pid_instance_change(self) -> None:
+        state = {"process_alive": True, "responsive": True,
+                 "identity_verified": True, "current_operation": None,
+                 "pid": 42, "port": 1234}
+        info = {"pid": 42, "port": 1234}
+        with mock.patch.object(jvm_validate_daemon, "status", return_value=state), \
+             mock.patch.object(jvm_validate_daemon, "_read_info", return_value=info), \
+             mock.patch.object(jvm_validate_daemon, "process_created",
+                               side_effect=["old-instance", "new-instance"]), \
+             mock.patch.object(jvm_validate_daemon, "_exchange") as exchange:
+            result = jvm_validate_daemon.stop_idle()
+        self.assertFalse(result["stopped"])
+        self.assertIn("身份变化", result["reason"])
+        exchange.assert_not_called()
+
+    def test_stop_idle_rejects_reused_pid_after_stop_request(self) -> None:
+        state = {"process_alive": True, "responsive": True,
+                 "identity_verified": True, "current_operation": None,
+                 "pid": 42, "port": 1234}
+        info = {"pid": 42, "port": 1234}
+        alive = [True, True, True, True, True]
+        identities = ["daemon-instance", "daemon-instance", "replacement-instance"]
+        with mock.patch.object(jvm_validate_daemon, "status", return_value=state), \
+             mock.patch.object(jvm_validate_daemon, "_read_info", return_value=info), \
+             mock.patch.object(jvm_validate_daemon, "_pid_alive",
+                               side_effect=lambda _pid: alive.pop(0)), \
+             mock.patch.object(jvm_validate_daemon, "process_created",
+                               side_effect=lambda _pid: identities.pop(0)), \
+             mock.patch.object(jvm_validate_daemon, "_exchange",
+                               return_value={"code": 0}) as exchange:
+            with mock.patch.object(jvm_validate_daemon.time, "monotonic",
+                                   side_effect=[0, 0, 11]):
+                result = jvm_validate_daemon.stop_idle()
+        self.assertFalse(result["stopped"])
+        self.assertIn("被其他进程复用", result["reason"])
+        exchange.assert_called_once_with({"id": 0, "op": "stop"}, 1234, timeout=10)
+
     def test_stop_idle_refuses_changed_operation_owner(self) -> None:
         state = {"process_alive": True, "responsive": True,
                  "identity_verified": True,
@@ -125,25 +200,25 @@ class ValidateDaemonProtocolTests(unittest.TestCase):
         self.assertFalse(result["stopped"])
         exchange.assert_not_called()
 
-        with tempfile.TemporaryDirectory(prefix="validate_stop_") as tmp:
-            info_file = pathlib.Path(tmp) / "validate_daemon.json"
-            info = {"pid": 42, "port": 1234}
-            info_file.write_text(json.dumps(info), encoding="utf-8")
-            state = {"process_alive": True, "responsive": True,
-                     "identity_verified": True, "current_operation": None,
-                     "pid": 42, "port": 1234}
-            with mock.patch.object(jvm_validate_daemon, "status", return_value=state), \
-                 mock.patch.object(jvm_validate_daemon, "info_path", return_value=info_file), \
-                 mock.patch.object(jvm_validate_daemon, "_read_info", return_value=info), \
-                 mock.patch.object(jvm_validate_daemon, "_pid_alive", return_value=False), \
-                 mock.patch.object(jvm_validate_daemon, "_PROC", None), \
-                 mock.patch.object(jvm_validate_daemon, "_LOG", None), \
-                 mock.patch.object(jvm_validate_daemon, "_exchange",
-                                   return_value={"code": 0}) as exchange:
+        info = {"pid": 42, "port": 1234}
+        state = {"process_alive": True, "responsive": True,
+                 "identity_verified": True, "current_operation": None,
+                 "pid": 42, "port": 1234}
+        with mock.patch.object(jvm_validate_daemon, "status", return_value=state), \
+             mock.patch.object(jvm_validate_daemon, "_read_info", return_value=info), \
+             mock.patch.object(jvm_validate_daemon, "_pid_alive",
+                               return_value=False), \
+             mock.patch.object(jvm_validate_daemon, "process_created",
+                               return_value="daemon-start"), \
+             mock.patch.object(jvm_validate_daemon, "_PROC", None), \
+             mock.patch.object(jvm_validate_daemon, "_LOG", None), \
+             mock.patch.object(jvm_validate_daemon, "_exchange",
+                               return_value={"code": 0}) as exchange:
+            with mock.patch.object(jvm_validate_daemon.time, "monotonic",
+                                   side_effect=[0, 11]):
                 result = jvm_validate_daemon.stop_idle()
-            self.assertTrue(result["stopped"], result)
-            exchange.assert_called_once_with({"id": 0, "op": "stop"}, 1234, timeout=10)
-            self.assertFalse(info_file.exists())
+        self.assertTrue(result["stopped"], result)
+        exchange.assert_called_once_with({"id": 0, "op": "stop"}, 1234, timeout=10)
 
     def test_ping_rejects_other_daemon_kind(self) -> None:
         with mock.patch.object(jvm_validate_daemon, "_exchange",

@@ -1194,8 +1194,8 @@ class Store:
         return self.conn.execute("SELECT COUNT(*) AS c FROM checks").fetchone()["c"]
 
     # ---------------------------------------------------------------- jobs
-    def fail_orphan_jobs(self) -> int:
-        """把**上次进程留下的**非终态任务标成 failed，返回改了几条。
+    def fail_orphan_jobs(self) -> List[str]:
+        """把**上次进程留下的**非终态任务标成 failed，返回被恢复的 job id。
 
         任务活在进程内的 asyncio task 里（``backend/jobs/runner.py`` 的 ``TASKS``），
         进程一死它们必然不存在——所以「本进程启动时，库里任何非终态任务都是孤儿」
@@ -1217,12 +1217,15 @@ class Store:
             "%Y-%m-%d %H:%M:%S",
             time.localtime(time.time() + JOBS_TTL_DAYS * 86400))
         with self.conn:
-            cur = self.conn.execute(
+            rows = self.conn.execute(
+                "SELECT id FROM jobs WHERE status IN ('running', 'pending')").fetchall()
+            recovered_ids = [str(row["id"]) for row in rows]
+            self.conn.execute(
                 "UPDATE jobs SET status = 'failed', phase = 'finished', result_json = ?, updated_at = ?, expires_at = ?"
                 " WHERE status IN ('running', 'pending')",
                 (json.dumps({"error": "进程重启，任务没写终态（崩溃或被强杀）"},
                             ensure_ascii=False), now(), expiry))
-        return cur.rowcount or 0
+        return recovered_ids
 
     def sweep_jobs(self) -> int:
         """清掉过期的任务，返回清了几条。**在建新任务时顺带扫**（对齐 export.py 的

@@ -281,8 +281,8 @@ async def _run(job_id: str, kind: str, payload: Dict[str, Any],
             TASKS.pop(job_id, None)
 
 
-def recover_orphans() -> int:
-    """把上次进程留下的孤儿任务收尾（标成 failed），返回收了几条。
+def recover_orphans() -> list[str]:
+    """把上次进程留下的孤儿任务收尾（标成 failed），返回恢复的 job ids。
 
     **必须在服务进程启动时调一次**：任务活在进程内的 asyncio task 里（``TASKS``），
     进程一死它们就没了，而库里那行还写着 running/pending。调用点的选择见
@@ -294,10 +294,10 @@ def recover_orphans() -> int:
     没有任何痕迹。判据与假定见 ``Store.fail_orphan_jobs``。
     """
     with Store() as st:
-        n = st.fail_orphan_jobs()
-    if n:
-        print("警告: 上次进程结束时 %d 个任务没写终态，已标为 failed" % n, flush=True)
-    return n
+        recovered_ids = st.fail_orphan_jobs()
+    if recovered_ids:
+        print("警告: 上次进程结束时 %d 个任务没写终态，已标为 failed" % len(recovered_ids), flush=True)
+    return recovered_ids
 
 
 def sweep_expired() -> int:

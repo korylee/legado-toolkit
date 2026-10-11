@@ -22,6 +22,24 @@ from core.plocks import ProcLock, read_owner
 from core.store import Store
 
 
+def _report_recovered_daemon_operation(recovered_job_ids: list[str]) -> None:
+    if not recovered_job_ids:
+        return
+    from core import jvm_validate_daemon
+
+    try:
+        operation = jvm_validate_daemon.status().get("current_operation") or {}
+    except Exception as exc:
+        print("警告: 无法读取 Validate daemon 操作状态，未发送 stop：%s" % exc,
+              flush=True)
+        return
+    job_id = str(operation.get("job_id") or "")
+    if job_id in set(recovered_job_ids):
+        print("警告: Validate daemon 孤儿状态无法确认，未自动停止："
+              "后端 job 已恢复为终态，但 daemon 请求是否仍在执行无法证明；保留 daemon，不发送 stop",
+              flush=True)
+
+
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
     # 单实例哨兵：第二个后端进程到此为止。误开 `--workers`、旧进程没退干净，
@@ -43,7 +61,8 @@ async def _lifespan(_app: FastAPI):
         #   - 模块级 import：测试与 CLI 顺手 import 一下就会写库
         #   - backend/__main__.py：--reload 下跑在监督进程里，热重载重启子进程时不会执行
         #   - lifespan：跑在**服务进程**里，每次启动/重启都执行一次
-        runner.recover_orphans()
+        recovered_job_ids = runner.recover_orphans()
+        _report_recovered_daemon_operation(recovered_job_ids)
         runner.sweep_expired()
         await runner.start_job_sweeper()
         yield
