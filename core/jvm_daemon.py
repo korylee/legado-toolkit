@@ -21,14 +21,14 @@ daemon 只换「怎么拉起」：请求走一行 JSON 过 socket，产物（NDJ
 
 ## 版本键
 
-`source_sig()` = appservice 的 Kotlin 源码指纹 + dump 指纹。**改了 Kotlin 不重启进程，
-进程里跑的还是旧类**，而那看起来像「规则改了没生效」——所以 sig 变了就换进程。
-daemon 自己不判版本（它不知道磁盘上现在是什么），只在 `op=ping` 时把起它时收到的 sig
-原样回吐，由客户端比。
+`source_sig()` = appservice 的 Kotlin 源码指纹 + runtime snapshot 内容指纹。**改了 Kotlin 或运行环境不重启进程，
+进程里跑的还是旧类/旧环境**，而那看起来像「规则改了没生效」——所以 sig 变了就换进程。daemon 自己
+不判版本（它不知道磁盘上现在是什么），只在 `op=ping` 时把起它时收到的 sig 原样回吐，由客户端比。
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import pathlib
@@ -69,20 +69,32 @@ def log_path() -> pathlib.Path:
     return pathlib.Path(data_path("app_probe", LOG_NAME))
 
 
+def _runtime_sig() -> str:
+    path = jvm_direct.dump_path()
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        canonical = json.dumps(raw, ensure_ascii=False, sort_keys=True,
+                               separators=(",", ":"))
+    except (OSError, ValueError, TypeError):
+        try:
+            canonical = path.read_bytes().decode("utf-8", errors="replace")
+        except OSError:
+            canonical = ""
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+
+
 def source_sig(dump: Optional[Dict[str, Any]] = None) -> str:
-    """版本键：Kotlin 源码（数量+mtime+总大小）+ dump 的 mtime。
+    """版本键：Kotlin 源码（数量+mtime+总大小）+ runtime snapshot 内容指纹。
 
-    **不是密码学哈希**，D1 够用：它的职责只是「改了代码别用旧进程」。文件大小也进来是
-    为了挡住同一秒内的连续编辑（mtime 精度够、但 truncate 成秒就不够了）。
-
-    **刻意不缓存**：本机 26 个 .kt 时单次约 0.5ms（2026-10-06，Windows/NTFS 实测），
-    而它的结果必须逐次反映真实文件状态——加缓存省下的时间抵不上多出来的失效条件。"""
+    **不是密码学哈希**，职责是「改了代码或执行环境别用旧进程」。snapshot 使用稳定内容
+    指纹而不是文件 mtime；Gradle 重写同一份环境描述不应无故让常驻 daemon 失效。
+    **刻意不缓存**：源码与 snapshot 每次重新读取，必须逐次反映真实执行环境；加缓存省下的时间抵不上多出来的失效条件。"""
     files = list((jvm_direct.AGSVC / "test").rglob("*.kt"))
     mt = max((f.stat().st_mtime for f in files), default=0.0)
     size = sum(f.stat().st_size for f in files)
-    d = jvm_direct.dump_path()
-    dm = d.stat().st_mtime if d.exists() else 0.0
-    return "kt%d-%d-%d-dump%d" % (len(files), int(mt), size, int(dm))
+    runtime = _runtime_sig()
+
+    return "kt%d-%d-%d-runtime%s" % (len(files), int(mt), size, runtime)
 
 
 # ---------------------------------------------------------------- 进程间协议

@@ -114,6 +114,10 @@ object ValidateServiceDaemon {
                 writer.flush()
                 return true
             }
+            val ownerJob = req.str("owner_job_id").ifBlank { "unknown" }
+            val ownerChunk = req.str("owner_chunk").ifBlank { "unknown" }
+            val ownerSource = req.str("owner_source_name").ifBlank { "unknown" }
+            println("[appservice] Validate daemon 开始请求 job=$ownerJob chunk=$ownerChunk source=$ownerSource")
             val started = System.currentTimeMillis()
             var error = ""
             val code = try {
@@ -128,7 +132,7 @@ object ValidateServiceDaemon {
             val cost = System.currentTimeMillis() - started
             writer.println(respond(id, code, cost, error))
             writer.flush()
-            println("[appservice] Validate daemon 请求完成：code=$code ${cost}ms")
+            println("[appservice] Validate daemon 请求完成 job=$ownerJob chunk=$ownerChunk source=$ownerSource code=$code ${cost}ms")
             return true
         }
     }

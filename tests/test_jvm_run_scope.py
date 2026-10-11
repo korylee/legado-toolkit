@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""跑批的范围：**只跑选中的那几条**（S5-A 第二期）。
+"""批量校验的范围：**只跑选中的那几条**（S5-A 第二期）。
 
 守三件事，都是「不报错但结果不对」的那一类：
 
@@ -49,6 +49,7 @@ class _Base(unittest.TestCase):
         (self.probe / "appservice" / "legado-gradle.bat").write_text("@echo off\n",
                                                                     encoding="utf-8")
         self.gradle_calls = 0
+        self.daemon_calls = 0
         self.gradle_kwargs = {}
         self.runtime_seen = None
         self.gradle_result = 0
@@ -71,9 +72,16 @@ class _Base(unittest.TestCase):
             # 「data/ 里没有 dump」这个巧合，snapshot 一存在就整批变红。
             mock.patch.object(jvm_direct, "dump_path",
                               lambda: self.probe / "data" / "app_probe" / "test_jvm_env.json"),
+            mock.patch.object(jvm_direct, "load_dump",
+                              lambda warn_stale=True: {"source": "test"}),
             mock.patch.object(jvm_exec, "_write_meta", lambda rows: "testbatch"),
             mock.patch.object(jvm_api.settings_store, "LIMITS", test_limits),
             mock.patch.object(jvm_exec, "_run_gradle", self._fake_gradle),
+            mock.patch("core.jvm_validate_daemon.prepare",
+                        lambda *a, **kw: {"outcome": "started", "reason": ""}),
+            mock.patch("core.jvm_validate_daemon.probe",
+                        lambda *a, **kw: {"sig": "sig"}),
+            mock.patch("core.jvm_validate_daemon.run", self._fake_daemon),
             mock.patch.object(jvm_api.settings_store, "load",
                               lambda: {"network": {"proxy": ""}, "jvm": {"app_repo": "X:/repo", "keyword": "我",
                                                "timeout": 25, "concurrency": 8,
@@ -102,6 +110,20 @@ class _Base(unittest.TestCase):
         out.write_text(json.dumps({"url": "https://a.com", "state": "ok"}),
                        encoding="utf-8")
         return self.gradle_result
+
+    def _fake_daemon(self, dump, args_path, socket_timeout=None, **kwargs) -> dict:
+        self.daemon_calls += 1
+        self.args_seen = pathlib.Path(args_path).read_text(encoding="utf-8")
+        source_path = next(line.split("=", 1)[1] for line in self.args_seen.splitlines()
+                           if line.startswith("file="))
+        self.batch_seen = json.loads(pathlib.Path(source_path).read_text(encoding="utf-8"))
+        if self.no_output:
+            return {"code": 0, "cost_ms": 1}
+        out = pathlib.Path(args_path).parent / "results.jsonl"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps({"url": "https://a.com", "state": "ok"}),
+                       encoding="utf-8")
+        return {"code": 0, "cost_ms": 1}
 
     def _put_source(self, url: str, name: str) -> None:
         # 用真 API 写源（`upsert_sources` 会建表+算 fingerprint）：比手写 INSERT 更接近
@@ -172,7 +194,7 @@ class ScopeTests(_Base):
             if started.is_set():
                 break
             await asyncio.sleep(0.01)
-        self.assertTrue(started.is_set(), "Gradle worker 未启动")
+        self.assertTrue(started.is_set(), "daemon worker 未启动")
         task.cancel()
         await asyncio.sleep(0.05)
         self.assertFalse(task.done(), "取消不应绕过仍在运行的 worker")
@@ -191,8 +213,8 @@ class ScopeTests(_Base):
         args_file.write_text("file=%s\nout=%s\n" % (source_file, out_path), encoding="utf-8")
         manifest = jvm_exec._build_jvm_manifest(
             run_dir=run_dir, source_file=source_file, args_file=args_file,
-            out_path=out_path, single=False, execution_plan="gradle",
-            allow_gradle_fallback=True, runtime={"app_repo": "X:/repo"},
+            out_path=out_path, single=False, execution_plan="validate_daemon",
+            allow_gradle_fallback=False, runtime={"app_repo": "X:/repo"},
             readiness={"ok": True}, execution_readiness={},
             readiness_fingerprint="", readiness_checked_at="", source_count=2,
             urls=["https://a.com", "https://b.com"], params={"keyword": "我", "timeout": 25, "concurrency": 8, "depth": "search"}, chunks=[2])
@@ -200,13 +222,13 @@ class ScopeTests(_Base):
         payload = {"prep": {"started": True}, "manifest": manifest,
                    **control}
 
-        def blocking_gradle(*, args_path=None, runtime=None, **kwargs):
+        def blocking_daemon(_dump, args_path, socket_timeout=None, owner=None):
             control["started"].set()
             control["release"].wait(2)
-            return {"exit": 1, "stdout": "", "stderr": "cancelled"}
+            return {"code": 1, "error": "cancelled"}
 
         async def go():
-            with mock.patch.object(jvm_exec, "_run_gradle", side_effect=blocking_gradle):
+            with mock.patch("core.jvm_validate_daemon.run", side_effect=blocking_daemon):
                 await self._cancelled_job(payload)
 
         asyncio.run(go())
@@ -305,43 +327,27 @@ class ScopeTests(_Base):
                 "queued-job", Store(self.db), submitted["payload"]))
 
         self.assertTrue(result["ok"])
-        self.assertEqual(self.runtime_seen, original)
+        self.assertEqual(submitted["payload"]["runtime"], original)
+        self.assertEqual(result["execution_mode"], "validate_daemon")
+        self.assertEqual(self.gradle_calls, 0)
 
-    def test_readiness_environment_drift_does_not_store_result(self) -> None:
-        self.gradle_result = {
-            "exit": 0,
-            "stdout": "",
-            "stderr": "",
-            "runtime_snapshot": {
-                "differences": {
-                    "readinessEnvironment": {
-                        "JAVA_HOME": {
-                            "declared": "X:/jdk",
-                            "actual": "Y:/jdk",
-                        },
-                    },
-                },
-            },
-        }
-        result = self._call(urls=["https://a.com"])
+    def test_execution_readiness_drift_does_not_store_result(self) -> None:
+        reason = "实际启动环境 JAVA_HOME 与 readiness 不一致"
+        with mock.patch.object(jvm_exec, "execution_readiness",
+                               return_value={"ok": False, "reason": reason}), \
+             mock.patch("core.jvm_validate_daemon.prepare") as prepare:
+            result = self._call()
         self.assertFalse(result["ok"])
-        self.assertIn("实际启动环境", result["reason"])
         self.assertIn("JAVA_HOME", result["reason"])
-        self.assertEqual(result["gradle"], self.gradle_result)
+        prepare.assert_not_called()
+        self.assertEqual(self.gradle_calls, 0)
         with Store(self.db) as st:
             self.assertNotIn("https://a.com", st.checks_map())
 
-    def test_missing_runtime_snapshot_is_diagnostic_only(self) -> None:
-        self.gradle_result = {
-            "exit": 0,
-            "stdout": "",
-            "stderr": "",
-            "runtime_snapshot": {"error": "actual snapshot missing"},
-        }
+    def test_daemon_only_result_has_no_gradle_snapshot_diagnostic(self) -> None:
         result = self._call(urls=["https://a.com"])
         self.assertTrue(result["ok"])
-        self.assertEqual(result["runtime_snapshot"]["error"],
-                         "actual snapshot missing")
+        self.assertNotIn("runtime_snapshot", result)
 
     def test_selector_matches_despite_case_and_trailing_slash(self) -> None:
         """**归一后才比**：库里那条的原文是 `https://A.com/`（大写 + 尾斜杠），
@@ -360,7 +366,8 @@ class ScopeTests(_Base):
         「条数上限」静默截断过——界面上只会看到「选了 3 条」而实际跑了 2 条）。"""
         self._call(urls=["https://a.com", "https://b.com", "https://c.com"])
         self.assertEqual(len(self._batch()), 3)
-        self.assertEqual(self.gradle_calls, 1)
+        self.assertEqual(self.gradle_calls, 0)
+        self.assertEqual(self.daemon_calls, 1)
 
     def test_unmatched_selection_is_refused_with_a_reason(self) -> None:
         r = self._call(urls=["https://nope.com"])
@@ -460,7 +467,7 @@ class GradleDiagnosticTests(_Base):
 
 
 class ResultShapeTests(_Base):
-    """跑批结果体与**本地校验那条同形状**（十-2：单条校验切引擎）。
+    """批量校验结果体与**本地校验那条同形状**（十-2：单条校验切引擎）。
 
     前端读 items / transitions 的是同一段代码，所以两边少一个键就等于「某一格
     永远不更新」——不报错，只是那一列看着像没校验过。这里走**真的** `store_checks`
@@ -522,7 +529,7 @@ class ResultShapeTests(_Base):
         self.assertEqual(out["transitions"]["first_checked"], 0)
 
     def test_single_prefers_validate_daemon(self) -> None:
-        def fake_daemon(_dump, args_file):
+        def fake_daemon(_dump, args_file, owner=None):
             args = pathlib.Path(args_file).read_text(encoding="utf-8")
             out = pathlib.Path(next(line.split("=", 1)[1] for line in args.splitlines()
                                     if line.startswith("out=")))
@@ -562,7 +569,7 @@ class ResultShapeTests(_Base):
             events.append(("execution_readiness", dump))
             return executable
 
-        def fake_daemon(_dump, args_file):
+        def fake_daemon(_dump, args_file, owner=None):
             events.append(("daemon", None))
             args = pathlib.Path(args_file).read_text(encoding="utf-8")
             out = pathlib.Path(next(line.split("=", 1)[1] for line in args.splitlines()
@@ -615,7 +622,7 @@ class ResultShapeTests(_Base):
         self.assertEqual(self.gradle_calls, 1)
 
     def test_single_uses_daemon_when_gradle_readiness_is_incomplete(self) -> None:
-        def fake_daemon(_dump, args_file):
+        def fake_daemon(_dump, args_file, owner=None):
             args = pathlib.Path(args_file).read_text(encoding="utf-8")
             out = pathlib.Path(next(line.split("=", 1)[1] for line in args.splitlines()
                                     if line.startswith("out=")))
@@ -784,30 +791,33 @@ class ChunkExecutionTests(_Base):
                                "concurrency": 8, "depth": "search",
                                "chunk_size": 1}}
 
-    def test_batch_runs_one_gradle_call_per_chunk(self) -> None:
+    def test_batch_runs_one_daemon_call_per_chunk(self) -> None:
         with mock.patch.object(jvm_api.settings_store, "load",
                                lambda: dict(self._CHUNK_SETTINGS)):
             result = self._call()
         self.assertTrue(result["ok"], result)
-        self.assertEqual(self.gradle_calls, 3)
+        self.assertEqual(self.gradle_calls, 0)
+        self.assertEqual(self.daemon_calls, 3)
         self.assertEqual(len(result["chunk_reports"]), 3)
         self.assertEqual(result["count"], 3)
 
     def test_chunk_failure_aborts_remaining_chunks(self) -> None:
         calls = {"n": 0}
 
-        def flaky_gradle(args_path=None, runtime=None, **kwargs):
+        def flaky_daemon(dump, args_path, socket_timeout=None, owner=None):
             calls["n"] += 1
             if calls["n"] == 2:
-                return {"exit": 1, "stdout": "", "stderr": "boom"}
-            return self._fake_gradle(args_path=args_path, runtime=runtime)
+                return {"code": 1, "error": "boom"}
+            return self._fake_daemon(dump, args_path, socket_timeout=socket_timeout)
 
         with mock.patch.object(jvm_api.settings_store, "load",
-                               lambda: dict(self._CHUNK_SETTINGS)),              mock.patch.object(jvm_exec, "_run_gradle", side_effect=flaky_gradle):
+                               lambda: dict(self._CHUNK_SETTINGS)), \
+             mock.patch("core.jvm_validate_daemon.run", side_effect=flaky_daemon):
             result = self._call()
         self.assertFalse(result["ok"])
         self.assertIn("第 2/3 块失败", result["reason"])
         self.assertEqual(calls["n"], 2)
+        self.assertEqual(self.gradle_calls, 0)
         self.assertFalse(result["chunk_reports"][1]["ok"])
 
     def test_retry_skips_completed_chunks(self) -> None:
@@ -820,11 +830,11 @@ class ChunkExecutionTests(_Base):
 
         calls = {"n": 0}
 
-        def flaky_gradle(args_path=None, runtime=None, **kwargs):
+        def flaky_daemon(dump, args_path, socket_timeout=None, owner=None):
             calls["n"] += 1
             if calls["n"] == 2:
-                return {"exit": 1, "stdout": "", "stderr": "boom"}
-            return self._fake_gradle(args_path=args_path, runtime=runtime)
+                return {"code": 1, "error": "boom"}
+            return self._fake_daemon(dump, args_path, socket_timeout=socket_timeout)
 
         async def go():
             with mock.patch.object(jvm_api, "Store",
@@ -832,8 +842,8 @@ class ChunkExecutionTests(_Base):
                                    lambda *a, **kw: Store(self.db)),                  mock.patch.object(jvm_api.runner, "submit",
                                    side_effect=capture_submit),                  mock.patch.object(jvm_api.settings_store, "load",
                                    lambda: dict(self._CHUNK_SETTINGS)),                 mock.patch("core.jvm_health.store_checks",
-                            lambda *a, **kw: 0),                  mock.patch.object(jvm_exec, "_run_gradle",
-                                   side_effect=flaky_gradle):
+                            lambda *a, **kw: 0),                  mock.patch("core.jvm_validate_daemon.run",
+                                   side_effect=flaky_daemon):
                 await jvm_api.jvm_run(
                     JvmRunRequest(urls=["https://a.com", "https://b.com"]))
                 return await jvm_exec.run_jvm_job(
@@ -848,8 +858,8 @@ class ChunkExecutionTests(_Base):
                                    lambda *a, **kw: Store(self.db)),                  mock.patch.object(jvm_exec, "Store",
                                    lambda *a, **kw: Store(self.db)),                  mock.patch.object(jvm_api.settings_store, "load",
                                    lambda: dict(self._CHUNK_SETTINGS)),                 mock.patch("core.jvm_health.store_checks",
-                            lambda *a, **kw: 0),                  mock.patch.object(jvm_exec, "_run_gradle",
-                                   side_effect=flaky_gradle):
+                            lambda *a, **kw: 0),                  mock.patch("core.jvm_validate_daemon.run",
+                                   side_effect=flaky_daemon):
                 return await jvm_exec.run_jvm_job(
                     "resume-job-2", Store(self.db), saved_payload)
 
@@ -904,7 +914,7 @@ class BatchDaemonTests(_Base):
                         "chunk_size": 1}}
 
     def _fake_run_writing_results(self, calls: list):
-        def fake_run(_dump, args_file, socket_timeout=None):
+        def fake_run(_dump, args_file, socket_timeout=None, owner=None):
             args = pathlib.Path(args_file).read_text(encoding="utf-8")
             out = pathlib.Path(next(line.split("=", 1)[1] for line in args.splitlines()
                                     if line.startswith("out=")))
@@ -916,6 +926,33 @@ class BatchDaemonTests(_Base):
                            encoding="utf-8")
             return {"code": 0, "cost_ms": 3, "error": ""}
         return fake_run
+
+    def test_daemon_prepare_failures_fail_batch_without_gradle(self) -> None:
+        cases = (
+            ("busy", {"outcome": "busy", "reason": "daemon busy"}),
+            ("stale", {"outcome": "failed", "reason": "runtime snapshot stale"}),
+            ("exception", RuntimeError("prepare crashed")),
+        )
+        for name, outcome in cases:
+            with self.subTest(name=name):
+                if isinstance(outcome, Exception):
+                    prepare = mock.patch("core.jvm_validate_daemon.prepare",
+                                         side_effect=outcome)
+                    expected = str(outcome)
+                else:
+                    prepare = mock.patch("core.jvm_validate_daemon.prepare",
+                                         return_value=outcome)
+                    expected = outcome["reason"]
+                with mock.patch("core.jvm_direct.load_dump", return_value=self._DUMP), \
+                     prepare, \
+                     mock.patch.object(jvm_exec, "_run_gradle") as gradle:
+                    result = self._call()
+                self.assertFalse(result["ok"], result)
+                gradle.assert_not_called()
+                self.assertEqual(result["gradle_chunks"], 0)
+                self.assertIn(expected, result["reason"])
+
+
 
     def test_batch_uses_daemon(self) -> None:
         calls: dict = {}
@@ -943,90 +980,25 @@ class BatchDaemonTests(_Base):
         # 块墙钟落进报告；数值随环境漂，只钉存在与非负
         self.assertGreaterEqual(report.get("cost_sec", -1), 0)
 
-    def test_batch_daemon_busy_falls_back_without_killing_it(self) -> None:
-        """prepare 判忙（不杀不启）→ 首块直接回落，下一块最多重试一次；
-        批量层全程不触碰 ensure / start / _kill_proc。"""
-        busy = {"outcome": "busy", "reason": "daemon 进程还在但 ping 没应答，本批不准备也不杀"}
-        with mock.patch("core.jvm_direct.load_dump", return_value=self._DUMP), \
-            mock.patch("core.jvm_validate_daemon.prepare", return_value=busy) as prepare, \
-            mock.patch("core.jvm_validate_daemon.probe", return_value=None) as probe, \
-            mock.patch("core.jvm_validate_daemon.ensure") as ensure, \
-            mock.patch("core.jvm_validate_daemon.start") as start, \
-            mock.patch("core.jvm_validate_daemon._kill_proc") as kill:
-            result = self._call()
-        prepare.assert_called_once()
-        probe.assert_not_called()
-        ensure.assert_not_called()
-        start.assert_not_called()
-        kill.assert_not_called()
-        self.assertEqual(self.gradle_calls, 1, "回落必须真用 Gradle 跑完本块")
-        report = result["chunk_reports"][0]
-        self.assertEqual(report["execution_mode"], "gradle")
-        self.assertIn("daemon", report.get("daemon_failure") or "")
-        self.assertEqual(result["execution_mode"], "gradle_fallback")
-        self.assertEqual(result["daemon_prepare"],
-                         {"outcome": "busy", "reason": busy["reason"]})
-
-    def test_gradle_fallback_hands_job_id_to_the_phase_watch(self) -> None:
-        """Gradle 回落的调用必须带上任务号：相位观察靠它写库。
-
-        忘了传**不报错**——只是整个块头都写着「启动 Gradle」（2026-10-09 那个 bug：
-        进度 150/400 时相位还是 starting_gradle），所以这里钉一下接线。
-        """
-        stale = {"outcome": "failed", "retryable": False,
-                 "reason": "runtime_snapshot：snapshot 早于 appservice Kotlin 源码，请先刷新"}
-        with mock.patch("core.jvm_direct.load_dump", return_value=self._DUMP), \
-            mock.patch("core.jvm_validate_daemon.prepare", return_value=stale):
-            result = self._call()
-        self.assertEqual(self.gradle_calls, 1, "准备失败后本块必须走 Gradle")
-        self.assertEqual(result["execution_mode"], "gradle_fallback")
-        self.assertEqual(self.gradle_kwargs.get("job_id"), "testjob")
-
-    def test_batch_busy_retries_once_then_reuses_recovered_daemon(self) -> None:
-        """批次初始忙：首块直接回落，下一块只重试一次；恢复后余块复用。"""
-        calls: dict = {}
-        busy = {"outcome": "busy", "reason": "daemon 忙，本批暂不准备"}
-        with mock.patch.object(jvm_api.settings_store, "load",
-                               lambda: dict(self._CHUNKED)), \
-            mock.patch("core.jvm_direct.load_dump", return_value=self._DUMP), \
-            mock.patch("core.jvm_validate_daemon.prepare", return_value=busy), \
-            mock.patch("core.jvm_validate_daemon.probe",
-                        return_value={"pid": 7, "port": 7777, "sig": "s"}) as probe, \
-            mock.patch("core.jvm_validate_daemon.run",
-                        side_effect=self._fake_run_writing_results(calls)):
-            result = self._call()
-
-        self.assertTrue(result["ok"], result)
-        probe.assert_has_calls([mock.call(self._DUMP), mock.call(self._DUMP)])
-        self.assertEqual(probe.call_count, 2)
-        self.assertEqual(self.gradle_calls, 1)
-        self.assertEqual(result["daemon_chunks"], 2)
-        self.assertEqual(result["gradle_chunks"], 1)
-        self.assertEqual(result["chunk_reports"][0]["execution_mode"], "gradle")
-        self.assertEqual(result["chunk_reports"][1]["execution_mode"], "validate_daemon")
-        self.assertEqual(result["chunk_reports"][2]["execution_mode"], "validate_daemon")
-    def test_batch_daemon_error_code_falls_back_with_reason(self) -> None:
-        """daemon 应答 code!=0 → 回落 Gradle，原因逐字带到块报告；
-        daemon 的半成品结果不得冒充结论。"""
+    def test_batch_daemon_error_is_reported_without_gradle(self) -> None:
         calls: dict = {}
         with mock.patch("core.jvm_direct.load_dump", return_value=self._DUMP), \
-            mock.patch("core.jvm_validate_daemon.prepare",
+             mock.patch("core.jvm_validate_daemon.prepare",
                         return_value={"outcome": "ready",
                                       "info": {"pid": 1, "port": 9999, "sig": "s"}}), \
-            mock.patch("core.jvm_validate_daemon.probe",
+             mock.patch("core.jvm_validate_daemon.probe",
                         return_value={"pid": 1, "port": 9999, "sig": "s"}), \
-            mock.patch("core.jvm_validate_daemon.run",
-                        side_effect=lambda d, a, socket_timeout=None:
-                            {"code": 2, "cost_ms": 3, "error": "daemon 内部错误"}):
+             mock.patch("core.jvm_validate_daemon.run",
+                        return_value={"code": 2, "cost_ms": 3, "error": "daemon 内部错误"}), \
+             mock.patch.object(jvm_exec, "_run_gradle") as gradle:
             result = self._call()
-        self.assertEqual(self.gradle_calls, 1)
+        gradle.assert_not_called()
         report = result["chunk_reports"][0]
-        self.assertEqual(report["execution_mode"], "gradle")
-        self.assertIn("code=2", report.get("daemon_failure") or "")
-        self.assertIn("daemon 内部错误", report.get("daemon_failure") or "")
-        self.assertEqual(result["daemon_chunks"], 0)
-        self.assertEqual(result["gradle_chunks"], 1)
-        # 回落路径的结果行来自 Gradle fake（一行），daemon 没写过
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["execution_mode"], "validate_daemon")
+        self.assertIn("code=2", report["daemon_failure"])
+        self.assertIn("daemon 内部错误", report["daemon_failure"])
+        self.assertEqual(result["gradle_chunks"], 0)
         self.assertEqual(calls, {})
 
     def test_batch_cold_start_prepares_once_and_reuses_across_chunks(self) -> None:
@@ -1053,46 +1025,18 @@ class BatchDaemonTests(_Base):
         self.assertEqual(result["execution_mode"], "validate_daemon")
         self.assertEqual(result["daemon_prepare"], {"outcome": "started", "reason": ""})
 
-    def test_batch_prepare_failure_falls_back_with_reason(self) -> None:
-        """准备失败（如启动超时）→ 原因逐字进结果，各块照旧回落 Gradle，
-        批不炸。"""
-        reason = "Validate daemon 180s 内没起来（看 validate_daemon.log）"
-        with mock.patch("core.jvm_direct.load_dump", return_value=self._DUMP), \
-            mock.patch("core.jvm_validate_daemon.prepare",
-                        return_value={"outcome": "failed", "reason": reason}), \
-            mock.patch("core.jvm_validate_daemon.probe", return_value=None):
-            result = self._call()
-        self.assertTrue(result["ok"], result)
-        self.assertEqual(self.gradle_calls, 1)
-        self.assertEqual(result["execution_mode"], "gradle_fallback")
-        self.assertEqual(result["daemon_prepare"],
-                         {"outcome": "failed", "reason": reason})
-
-    def test_batch_prepare_exception_is_contained(self) -> None:
-        """prepare 意外抛异常也不能带走整批：兜底成 failed 带原因，批继续。"""
-        with mock.patch("core.jvm_direct.load_dump", return_value=self._DUMP), \
-            mock.patch("core.jvm_validate_daemon.prepare",
-                        side_effect=RuntimeError("boom")), \
-            mock.patch("core.jvm_validate_daemon.probe", return_value=None):
-            result = self._call()
-        self.assertTrue(result["ok"], result)
-        self.assertEqual(self.gradle_calls, 1)
-        self.assertEqual(result["daemon_prepare"],
-                         {"outcome": "failed", "reason": "boom"})
-
     def _resume_harness(self):
-        """重试恢复的共享桩具：daemon 第 2 次调用返回 code=2、Gradle 第 1 次
-        调用 exit=1——第 1 轮固定打成「块 1 daemon 成、块 2 双败中止、目录保留」。"""
+        """重试恢复的共享桩具：daemon 第 2 次调用失败；第 1 块已完成并保留。"""
         import contextlib
 
         submitted = {}
-        state = {"daemon": 0, "gradle": 0}
+        state = {"daemon": 0}
 
         def capture_submit(kind, payload, lane=None):
             submitted["payload"] = payload
             return "resume-job"
 
-        def fake_run(_dump, args_file, socket_timeout=None):
+        def fake_run(_dump, args_file, socket_timeout=None, owner=None):
             state["daemon"] += 1
             args = pathlib.Path(args_file).read_text(encoding="utf-8")
             out = pathlib.Path(next(line.split("=", 1)[1] for line in args.splitlines()
@@ -1102,12 +1046,6 @@ class BatchDaemonTests(_Base):
             out.write_text(json.dumps({"url": "https://a.com", "state": "ok"}),
                            encoding="utf-8")
             return {"code": 0, "cost_ms": 3, "error": ""}
-
-        def flaky_gradle(args_path=None, runtime=None, **kwargs):
-            state["gradle"] += 1
-            if state["gradle"] == 1:
-                return {"exit": 1, "stdout": "", "stderr": "boom"}
-            return self._fake_gradle(args_path=args_path, runtime=runtime)
 
         def _started():
             return {"outcome": "started",
@@ -1127,9 +1065,9 @@ class BatchDaemonTests(_Base):
                    mock.patch("core.jvm_validate_daemon.probe",
                                return_value={"pid": 7, "port": 7777, "sig": "s"}),
                    mock.patch("core.jvm_validate_daemon.run",
-                               side_effect=fake_run),
-                    mock.patch.object(jvm_exec, "_run_gradle",
-                                      side_effect=flaky_gradle))
+                               side_effect=fake_run))
+
+
 
         def _run(prepare_mock, body):
             with contextlib.ExitStack() as stk:
@@ -1161,7 +1099,6 @@ class BatchDaemonTests(_Base):
         self.assertIn("第 2/2 块失败", r1["reason"])
         self.assertEqual(prepare1.call_count, 1)
         self.assertEqual(state["daemon"], 2)
-        self.assertEqual(state["gradle"], 1)
 
         # 第 2 轮（重试）：块 1 DONE 跳过；块 2 待跑 → 本轮准备一次、跑成
         prepare2 = mock.MagicMock(return_value=_started())
@@ -1170,7 +1107,6 @@ class BatchDaemonTests(_Base):
         self.assertEqual(prepare2.call_count, 1, "恢复批对唯一待跑块仍只准备一次")
         self.assertEqual(len([c for c in r2["chunk_reports"] if c.get("resumed")]), 1)
         self.assertEqual(state["daemon"], 3)
-        self.assertEqual(state["gradle"], 1, "重试成功后不应有新的 Gradle 调用")
 
     def test_batch_all_chunks_done_skips_prepare(self) -> None:
         """全部块 DONE 的恢复批（成功清场后手工补齐的形态）：一次都不准备，
@@ -1327,24 +1263,42 @@ class EventTimelineTests(_Base):
 
         def fake_prepare(dump, **kwargs):
             prepare_calls["n"] += 1
-            # 第一声是批量开跑前的准备：daemon 还被上一批那条挂死的 op 占着（真机形状）
-            if prepare_calls["n"] == 1:
-                return {"outcome": "busy", "reason": "daemon 忙"}
             return {"outcome": "started", "info": {"pid": 1, "port": 1, "sig": "s"}}
 
-        def stalled_gradle(args_path=None, runtime=None, **kwargs):
-            return {"exit": 1, "stalled": True, "stdout": "", "stderr": "块内输出停滞"}
+        stalled = threading.Event()
 
-        def hung_run(_dump, args_file, socket_timeout=None):
-            # 隔离重跑那一条源：引擎无响应（真机形状，客户端到点判它死）
-            raise jvm_validate_daemon.ValidateDaemonError("引擎对该源无响应")
+        def force_stall(watch_path, stall_sec, stop, abort, interval,
+                        is_cancelled, why):
+            why["stalled"] = True
+            stalled.set()
+            stop.set()
 
-        with mock.patch.object(jvm_exec, "_run_gradle", stalled_gradle), \
-             mock.patch("core.jvm_direct.load_dump", return_value=self._DUMP), \
+        run_calls = {"n": 0}
+
+        def fake_run(_dump, args_file, socket_timeout=None, owner=None):
+            run_calls["n"] += 1
+            if run_calls["n"] == 1:
+                stalled.wait(1)
+                raise jvm_validate_daemon.ValidateDaemonError("daemon op stalled")
+            if run_calls["n"] == 2:
+                raise jvm_validate_daemon.ValidateDaemonError("引擎对该源无响应")
+            args = pathlib.Path(args_file).read_text(encoding="utf-8")
+            out = pathlib.Path(next(line.split("=", 1)[1] for line in args.splitlines()
+                                    if line.startswith("out=")))
+            src = pathlib.Path(next(line.split("=", 1)[1] for line in args.splitlines()
+                                    if line.startswith("file=")))
+            row = json.loads(src.read_text(encoding="utf-8"))[0]
+            out.write_text(json.dumps({"url": row["bookSourceUrl"], "state": "ok"}),
+                           encoding="utf-8")
+            return {"code": 0, "cost_ms": 3}
+
+        with mock.patch("core.jvm_direct.load_dump", return_value=self._DUMP), \
              mock.patch("core.jvm_validate_daemon.prepare", side_effect=fake_prepare), \
-             mock.patch("core.jvm_validate_daemon.probe", return_value=None), \
+             mock.patch("core.jvm_validate_daemon.probe",
+                        return_value={"pid": 1, "port": 1, "sig": "s"}), \
              mock.patch("core.jvm_validate_daemon.stop", return_value=True), \
-             mock.patch("core.jvm_validate_daemon.run", side_effect=hung_run):
+             mock.patch("core.jvm_validate_daemon.run", side_effect=fake_run), \
+             mock.patch.object(jvm_exec, "_watch_output_stall", side_effect=force_stall):
             payload, result = self._run_batch(self._QUIET)
         self.assertTrue(result["ok"], result)
         self.assertEqual(3, len(result["chunk_reports"]), result["chunk_reports"])
@@ -1355,24 +1309,19 @@ class EventTimelineTests(_Base):
                          [r.get("count") for r in result["chunk_reports"]])
         self.assertEqual("done", self._kinds(self._run_dir(payload))[-1])
 
-    def test_batch_stale_snapshot_skips_daemon_and_keeps_reason(self) -> None:
-        """改了 Kotlin 未刷新 snapshot：批量不碰 daemon、全部走 Gradle，原因可见。
-
-        daemon 的 sig 只反映源码 mtime，不等于类已重编——少了这道闸门就会整批跑在
-        旧字节码上，而结论和真跑的一样。
-        """
+    def test_batch_stale_snapshot_fails_without_daemon_or_gradle(self) -> None:
         gate = {"ok": False,
                 "reason": "snapshot 早于 appservice Kotlin 源码，请先刷新"}
-        with mock.patch.object(jvm_exec, "execution_readiness",
-                               lambda dump=None: gate), \
+        with mock.patch.object(jvm_exec, "execution_readiness", lambda dump=None: gate), \
              mock.patch("core.jvm_direct.load_dump", return_value=self._DUMP), \
-             mock.patch("core.jvm_validate_daemon.prepare") as prepare:
+             mock.patch("core.jvm_validate_daemon.prepare") as prepare, \
+             mock.patch.object(jvm_exec, "_run_gradle") as gradle:
             _payload, result = self._run_batch(self._QUIET)
-        self.assertTrue(result["ok"], result)
+        self.assertFalse(result["ok"], result)
         prepare.assert_not_called()
-        self.assertEqual({r.get("execution_mode") for r in result["chunk_reports"]},
-                         {"gradle"})
-        self.assertIn("刷新", result["daemon_prepare"]["reason"])
+        gradle.assert_not_called()
+        self.assertIn("刷新", result["reason"])
+        self.assertEqual(result["gradle_chunks"], 0)
 
     def test_batch_without_manifest_is_rejected_with_reason(self) -> None:
         """无 manifest 的批量调用要给可读失败，而不是块线程里的 KeyError。"""
@@ -1394,10 +1343,10 @@ class EventTimelineTests(_Base):
                           "chunk_started", "chunk_done", "chunk_started", "chunk_done",
                           "done"])
 
-    def test_prepare_and_recovered_events_on_busy_retry(self) -> None:
-        """忙批：prepare(busy) → 首块 Gradle → 重试块 daemon + recovered → 余块 daemon。"""
+    def test_busy_daemon_failure_events(self) -> None:
+        """daemon busy：保留 prepare 原因，当前块失败并结束批次。"""
 
-        def fake_run(_dump, args_file, socket_timeout=None):
+        def fake_run(_dump, args_file, socket_timeout=None, owner=None):
             args = pathlib.Path(args_file).read_text(encoding="utf-8")
             out = pathlib.Path(next(line.split("=", 1)[1] for line in args.splitlines()
                                     if line.startswith("out=")))
@@ -1412,13 +1361,11 @@ class EventTimelineTests(_Base):
                         return_value={"pid": 7, "port": 7777, "sig": "s"}), \
             mock.patch("core.jvm_validate_daemon.run", side_effect=fake_run):
             _payload, result = self._run_batch(self._BUSY3)
-        self.assertTrue(result["ok"], result)
+        self.assertFalse(result["ok"], result)
         self.assertEqual(self._kinds(_payload["manifest"]["run_dir"]),
-                         ["batch_started", "prepare", "chunk_started", "chunk_done",
-                          "chunk_started", "chunk_done", "recovered",
-                          "chunk_started", "chunk_done", "done"])
-        self.assertEqual(result["daemon_chunks"], 2)
-        self.assertEqual(result["gradle_chunks"], 1)
+                         ["batch_started", "prepare", "chunk_started",
+                          "chunk_failed", "failed"])
+        self.assertEqual(result["gradle_chunks"], 0)
 
     def test_resume_and_abort_events(self) -> None:
         """中止批以 failed 收尾；恢复批以 resumed 开场、done 收尾。"""
@@ -1426,11 +1373,18 @@ class EventTimelineTests(_Base):
 
         gradle_calls = {"n": 0}
 
-        def flaky_gradle(args_path=None, runtime=None, **kwargs):
+        def flaky_daemon(_dump, args_file, socket_timeout=None, owner=None):
             gradle_calls["n"] += 1
             if gradle_calls["n"] == 2:
-                return {"exit": 1, "stdout": "", "stderr": "boom"}
-            return self._fake_gradle(args_path=args_path, runtime=runtime)
+                return {"code": 1, "error": "boom"}
+            args = pathlib.Path(args_file).read_text(encoding="utf-8")
+            out = pathlib.Path(next(line.split("=", 1)[1] for line in args.splitlines()
+                                    if line.startswith("out=")))
+            src = pathlib.Path(next(line.split("=", 1)[1] for line in args.splitlines()
+                                    if line.startswith("file=")))
+            url = json.loads(src.read_text(encoding="utf-8"))[0]["bookSourceUrl"]
+            out.write_text(json.dumps({"url": url, "state": "ok"}), encoding="utf-8")
+            return {"code": 0, "cost_ms": 1}
 
         submitted = {}
 
@@ -1447,8 +1401,8 @@ class EventTimelineTests(_Base):
                                       lambda: dict(self._QUIET)),
                    mock.patch("core.jvm_health.store_checks",
                                lambda *a, **kw: 0),
-                    mock.patch.object(jvm_exec, "_run_gradle",
-                                      side_effect=flaky_gradle)]
+                    mock.patch("core.jvm_validate_daemon.run",
+                               side_effect=flaky_daemon)]
 
         with contextlib.ExitStack() as stk:
             for p in patches():

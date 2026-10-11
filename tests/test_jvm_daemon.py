@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import socket
 import tempfile
@@ -167,7 +168,20 @@ class SigTests(_Base):
             self.assertNotEqual(first, jvm_daemon.source_sig(), "内容变了就得变")
 
 
-class StopTests(_Base):
+    def test_sig_ignores_dump_mtime_but_changes_dump_content(self) -> None:
+        app = self.tmp / "appservice"
+        (app / "test").mkdir(parents=True)
+        (app / "test" / "A.kt").write_text("class A", encoding="utf-8")
+        dump = self.tmp / "dump.json"
+        dump.write_text(json.dumps({"classpath": ["a.jar"]}), encoding="utf-8")
+        with mock.patch.object(jvm_daemon.jvm_direct, "AGSVC", app), \
+             mock.patch.object(jvm_daemon.jvm_direct, "dump_path", lambda: dump):
+            first = jvm_daemon.source_sig()
+            os.utime(dump, (dump.stat().st_atime + 10, dump.stat().st_mtime + 10))
+            self.assertEqual(first, jvm_daemon.source_sig())
+            dump.write_text(json.dumps({"classpath": ["b.jar"]}), encoding="utf-8")
+            self.assertNotEqual(first, jvm_daemon.source_sig())
+
     def test_stop_prefers_graceful_op(self) -> None:
         info = {"pid": self.fake.pid, "port": self.fake.port, "sig": "sig-a"}
         jvm_daemon.info_path().write_text(json.dumps(info), encoding="utf-8", newline="\n")

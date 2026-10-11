@@ -48,8 +48,8 @@ class JvmRunProgressTests(unittest.TestCase):
                              encoding="utf-8")
         manifest = jvm_exec._build_jvm_manifest(
             run_dir=run_dir, source_file=source_file, args_file=args_file,
-            out_path=out_path, single=single, execution_plan="gradle",
-            allow_gradle_fallback=True, runtime={}, readiness={},
+            out_path=out_path, single=single, execution_plan="validate_daemon",
+            allow_gradle_fallback=False, runtime={}, readiness={},
             execution_readiness={}, readiness_fingerprint="",
             readiness_checked_at="", source_count=(1 if single else 2),
             urls=(["https://a.com"] if single else
@@ -79,14 +79,12 @@ class JvmRunProgressTests(unittest.TestCase):
 
     def _run(self, payload: dict, gradle=None, daemon=None) -> dict:
         if gradle is None:
-            def gradle(args_path=None, runtime=None):
+            def gradle(args_path=None, runtime=None, **kwargs):
                 return {"exit": 0, "stdout": "", "stderr": ""}
         if daemon is None:
             def daemon(dump, args_file):
                 return {"code": 0, "cost_ms": 1, "error": ""}
-        # runner 的阶段/进度更新走短连接（runner 自己的 Store）：必须落到这份
-        # 临时库——落到真库的话 job 不存在、UPDATE 是 no-op，断言会恒 0。
-        # prepare 判失败 + probe 恒 None：批量块确定走 Gradle
+        # 进度测试走真实批量执行形状：daemon 成功时逐条写结果，Gradle 不应被调用。
         with mock.patch.object(jvm_exec, "_run_gradle", gradle), \
              mock.patch.object(jvm_exec, "_write_meta", lambda rows: "testbatch"), \
              mock.patch("core.jvm_health.store_checks", lambda *a, **kw: 0), \
@@ -94,11 +92,10 @@ class JvmRunProgressTests(unittest.TestCase):
              mock.patch.object(jvm_exec, "execution_readiness",
                                lambda dump=None: {"ok": True}), \
              mock.patch("core.jvm_direct.load_dump", return_value=dict(_DUMP)), \
-             mock.patch("core.jvm_validate_daemon.run", daemon), \
              mock.patch("core.jvm_validate_daemon.prepare",
-                        return_value={"outcome": "failed",
-                                      "reason": "测试不启 daemon"}), \
-             mock.patch("core.jvm_validate_daemon.probe", return_value=None), \
+                        return_value={"outcome": "ready", "reason": ""}), \
+             mock.patch("core.jvm_validate_daemon.probe", return_value={"sig": "s"}), \
+             mock.patch("core.jvm_validate_daemon.run", daemon), \
              mock.patch.object(jvm_api.runner, "Store",
                                lambda *a, **kw: Store(self.db)):
             return asyncio.run(
@@ -119,8 +116,12 @@ class JvmRunProgressTests(unittest.TestCase):
                        ["https://a.com", "https://b.com"])
             return {"exit": 0, "stdout": "", "stderr": ""}
 
-        result = self._run(payload, gradle=fake_gradle)
-        self.assertTrue(result["ok"])
+        def fake_daemon(dump, args_path, socket_timeout=None, owner=None):
+            fake_gradle(args_path=args_path)
+            return {"code": 0}
+
+        result = self._run(payload, daemon=fake_daemon)
+        self.assertTrue(result["ok"], result)
         job = self._job()
         self.assertEqual(job["progress"], 2)
         self.assertEqual(job["total"], 2)
@@ -134,18 +135,22 @@ class JvmRunProgressTests(unittest.TestCase):
             self._rows(pathlib.Path(args_path).parent / "results.jsonl", ["https://a.com"])
             return {"exit": 0, "stdout": "", "stderr": ""}
 
-        result = self._run(payload, gradle=fake_gradle)
-        self.assertTrue(result["ok"])
+        def fake_daemon(dump, args_path, socket_timeout=None, owner=None):
+            fake_gradle(args_path=args_path)
+            return {"code": 0}
+
+        result = self._run(payload, daemon=fake_daemon)
+        self.assertTrue(result["ok"], result)
         self.assertEqual(self._job()["progress"], 1)
 
-    def test_gradle_failure_keeps_progress_at_zero(self) -> None:
+    def test_daemon_failure_keeps_progress_at_zero(self) -> None:
         payload = self._payload()
         self._create_job(2)
 
-        def failing_gradle(args_path=None, runtime=None, **kwargs):
-            return {"exit": 1, "stdout": "", "stderr": "boom"}
+        def failing_daemon(dump, args_file, socket_timeout=None):
+            raise RuntimeError("daemon unavailable")
 
-        result = self._run(payload, gradle=failing_gradle)
+        result = self._run(payload, daemon=failing_daemon)
         self.assertFalse(result["ok"])
         self.assertEqual(self._job()["progress"], 0)
 
@@ -167,7 +172,7 @@ class JvmRunProgressTests(unittest.TestCase):
         self._create_job(2)
         seen = {"mid": 0}
 
-        def slow_gradle(args_path=None, runtime=None, **kwargs):
+        def slow_daemon(dump, args_path, socket_timeout=None, owner=None):
             out = pathlib.Path(args_path).parent / "results.jsonl"
             self._rows(out, ["https://a.com"])
             # 等轮询把 1 写进任务表（间隔 0.05s，给足余量）再写第二条；
@@ -179,11 +184,11 @@ class JvmRunProgressTests(unittest.TestCase):
                         break
                     time.sleep(0.02)
             self._rows(out, ["https://a.com", "https://b.com"])
-            return {"exit": 0, "stdout": "", "stderr": ""}
+            return {"code": 0}
 
-        result = self._run(payload, gradle=slow_gradle)
-        self.assertTrue(result["ok"])
-        self.assertEqual(seen["mid"], 1, "跑批期间轮询没把已完成条数写进进度")
+        result = self._run(payload, daemon=slow_daemon)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(seen["mid"], 1, "批量校验期间轮询没把已完成条数写进进度")
         self.assertEqual(self._job()["progress"], 2, "终值以解析出的结果行为准")
 
 

@@ -2,8 +2,8 @@
 """常驻 JVM 校验服务客户端。
 
 单条校验复用 ValidateService 的真实参数和结果文件，只把「每次起 Gradle」替换成
-「首次起一个测试 JVM，后续通过 localhost 请求」。daemon 失败时由调用方回到 Gradle，
-不能把 daemon 的失败误报成源校验结论。
+「首次起一个测试 JVM，后续通过 localhost 请求」。daemon 失败时由调用方保留真实原因；批量
+jvm_run 不再把失败隐式转换成 Gradle fallback。
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ import subprocess
 import threading
 import time
 from typing import Any, Dict, Optional
+from uuid import uuid4
 
 from core import jvm_daemon, jvm_direct
 from core.paths import data_path
@@ -39,7 +40,45 @@ _LOG = None
 
 
 class ValidateDaemonError(RuntimeError):
-    """Validate daemon 不可用，调用方应保留原因并回到 Gradle。"""
+    """daemon 执行失败；调用方保留真实原因，并按任务执行策略处理。"""
+
+
+def current_operation_path() -> pathlib.Path:
+    return pathlib.Path(data_path("app_probe", "validate_daemon.current.json"))
+
+
+def _read_current_operation() -> Dict[str, Any]:
+    try:
+        data = json.loads(current_operation_path().read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _begin_current_operation(owner: Optional[Dict[str, Any]]) -> str:
+    operation_id = uuid4().hex
+    data = {str(k): v for k, v in (owner or {}).items()
+            if k in {"job_id", "chunk", "source_count", "source_name"}}
+    if "source_name" in data:
+        data["source_name"] = str(data["source_name"]).replace("\r", " ").replace("\n", " ")[:120]
+    data.update({"operation_id": operation_id, "pid": os.getpid(),
+                 "started_at": time.time()})
+    path = current_operation_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=1),
+                    encoding="utf-8", newline="\n")
+    return operation_id
+
+
+def _end_current_operation(operation_id: str) -> None:
+    path = current_operation_path()
+    current = _read_current_operation()
+    if current.get("operation_id") != operation_id:
+        return
+    try:
+        path.unlink()
+    except OSError:
+        pass
 
 
 def info_path() -> pathlib.Path:
@@ -131,6 +170,9 @@ def request(cfg: Dict[str, Any], port: int, timeout: float) -> Dict[str, Any]:
         "depth": str(cfg["depth"]),
         "cookie": str(cfg.get("cookie") or ""),
         "no_strip_webview": bool(cfg.get("no_strip_webview")),
+        "owner_job_id": str(cfg.get("owner_job_id") or ""),
+        "owner_chunk": str(cfg.get("owner_chunk") or ""),
+        "owner_source_name": str(cfg.get("owner_source_name") or ""),
     }
     if cfg.get("profile"):
         payload["profile"] = str(cfg["profile"])
@@ -200,12 +242,20 @@ def _pid_alive(pid: int) -> bool:
         return False
     if os.name == "nt":
         import ctypes
+        from ctypes import wintypes
 
-        handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        handle = kernel32.OpenProcess(0x1000, False, pid)
         if not handle:  # PROCESS_QUERY_LIMITED_INFORMATION
             return False
-        ctypes.windll.kernel32.CloseHandle(handle)
-        return True
+        try:
+            exit_code = wintypes.DWORD()
+            ok = kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))
+            return bool(ok and exit_code.value == 259)  # STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -213,6 +263,122 @@ def _pid_alive(pid: int) -> bool:
     except PermissionError:
         return True  # 活着，只是没权限发信号
     return True
+
+
+def status() -> Dict[str, Any]:
+    info = _read_info()
+    if not isinstance(info, dict):
+        info = {}
+    try:
+        pid = int(info.get("pid") or 0)
+        port = int(info.get("port") or 0)
+    except (TypeError, ValueError):
+        pid, port = 0, 0
+    alive = _pid_alive(pid) if pid else False
+    got = ping(port, timeout=1.0) if alive and port else None
+    try:
+        got_pid = int((got or {}).get("pid") or 0)
+    except (TypeError, ValueError):
+        got_pid = 0
+    identity = bool(got and got.get("kind") == "validate" and got_pid == pid)
+    try:
+        sig_matches = bool(identity and got.get("sig") == source_sig())
+    except (OSError, ValueError):
+        sig_matches = False
+    owner = _read_current_operation()
+    try:
+        owner_pid = int(owner.get("pid") or 0)
+    except (TypeError, ValueError):
+        owner_pid = 0
+    owner_alive = _pid_alive(owner_pid) if owner_pid else False
+    try:
+        owner_age = (max(0.0, time.time() - float(owner.get("started_at") or time.time()))
+                     if owner else None)
+    except (TypeError, ValueError):
+        owner_age = None
+    return {
+        "state": ("missing" if not info else
+                  "stopped" if not alive else
+                  "idle" if identity else "unresponsive"),
+        "pid": pid or None,
+        "port": port or None,
+        "started_at": info.get("started_at"),
+        "process_alive": alive,
+        "responsive": bool(got),
+        "identity_verified": identity,
+        "signature_matches": sig_matches,
+        "current_operation": owner or None,
+        "owner_process_alive": owner_alive if owner else None,
+        "owner_age_seconds": round(owner_age, 1) if owner_age is not None else None,
+    }
+
+
+def stop_idle(owner_inactive: bool = False,
+              expected_operation_id: Optional[str] = None) -> Dict[str, Any]:
+    """仅停止经 ping 确认、当前空闲的 Validate daemon；绝不强杀。"""
+    with _LOCK:
+        state = status()
+        owner = state.get("current_operation") or {}
+        current_operation_id = owner.get("operation_id") if owner else None
+        if current_operation_id != expected_operation_id:
+            return {"stopped": False, "reason": "daemon 操作归属在检查后发生变化，拒绝停止"}
+        if owner and not owner_inactive:
+            return {"stopped": False, "reason": "当前操作仍有 owner，拒绝停止"}
+        if not state.get("process_alive"):
+            info = _read_info()
+            if not isinstance(info, dict):
+                info = {}
+            pid = int(state.get("pid") or 0)
+            if pid and _pid_alive(pid):
+                return {"stopped": False, "reason": "daemon 进程身份无法确认，拒绝停止"}
+            if info:
+                try:
+                    info_path().unlink()
+                except OSError:
+                    pass
+            if owner:
+                _end_current_operation(str(owner.get("operation_id") or ""))
+            return {"stopped": True, "already_stopped": True, "reason": "daemon 进程已退出"}
+        if not state.get("identity_verified") or not state.get("responsive"):
+            return {"stopped": False,
+                    "reason": "daemon 未响应，无法确认空闲和进程身份；未发送停止或强杀"}
+        pid = int(state["pid"])
+        port = int(state["port"])
+        try:
+            response = _exchange({"id": 0, "op": "stop"}, port, timeout=10)
+        except ValidateDaemonError as exc:
+            return {"stopped": False, "reason": "daemon 未确认停止：%s" % exc}
+        if response.get("code") != 0:
+            return {"stopped": False,
+                    "reason": "daemon 拒绝停止：%s" % str(response.get("error") or response)}
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            if not _pid_alive(pid):
+                break
+            time.sleep(0.1)
+        if _pid_alive(pid):
+            return {"stopped": False, "reason": "daemon 收到停止指令但进程仍存活；未强杀"}
+
+        global _PROC, _LOG
+        if _PROC is not None and _PROC.pid == pid:
+            _PROC = None
+        if _LOG is not None:
+            try:
+                _LOG.close()
+            except OSError:
+                pass
+            _LOG = None
+        latest = _read_info()
+        if not isinstance(latest, dict):
+            latest = {}
+        if int(latest.get("pid") or 0) == pid and int(latest.get("port") or 0) == port:
+            try:
+                info_path().unlink()
+            except OSError:
+                pass
+        if owner:
+            _end_current_operation(str(owner.get("operation_id") or ""))
+        return {"stopped": True, "pid": pid, "reason": "Validate daemon 已优雅停止并确认退出"}
 
 
 def stop() -> bool:
@@ -302,7 +468,7 @@ def probe(dump: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
     与 ``ensure`` 的差别是**绝不杀进程、绝不重启**：ping 不通可能只是 daemon
     正忙于别人的请求（daemon 串行，忙时 ping 排队到超时），探测方不持有互斥，
-    杀掉会伤及在跑的 op。调用方（批量块）拿 None 就回落 Gradle——daemon 的
+    杀掉会伤及在跑的 op。调用方（批量块）拿 None 就报告 daemon 不可用，不能杀掉仍可能执行的请求。
     死活由批量开跑前的 ``prepare``（先分类再行动）或单条路径的 ``ensure``
     恢复，探测本身绝不杀。
     """
@@ -339,7 +505,7 @@ def prepare(dump: Dict[str, Any],
                   正向确认是我们的 daemon 且此刻空闲 → 优雅停旧起新）。
     - ``busy``    进程还活着但 ping 没应答：先按 ``busy_wait_sec`` 有界等待它空闲
                   （daemon 串行处理 op，忙是瞬时的），到点仍不确定就**不杀、不启**，
-                  调用方按块回落 Gradle。
+                  调用方报告 busy 并保留当前操作归属。
     - ``failed``  启动尝试失败，reason 保留 ``ValidateDaemonError`` 原文。
 
     判「死」的唯一依据是 info 里的 pid 已不在（``_pid_alive``）；其余一律不杀。
@@ -378,10 +544,20 @@ def prepare(dump: Dict[str, Any],
                         return {"outcome": "started",
                                 "info": ensure(dump, boot_timeout=boot_timeout)}
                     time.sleep(0.1)
+                owner = _read_current_operation()
+                if owner:
+                    job = str(owner.get("job_id") or "未记录")
+                    chunk = str(owner.get("chunk") or "未记录")
+                    source = str(owner.get("source_name") or "源名称未记录")
+                    age = max(0.0, time.time() - float(owner.get("started_at") or time.time()))
+                    detail = ("；当前操作 job=%s chunk=%s source=%s 已运行 %.1fs"
+                              % (job, chunk, source, age))
+                else:
+                    detail = "；当前操作归属未知"
                 return {"outcome": "busy",
                         "reason": ("Validate daemon 进程还在（pid=%d）但在 %.1fs 内未空闲，"
-                                   "本批不准备也不杀" %
-                                   (pid, max(0.0, float(busy_wait_sec))))}
+                                   "本批不准备也不杀%s" %
+                                   (pid, max(0.0, float(busy_wait_sec)), detail))}
             if pid <= 0:
                 return {"outcome": "busy",
                         "reason": ("Validate daemon 的 info 没有 pid，无法判死活，"
@@ -400,8 +576,8 @@ def resolve(dump: Dict[str, Any], boot_timeout: int = DEFAULT_BOOT_TIMEOUT,
 
     存在的理由是 ``ensure`` 的一个真实危害：它对「ping 不通」一律杀进程重启，
     而 ping 不通可能只是 daemon 正串行跑**别人**的 op——单条校验踩上去就会掐断
-    那次执行（对方那一块随即失败、回落 Gradle）。这里改成等一小会儿，仍忙就把
-    原因原样抛出去，由调用方按「daemon 未就绪」回落，进程一个都不动。
+    那次执行（对方那一块可能仍在运行）。这里改成等一小会儿，仍忙就把
+    原因原样抛出去，由调用方按任务执行策略处理，进程一个都不动。
     """
     got = prepare(dump, boot_timeout=boot_timeout, busy_wait_sec=busy_wait_sec,
                   on_wait=on_wait)
@@ -412,24 +588,33 @@ def resolve(dump: Dict[str, Any], boot_timeout: int = DEFAULT_BOOT_TIMEOUT,
 
 def run(dump: Dict[str, Any], args_file: str, timeout_slack: int = 30,
         socket_timeout: Optional[int] = None,
-        busy_wait_sec: float = 2.0) -> Dict[str, Any]:
+        busy_wait_sec: float = 2.0,
+        owner: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """向 daemon 发一次执行请求并等应答。
 
     ``socket_timeout``：等待**应答**的秒数。不给就沿用单条口径（每源 timeout +
     slack）；批量块的执行时长是块内源数 × 每源预算，必须由调用方按块规模给足
-    （Kotlin 侧对 op 时长没有上限，这个客户端超时是唯一的护栏——超时会抛
-    ``ValidateDaemonError``，调用方回落 Gradle，不是源失败）。
+    （Kotlin 侧对 op 时长没有上限，这个客户端等待是唯一护栏——超时会抛
+    ``ValidateDaemonError``，不应把它误报成源失败）。
 
     ``busy_wait_sec`` 交给 ``resolve``：忙时等一小会儿，不杀进程（见 ``resolve``）。
-    单条的等待窗口**有意短**——单源跑 Gradle 与等一大块跑完不是一个量级，等太久
-    不如直接回落；批量那条链有自己的窗口，见 ``backend/jobs/jvm_exec``。
+    单条等待窗口**有意短**；批量按块规模计算 socket 超时，daemon 不可用就让块失败、保留原因。
     """
     cfg = params_from_args(args_file)
     info = resolve(dump, busy_wait_sec=busy_wait_sec)
+    operation_id = _begin_current_operation(owner)
+    cfg.update({
+        "owner_job_id": str((owner or {}).get("job_id") or ""),
+        "owner_chunk": str((owner or {}).get("chunk") or ""),
+        "owner_source_name": str(_read_current_operation().get("source_name") or ""),
+    })
     wait = int(socket_timeout) if socket_timeout else int(cfg["timeout"]) + timeout_slack
-    response = request(cfg, int(info["port"]), wait)
-    response["port"] = info["port"]
-    return response
+    try:
+        response = request(cfg, int(info["port"]), wait)
+        response["port"] = info["port"]
+        return response
+    finally:
+        _end_current_operation(operation_id)
 
 
 def reset_for_tests() -> None:

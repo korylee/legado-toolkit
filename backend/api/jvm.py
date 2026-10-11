@@ -3,18 +3,19 @@
 
 三个端点：
   GET  /api/jvm/readiness  环境就绪检查（只读，不下载、不构建）
-  POST /api/jvm/run        提交跑批（进入 JVM lane 后由任务体后台执行）
+  POST /api/jvm/run        提交批量校验（进入 JVM lane 后由任务体后台执行）
   GET  /api/jvm/results    最近一批结论（从 meta 读，供列表合并展示）
 
 执行引擎（manifest 写盘、参数文件、Gradle/daemon 调用、结果读回与落库）在
 `backend/jobs/jvm_exec.py`，由它注册进 runner 的 "jvm_run" 任务；**测试的
 patch 面在那里**（_run_gradle / _write_meta / _AGSVC / data_dir / Store）。
-跑批走 subprocess + 属性文件，不 import JVM 侧任何东西——两条进程的生命
+批量校验走 subprocess + 属性文件，不 import JVM 侧任何东西——两条进程的生命
 周期完全独立，Robolectric 的堆/退出码都不影响后端进程。
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections import Counter
 from pathlib import Path
@@ -22,6 +23,7 @@ from typing import Any, Dict, Optional
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException
+from fastapi.concurrency import run_in_threadpool
 
 from backend.jobs import jvm_exec, runner
 from backend.jobs.jvm_exec import (_build_jvm_manifest, _cleanup_run_dir,
@@ -32,7 +34,7 @@ from core.jvm_direct import execution_readiness
 from core.jvm_env import readiness
 from core.loader import _normalize_url
 from core.paths import data_dir
-from core.store import Store
+from core.store import ACTIVE_JOB_STATUSES, Store
 
 router = APIRouter()
 
@@ -50,9 +52,97 @@ STATE_LABEL = {
 }
 
 
-#: 允许**本次覆盖**的参数（白名单）。`app_repo` 是环境配置，不该被一次跑批改掉；
+#: 允许**本次覆盖**的参数（白名单）。`app_repo` 是环境配置，不该被一次批量校验改掉；
 #: 其余键走 `settings_store.coerce` 收敛（未知键丢弃、越界收到区间内）。
 JVM_RUN_PARAMS = ("keyword", "timeout", "concurrency", "depth")
+
+
+def _daemon_status_with_jobs() -> Dict[str, Any]:
+    from core import jvm_validate_daemon
+
+    daemon = jvm_validate_daemon.status()
+    with Store() as st:
+        active = [j for j in st.list_jobs(limit=10000, statuses=ACTIVE_JOB_STATUSES)
+                  if j.get("kind") in ("jvm_run", "jvm_debug")]
+        active_jobs = [{k: j.get(k) for k in
+                        ("id", "kind", "status", "phase", "progress", "total")}
+                       for j in active]
+        operation = daemon.get("current_operation") or {}
+        owner_job_id = str(operation.get("job_id") or "")
+        owner_job = st.get_job_summary(owner_job_id) if owner_job_id else None
+
+    if not operation:
+        owner_inactive, owner_state = True, "none"
+    elif owner_job is not None and owner_job.get("status") in ACTIVE_JOB_STATUSES:
+        owner_inactive, owner_state = False, str(owner_job.get("status"))
+    elif owner_job is not None:
+        owner_inactive, owner_state = True, str(owner_job.get("status") or "terminal")
+    elif not daemon.get("owner_process_alive"):
+        owner_inactive, owner_state = True, "owner_process_exited"
+    else:
+        owner_inactive, owner_state = False, "unknown"
+
+    no_active_jobs = not active_jobs
+    process_alive = bool(daemon.get("process_alive"))
+    identity_ready = bool(daemon.get("responsive") and daemon.get("identity_verified"))
+    has_daemon_record = bool(daemon.get("pid"))
+    stop_allowed = (has_daemon_record and no_active_jobs and owner_inactive
+                    and (not process_alive or identity_ready))
+    if active_jobs:
+        stop_reason = "有本机引擎任务未结束，不停止 daemon"
+    elif not owner_inactive:
+        stop_reason = "当前操作归属未确认，不停止 daemon"
+    elif process_alive and not identity_ready:
+        stop_reason = "进程仍存活但 daemon 未响应或身份无法验证，不停止 daemon"
+    elif not has_daemon_record:
+        stop_reason = "没有需要停止的 Validate daemon"
+    else:
+        stop_reason = "没有活跃 owner，且 daemon 身份可确认，可以安全停止"
+    return {
+        **daemon,
+        "active_jobs": active_jobs,
+        "owner_state": owner_state,
+        "owner_inactive": owner_inactive,
+        "stop_allowed": stop_allowed,
+        "stop_reason": stop_reason,
+    }
+
+
+@router.get("/daemon/status")
+def jvm_daemon_status():
+    return _daemon_status_with_jobs()
+
+
+@router.post("/daemon/stop")
+async def jvm_daemon_stop():
+    lane = runner.lane("jvm")
+    lane_acquired = False
+    try:
+        await asyncio.wait_for(lane.acquire("debug", job_id="daemon-stop"), timeout=0.25)
+        lane_acquired = True
+    except asyncio.TimeoutError:
+        raise HTTPException(409, "校验引擎正在被任务使用，暂不停止")
+    try:
+        from core.jvm_debug import RUN_LOCK
+        if not RUN_LOCK.acquire(blocking=False):
+            raise HTTPException(409, "校验引擎正在处理请求，暂不停止")
+        try:
+            snapshot = await run_in_threadpool(_daemon_status_with_jobs)
+            if not snapshot.get("stop_allowed"):
+                raise HTTPException(409, str(snapshot.get("stop_reason") or "无法安全停止 daemon"))
+            from core import jvm_validate_daemon
+            result = await run_in_threadpool(
+                jvm_validate_daemon.stop_idle,
+                owner_inactive=bool(snapshot.get("owner_inactive")),
+                expected_operation_id=(snapshot.get("current_operation") or {}).get("operation_id"))
+            if not result.get("stopped"):
+                raise HTTPException(409, str(result.get("reason") or "daemon 未确认停止"))
+            return result
+        finally:
+            RUN_LOCK.release()
+    finally:
+        if lane_acquired:
+            lane.release()
 
 
 @router.get("/readiness")
@@ -118,7 +208,7 @@ async def jvm_run(body: Optional[JvmRunRequest] = None):
         _cleanup_run_dir(run_dir)
         return {"started": False, "reason": "当前筛选没有命中任何源，不用跑"}
     # **本次覆盖**：逐键过 coerce（未知键丢弃、越界收敛到区间内），只作用于
-    # 这一次跑批，不写回设置（理由见 schemas）。白名单见 JVM_RUN_PARAMS
+    # 这一次批量校验，不写回设置（理由见 schemas）。白名单见 JVM_RUN_PARAMS
     eff = dict(conf)
     for key in JVM_RUN_PARAMS:
         if key in want_params:
@@ -169,9 +259,9 @@ async def jvm_run(body: Optional[JvmRunRequest] = None):
     prep = {
         "started": True,
         "count": len(rows),
-        "execution_plan": "validate_daemon" if single else "gradle",
+        "execution_plan": "validate_daemon",
     }
-    execution_plan = "validate_daemon" if single else "gradle"
+    execution_plan = "validate_daemon"
     # 分块大小（提交即冻结）：settings 的 jvm.chunk_size，越界值已被 coerce 收敛
     cs = chunk_size
     n = len(rows)
@@ -179,7 +269,7 @@ async def jvm_run(body: Optional[JvmRunRequest] = None):
     manifest = _build_jvm_manifest(
         run_dir=run_dir, source_file=src_file, args_file=args_path,
         out_path=out_path, single=single, execution_plan=execution_plan,
-        allow_gradle_fallback=allow_gradle_fallback,
+        allow_gradle_fallback=(allow_gradle_fallback if single else False),
         runtime=dict(st_conf.get("runtime") or {}),
         readiness=st_conf,
         execution_readiness=exec_conf,
@@ -190,7 +280,7 @@ async def jvm_run(body: Optional[JvmRunRequest] = None):
         params=params,
         chunks=chunk_sizes,
     )
-    # `total` 进 payload：一次跑批没有逐条进度（一次 Gradle 调用跑一批），但**条数**
+    # `total` 进 payload：一次批量校验没有逐条进度（一次 Gradle 调用跑一批），但**条数**
     # 要给前端算「N/N」——不给的话状态条永远停在 0
     job_id = runner.submit(
         "jvm_run",

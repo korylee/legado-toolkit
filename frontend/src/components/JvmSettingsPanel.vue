@@ -15,6 +15,35 @@
       <el-tag v-else size="small" type="info">待检查</el-tag>
     </section>
 
+    <section class="daemon-compact" :class="{ 'is-busy': daemonStatus?.state === 'unresponsive' }">
+      <div class="daemon-copy">
+        <b>常驻校验引擎</b>
+        <div class="muted">{{ daemonStateText }}</div>
+        <div v-if="daemonStatus?.current_operation" class="daemon-owner">
+          当前操作：{{ daemonStatus.current_operation.job_id || "无任务号" }} ·
+          {{ daemonStatus.current_operation.chunk || "块未知" }} ·
+          {{ daemonStatus.current_operation.source_name || "源名称未记录" }}
+          <span v-if="daemonStatus.owner_age_seconds != null"> · 已运行 {{ daemonStatus.owner_age_seconds }} 秒</span>
+        </div>
+        <div v-for="job in daemonStatus?.active_jobs || []" :key="job.id" class="daemon-owner">
+          {{ job.kind }}：{{ job.id }} · {{ job.phase || job.status }}
+          <span v-if="job.total"> · {{ job.progress || 0 }}/{{ job.total }}</span>
+        </div>
+        <div v-if="daemonStatus && !daemonStatus.stop_allowed" class="muted">
+          {{ daemonStatus.stop_reason }}
+        </div>
+      </div>
+      <div class="daemon-actions">
+        <el-button size="small" link :loading="daemonStatusLoading" @click="loadDaemonStatus">
+          刷新状态
+        </el-button>
+        <el-button v-if="daemonStatus?.stop_allowed" size="small" type="warning"
+                   :loading="daemonStopping" @click="stopIdleDaemon">
+          {{ daemonStatus.process_alive ? "停止空闲引擎" : "清理已退出记录" }}
+        </el-button>
+      </div>
+    </section>
+
     <el-form label-position="top" size="small" @submit.prevent>
       <el-form-item label="App 源码目录">
         <div class="path-row">
@@ -81,7 +110,7 @@
 import { ref, reactive, computed, onMounted } from "vue";
 import { ElMessage } from "element-plus";
 import { getSettings, patchSettings } from "../api/settings";
-import { jvmReadiness, pickJvmAppRepo, pickJvmAndroidSdk } from "../api/jvm.js";
+import { jvmReadiness, jvmDaemonStatus, stopJvmDaemon, pickJvmAppRepo, pickJvmAndroidSdk } from "../api/jvm.js";
 
 const conf = reactive({ app_repo: "", android_sdk_dir: "", proxy: "" });
 const readiness = ref(null);
@@ -90,6 +119,20 @@ const picking = ref(false);
 const pickingSdk = ref(false);
 const saving = ref(false);
 const diagnosisOpen = ref(false);
+const daemonStatus = ref(null);
+const daemonStatusLoading = ref(false);
+const daemonStopping = ref(false);
+const daemonStateText = computed(() => {
+  const state = daemonStatus.value?.state;
+  if (!state) return "状态尚未读取";
+  if (daemonStatus.value.active_jobs?.length) return "存在本机引擎任务，停止操作已锁定";
+  if (state === "missing") return "尚未启动";
+  if (state === "stopped") return "进程已退出";
+  if (state === "idle") return daemonStatus.value.signature_matches
+    ? "空闲，运行版本匹配" : "空闲，但运行版本与当前环境不同";
+  if (state === "unresponsive") return "进程仍在，但 daemon 未响应；不会自动停止";
+  return "状态未知";
+});
 const launchModeText = computed(() => {
   const mode = readiness.value?.runtime?.launch_mode;
   return mode === "daemon_or_gradle" ? "优先 daemon，失败时走 Gradle" : (mode || "—");
@@ -105,7 +148,29 @@ onMounted(async () => {
     conf.proxy = (s.values.network || {}).proxy || "";
   } catch (e) { /* 设置接口挂起时仍允许用户填写配置 */ }
   await runReadiness();
+  await loadDaemonStatus();
 });
+
+async function loadDaemonStatus() {
+  daemonStatusLoading.value = true;
+  try { daemonStatus.value = await jvmDaemonStatus(); }
+  catch (e) {
+    daemonStatus.value = { state: "unknown", stop_allowed: false,
+      stop_reason: "读取 daemon 状态失败：" + String(e?.message || e) };
+  } finally { daemonStatusLoading.value = false; }
+}
+async function stopIdleDaemon() {
+  daemonStopping.value = true;
+  try {
+    const result = await stopJvmDaemon();
+    ElMessage.success(result.reason || "Validate daemon 已停止");
+  } catch (e) {
+    ElMessage.warning(String(e?.message || e));
+  } finally {
+    daemonStopping.value = false;
+    await loadDaemonStatus();
+  }
+}
 
 async function pickAppRepo() {
   picking.value = true;
@@ -146,6 +211,11 @@ async function saveAndCheck() { await save(); }
 .env-compact.is-ok { border-left-color: var(--el-color-success); }
 .env-compact.is-error { border-left-color: var(--el-color-danger); }
 .env-status { margin-top: 3px; font-size: 12px; }
+.daemon-compact { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; margin-bottom: 14px; border: 1px solid var(--el-border-color-lighter); border-radius: 6px; background: var(--el-fill-color-lighter); }
+.daemon-compact.is-busy { border-left: 3px solid var(--el-color-warning); }
+.daemon-copy { min-width: 0; }
+.daemon-owner { margin-top: 3px; font-size: 12px; overflow-wrap: anywhere; }
+.daemon-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 6px; }
 .path-row { display: flex; gap: 8px; width: 100%; }
 .path-row .el-input { min-width: 0; }
 .env-actions { display: flex; align-items: center; gap: 8px; margin: 4px 0 12px; }
@@ -155,5 +225,5 @@ async function saveAndCheck() { await save(); }
 .diagnosis-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 16px; font-size: 12px; }
 .diagnosis-grid > div { display: flex; flex-direction: column; gap: 2px; min-width: 0; word-break: break-word; }
 .diagnosis-table { margin-top: 10px; }
-@media (max-width: 600px) { .diagnosis-grid { grid-template-columns: 1fr; } .env-problem { align-items: flex-start; flex-direction: column; } }
+@media (max-width: 600px) { .diagnosis-grid { grid-template-columns: 1fr; } .env-problem { align-items: flex-start; flex-direction: column; } .daemon-compact { align-items: flex-start; flex-direction: column; } .daemon-actions { align-self: flex-end; } }
 </style>

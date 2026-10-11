@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""JVM 跑批的执行引擎（自 backend/api/jvm.py 原样搬出）。
+"""JVM 批量校验的执行引擎（自 backend/api/jvm.py 原样搬出）。
 
 manifest 写盘、参数文件、Gradle/daemon 调用、结果读回与落库都在这里，经
 `runner.register("jvm_run")` 注册进 JVM lane；backend/api/jvm.py 只留 HTTP 编排。
@@ -216,8 +216,6 @@ def _manifest_error(manifest: Any) -> str:
         return "JVM 任务 manifest 缺少执行参数：%s" % ", ".join(missing_params)
     if manifest.get("execution_plan") not in ("validate_daemon", "gradle"):
         return "JVM 任务 manifest 结构不受支持：execution_plan 无效"
-    if bool(manifest.get("single")) != (manifest.get("execution_plan") == "validate_daemon"):
-        return "JVM 任务 manifest 结构不受支持：执行计划与 single 不一致"
     expected = str(manifest.get("sha256") or "")
     if not expected:
         return "JVM 任务 manifest 缺少 sha256"
@@ -234,20 +232,20 @@ def _manifest_error(manifest: Any) -> str:
 def _write_args(keyword: str, timeout: int, concurrency: int,
                 out_path: Path, source_file: Path, depth: str = "search",
                 args_path: Optional[Path] = None) -> None:
-    """把跑批参数写进启动器的参数文件（Launcher 的唯一参数入口）。"""
+    """把批量校验参数写进启动器的参数文件（Launcher 的唯一参数入口）。"""
     st_conf = settings_store.load().get("jvm", {})
     repo = st_conf.get("app_repo", "").strip()
     if not repo:
         raise HTTPException(400, "JVM 校验未配置：设置里缺少 App 源码目录")
     lines = [
-        "# 由后端 /api/jvm/run 生成（手工跑批时也可自己改）",
+        "# 由后端 /api/jvm/run 生成（手工校验时也可自己改）",
         "file=%s" % source_file.as_posix(),
         "keyword=%s" % keyword,
         "out=%s" % out_path.as_posix(),
         "timeout=%d" % timeout,
         "concurrency=%d" % concurrency,
         # 深度也进参数文件（Launcher 读它转发给 --depth）。**不硬编码 search**：
-        # 设置里选了什么就跑什么，跑批结论里的 stage 才与实际一致
+        # 设置里选了什么就跑什么，批量校验结论里的 stage 才与实际一致
         "depth=%s" % depth,
     ]
     # newline="\n" 是必须的：这是 **git 跟踪的文件**，而 write_text 在 Windows 上
@@ -317,7 +315,7 @@ def _export_sources_file(st, urls: Optional[List[str]] = None,
             "bookSourceName", "bookSourceUrl", "searchUrl", "exploreUrl",
             "ruleSearch", "ruleBookInfo", "ruleToc", "ruleContent",
             "header", "bookSourceType", "enabled", "bookSourceGroup") if k in d}
-        # 代理走源的 header（App 唯一认的注入点，十-3）——跑批与调试因此走同一个出口
+        # 代理走源的 header（App 唯一认的注入点，十-3）——批量校验与调试因此走同一个出口
         out.append(apply_proxy_header(row, proxy))
     # **必须绝对路径**：这两个路径是写给**另一个进程**用的——启动器会 `pushd` 到
     # App 仓库根再跑 Gradle，测试 JVM 的 CWD 就是那里。相对路径于是解析到
@@ -344,7 +342,7 @@ def _run_gradle(timeout_min: int = 90, args_path: Optional[Path] = None,
                 runtime: Optional[Dict[str, str]] = None,
                 stall_watch: Optional[Tuple[Path, float]] = None,
                 job_id: str = "") -> Dict[str, Any]:
-    """调启动器跑批（阻塞直到 Gradle 退出）。保留退出码和输出尾部。
+    """调启动器批量校验（阻塞直到 Gradle 退出）。保留退出码和输出尾部。
 
     以前这里只返回整数。Gradle 在测试 JVM 启动前失败时，调用方只能知道结果文件
     不存在，真正的 wrapper/native-platform 错误被丢掉。
@@ -612,7 +610,7 @@ def _watch_validate_start(job_id: str, report_path: Path, stop: threading.Event,
 def _remaining_sources(chunk_rows: List[Dict[str, Any]],
                        results_path: Path) -> List[Dict[str, Any]]:
     """块里还没落结论的源。**两侧都归一**（AGENTS #5）：sources.json 里是
-    ``bookSourceUrl`` 原文，results 行里是跑批写回的 url——不归一就全部对不上，
+    ``bookSourceUrl`` 原文，results 行里是批量校验写回的 url——不归一就全部对不上，
     剩余源会被整块重跑一遍。"""
     done = set()
     try:
@@ -659,7 +657,7 @@ def _merge_result_rows(base_path: Path, rows: List[Dict[str, Any]]) -> None:
 
 def _tail_progress(job_id: str, out_path: Path, stop: threading.Event,
                    interval: float, cap: int = 0, base: int = 0) -> None:
-    """跑批期间把 results.jsonl 已落盘的完整行数当进度上报。
+    """批量校验期间把 results.jsonl 已落盘的完整行数当进度上报。
 
     Kotlin 侧每写完一条源就 flush（`ValidateService.kt` 的 writer 回调），数 ``\\n``
     就是「实际完成几条」，不是估的——这与「不编假进度」不冲突，编的是没有依据的数。
@@ -684,9 +682,9 @@ def _tail_progress(job_id: str, out_path: Path, stop: threading.Event,
 
 @runner.register("jvm_run")
 async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[str, Any]:
-    """跑批任务体。`payload`：`out_path`（结果文件）+ `prep`（预检里算好的摘要，原样回给前端）。
+    """批量校验任务体。`payload`：`out_path`（结果文件）+ `prep`（预检里算好的摘要，原样回给前端）。
 
-    **跑批是分钟级的**（全量十几分钟），所以它是一条 job 而不是一个长 HTTP 请求：
+    **批量校验是分钟级的**（全量十几分钟），所以它是一条 job 而不是一个长 HTTP 请求：
     关掉页面、刷新、断网都不再让那十几分钟白等（结论本来就会落库，但界面从此知道
     它跑完了）。形状与本地校验那条 `check` 一样：POST /api/jobs → SSE 订阅。
 
@@ -796,7 +794,9 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
                             current_exec.get("reason") or "单条 JVM 执行态在排队期间失效")
                 job_runner.update_phase(job_id, "running_validate")
                 _engine_t0 = time.monotonic()
-                daemon_response = jvm_validate_daemon.run(dump, str(args_path))
+                daemon_response = jvm_validate_daemon.run(
+                    dump, str(args_path),
+                    owner={"job_id": job_id, "chunk": "single"})
                 _append_event(run_dir, "startup_stage", stage="daemon_request",
                                status="done", cost_sec=round(time.monotonic() - _engine_t0, 3),
                                mode="validate_daemon")
@@ -926,7 +926,6 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
             # 块级 daemon 路径：与单条同形——省掉每块一次 Gradle+JVM 冷启动。
             daemon_failure = (daemon_reason if not daemon_allowed else "")
             daemon_response: Dict[str, Any] = {}
-            gradle: Dict[str, Any] = {}
             daemon_mode = False
             stalled = False
             # 看门狗触发原因（stalled / cancelled）——except 里要读，必须在 try 外初始化
@@ -942,8 +941,8 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
                             "daemon 探测未通过（未启动/忙/版本不符）")
                     job_runner.update_phase(job_id, "running_validate")
                     # socket 等待 = 每源预算 × 块源数 + 余量：Kotlin 侧对单次 op
-                    # 的时长没有上限，这个客户端等待是唯一护栏；硬上限对齐 Gradle
-                    # 路径的 90 分钟。超时抛 ValidateDaemonError → 回落，不是源失败
+                    # 的时长没有上限，这是 daemon-only 批量路径的唯一护栏；超时即报告
+                    # 引擎失败，不把一次 daemon 故障放大成每块一次 Gradle 冷启动。
                     per_source = int(jvm_validate_daemon.params_from_args(
                         chunk_args)["timeout"])
                     wait = min(per_source * max(chunk_sources, 1) + 60,
@@ -959,7 +958,12 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
                     watcher.start()
                     try:
                         daemon_response = jvm_validate_daemon.run(
-                            dump, str(chunk_args), socket_timeout=wait)
+                            dump, str(chunk_args), socket_timeout=wait,
+                            owner={"job_id": job_id,
+                                   "chunk": "%d/%d" % (idx + 1, total),
+                                   "source_count": len(chunk_rows),
+                                   "source_name": str((chunk_rows or [{}])[0].get(
+                                       "bookSourceUrl") or "")})
                     finally:
                         tail_stop.set()
                     daemon_code = daemon_response.get("code")
@@ -992,25 +996,24 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
                             chunk_out.unlink()
                         except OSError:
                             pass
+            if not daemon_mode and not stalled:
+                return {"index": idx, "ok": False, "exit": 1,
+                        "reason": daemon_failure or "常驻 Validate JVM 未执行",
+                        "execution_mode": "validate_daemon",
+                        "daemon_failure": daemon_failure or "常驻 Validate JVM 未执行",
+                        "cost_sec": round(time.monotonic() - started, 1)}
             if daemon_mode:
                 code = daemon_response.get("code")
             else:
-                job_runner.update_phase(job_id, "starting_gradle")
-                gradle = _normalize_gradle_result(
-                    _run_gradle(args_path=chunk_args, runtime=runtime,
-                                stall_watch=(chunk_out, min(
-                                    _STALL_FACTOR * per_source_budget,
-                                    _STALL_CAP_SEC)),
-                                job_id=job_id))
-                code = gradle.get("exit")
-                if gradle.get("stalled"):
-                    stalled = True
+                # daemon 看门狗已停止当前操作；后面只允许逐源隔离重跑，
+                # 不再用 Gradle 把一次 daemon 故障放大成整批冷启动。
+                code = 1
             if stalled and chunk_dir is not None and not cancelled.is_set():
                 # 看门狗触发：重启引擎，剩余源逐条隔离重跑，再挂的判死——
                 # 把「一条源挂死一块 11 分钟」压成「约 2 分钟、只付一次」
                 job_runner.update_phase(job_id, "isolating_stall")
                 _append_event(run_dir, "chunk_stalled", index=idx,
-                              mode=("validate_daemon" if daemon_mode else "gradle"),
+                              mode="validate_daemon",
                               reason="块内输出停滞，疑似慢源挂住引擎")
                 iso = _isolate_stalled_chunk(
                     chunk_rows=chunk_rows or [], chunk_dir=chunk_dir,
@@ -1036,22 +1039,10 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
                 else:
                     daemon_failure = (daemon_failure + "；隔离重跑未完成："
                                       + str(iso.get("note") or ""))
-            snapshot_reason = _runtime_snapshot_failure_reason(gradle)
-            if snapshot_reason:
-                return {"index": idx, "ok": False, "exit": code,
-                        "reason": snapshot_reason, "gradle": gradle,
-                        "execution_mode": ("validate_daemon" if daemon_mode
-                                           else "gradle"),
-                        "daemon_failure": daemon_failure,
-                        "cost_sec": round(time.monotonic() - started, 1)}
             if code != 0 or not chunk_out.exists():
                 return {"index": idx, "ok": False, "exit": code,
-                        "reason": (_gradle_failure_reason(gradle)
-                                   if gradle and not daemon_mode
-                                   else "没有产出结果文件"),
-                        "gradle": gradle,
-                        "execution_mode": ("validate_daemon" if daemon_mode
-                                           else "gradle"),
+                        "reason": (daemon_failure or "Validate daemon 没有产出结果文件"),
+                        "execution_mode": "validate_daemon",
                         "daemon_failure": daemon_failure,
                         "cost_sec": round(time.monotonic() - started, 1)}
             # 读结果前先停本块轮询：终值以解析出的 rows 为准（理由同单条）
@@ -1068,8 +1059,7 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
             if chunk_dir is not None:
                 (chunk_dir / "DONE").write_text("", encoding="utf-8")
             return {"index": idx, "ok": True, "count": len(rows),
-                    "execution_mode": ("validate_daemon" if daemon_mode
-                                       else "gradle"),
+                    "execution_mode": "validate_daemon",
                     "daemon_failure": daemon_failure,
                     "cost_sec": round(time.monotonic() - started, 1)}
         finally:
@@ -1127,7 +1117,11 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
             try:
                 resp = jvm_validate_daemon.run(
                     dump, str(iso_args),
-                    socket_timeout=timeout + _REMEDIAL_WAIT_MARGIN_SEC)
+                    socket_timeout=timeout + _REMEDIAL_WAIT_MARGIN_SEC,
+                    owner={"job_id": job_id,
+                           "chunk": "%s/isolate-%02d" % (chunk_dir.name, i + 1),
+                           "source_count": 1,
+                           "source_name": str(src.get("bookSourceName") or "")})
                 if resp.get("code") == 0 and iso_out.exists():
                     rows = _read_results(iso_out)
                     good.extend(rows)
@@ -1161,7 +1155,7 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
             return False
 
     def _prepare_daemon() -> Dict[str, Any]:
-        """批量开跑前准备 daemon；忙时有界等待（可见），失败转 failed 回落 Gradle。
+        """批量开跑前准备 daemon；忙时有界等待（可见），失败则保留原因并停止本批。
 
         **先过单条同一条闸门**（``execution_readiness``，含 ``dump_is_stale``）：少了它，
         改了 Kotlin 源码又不刷新 snapshot 就会用**旧字节码**跑完整批——daemon 的 sig 只反映
@@ -1260,23 +1254,20 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
                               reason=str(daemon_prepare.get("reason") or ""),
                               cost_sec=round(time.monotonic() - _prepare_t0, 1))
                 daemon_state = ("ready" if daemon_prepare.get("outcome")
-                                in ("ready", "started")
-                                else ("fallback"
-                                      if daemon_prepare.get("retryable") is False
-                                      else "retry_pending"))
+                                in ("ready", "started") else "unavailable")
             tail_stop = threading.Event()
             tail = threading.Thread(
                 target=_tail_progress, name="jvm-progress-tail",
                 args=(job_id, chunk_out, tail_stop, _PROGRESS_POLL_INTERVAL,
                       len(chunk_rows), base_done), daemon=True)
             tail.start()
-            retry_this_chunk = daemon_state == "retry"
-            daemon_allowed = daemon_state in ("ready", "retry")
+            daemon_allowed = daemon_state == "ready"
             daemon_reason = (str(daemon_prepare.get("reason") or "")
                              if not daemon_allowed else "")
             _append_event(run_dir, "chunk_started", index=idx,
                           total=len(chunks), count=len(chunk_rows),
-                          mode=("validate_daemon" if daemon_allowed else "gradle"))
+                          mode=("validate_daemon" if daemon_allowed else "unavailable"),
+                          reason=(daemon_reason[:300] if daemon_reason else ""))
             work = asyncio.create_task(run_in_threadpool(
                 _chunk_work, idx, len(chunks), chunk_dir, chunk_args,
                 chunk_out, base_done, batch, tail_stop, tail,
@@ -1298,20 +1289,11 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
                           cost_sec=report.get("cost_sec"),
                           reason=(str(report.get("reason") or "")[:300]
                                   if not report.get("ok") else ""))
-            if daemon_state == "retry":
-                if report.get("execution_mode") == "validate_daemon":
-                    daemon_state = "ready"
-                    _append_event(run_dir, "recovered", index=idx)
-                else:
-                    daemon_state = "fallback"
-            elif daemon_state == "retry_pending":
-                # 首块回退后只给下一块一次重试机会；重试失败后保持回退。
-                daemon_state = "retry"
             if cancelled.is_set():
                 abort_reason = abort_reason or "用户取消，剩余块未启动"
                 break
             if not report.get("ok"):
-                # 环境级失败（Gradle/快照漂移）：余下块不再启动——不是源的问题，
+                # daemon/运行环境级失败：余下块不再启动——不是源的问题，
                 # 别把它们也记成失败；已完成块的结论已在库
                 abort_reason = ("第 %d/%d 块失败：%s"
                                 % (idx + 1, len(chunks), report.get("reason") or ""))
@@ -1339,24 +1321,20 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
         dist = Counter(r.get("state") for r in all_rows)
         # 块级执行方式统计。混合时保留历史值，差额写进 execution_note。
         daemon_blocks = sum(1 for r in chunk_reports
-                            if r.get("execution_mode") == "validate_daemon")
-        gradle_blocks = sum(1 for r in chunk_reports
-                            if r.get("execution_mode") == "gradle")
-        all_daemon = daemon_blocks > 0 and gradle_blocks == 0
+                            if r.get("ok") and r.get("execution_mode") == "validate_daemon")
+        failed_blocks = sum(1 for r in chunk_reports if not r.get("ok"))
         result = dict(prep, **{
             "ok": not abort_reason, "exit": None if abort_reason else 0,
             "batch": batch, "count": len(all_rows), "dist": dict(dist),
             "checks": sum(r.get("count", 0) for r in chunk_reports if r.get("ok")),
-            "execution_mode": "validate_daemon" if all_daemon else "gradle_fallback",
-            "execution_note": ("批量按块执行：%d 块走常驻 daemon、%d 块走 Gradle"
-                               % (daemon_blocks, gradle_blocks)
-                               if (daemon_blocks or gradle_blocks)
-                               else "批量按块执行 Gradle，块间交还调度权"),
+            "execution_mode": "validate_daemon",
+            "execution_note": ("批量 daemon 执行：%d 块完成、%d 块失败"
+                               % (daemon_blocks, failed_blocks)),
             "checked": len(items), "cached": 0, "fetched": len(items),
             "transitions": summarize_transitions(prev_checks, items),
             "items": items[:ITEMS_LIMIT],
             "chunk_reports": chunk_reports,
-            "daemon_chunks": daemon_blocks, "gradle_chunks": gradle_blocks,
+            "daemon_chunks": daemon_blocks, "gradle_chunks": 0,
         })
         if daemon_prepare:
             # 仅投影有界两键：pid/port 等易变值不进结果。

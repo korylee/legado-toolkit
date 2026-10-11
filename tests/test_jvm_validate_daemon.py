@@ -53,7 +53,9 @@ class ValidateDaemonProtocolTests(unittest.TestCase):
         try:
             result = jvm_validate_daemon.request(
                 {"file": "C:/a.json", "out": "C:/a.jsonl", "keyword": "我",
-                 "concurrency": 1, "timeout": 25, "depth": "search"},
+                 "concurrency": 1, "timeout": 25, "depth": "search",
+                 "owner_job_id": "job-1", "owner_chunk": "2/4",
+                 "owner_source_name": "example source"},
                 port,
                 2,
             )
@@ -64,6 +66,84 @@ class ValidateDaemonProtocolTests(unittest.TestCase):
         self.assertEqual(seen["payload"]["out"], "C:/a.jsonl")
         self.assertEqual(seen["payload"]["concurrency"], 1)
         self.assertEqual(seen["payload"]["depth"], "search")
+        self.assertEqual(seen["payload"]["owner_job_id"], "job-1")
+        self.assertEqual(seen["payload"]["owner_chunk"], "2/4")
+        self.assertEqual(seen["payload"]["owner_source_name"], "example source")
+
+    def test_run_tracks_and_clears_operation_owner(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="validate_owner_") as root:
+            marker = pathlib.Path(root) / "current.json"
+            owner = {"job_id": "job-7", "chunk": "3/8",
+                     "source_count": 25, "source_name": "example source"}
+
+            def fake_request(cfg, port, timeout):
+                current = json.loads(marker.read_text(encoding="utf-8"))
+                self.assertEqual(current["job_id"], "job-7")
+                self.assertEqual(current["chunk"], "3/8")
+                self.assertEqual(cfg["owner_source_name"], "example source")
+                return {"code": 0}
+
+            with mock.patch.object(jvm_validate_daemon, "current_operation_path",
+                                   return_value=marker), \
+                 mock.patch.object(jvm_validate_daemon, "params_from_args",
+                                   return_value={"timeout": 25}), \
+                 mock.patch.object(jvm_validate_daemon, "resolve",
+                                   return_value={"port": 1234}), \
+                 mock.patch.object(jvm_validate_daemon, "request", side_effect=fake_request):
+                result = jvm_validate_daemon.run(
+                    {}, "args.properties", socket_timeout=90, owner=owner)
+            self.assertEqual(result["code"], 0)
+            self.assertFalse(marker.exists())
+
+    def test_stop_idle_refuses_unresponsive_or_unverified_process(self) -> None:
+        state = {"process_alive": True, "responsive": False,
+                 "identity_verified": False, "current_operation": None}
+        with mock.patch.object(jvm_validate_daemon, "status", return_value=state), \
+             mock.patch.object(jvm_validate_daemon, "_exchange") as exchange:
+            result = jvm_validate_daemon.stop_idle()
+        self.assertFalse(result["stopped"])
+        exchange.assert_not_called()
+
+    def test_stop_idle_refuses_active_operation_owner(self) -> None:
+        state = {"process_alive": True, "responsive": True,
+                 "identity_verified": True,
+                 "current_operation": {"operation_id": "op-1", "job_id": "job-1"}}
+        with mock.patch.object(jvm_validate_daemon, "status", return_value=state), \
+             mock.patch.object(jvm_validate_daemon, "_exchange") as exchange:
+            result = jvm_validate_daemon.stop_idle(owner_inactive=False)
+        self.assertFalse(result["stopped"])
+        exchange.assert_not_called()
+
+    def test_stop_idle_refuses_changed_operation_owner(self) -> None:
+        state = {"process_alive": True, "responsive": True,
+                 "identity_verified": True,
+                 "current_operation": {"operation_id": "new-op", "job_id": "job-2"}}
+        with mock.patch.object(jvm_validate_daemon, "status", return_value=state), \
+             mock.patch.object(jvm_validate_daemon, "_exchange") as exchange:
+            result = jvm_validate_daemon.stop_idle(
+                owner_inactive=True, expected_operation_id="old-op")
+        self.assertFalse(result["stopped"])
+        exchange.assert_not_called()
+
+        with tempfile.TemporaryDirectory(prefix="validate_stop_") as tmp:
+            info_file = pathlib.Path(tmp) / "validate_daemon.json"
+            info = {"pid": 42, "port": 1234}
+            info_file.write_text(json.dumps(info), encoding="utf-8")
+            state = {"process_alive": True, "responsive": True,
+                     "identity_verified": True, "current_operation": None,
+                     "pid": 42, "port": 1234}
+            with mock.patch.object(jvm_validate_daemon, "status", return_value=state), \
+                 mock.patch.object(jvm_validate_daemon, "info_path", return_value=info_file), \
+                 mock.patch.object(jvm_validate_daemon, "_read_info", return_value=info), \
+                 mock.patch.object(jvm_validate_daemon, "_pid_alive", return_value=False), \
+                 mock.patch.object(jvm_validate_daemon, "_PROC", None), \
+                 mock.patch.object(jvm_validate_daemon, "_LOG", None), \
+                 mock.patch.object(jvm_validate_daemon, "_exchange",
+                                   return_value={"code": 0}) as exchange:
+                result = jvm_validate_daemon.stop_idle()
+            self.assertTrue(result["stopped"], result)
+            exchange.assert_called_once_with({"id": 0, "op": "stop"}, 1234, timeout=10)
+            self.assertFalse(info_file.exists())
 
     def test_ping_rejects_other_daemon_kind(self) -> None:
         with mock.patch.object(jvm_validate_daemon, "_exchange",
@@ -167,7 +247,25 @@ class PrepareTests(unittest.TestCase):
         kill.assert_not_called()
         stop.assert_not_called()
 
-    def test_prepare_reuses_daemon_that_frees_up_within_wait(self) -> None:
+    def test_prepare_busy_reason_includes_current_operation_owner(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="validate_busy_owner_") as tmp:
+            marker = pathlib.Path(tmp) / "validate_daemon.current.json"
+            marker.write_text(json.dumps({
+                "operation_id": "op-1", "job_id": "job-8", "chunk": "4/7",
+                "source_name": "example source", "started_at": time.time() - 3,
+            }), encoding="utf-8")
+            with mock.patch.object(jvm_validate_daemon, "current_operation_path",
+                                   return_value=marker), \
+                 mock.patch.object(jvm_validate_daemon, "_read_info",
+                                   return_value=dict(self._INFO)), \
+                 mock.patch.object(jvm_validate_daemon, "ping", return_value=None), \
+                 mock.patch.object(jvm_validate_daemon, "_pid_alive", return_value=True):
+                got = jvm_validate_daemon.prepare(self._DUMP, busy_wait_sec=0)
+        self.assertEqual(got["outcome"], "busy")
+        self.assertIn("job=job-8", got["reason"])
+        self.assertIn("chunk=4/7", got["reason"])
+        self.assertIn("source=example source", got["reason"])
+
         """忙是瞬时的：等待窗口内 ping 恢复应答 → ready，杀掉重启才是真损失。"""
         answers = [None, None, {"sig": "s", "kind": "validate"}]
         with mock.patch.object(jvm_validate_daemon, "_read_info",
