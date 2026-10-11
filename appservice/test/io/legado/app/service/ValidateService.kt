@@ -120,7 +120,7 @@ object ValidateService {
     //: 全在那里，连注释一起搬的；别在这里重新长一份。
 
     /**
-     * 进程级初始化（幂等：`main` 与调试的 `runOnce` 各调一次，第二次直接返回）：Koin + appCtx。由 [main] 在跑批前调用一次。
+     * 进程级初始化（幂等：`main` 与调试的 `runOnce` 各调一次，第二次直接返回）：Koin + appCtx。由 [main] 在批量校验前调用一次。
      *
      * [userAgent] 默认就是 [AppserviceEnv.USER_AGENT]——它是请求头里那条 UA
      * （`BaseSource.getHeaderMap` → `AppConst.UA_NAME`），**只能有一份**（那个常量上

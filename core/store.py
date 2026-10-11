@@ -91,7 +91,7 @@ _JOB_LIGHT_COLUMNS = (
     # 闸门（JSON 的 false 经 json_extract 出来是 0）。
     " json_extract(%s, '$.ok') AS result_ok_flag,"
     " json_extract(%s, '$.reason') AS result_reason,"
-    # 运行目录：跑批放在 `payload.manifest.run_dir`、调试 job 放在 `payload.run_dir`
+    # 运行目录：批量校验放在 `payload.manifest.run_dir`、调试 job 放在 `payload.run_dir`
     # （两处都是提交时冻结的）。SQL 侧一次抽好——观测端不该为了一个路径去解析
     # 上百 KB 的 result_json。
     " COALESCE(json_extract(%s, '$.run_dir'),"

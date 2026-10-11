@@ -123,7 +123,7 @@ class JvmRunRequest(BaseModel):
     #: **urls 优先**：勾选是明确意图，筛选是「这一屏里的」。
     #: 有它才做得到「只重跑待验证那批」——全量一次十几分钟，而站点是按 IP 认人的。
     filter: Dict[str, Any] = Field(default_factory=dict)
-    #: **本次跑批的参数**（keyword / timeout / concurrency / depth）。
+    #: **本次批量校验的参数**（keyword / timeout / concurrency / depth）。
     #: 与本地校验的 `check: {...}` 同形：只作用于这一次，**不写回全局设置**——
     #: 这些是"这次怎么跑"，不是"这台机器的配置"（配置只有环境目录那几项）。
     #: 每个键都过 `settings_store.coerce`，取值范围仍然只有后端那一份（AGENTS #8）。
@@ -298,11 +298,11 @@ class JvmSettingsPatch(BaseModel):
     """JVM 校验服务的**环境**设置（core.settings_store.DEFAULTS["jvm"] 里的环境键）。
     同 CheckSettingsPatch 的约定：收敛全部交给 settings_store.coerce。
 
-    **跑批那五个参数（keyword / timeout / concurrency / depth / limit）不在这里**：
+    **批量校验那五个参数（keyword / timeout / concurrency / depth / limit）不在这里**：
     它们由 `settings_store` 的常量定默认值与区间、由 `JVM_RUN_PARAMS` 允许本次覆盖，
     没有「改永久默认值」这个动作——所以这里不设字段。Pydantic 默认忽略未声明的键，
     提交 `{"jvm": {"keyword": …}}` 会被静默丢弃（等价于没传）；要改这次的搜索词就在
-    跑批弹框里改（`CheckJvmForm`），那才是它唯一的作用面。
+    批量校验弹框里改（`CheckJvmForm`），那才是它唯一的作用面。
     """
 
     app_repo: Optional[str] = None

@@ -87,7 +87,7 @@ async function load() {
     listLimit.value = Number(page?.limit || 0);
     recentDays.value = Number(page?.recent_days || 0);
     // **必须写回共享状态**：提交任务的页面刷新之后它的 SSE 就断了，没人再 upsert，
-    // 徽标和在跑条会一直空着（跑批是分钟级，刷新很常见）。列表是唯一还能拿到
+    // 徽标和在跑条会一直空着（批量校验是分钟级，刷新很常见）。列表是唯一还能拿到
     // 「本页刷新前就在跑的 / 别处提交的」任务的来源。
     for (const row of jobs.value) upsertJob(row);
   } catch (e) {
@@ -97,7 +97,7 @@ async function load() {
   }
 }
 
-// 取消：与明细弹窗同一句后果说明——跑批是**块级中止**，说成「立刻停止」会让人
+// 取消：与明细弹窗同一句后果说明——批量校验是**块级中止**，说成「立刻停止」会让人
 // 以为按钮失灵（详见 utils/jobs 的 jobCancelHint）
 async function cancelJob(row) {
   try {

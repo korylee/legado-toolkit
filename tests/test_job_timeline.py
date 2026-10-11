@@ -122,7 +122,7 @@ class JobTimelineTests(unittest.TestCase):
         self.assertEqual([e["seq"] for e in tail["events"]], [3])
 
     def test_failures_are_read_from_the_run_dir_with_chunk_labels(self) -> None:
-        """失败清单来自 ``failures.jsonl``（跑批在产生处写一次，不再重扫 results）。"""
+        """失败清单来自 ``failures.jsonl``（批量校验在产生处写一次，不再重扫 results）。"""
         self._append_failures(
             {"url": "https://b.com", "name": "乙", "state": "no_result",
              "reason": "搜索为空", "stage": "search", "chunk": "chunk-01"},

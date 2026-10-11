@@ -315,7 +315,7 @@ ORPHAN_RUN_DIR_HOURS = 24
 
 
 def _run_dir_job_id(entry: pathlib.Path) -> str:
-    """目录属于哪个任务：跑批写在信封 ``manifest.json`` 里，调试目录名里就带。"""
+    """目录属于哪个任务：批量校验写在信封 ``manifest.json`` 里，调试目录名里就带。"""
     try:
         data = json.loads((entry / "manifest.json").read_text(encoding="utf-8"))
         if isinstance(data, dict) and data.get("job_id"):

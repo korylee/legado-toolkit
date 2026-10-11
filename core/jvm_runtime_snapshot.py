@@ -82,7 +82,7 @@ def compare(dump: dict, actual: dict, runtime: dict | None = None) -> dict[str, 
 def describe_differences(differences: dict) -> str:
     """把差异压成一行：哪些字段不同、各自多少项。
 
-    完整 declared/actual 清单可能有几百条（实测 2026-10-06 一次跑批 16KB），
+    完整 declared/actual 清单可能有几百条（实测 2026-10-06 一次批量校验 16KB），
     灌进 stdout 只会淹没日志；完整内容本来就会写进 `.comparison.json`。
     """
     parts = []

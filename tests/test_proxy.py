@@ -139,7 +139,7 @@ class EngineWiringTests(unittest.TestCase):
         src = (pathlib.Path(__file__).parent.parent / "backend/jobs/jvm_exec.py").read_text(
             encoding="utf-8")
         self.assertIn("apply_proxy_header(row, proxy)", src,
-                      "跑批导出的源没带代理（那就会「跑批没走、调试走了」）")
+                      "批量校验导出的源没带代理（那就会「批量校验没走、调试走了」）")
 
     def test_the_generation_chain_reads_it_too(self):
         src = (pathlib.Path(__file__).parent.parent / "core/jvm_debug.py").read_text(

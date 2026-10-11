@@ -128,7 +128,7 @@ const runningJobsText = computed(() => {
 });
 
 //: 某一行是否正在校验。**按行区分**：逐条校验时只有命中的那些转圈
-//: （全量跑批不在这里——它有自己的在跑条与徽标）
+//: （全量校验不在这里——它有自己的在跑条与徽标）
 function isRowChecking(url) {
   if (!checking.value) return false;
   return checkingUrls.value.has(url);
@@ -140,7 +140,7 @@ function checkOne(row) {
   return checkOneSource(row.source_url);
 }
 
-//: 单条校验的状态文案。**跑批不在这里**：它走 `runJvmBatch`，进度由统计条上那条
+//: 单条校验的状态文案。**批量校验不在这里**：它走 `runJvmBatch`，进度由统计条上那条
 //: 在跑提示（读共享任务状态）与明细弹窗展示——两者互斥提交，不需要在这里再判一次。
 const checkStatusText = computed(() => {
   const n = checkingUrls.value.size;
@@ -272,16 +272,16 @@ function startPendingCheck() {
   runJvmBatch();
 }
 
-//: JVM 跑批由后端 job 执行；进度/阶段/条数走共享任务状态（`useJobs`）——
+//: JVM 批量校验由后端 job 执行；进度/阶段/条数走共享任务状态（`useJobs`）——
 //: 在跑条、明细弹窗、任务中心读的都是它 upsert 进去的那一帧，这里不再各存一份。
 const jvmRunning = ref(false);
 //: 当前这批的 job_id：在跑条与明细弹窗要靠它指向正在跑的那条
 const jvmJobId = ref("");
-//: 跑批任务的 SSE 句柄（关掉订阅用；任务本身在后端跑，关页面也不会丢）
+//: 批量校验任务的 SSE 句柄（关掉订阅用；任务本身在后端跑，关页面也不会丢）
 let stopJvm = null;
 
 async function runJvmBatch() {
-  if (jvmRunning.value) return ElMessage.warning("已有本机引擎跑批在运行");
+  if (jvmRunning.value) return ElMessage.warning("已有本机引擎校验在运行");
   if (checking.value) return ElMessage.warning("已有校验任务在运行");
   const scope = checkScope.value;
   // 三种范围各自的入参：勾选给 urls、筛选给 filter、全量什么都不给
@@ -307,9 +307,9 @@ async function runJvmBatch() {
   try {
     const r = await jvmRun(payload);
     if (!r.started) {
-      // 没起来的几种原因要分开说：另一个 JVM 任务在跑（reason）、环境就绪检查没过（readiness）、
+      // 没起来的几种原因要分开说：另一个本机引擎任务在跑（reason）、环境就绪检查没过（readiness）、
       // 选中的源一条都没匹配上 / 筛选没命中（reason）——都说成「自检未通过」会把原因指反
-      ElMessage.warning(r.reason || "环境就绪检查未通过，不能跑批");
+      ElMessage.warning(r.reason || "环境就绪检查未通过，不能校验");
       jvmRunning.value = false;
       return;
     }
@@ -326,7 +326,7 @@ async function runJvmBatch() {
       phase: "queued",
       kind: "jvm_run",
     }); // 徽标立刻反映：不等第一帧 SSE
-    // 跑批是分钟级的：**提交任务 + 盯住那条流**（与单条校验同一个入口）。原来是一个
+    // 批量校验是分钟级的：**提交任务 + 盯住那条流**（与单条校验同一个入口）。原来是一个
     // 挂到跑完的长请求——关掉页面/刷新就白等；结论照落库，但界面不知道它跑完了。
     // 状态与时间线都从 `useJobs` 的那条流来（谁盯着就多一个引用，只有一条连接）。
     if (stopJvm) stopJvm();
@@ -341,7 +341,7 @@ async function runJvmBatch() {
         try {
           detail = await getJobDetail(r.job_id, { raw: true });
         } catch (e) {
-          ElMessage.error("跑批结果读取失败：" + (e?.message || e));
+          ElMessage.error("校验结果读取失败：" + (e?.message || e));
           return;
         }
         const res = detail.result || {};
@@ -350,14 +350,14 @@ async function runJvmBatch() {
           ElMessage.warning(detail.error);
         } else {
           ElMessage.success(
-            "跑批完成：" +
+            "校验完成：" +
               (res.count || 0) +
               " 条结论已入库" +
               (res.checks ? "（健康档位 " + res.checks + " 条）" : ""),
           );
         }
-        // **把结论留在页面上**（复用单条校验那条结果条）：跑批提交时弹的明细弹窗
-        // 一关，这次跑批在页面上就没有痕迹了，用户只能去任务中心翻历史。
+        // **把结论留在页面上**（复用单条校验那条结果条）：批量校验提交时弹的明细弹窗
+        // 一关，这次批量校验在页面上就没有痕迹了，用户只能去任务中心翻历史。
         const summary = parseCheckResult(res);
         if (summary) {
           summary.jobId = r.job_id;
@@ -365,16 +365,16 @@ async function runJvmBatch() {
         }
         await load();
       } else if (status === "failed") {
-        ElMessage.error("跑批失败：" + ((state && state.job && state.job.error) || "看任务详情"));
+        ElMessage.error("校验失败：" + ((state && state.job && state.job.error) || "看任务详情"));
       } else if (status === "cancelled") {
-        ElMessage.info("跑批已取消");
+        ElMessage.info("校验已取消");
       } else if (status === "unknown") {
         ElMessage.error((state && state.job && state.job.error) || "任务状态获取失败，请刷新页面");
       }
     });
   } catch (e) {
     jvmRunning.value = false;
-    ElMessage.error("跑批失败：" + (e?.message || e));
+    ElMessage.error("校验失败：" + (e?.message || e));
   }
 }
 
@@ -771,7 +771,7 @@ function parseCheckResult(r) {
  */
 async function checkOneSource(url) {
   if (checking.value) return ElMessage.warning("已有校验任务在运行");
-  if (jvmRunning.value) return ElMessage.warning("已有本机引擎跑批在运行");
+  if (jvmRunning.value) return ElMessage.warning("已有本机引擎校验在运行");
   checking.value = true;
   // 提交时就要把"测哪些"记下来：等 SSE 回来才更新的话，点完到第一次事件之间
   // 界面上什么都不会变
@@ -783,7 +783,7 @@ async function checkOneSource(url) {
     const r = await jvmRun({ urls: [url] });
     if (!r.started) {
       // 引擎没起来的几种原因分开说（reason = 忙 / 空范围，readiness = 环境没过）——
-      // 都说成「自检未通过」会把原因指反（与跑批那条同一套说法）
+      // 都说成「自检未通过」会把原因指反（与批量校验那条同一套说法）
       checking.value = false;
       checkingUrls.value = new Set();
       return ElMessage.warning(
@@ -965,7 +965,7 @@ onUnmounted(() => {
           >取消</el-button
         >
       </template>
-      <!-- 跑批/其他后台任务：原统计条只在单条校验时说话，跑批期间一句提示都没有 -->
+      <!-- 批量校验/其他后台任务：原统计条只在单条校验时说话，批量校验期间一句提示都没有 -->
       <template v-else-if="activeJobs.length">
         <span class="muted">{{ runningJobsText }}</span>
         <el-button link size="small" @click="openJobDetail(activeJobs[0].id)"
@@ -1588,7 +1588,7 @@ onUnmounted(() => {
     />
     <ImportDialog v-model="importVisible" @imported="load" />
     <!-- 任务明细弹窗：在跑时是进度条，结束后是结果。列表页的在跑条、结果条、
-         跑批提交后都走这一个，不再各弹一个只报进度的框 -->
+         批量校验提交后都走这一个，不再各弹一个只报进度的框 -->
     <TaskDetailDialog v-model="taskDetailOpen" :job-id="taskDetailJobId"
                       @changed="jobsRef?.refresh()" />
     <JobsDrawer ref="jobsRef" v-model="jobsVisible" />

@@ -151,7 +151,7 @@ def _run_probe(probe, host: str) -> Tuple[str, str]:
     try:
         asyncio.get_running_loop()
     except RuntimeError:
-        # 跑批那条路在 FastAPI 的线程池里，没有事件循环 → 直接起一个
+        # 批量校验那条路在 FastAPI 的线程池里，没有事件循环 → 直接起一个
         return asyncio.run(dns_check.probe(host))
     # 已经在事件循环里：`asyncio.run` 会炸，丢到一个临时线程里跑
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:

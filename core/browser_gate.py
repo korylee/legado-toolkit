@@ -9,7 +9,7 @@
 `java.startBrowserAwait(url, title)`（打开内置浏览器让人过，过完接着走）——它们的立场同样是
 「问人」，不是「骗过」那道墙。
 
-**profile 是独占的**：这个窗口开着时不要同时跑批 / 调试（会被占用而启动失败，实测踩过）。
+**profile 是独占的**：这个窗口开着时不要同时批量校验 / 调试（会被占用而启动失败，实测踩过）。
 本模块负责在收尾时关掉它，关不掉会**明说**（见 `close_browser`）。
 
 这些函数原本长在 `scripts/jvm_login.py` 里，抽出来是因为生成链也要用（`human_gate`）。
@@ -27,7 +27,7 @@ import urllib.request
 from typing import Any, Dict, List, Optional
 
 #: 与 `appservice/…/BrowserSession.profileDir()` **同一套**默认：改一边必须改另一边，
-#: 否则「预热登的」和「跑批读的」不是同一个 profile——现象是「明明登了却说没登录」
+#: 否则「预热登的」和「批量校验读的」不是同一个 profile——现象是「明明登了却说没登录」
 #: （契约测试 `tests/test_jvm_debug_contract.py::TestBrowserProfileParity` 钉着）。
 PROFILE_DIR_NAME = "legado-appservice-profile"
 
@@ -142,7 +142,7 @@ def close_browser(port: int, proc: Optional[subprocess.Popen] = None) -> bool:
     if wait_port_gone(port):
         return True
     print("⚠ 浏览器还在（调试端口仍应答）——请手动关掉那个窗口：")
-    print("   它占着 profile，跑批/调试会因 profile 被占用而启动失败。")
+    print("   它占着 profile，批量校验/调试会因 profile 被占用而启动失败。")
     if proc is not None:
         subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True)
     return False
@@ -168,7 +168,7 @@ def open_for_human(url: str, prompt: str = "", profile: str = "",
     print("浏览器 : %s" % exe)
     print("profile: %s" % prof)
     print("地址   : %s" % url)
-    print("（这个 profile 是独占的：现在不要同时跑批/调试）")
+    print("（这个 profile 是独占的：现在不要同时批量校验/调试）")
     proc = subprocess.Popen(
         [exe, "--remote-debugging-port=%d" % port, "--user-data-dir=%s" % prof,
          "--no-first-run", "--no-default-browser-check", url],

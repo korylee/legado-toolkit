@@ -101,7 +101,7 @@ class JobDetailShapeTests(unittest.TestCase):
 
     def test_aborted_batch_reason_reaches_error(self):
         """中止批的原因写在 ``reason``：只读 ``error`` 时，界面只剩「已完成 + 空原因」，
-        而同一个任务已经停在一半（跑批中止不再启动余下块）。"""
+        而同一个任务已经停在一半（批量校验中止不再启动余下块）。"""
         detail = _job_detail({**self._job({
             "ok": False, "checked": 0,
             "reason": "第 34/132 块失败：没有产出结果文件",

@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
 """ValidateService.kt 与 Python 侧的跨语言契约（不跑 Kotlin，对照源码字面量）。
 
-跑批的默认参数与错误分类码**各写一份**——Kotlin 读不到 settings_store，Python
+批量校验的默认参数与错误分类码**各写一份**——Kotlin 读不到 settings_store，Python
 读不到 Kotlin 常量——只能靠测试把「各改一边」拦住，与
 ``tests/test_jvm_debug_contract.py`` 的 TestLoginMarkerParity 同一个套路
-（AGENTS #22⑤）。漂了的后果不是报错：默认值漂了，两侧给同一次跑批算的
+（AGENTS #22⑤）。漂了的后果不是报错：默认值漂了，两侧给同一次批量校验算的
 预算不一样；分类码漂了，``classify_cause`` 静默落到字符串匹配的兜底里。
 """
 
@@ -23,7 +23,7 @@ def kotlin_text() -> str:
 
 
 class TestJvmDefaultsParity(unittest.TestCase):
-    """跑批种子（keyword / timeout / concurrency）两侧必须同值。
+    """批量校验种子（keyword / timeout / concurrency）两侧必须同值。
 
     权威在 ``settings_store.DEFAULTS["jvm"]``（AGENTS #8）；Kotlin 那份只是
     直连 CLI 时的兜底。timeout 必须 > App okhttp callTimeout 60s（两种超时

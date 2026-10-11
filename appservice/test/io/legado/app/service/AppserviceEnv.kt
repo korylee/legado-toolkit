@@ -4,7 +4,7 @@ import java.io.File
 import java.util.Properties
 
 /**
- * 进程级共享的环境事实：**跑批 / 调试 / 两个探针都走这一份**。
+ * 进程级共享的环境事实：**批量校验 / 调试 / 两个探针都走这一份**。
  *
  * 单独一个文件的理由不是「好看」，是这两样东西**只能有一份**，而它们原来各被抄了
  * 三到四遍（UA 四处、参数文件定位三处）：
@@ -40,11 +40,11 @@ object AppserviceEnv {
      * 参数文件的候选路径，**顺序即优先级**：
      *
      * 1. `LEGADO_APPSERVICE_ARGS` 指的**那个文件**——手跑要换参数时的显式覆盖口；
-     *    跑批/调试自己那份也走这条（Python 侧写在 `data/app_probe/args.properties`，
+     *    批量校验/调试自己那份也走这条（Python 侧写在 `data/app_probe/args.properties`，
      *    拉起 Gradle 时把它塞进这个环境变量）。**第 2 条只服务手工场景**：
      *    指哪读哪，不猜位置，也不往别人的仓库里放东西。
      * 2. `LEGADO_APPSERVICE_DIR/args.properties`：启动器（`legado-gradle.bat`）设的环境
-     *    变量。今天所有自动链路（后端跑批 / `scripts/jvm_debug_run.py`）都命中它。
+     *    变量。今天所有自动链路（后端批量校验 / `scripts/jvm_debug_run.py`）都命中它。
      *
      * **曾经还有第三个**候选（CWD 下的 `appservice-args.properties`），2026-09-20 删除：
      * 那个 CWD 是 **App 仓库根**（启动器 `pushd` 到那里），而那个仓库必须保持干净

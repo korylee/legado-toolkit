@@ -211,7 +211,7 @@ async function deleteJob() {
         </div>
         <el-progress :percentage="pct" :stroke-width="10" :show-text="false"
                      :status="jobProgressStatus(job.status)" />
-        <!-- 绝对时间对分钟级跑批没用（还得自己减时钟）；这个数停住不动就是「卡住了」 -->
+        <!-- 绝对时间对分钟级批量校验没用（还得自己减时钟）；这个数停住不动就是「卡住了」 -->
         <p v-if="inFlight && agoText" class="muted td-progress-text">{{ agoText }}更新</p>
       </div>
 
@@ -403,7 +403,7 @@ async function deleteJob() {
 .task-detail-overlay .task-detail-dialog .el-dialog__body {
   flex: 1 1 auto; min-height: 0; overflow-y: auto;
   display: flex; flex-direction: column;
-  /* 跑批中每 2 秒来一行：没有它，内容刚越过高度的那一刻会冒出滚动条，
+  /* 批量校验中每 2 秒来一行：没有它，内容刚越过高度的那一刻会冒出滚动条，
      整块文字跟着横跳一下 */
   scrollbar-gutter: stable;
 }

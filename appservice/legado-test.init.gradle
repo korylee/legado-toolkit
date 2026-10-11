@@ -47,10 +47,10 @@ gradle.projectsEvaluated {
     }
     app.tasks.matching { it.name ==~ /test.*UnitTest/ }.configureEach {
         it.classpath += app.files(testRes)
-        // 全量跑批 3774 条时 OOM（约 600 条崩）——Robolectric 默认堆不够 3000+ 协程
+        // 全量校验 3774 条时 OOM（约 600 条崩）——Robolectric 默认堆不够 3000+ 协程
         // 同时持有页面/规则对象。3g 实测够用；single fork 保持结论顺序稳定。
         it.maxHeapSize = "3g" 
-        // 跑批参数是外部进程写出的文件，优先使用本次调用通过
+        // 批量校验参数是外部进程写出的文件，优先使用本次调用通过
         // LEGADO_APPSERVICE_ARGS 传入的绝对路径；手工调用没有该变量时才回落到
         // appservice/args.properties。必须声明为任务输入，否则改参数后 Gradle
         // 仍可能判 UP-TO-DATE，或在 Gradle 9.6 的输入校验阶段直接因为路径错而中止。

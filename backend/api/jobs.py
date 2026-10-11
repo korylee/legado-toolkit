@@ -39,7 +39,7 @@ def _tail_text(value: Any, limit: int) -> str:
 
 
 def _chunk_detail_reports(parsed: Dict[str, Any]) -> Dict[str, Any]:
-    """从 JVM 跑批结果里挑出详情面板实际消费的有限字段。"""
+    """从 JVM 批量校验结果里挑出详情面板实际消费的有限字段。"""
     reports = parsed.get("chunk_reports")
     if not isinstance(reports, list):
         return {"chunk_reports": [], "chunk_report_total": 0,
@@ -334,7 +334,7 @@ def list_jobs(
 def lane_status():
     """JVM lane 的排队现状：谁持着 JVM、排队的都有谁（kind/已等秒/有效优先级）。
 
-    回答「我的调试/跑批为什么还没开始」；不塞进任务列表响应，是为了不动
+    回答「我的调试/批量校验为什么还没开始」；不塞进任务列表响应，是为了不动
     前端已消费的列表形状。必须注册在 /{job_id} 之前。
     """
     return {"jvm": runner.lane_snapshot("jvm")}

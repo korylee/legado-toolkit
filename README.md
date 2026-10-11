@@ -137,16 +137,16 @@ Gradle Wrapper 分发包需要先显式准备（校验与调试不会自动联�
 
 1. 设置 → 「JVM 校验」页签 → 填 App 源码目录；SDK / JDK 自动发现失败时，可在
    页签里手填或点「选择目录」。
-2. 同页签点「自检环境」，逐项全绿才能跑批；分发包未准备时，自检会给出
+2. 同页签点「自检环境」，逐项全绿才能批量校验；分发包未准备时，自检会给出
    `prepare_gradle.py` 命令，下载完成后重新自检。
-   **这一页只配环境**（App 源码目录 + 自检 + 最近一次的结果）。
-3. **跑批的入口在书源列表**：工具栏「全量校验」（或先勾选几条 → 「校验选中」）→
+   **这一页配环境并查看常驻校验引擎状态**（App 源码目录 + 自检 + daemon 操作归属；仅确认无活跃任务且身份可验证时允许停止）。
+3. **批量校验的入口在书源列表**：工具栏「全量校验」（或先勾选几条 → 「校验选中」）→
    「开始校验」。一次调用跑完即退（后端起 `appservice` 子进程）。
    跑哪些由打开的入口决定：没勾选 = 全部在用书源，勾了 = 只跑这几条，带筛选 = 筛选命中的那批。
 4. **参数在弹框里填**（测试关键词 / 超时 / 并发 / 校验深度）：它们是"这次怎么跑"，
    跟着动作走，**只作用于这一次、不写回设置**；默认值与取值范围仍由后端一份定义。
 
-**本机引擎调试**（与跑批共用同一套 JVM 环境，但快得多）：调试抽屉里选「本机引擎」，
+**本机引擎调试**（与批量校验共用同一套 JVM 环境，但快得多）：调试抽屉里选「本机引擎」，
 JVM 常驻后台（也可 `python scripts/jvm_debug_direct.py --daemon-stop` 停掉）。改了
 `appservice/` 的 Kotlin 后，下一次会走 Gradle 重新编译、慢一次；走不成常驻时结果里
 会写明原因并回落 Gradle。
@@ -201,7 +201,7 @@ JVM 常驻后台（也可 `python scripts/jvm_debug_direct.py --daemon-stop` 停
 | POST /api/import | `conflict_strategy`：`keep`（默认，冲突进待审）/ `overwrite`（覆盖） |
 | POST /api/rules/jvm-debug | **本机引擎调试**（JVM 里跑 App 真源码，含 JS 规则）：提交即返回任务号，结果看任务明细 |
 | POST /api/rules/app-push | 推送会**改 App 数据**，所以必须显式触发（由预检三态决定要不要先推） |
-| POST /api/jvm/run | 跑批建一条任务（`kind=jvm_run`，关页面不丢）；范围 `urls` / `filter`，本次参数走 `params` |
+| POST /api/jvm/run | 批量校验建一条任务（`kind=jvm_run`，关页面不丢）；范围 `urls` / `filter`，本次参数走 `params` |
 | POST /api/rules/suggest-rule | AI 只提议：每条都过验证，验不了的单独标「只能连 App 试」 |
 | GET /api/settings | 全局设置，同时下发 `defaults` 与 `limits`（前端不硬编码上下界） |
 
@@ -225,7 +225,7 @@ cache/imports/out/config/app_probe 等）——**新增子目录要自己补一�
 | `data/backups/` | 软删除记录（`deleted.jsonl`）+ 手动备份 |
 | `data/out/` | Web / 后端产出的临时快照与导出记录 |
 | `data/archive/` | 历史产物归档（可回溯，不删） |
-| `data/app_probe/` | App / JVM 实测产物：调试 NDJSON 与侧车、跑批导出、常驻日志 |
+| `data/app_probe/` | App / JVM 实测产物：调试 NDJSON 与侧车、批量校验导出、常驻日志 |
 
 **操作纪律**：新增源走 Web「新增」，外部源走 Web「导入」；规则冲突要人工判断，
 确实更好再用导入对话框的 `overwrite`（覆盖后特征变化会强制复查）。

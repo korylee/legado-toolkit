@@ -12,7 +12,7 @@
 1. **运行时数据都在 `data/`，不进版本库**（已 gitignore）。
    **管理库 `data/sources.sqlite3` 是唯一事实库，请单独备份**（`Store.backup()` 现成）。
    **启动器的参数文件也在 `data/`**（`data/app_probe/args.properties`，见
-   `core.paths.ARGS_PARTS`）：跑批/调试每次都重写它，拉起 Gradle 时用
+   `core.paths.ARGS_PARTS`）：批量校验/调试每次都重写它，拉起 Gradle 时用
    `LEGADO_APPSERVICE_ARGS` 把绝对路径交过去（`legado-gradle.bat` 会 `pushd` 进 App
    仓库，测试 JVM 的 CWD 是别人的目录，「相对 CWD 找」不成立）。
    `appservice/args.properties` 那条 ignore 只服务手工场景（启动器的第 2 候选）。
@@ -190,7 +190,7 @@
 
 22. **一份结论跨语言（Kotlin ⇄ Python）时：编码只有一处，对端入口要有一道闸。**
     ①**编码器只能写一遍**（`appservice/test/io/legado/app/service/ServiceJson.kt`）。两处各写一遍时，分歧正好落在
-    **不报错的那一支**：跑批那份少了 `null` 分支，`Any?.toString()` 把
+    **不报错的那一支**：批量校验那份少了 `null` 分支，`Any?.toString()` 把
     `content_ok = null` 写成**字符串 `"null"`**，下游 `jvm_content_ok: Optional[bool]`
     校验不过 → `GET /api/sources`（列表页**唯一**的数据来源）**整页 500**，而生产侧
     一句日志都没有。**改编码器 / 取值规则前，先问「另一份在哪」。**

@@ -47,7 +47,7 @@ class ValidateServiceLauncher {
         props.getProperty("depth")?.let { args += listOf("--depth", it) }
         // A3：手工 cookie（可选）——不给就由服务按源 URL 从浏览器 profile 读
         props.getProperty("cookie")?.let { args += listOf("--cookie", it) }
-        // 浏览器 profile 目录（S3-4）：给跑批用，探针自己读同一个键
+        // 浏览器 profile 目录（S3-4）：给批量校验用，探针自己读同一个键
         props.getProperty("profile")?.let {
             System.setProperty("legado.browser.profile", it)
         }

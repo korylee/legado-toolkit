@@ -341,7 +341,7 @@ class TestBrowserProfileParity(unittest.TestCase):
     """浏览器与 profile：**两侧必须同一套**（谁开窗口都得落在同一个 profile 上）。
 
     为什么：cookie（登录态、CF 的 clearance）存在 profile 里——`scripts/jvm_login.py` 与
-    生成链的 `human_gate` 开的是它，桥渲染与跑批读的也是它。两边任一处换了浏览器或目录，
+    生成链的 `human_gate` 开的是它，桥渲染与批量校验读的也是它。两边任一处换了浏览器或目录，
     现象是「明明过完验证了 / 明明登了，却说没登」（`core/browser_gate.py` 的注释里写着这条）。
     对照的是**源码字面量**（不跑 Kotlin），与 `TestLoginMarkerParity` 同一个套路。
     """

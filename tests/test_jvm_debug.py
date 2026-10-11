@@ -174,14 +174,14 @@ class RunJvmDebugTests(_RunCase):
         self.assertEqual(self.launcher_calls, [], "环境不可用就不该去拉 Gradle")
 
     def test_busy_when_another_jvm_task_holds_the_lock(self) -> None:
-        """跑批与调试共用参数文件与 Gradle 任务：拿不到锁要**明说**，不排队。"""
+        """批量校验与调试共用参数文件与 Gradle 任务：拿不到锁要**明说**，不排队。"""
         self._patch("_run_launcher", self._fake_launcher())
         jvm_debug.RUN_LOCK.acquire()
         try:
             r = self._run()
         finally:
             jvm_debug.RUN_LOCK.release()
-        self.assertIn("另一个 JVM 任务在跑", r["error"])
+        self.assertIn("另一个本机引擎任务在跑", r["error"])
         self.assertEqual(self.launcher_calls, [])
 
     def test_assembles_steps_events_and_reports_cookie_len(self) -> None:
@@ -258,7 +258,7 @@ class RunJvmDebugTests(_RunCase):
 
 
     def test_args_are_restored_after_the_run(self) -> None:
-        """跑批与调试共用 `args.properties`：跑完必须还原（否则跑批参数被顶掉）。"""
+        """批量校验与调试共用 `args.properties`：跑完必须还原（否则批量校验参数被顶掉）。"""
         jvm_debug.ARGS.write_text("file=keep\n", encoding="utf-8", newline="\n")
         self._patch("_run_launcher", self._fake_launcher(
             events=self._fixture_events(), meta={"code": 0}))

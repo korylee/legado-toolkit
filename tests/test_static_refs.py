@@ -2,7 +2,7 @@
 """静态闸门：`X.attr` 里的 X 既没 import、也没被 `from … import *` 带进来 → 报错。
 
 由来（2026-09-20）：`backend/api/jvm.py` 的 `_run_gradle` 用了 `os.environ` 却忘了
-`import os`，于是 `POST /api/jvm/run` **每次调用都 500**——产品里「本机引擎」跑批走的
+`import os`，于是 `POST /api/jvm/run` **每次调用都 500**——产品里「本机引擎」批量校验走的
 就是它（lessons §六十九 的第二次实例：同样因为那一行在打桩的下游之外，测试拦不住）。
 
 不跑代码、只做 AST 静态检查（几毫秒），管的是「名字没定义」这一**类**错。名字来自

@@ -92,7 +92,7 @@ class WatchOutputStallTests(unittest.TestCase):
 
 class RemainingSourcesTests(unittest.TestCase):
     def test_matches_after_normalization(self):
-        """sources.json 给 bookSourceUrl 原文、results 给跑批写回的 url——
+        """sources.json 给 bookSourceUrl 原文、results 给批量校验写回的 url——
         两侧都要归一（AGENTS #5），尾斜杠差一个字符就全对不上。"""
         with tempfile.TemporaryDirectory() as td:
             out = Path(td) / "results.jsonl"

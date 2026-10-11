@@ -207,7 +207,7 @@ def _failures_from_result(parsed: Dict[str, Any]) -> Dict[str, Any]:
 def _run_dir_of(row: Dict[str, Any]) -> pathlib.Path:
     """运行目录。
 
-    跑批的目录在**提交时就冻结进了 payload**（导出清单那一步决定的），所以从轻量行的
+    批量校验的目录在**提交时就冻结进了 payload**（导出清单那一步决定的），所以从轻量行的
     ``result_run_dir`` 取（SQL 侧已抽好，见 ``core.store._JOB_LIGHT_COLUMNS``——不为一个
     路径去解析上百 KB 的 result_json）。
 

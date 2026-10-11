@@ -21,7 +21,7 @@ Gradle 里是隐式给的、看不见。
 - classpath 会长到**几万字符**（远超 Windows 命令行的 32767 上限）→ 走 `java @argfile`；
   argfile 里 `\\` 要翻倍（JDK 的 `@file` 解析把它当转义符）。
 - `javaLauncher` 的 `installationPath` 是 **JDK 根目录**，不是可执行文件。
-- `maxHeapSize`（3g，为全量跑批 OOM 设的）**不在 jvmArgs 里**，得自己补 `-Xmx`。
+- `maxHeapSize`（3g，为全量校验 OOM 设的）**不在 jvmArgs 里**，得自己补 `-Xmx`。
 """
 
 from __future__ import annotations
@@ -421,7 +421,7 @@ def java_argv(dump: Dict[str, Any], main_class: str = LAUNCHER_CLASS) -> List[st
     argv: List[str] = []
     heap = dump["maxHeapSize"]
     # 堆要显式带上：它是 Test 任务的另一个属性、不在 jvmArgs 里，而它正是为
-    # 「全量跑批 OOM」设的 3g——漏了就等于悄悄把堆退回默认值（实测过）
+    # 「全量校验 OOM」设的 3g——漏了就等于悄悄把堆退回默认值（实测过）
     argv.append("-Xmx" + heap)
     argv += list(dump["jvmArgs"])
     for k, v in dump["systemProperties"].items():

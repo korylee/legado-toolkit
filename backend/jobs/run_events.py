@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """一次运行留在运行目录里的两本账：**事件**与**失败清单**（唯一一份生产者）。
 
-为什么单独成模块：跑批（``backend/jobs/jvm_exec``）与调试 job
+为什么单独成模块：批量校验（``backend/jobs/jvm_exec``）与调试 job
 （``backend/jobs/jvm_debug_job``）都往同一本账里追加，而**行号即游标**是消费端
 （``backend/api/job_timeline``）的契约——两个生产者各写一份格式，游标就对不上，
 表现是「时间线缺行」而不是报错。
@@ -28,7 +28,7 @@ _LOCK = threading.Lock()
 EVENTS_NAME = "events.jsonl"
 FAILURES_NAME = "failures.jsonl"
 
-#: 清场时保留的文件（**唯一一份**：跑批与调试共用）。
+#: 清场时保留的文件（**唯一一份**：批量校验与调试共用）。
 KEEP_ON_TRIM = (EVENTS_NAME, FAILURES_NAME)
 
 
@@ -53,7 +53,7 @@ def append_failure(run_dir: Optional[pathlib.Path], *, url: Any, name: Any, stat
                    reason: Any, stage: Any = "", chunk: Any = "") -> None:
     """把一条**已经判定的失败**记进 ``failures.jsonl``。
 
-    「在产生处写一次」：跑批读那一块结果时手里就有 rows，写在这里；消费端因此
+    「在产生处写一次」：批量校验读那一块结果时手里就有 rows，写在这里；消费端因此
     不必每拍重扫各块 ``results.jsonl``（那是把已知的事重算）。行形状与消费端一致
     ``{url,name,state,reason,stage,chunk}``；reason 的截断在消费端做，文件留原文。
     """

@@ -15,10 +15,10 @@ import io.legado.app.probe.WindowsPathAssetManagerShadow
  *         --tests io.legado.app.service.DebugServiceLauncher --rerun
  *
  * **为什么单开一个启动器而不是并进 ValidateServiceLauncher**：两者的参数集不同
- * （跑批是 `dir/keyword/concurrency/depth`，调试是 `key/out` 单源），混在一个
+ * （批量校验是 `dir/keyword/concurrency/depth`，调试是 `key/out` 单源），混在一个
  * `@Test` 里要靠猜参数决定走哪条路；分开之后 `--tests` 就是唯一的分派开关，
- * 跑批与调试互不干扰。两者读同一个 args.properties，靠 **`key=` 在不在**区分：
- * 没有 `key=` 说明这是跑批的参数文件，本启动器直接跳过（而不是拿跑批参数去调试）。
+ * 批量校验与调试互不干扰。两者读同一个 args.properties，靠 **`key=` 在不在**区分：
+ * 没有 `key=` 说明这是批量校验的参数文件，本启动器直接跳过（而不是拿批量校验参数去调试）。
  *
  * **返回码 → Gradle 退出码**：`main` 返回非 0 时这里抛 `AssertionError`，
  * 让测试任务失败，Gradle 于是给出非 0 退出码——调用方（A4 的 subprocess）靠它
@@ -42,7 +42,7 @@ class DebugServiceLauncher {
             return
         }
 
-        // 没有 key= 就是跑批的参数文件，不归本启动器管——**跳过而不是失败**：
+        // 没有 key= 就是批量校验的参数文件，不归本启动器管——**跳过而不是失败**：
         // 不带上 --tests 跑全量测试时两个启动器都会执行，这里失败会平白弄红一次构建
         val key = props.getProperty("key")
         if (key.isNullOrBlank()) {

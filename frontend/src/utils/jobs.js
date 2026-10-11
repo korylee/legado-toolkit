@@ -104,7 +104,7 @@ function durationText(sec) {
   return Math.floor(min / 60) + " 小时 " + (min % 60) + " 分";
 }
 
-/** 「已经跑了多久」。跑批是分钟级，这是用户最想知道的数，且是**已发生的耗时**，
+/** 「已经跑了多久」。批量校验是分钟级，这是用户最想知道的数，且是**已发生的耗时**，
  *  不是 ETA（编 ETA 在组件注释里是明令禁止的）。时钟对不上（负数）时取 0。 */
 export function jobSpentText(createdAt, now = Date.now()) {
   const start = stampMs(createdAt);

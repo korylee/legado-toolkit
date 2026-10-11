@@ -187,7 +187,7 @@ watch(status, (value) => { collapsed.value = TERMINAL.includes(value); },
 }
 .job-timeline-ts { color: var(--el-text-color-secondary); }
 .job-timeline-log-toggle { margin-left: 8px; }
-/* 异常行给整行淡底 + 左侧色条：跑批时用户的动作就是扫一眼有没有红的，
+/* 异常行给整行淡底 + 左侧色条：批量校验时用户的动作就是扫一眼有没有红的，
    只染文字色不够——一屏几十行里找不出来。写在 is-nested 之后，异常优先级更高。 */
 .job-timeline-line.is-warn {
   padding-left: 8px; border-left: 2px solid var(--el-color-warning);

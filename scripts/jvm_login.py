@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""预热登录（A3）：**在我们的固定 profile 里登一次**，之后 JVM 跑批/调试自动带上登录态。
+"""预热登录（A3）：**在我们的固定 profile 里登一次**，之后 JVM 批量校验/调试自动带上登录态。
 
     python scripts/jvm_login.py --url https://example.com/login
     python scripts/jvm_login.py -i data/app_probe/some_source.json      # 用源的 loginUrl
@@ -15,7 +15,7 @@ JVM 里没有那个界面；而上游自己在设备上「收登录态」那一�
 我们**已经接通了**——`SourceCookies` 会按源 URL 从 profile 里读 cookie 注进 App 的
 `CookieStore`（`enabledCookieJar` 默认 true，后续请求自动带上）。所以缺的只是「登一次」。
 
-⚠️ 两点：① profile 是**独占**的——这个窗口开着时不要同时跑批/调试；② cookie 会过期，
+⚠️ 两点：① profile 是**独占**的——这个窗口开着时不要同时批量校验/调试；② cookie 会过期，
 过期了就再跑一次这个脚本。
 
 **同一件事在生成链里也有第二个入口**：判到反爬拦截页时（`services/add_source` 的
@@ -72,7 +72,7 @@ def main() -> int:
     print("浏览器 : %s" % exe)
     print("profile: %s" % profile)
     print("地址   : %s" % url)
-    print("（这个 profile 是独占的：现在不要同时跑批/调试）")
+    print("（这个 profile 是独占的：现在不要同时批量校验/调试）")
     # **有界面**：这一步就是要人自己登（我们不在 CDP 里代登录，也不碰账号密码）
     import subprocess
     proc = subprocess.Popen(
@@ -103,7 +103,7 @@ def main() -> int:
             print("  …（还有 %d 条）" % (len(cookies) - 8))
         if cookies:
             print()
-            print("已留在 profile 里。之后跑批/调试会按**源 URL** 自动读出来注入——"
+            print("已留在 profile 里。之后批量校验/调试会按**源 URL** 自动读出来注入——"
                   "源用得到的域要和这里登的一致。")
         else:
             print()

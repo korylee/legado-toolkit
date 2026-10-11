@@ -160,7 +160,7 @@ object DebugServiceDaemon {
                         extra: Map<String, Any?> = emptyMap()): String =
         Json.encodeToString(
             JsonObject.serializer(),
-            // 编码器只此一份（ServiceJson）：跑批那边就是各写一个 when 才把 null
+            // 编码器只此一份（ServiceJson）：批量校验那边就是各写一个 when 才把 null
             // 写成字符串 "null" 的（AGENTS #22）
             ServiceJson.toJsonObject(mapOf(
                 "id" to id, "code" to code, "cost_ms" to costMs, "error" to error) + extra))

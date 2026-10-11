@@ -1,14 +1,14 @@
 # -*- coding: utf-8 -*-
-"""跑批与调试**共用一把锁**（`core.jvm_debug.RUN_LOCK`）——接线测试。
+"""批量校验与调试**共用一把锁**（`core.jvm_debug.RUN_LOCK`）——接线测试。
 
-守的是「调试在跑时点跑批」这件事：两条链都写 `appservice/args.properties`、
+守的是「调试在跑时点批量校验」这件事：两条链都写 `appservice/args.properties`、
 都 `--rerun` 同一个 `:app:testAppDebugUnitTest`。同时跑会互相踩（参数被改写、
 两个 Gradle 抢同一份构建产物），而**踩坏的表现是「JVM 坏了」**——用户会去查
 环境，实际只要等对方跑完。
 
-这个保护原先只有调试侧有；`core/jvm_debug.py` 里那句「跑批与调试共用一把锁」
+这个保护原先只有调试侧有；`core/jvm_debug.py` 里那句「批量校验与调试共用一把锁」
 当时描述的是一个**并不存在**的保护（AGENTS #12 那类「读起来像存在的信号」）。
-所以这里钉三件事：① 忙时不跑批、也不动参数文件；② 忙时不把**别人的锁**释放掉；
+所以这里钉三件事：① 忙时不批量校验、也不动参数文件；② 忙时不把**别人的锁**释放掉；
 ③ 跑完（含抛异常）一定归还，否则下一次永远「另一个任务在跑」。
 
 **打桩下游、断言收到什么**（本仓库的接线测试写法）：真跑 Gradle 就不叫接线测试了。
@@ -93,7 +93,7 @@ class _Base(unittest.TestCase):
             self.addCleanup(p.stop)
 
     def _fake_export(self, st, urls=None, filt=None, dest_path=None) -> pathlib.Path:
-        # 签名要与真的一致（跑批现在会传「只跑这几条」）：少了这个参数，
+        # 签名要与真的一致（批量校验现在会传「只跑这几条」）：少了这个参数，
         # 打桩就成了「只有测试里才成立的那种函数」（实测踩过：TypeError）
         self.seen_urls = urls
         f = pathlib.Path(dest_path or (self.tmp / "batch_src.json"))
@@ -146,7 +146,7 @@ class _Base(unittest.TestCase):
 
 
 class BusyTests(_Base):
-    """另一个 JVM 任务在跑时，新任务等待锁释放后再执行。"""
+    """另一个本机引擎任务在跑时，新任务等待锁释放后再执行。"""
 
     def setUp(self) -> None:
         super().setUp()
@@ -178,7 +178,7 @@ class FreeTests(_Base):
         self.assertEqual(r["count"], 3)
         self.assertEqual(self.gradle_calls, 1)
         self.assertIn("keyword=我", self.args_seen)
-        # 归还了，否则界面上「跑批」从此永远说「另一个任务在跑」
+        # 归还了，否则界面上「批量校验」从此永远说「另一个任务在跑」
         self.assertFalse(jvm_debug.RUN_LOCK.locked())
 
     def test_lock_is_released_even_when_gradle_raises(self) -> None:

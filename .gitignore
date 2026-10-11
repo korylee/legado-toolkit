@@ -47,14 +47,14 @@ _inspect*.py
 
 # LLM 本地配置（含 API Key，禁止提交）
 data/config/
-# 实测产物目录（设备探针 + JVM 调试/跑批 + 常驻日志）。**仍在写**：
+# 实测产物目录（设备探针 + JVM 调试/批量校验 + 常驻日志）。**仍在写**：
 # core/jvm_debug.py、core/jvm_daemon.py、backend/api/jvm.py、
 # scripts/jvm_debug_run.py、scripts/jvm_debug_direct.py、tools/probe_app_debug.py。
 data/app_probe
 
-# 启动器的参数文件：跑批/调试自己那份现在写在 **data/app_probe/** 下（data/ 已被忽略），
+# 启动器的参数文件：批量校验/调试自己那份现在写在 **data/app_probe/** 下（data/ 已被忽略），
 # 这里留一条是给**手工场景**的——启动器的第 2 候选就是「挨着它自己找」。别把运行时数据
-# 提交进来（曾经跟踪过，于是 HEAD 里躺着一次跑批的参数，读起来像配置）。
+# 提交进来（曾经跟踪过，于是 HEAD 里躺着一次批量校验的参数，读起来像配置）。
 appservice/args.properties
 
 AGENTS.local.md

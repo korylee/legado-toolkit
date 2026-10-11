@@ -87,7 +87,7 @@ object BrowserSession {
         }
     }
 
-    /** 收尾：关掉共享会话。跑批在 `shutdown()` 里调、调试在收尾时调。 */
+    /** 收尾：关掉共享会话。批量校验在 `shutdown()` 里调、调试在收尾时调。 */
     fun close() {
         synchronized(lock) {
             session?.close()

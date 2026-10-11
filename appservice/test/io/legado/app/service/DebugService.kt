@@ -87,7 +87,7 @@ object DebugService {
     //: 事件流被截断：有事件但没等到终止事件
     const val TRUNCATED = 5
 
-    /** 整次调试的墙钟上限（秒）。比跑批的 30 宽：调试一条含正文段的链要渲染页面。 */
+    /** 整次调试的墙钟上限（秒）。比批量校验的 30 宽：调试一条含正文段的链要渲染页面。 */
     const val DEFAULT_TIMEOUT_SEC = 60L
 
     /**
@@ -198,7 +198,7 @@ object DebugService {
         // `shadow_webview_calls` 判据是「普通源必须是 0」——累积之后那条诊断会说反话。
         ShadowBackstageWebView.reset()
 
-        // 源 JSON：数组取第一条（与跑批同一个导出形状），也允许单个对象（手工跑方便）
+        // 源 JSON：数组取第一条（与批量校验同一个导出形状），也允许单个对象（手工跑方便）
         val sourceJson = try {
             val text = File(file).readText(Charsets.UTF_8).trim()
             if (text.startsWith("[")) {
@@ -349,7 +349,7 @@ object DebugService {
 
         // 浏览器进程要收掉：A2 起它可能被 shadow 拉起过。**常驻也收**（实测取舍见下）：
         // 留着能省 0.65s/次（实测 0.7s → 0.05s），但它会**一直占着浏览器 profile**
-        // ——另一个 JVM（跑批、一次性调试）撞上占用就「自愈」换临时 profile，
+        // ——另一个 JVM（批量校验、一次性调试）撞上占用就「自愈」换临时 profile，
         // **cookie 静默全丢**（实测：同一条源从 3 段变 1 段，还白等 18s 超时）。
         // 那种错长得像「源坏了」（AGENTS #4），拿 0.65s 换掉它是划算的。
         // 真要留着，正确做法是「谁要用谁先让 daemon 交出来」（还没做），
@@ -772,9 +772,9 @@ object DebugService {
     /** 侧车诊断。写不出来也不能影响主流程——它只是给调用方的额外情报。 */
     private fun writeMeta(path: String, data: Map<String, Any?>) {
         runCatching {
-            // 编码器只此一份（ServiceJson）：原来这里与跑批那边各写一个 when，
+            // 编码器只此一份（ServiceJson）：原来这里与批量校验那边各写一个 when，
             // 两边对 null / List 的处理**不一样**——那种漂移不报错，只在下游按
-            // 类型读它的时候才现形（跑批那边就是这么把 null 写成字符串 "null" 的）
+            // 类型读它的时候才现形（批量校验那边就是这么把 null 写成字符串 "null" 的）
             val obj = ServiceJson.toJsonObject(data)
             File(path).writeText(
                 kotlinx.serialization.json.Json.encodeToString(

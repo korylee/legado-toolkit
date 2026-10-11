@@ -22,7 +22,7 @@ import io.legado.app.help.http.CookieStore
  * ## 边界（别越过）
  *
  * **不在 CDP 里代替用户登录**。拿的是「已经登录之后」的 cookie：用户在我们的固定 profile
- * 里登一次（预热），之后每次跑批/调试按 URL 读出来。App 的登录入口在 UI 层
+ * 里登一次（预热），之后每次批量校验/调试按 URL 读出来。App 的登录入口在 UI 层
  * （`ui/login/SourceLoginViewModel`，要用户填凭据），JVM 里没有那个界面，也不该有。
  */
 object SourceCookies {

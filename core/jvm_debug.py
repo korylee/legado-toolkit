@@ -54,14 +54,14 @@ CODE_TEXT = {
     5: "事件流被截断（没等到终止事件）",
 }
 
-#: **跑批与调试共用一把锁**：两条链都写 `appservice/args.properties`（跑批写
+#: **批量校验与调试共用一把锁**：两条链都写 `appservice/args.properties`（批量校验写
 #: keyword/depth，调试写 file/key/out），而那个文件是**另一个进程**的入参入口——
 #: 同时跑会互相踩（参数被改写），那种失败看起来像「JVM 坏了」。D2 之后调试默认走常驻、
 #: 不碰 Gradle，所以「抢同一个 Gradle 任务」只对**回落那条路**成立；锁仍然必须有，
 #: 理由就是那个参数文件。非阻塞获取——拿不到就直说，**不排队**：排队会让界面上的一张
 #: 卡片转十几分钟，那比一句「另一个任务在跑」糟得多。
 #:
-#: **两侧都必须真拿这把锁**（`run_jvm_debug` 与 `backend/api/jvm.py` 的跑批）：
+#: **两侧都必须真拿这把锁**（`run_jvm_debug` 与 `backend/api/jvm.py` 的批量校验）：
 #: 只有一侧拿，注释里那句「共用」就成了一个读起来像存在的保护（AGENTS #12）。
 RUN_LOCK = threading.Lock()
 
@@ -70,7 +70,7 @@ def _write_debug_manifest(run_dir: pathlib.Path, src: Dict[str, Any], key: str,
                           ndjson_path: pathlib.Path, job_id: str = "") -> None:
     """调试任务也留一份任务信封：这次调试用了哪个源、哪个词、材料写到哪。
 
-    与跑批 manifest 同一立场：SQLite/返回体是事实源，这个文件是**崩溃后仍可
+    与批量校验 manifest 同一立场：SQLite/返回体是事实源，这个文件是**崩溃后仍可
     逐项对出**的复查交付物。``job_id`` 是运行目录与任务行的关联键——运行目录的
     过期清理由它决定（`backend/jobs/runner.sweep_run_dirs`）。
     """
@@ -93,9 +93,9 @@ def _write_debug_manifest(run_dir: pathlib.Path, src: Dict[str, Any], key: str,
     except OSError:
         pass
 
-#: 拿不到 `RUN_LOCK` 时的**同一句话**。跑批与调试是同一把锁、同一个原因，
+#: 拿不到 `RUN_LOCK` 时的**同一句话**。批量校验与调试是同一把锁、同一个原因，
 #: 两处各写一份就会在界面上长得不一样，而用户看不出那其实是同一件事。
-BUSY_REASON = ("另一个 JVM 任务在跑（跑批与调试共用同一个参数文件），"
+BUSY_REASON = ("另一个本机引擎任务在跑（批量校验与调试共用同一个参数文件），"
                "等它跑完再来")
 
 
@@ -108,7 +108,7 @@ def _write_args(src_file: str, key: str, out_file: str, timeout: int, cookie: st
     `git diff` 连内容都不显示）。同 `agent-write-safety` §三。
     """
     lines = [
-        "# 由 core/jvm_debug.py 生成（跑批时后端会重写它）",
+        "# 由 core/jvm_debug.py 生成（批量校验时后端会重写它）",
         "file=%s" % pathlib.Path(src_file).as_posix(),
         "key=%s" % key,
         "out=%s" % pathlib.Path(out_file).as_posix(),
@@ -266,7 +266,7 @@ def verify_generated(source: Dict[str, Any], keyword: str, detail_url: str = "",
 
     两条边界：
 
-    - **引擎不可用不推翻生成结果**：没配 App 源码目录 / 另一个 JVM 任务在跑 / 零事件时，
+    - **引擎不可用不推翻生成结果**：没配 App 源码目录 / 另一个本机引擎任务在跑 / 零事件时，
       源照样生成，只把「这次没验成 + 为什么」带回去（AGENTS #4：原因要走到用户眼前）。
       生成的验证是**附加证据**，不是生成的必要条件。
     - **证据原文要剥掉**（`strip_evidence`）：Web 那条路的结果会写进 jobs 表并走 SSE，
@@ -530,7 +530,7 @@ def run_jvm_debug(source: Dict[str, Any],
         # （目录寿命跟着行走，不在这儿按个数删）。
         raise
     finally:
-        # 还原：跑批与调试共用这一个参数文件，别把调试的参数留在里面
+        # 还原：批量校验与调试共用这一个参数文件，别把调试的参数留在里面
         if saved:
             ARGS.write_text(saved, encoding="utf-8", newline="")
         RUN_LOCK.release()

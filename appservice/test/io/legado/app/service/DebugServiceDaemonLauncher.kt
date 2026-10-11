@@ -18,7 +18,7 @@ import io.legado.app.probe.WindowsPathAssetManagerShadow
  * ## 参数走环境变量，不走 args.properties
  *
  * `args.properties` 是**每次调试**的参数文件（含源文件路径、输出路径），常驻进程活的
- * 比它久，读它只会读到某一次的旧值。而且它由跑批/调试两侧轮着写（RUN_LOCK 就是为这个
+ * 比它久，读它只会读到某一次的旧值。而且它由批量校验/调试两侧轮着写（RUN_LOCK 就是为这个
  * 存在的）。所以常驻只从环境变量拿「它自己的」参数：
  *
  *     LEGADO_DAEMON_PORT      监听端口（必须给，由客户端选一个空闲端口）

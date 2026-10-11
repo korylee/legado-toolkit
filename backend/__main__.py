@@ -103,7 +103,7 @@ def main(argv=None) -> None:
             print("警告: 未安装 watchfiles，热重载将退回 StatReload 轮询"
                   "（持续约占 4% 单核）。安装: uv sync")
         # 优雅关机必须封顶：重载触发时 uvicorn 会等非 daemon 的任务线程跑完，
-        # 而跑批线程里 Gradle 的硬上限是 90 分钟——实测（2026-10-05）改一个后端
+        # 而批量校验线程里 Gradle 的硬上限是 90 分钟——实测（2026-10-05）改一个后端
         # 文件把全站冻结了十几分钟。5 秒后强杀：在途块作废，DONE 标记 + 重试续跑
         # 兜底，比冻住整个服务便宜得多
         uvicorn.run("backend.app:app", host=args.host, port=args.port,
