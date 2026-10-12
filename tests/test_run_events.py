@@ -75,6 +75,18 @@ class RunEventsTests(unittest.TestCase):
         # 执行产物必须真的没了：DONE 还在的话「再次运行」会跳过所有块
         self.assertFalse((self.run_dir / "chunk-01").exists())
 
+    def test_trim_preserves_retry_attempt_ledgers(self) -> None:
+        attempt = self.run_dir / "attempts" / "retry-1"
+        attempt.mkdir(parents=True)
+        run_events.append_event(attempt, "batch_started", chunks=2)
+        (self.run_dir / "chunk-01").mkdir()
+        (self.run_dir / "chunk-01" / "DONE").write_text("", encoding="utf-8")
+
+        run_events.trim_run_dir(self.run_dir, self.root)
+
+        self.assertTrue((attempt / run_events.EVENTS_NAME).is_file())
+        self.assertFalse((self.run_dir / "chunk-01").exists())
+
     def test_outside_paths_are_never_touched(self) -> None:
         """越界的 run_dir：一个文件都不许动（删目录算错路径就是工作目录）。"""
         outside = self.tmp / "work"

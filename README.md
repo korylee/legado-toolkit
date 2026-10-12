@@ -199,9 +199,11 @@ JVM 常驻后台（也可 `python scripts/jvm_debug_direct.py --daemon-stop` 停
 | POST /api/sources/restore | 按**行 id** 恢复（同 URL 可有多份历史版本，按 URL 会含糊） |
 | POST /api/sources/purge | 清空回收站（**唯一**的硬删除路径），先落快照再删 |
 | POST /api/import | `conflict_strategy`：`keep`（默认，冲突进待审）/ `overwrite`（覆盖） |
+| POST /api/import/url | 拉取公网 HTTPS JSON 数组用于预览；限时、限 8 MB，不自动写入 |
 | POST /api/rules/jvm-debug | **本机引擎调试**（JVM 里跑 App 真源码，含 JS 规则）：提交即返回任务号，结果看任务明细 |
 | POST /api/rules/app-push | 推送会**改 App 数据**，所以必须显式触发（由预检三态决定要不要先推） |
 | POST /api/jvm/run | 批量校验建一条任务（`kind=jvm_run`，关页面不丢）；范围 `urls` / `filter`，本次参数走 `params` |
+| POST /api/jvm/refresh | 后台刷新本机 runtime snapshot，结果通过任务流查看 |
 | POST /api/rules/suggest-rule | AI 只提议：每条都过验证，验不了的单独标「只能连 App 试」 |
 | GET /api/settings | 全局设置，同时下发 `defaults` 与 `limits`（前端不硬编码上下界） |
 

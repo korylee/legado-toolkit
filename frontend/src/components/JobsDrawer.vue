@@ -6,17 +6,19 @@
 // 挤在一个抽屉里时两边都难受——列表里在跑的任务进度是冻结的（只有被选中的那条会被
 // 轮询），而详情面板大半屏被 job_id / 执行方式这类八股字段占着。
 //
-// 现在：抽屉只做列表（默认「进行中 + 最近一个保留期」，可切全部），点行开
+// 现在：抽屉只做近期任务列表（在跑任务 + 最近保留期），过期任务由后端清理；点行开
 // `TaskDetailDialog`——那个弹窗在跑时是进度条、结束后是结果明细，自带轮询。
 //
 // 列表的**结论摘要**（通过 / 未通过 / 相对上次变化）由后端投影给（见
 // `backend/api/jobs.py` 的 `_job_row`）：结果里有 items[:500]，不能进列表响应。
 import { ref, computed, watch, onMounted, onUnmounted } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { cancelJob as cancelJobApi, listJobs } from "../api/jobs";
+import { cancelJob as cancelJobApi, deleteJob as deleteJobApi, listJobs } from "../api/jobs";
 import {
   jobCancelHint,
+  jobCanCancel,
   jobIsInFlight,
+  jobIsTerminal,
   jobKindLabel,
   jobPhaseLabel,
   jobStatusLabel,
@@ -42,10 +44,6 @@ const loading = ref(false);
 const jobs = ref([]);
 //: 后端下发的列表条数上限；到顶时界面要说明还有更早的没显示
 const listLimit = ref(0);
-// 档位名里的「最近 N 天」由后端下发（= 任务的保留期），不在这里抄一份
-const recentDays = ref(0);
-//: 默认只给「进行中 + 最近一个保留期」。全部历史在任务多起来后首屏就是噪音
-const scope = ref("recent");
 const detailOpen = ref(false);
 const detailJobId = ref("");
 const isMobile = useMobile();
@@ -81,11 +79,10 @@ async function load() {
   try {
     // 调试运行不进这份列表：它由调试页自己观测（一进 jobs 表，点一次调试就多一条，
     // 任务中心会被刷成流水账）。要回看某次调试的运行，从调试页那条运行条进
-    const page = await listJobs({ scope: scope.value, exclude_kind: "jvm_debug" });
+    const page = await listJobs({ scope: "recent", exclude_kind: "jvm_debug" });
     jobs.value = Array.isArray(page?.items) ? page.items : [];
     //: 上限由后端下发（不在这里写 200）：界面要说明「只显示最近 N 条」
     listLimit.value = Number(page?.limit || 0);
-    recentDays.value = Number(page?.recent_days || 0);
     // **必须写回共享状态**：提交任务的页面刷新之后它的 SSE 就断了，没人再 upsert，
     // 徽标和在跑条会一直空着（批量校验是分钟级，刷新很常见）。列表是唯一还能拿到
     // 「本页刷新前就在跑的 / 别处提交的」任务的来源。
@@ -112,6 +109,19 @@ async function cancelJob(row) {
   }
 }
 
+async function deleteJobRow(row) {
+  try {
+    await ElMessageBox.confirm("删除后将移除任务记录和结果，不能恢复。", "删除任务", {
+      type: "warning", confirmButtonText: "删除", cancelButtonText: "返回",
+    });
+    await deleteJobApi(row.id);
+    ElMessage.success("任务已删除");
+    await load();
+  } catch (e) {
+    if (e !== "cancel" && e !== "close") ElMessage.error("删除任务失败：" + e.message);
+  }
+}
+
 function openDetail(row) {
   detailJobId.value = row.id;
   detailOpen.value = true;
@@ -130,8 +140,6 @@ function stopTicker() {
   if (timer) window.clearInterval(timer);
   timer = null;
 }
-
-watch(scope, () => { if (visible.value) load(); });
 
 // 打开抽屉时拉一次最新列表
 watch(() => props.modelValue, async (open) => {
@@ -155,12 +163,7 @@ defineExpose({ refresh: load });
   <el-drawer v-model="visible" title="任务中心" direction="rtl" size="min(960px, 96vw)"
              class="jobs-drawer">
     <div class="jobs-toolbar">
-      <el-radio-group v-model="scope" size="small">
-        <el-radio-button value="recent">{{
-          recentDays ? "进行中 + 最近 " + recentDays + " 天" : "进行中"
-        }}</el-radio-button>
-        <el-radio-button value="all">全部</el-radio-button>
-      </el-radio-group>
+      <span class="muted">近期任务</span>
       <span class="chip is-active"><b>{{ inFlightCount }}</b> 进行中</span>
       <span class="grow" />
       <el-button size="small" :loading="loading" @click="load">刷新</el-button>
@@ -229,9 +232,13 @@ defineExpose({ refresh: load });
             明细
           </el-button>
           <!-- 在跑的能就地取消：不必先点开弹窗（取消的后果说明在确认框里按类型给） -->
-          <el-button v-if="jobIsInFlight(row.status)" link type="warning" size="small"
+          <el-button v-if="jobIsInFlight(row.status) && jobCanCancel(row.kind)" link type="warning" size="small"
                      @click.stop="cancelJob(row)">
             取消
+          </el-button>
+          <el-button v-if="jobIsTerminal(row.status)" link type="danger" size="small"
+                     @click.stop="deleteJobRow(row)">
+            删除
           </el-button>
         </template>
       </el-table-column>

@@ -580,6 +580,15 @@ class EndpointTests(_RunCase):
         self.assertEqual(self.seen["cache"], "only")
         self.assertIsNotNone(self.seen["readiness"])
 
+    def test_busy_jvm_lane_returns_conflict_instead_of_queueing_debug(self) -> None:
+        message = "校验引擎正忙，本次调试未排队，请稍后重试"
+        with mock.patch.object(job_runner, "submit",
+                               side_effect=job_runner.JvmLaneBusyError(message)):
+            with self.assertRaises(HTTPException) as ctx:
+                self._call(target="search", query="词")
+        self.assertEqual(ctx.exception.status_code, 409)
+        self.assertEqual(ctx.exception.detail, message)
+
     def test_unknown_cache_is_400(self) -> None:
         with self.assertRaises(HTTPException) as ctx:
             self._call(cache="whatever")

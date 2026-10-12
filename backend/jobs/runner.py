@@ -19,7 +19,7 @@ from contextlib import asynccontextmanager
 from typing import Any, Awaitable, Callable, Dict, Optional
 
 from core.paths import data_dir
-from core.store import Store, now
+from core.store import ACTIVE_JOB_STATUSES, Store, now
 
 #: 正在运行的任务 {job_id: asyncio.Task}
 TASKS: Dict[str, asyncio.Task] = {}
@@ -40,12 +40,17 @@ _LANES: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, Dict[str, _Lane]]"
 #: 批量校验与生成后验证同档（10）——它们都由用户显式提交、非交互敏感。
 LANE_PRIORITY = {"debug": 0, "batch": 10, "unknown": 10}
 
+
+class JvmLaneBusyError(ValueError):
+    """本机引擎正在运行或排队，新的交互调试不进入队列。"""
+
 #: 批量老化：等待超过 _AGING_DELAY 秒后每 _AGING_STEP 秒优先级 -1，下限
 #: _AGING_FLOOR（仍高于调试的 0——调试在 unit 边界总是优先，但第二个批量
 #: 任务最终也能跑，不会被持续的调试流饿死）。
 _AGING_DELAY = 120.0
 _AGING_STEP = 60.0
 _AGING_FLOOR = 2
+_BATCH_RESUME_PRIORITY = 1
 
 
 class _Waiter:
@@ -71,6 +76,8 @@ class _Lane:
         self._waiters: list[_Waiter] = []
 
     def _effective_priority(self, w: _Waiter, now: float) -> float:
+        if w.kind == "batch_resume":
+            return _BATCH_RESUME_PRIORITY
         base = LANE_PRIORITY.get(w.kind, LANE_PRIORITY["unknown"])
         if base <= LANE_PRIORITY["debug"]:
             return base                # 调试档不老化：交互优先是恒定的
@@ -166,6 +173,13 @@ def lane_snapshot_threadsafe(name: str) -> Dict[str, Any]:
     return {"held": None, "waiting": []}
 
 
+def _ensure_jvm_debug_lane_idle(st: Store) -> None:
+    # 批量校验允许调试越过；已有调试或快照刷新不可重入/中断。
+    active_jobs = st.list_jobs(limit=10000, statuses=ACTIVE_JOB_STATUSES)
+    if any(job.get("kind") in {"jvm_debug", "jvm_refresh"} for job in active_jobs):
+        raise JvmLaneBusyError("校验引擎正忙，本次调试未排队，请稍后重试")
+
+
 @asynccontextmanager
 async def acquire_lane(name: str, kind: str = "batch",
                        job_id: Optional[str] = None):
@@ -218,7 +232,16 @@ def submit(kind: str, payload: Optional[Dict[str, Any]] = None,
         raise ValueError("未知任务类型: %s（可用: %s）" % (kind, ", ".join(sorted(HANDLERS))))
     job_id = uuid.uuid4().hex[:12]
     payload = payload or {}
+    if kind == "jvm_run":
+        payload = dict(payload)
+        manifest = payload.get("manifest")
+        run_dir = manifest.get("run_dir") if isinstance(manifest, dict) else None
+        if run_dir:
+            # retry 复用 DONE/results，但时间线按 job 隔离，避免旧失败混进新尝试。
+            payload["timeline_dir"] = str(pathlib.Path(str(run_dir)) / "attempts" / job_id)
     with Store() as st:
+        if kind == "jvm_debug":
+            _ensure_jvm_debug_lane_idle(st)
         st.create_job(job_id, kind, total=int(payload.get("total", 0) or 0),
                       payload=payload, retry_of=retry_of)
     TASKS[job_id] = asyncio.create_task(_run(job_id, kind, payload, lane, lane_kind))
@@ -404,6 +427,8 @@ def cancel(job_id: str) -> bool:
     with Store() as st:
         job = st.get_job(job_id)
         if not job or job.get("status") in ("done", "failed", "cancelled"):
+            return False
+        if job.get("kind") == "jvm_refresh":
             return False
         st.update_job(job_id, status="cancel_requested", phase="cancel_requested")
     t.cancel()

@@ -1,3 +1,4 @@
+import asyncio
 import json
 import tempfile
 import unittest
@@ -5,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from backend.api import jvm as jvm_api
 from core import jvm_direct
 
 
@@ -125,6 +127,15 @@ class RefreshSnapshotTests(unittest.TestCase):
         self.assertEqual(self._run(code=1), 1)
         # 失败不写新 manifest：旧的那份仍如实描述着仍发布着的旧 dump
         self.assertEqual(json.loads(manifest_path.read_text(encoding="utf-8"))["old"], True)
+
+
+class RefreshEndpointTests(unittest.TestCase):
+    def test_refresh_submits_a_background_jvm_task(self):
+        with patch.object(jvm_api.runner, "submit", return_value="refresh-1") as submit:
+            result = asyncio.run(jvm_api.jvm_refresh())
+        self.assertEqual(result["job_id"], "refresh-1")
+        self.assertEqual(result["kind"], "jvm_refresh")
+        submit.assert_called_once_with("jvm_refresh", {}, lane="jvm", lane_kind="batch")
 
 
 if __name__ == "__main__":

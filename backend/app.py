@@ -30,12 +30,12 @@ def _report_recovered_daemon_operation(recovered_job_ids: list[str]) -> None:
     try:
         operation = jvm_validate_daemon.status().get("current_operation") or {}
     except Exception as exc:
-        print("警告: 无法读取 Validate daemon 操作状态，未发送 stop：%s" % exc,
+        print("警告：无法读取 Validate daemon 操作状态，未发送 stop：%s" % exc,
               flush=True)
         return
     job_id = str(operation.get("job_id") or "")
     if job_id in set(recovered_job_ids):
-        print("警告: Validate daemon 孤儿状态无法确认，未自动停止："
+        print("警告：Validate daemon 孤儿状态无法确认，未自动停止："
               "后端 job 已恢复为终态，但 daemon 请求是否仍在执行无法证明；保留 daemon，不发送 stop",
               flush=True)
 
@@ -86,9 +86,8 @@ app.include_router(llm.router, prefix="/api/llm", tags=["llm"])
 app.include_router(settings.router, prefix="/api/settings", tags=["settings"])
 app.include_router(jvm.router, prefix="/api/jvm", tags=["jvm"])
 
-# 导入即注册 job handler：ops 里的生成后验证、jvm_debug_job 里的本机调试
-# （调试也是任务：不在这儿导入，`/jobs/{id}/retry` 会因为 HANDLERS 里没有它而 409）
-from backend.jobs import jvm_debug_job  # noqa: E402,F401  导入即注册
+# 导入即注册 job handler：ops 生成验证、JVM 调试与 runtime snapshot 刷新。
+from backend.jobs import jvm_debug_job, jvm_refresh_job  # noqa: E402,F401  导入即注册
 _ = ops
 
 

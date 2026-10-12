@@ -1417,20 +1417,21 @@ class EventTimelineTests(_Base):
                           "chunk_started", "chunk_failed", "failed"])
         self.assertFalse(r1["ok"])
 
+        retry_id = "ev-job-2"
+        retry_timeline = pathlib.Path(run_dir) / "attempts" / retry_id
+        retry_payload = dict(submitted["payload"], timeline_dir=str(retry_timeline))
         with contextlib.ExitStack() as stk:
             for p in patches():
                 stk.enter_context(p)
             r2 = asyncio.run(jvm_exec.run_jvm_job(
-                "ev-job-2", Store(self.db), submitted["payload"]))
+                retry_id, Store(self.db), retry_payload))
         self.assertTrue(r2["ok"], r2)
-        # 事件**只落盘**（不再合并进 result_json）：成功清场也只清执行产物，
-        # 事件文件跨轮追加，所以恢复批的时间线包含上一轮的完整历史，
-        # resumed 行标记了两次运行的边界
-        self.assertNotIn("events", r2)
+        # 执行块从共享目录恢复，观测账本按 job 隔离：新时间线用 resumed 表示跳过旧 DONE 块。
         self.assertEqual(self._kinds(run_dir),
                          ["batch_started", "prepare", "chunk_started", "chunk_done",
-                          "chunk_started", "chunk_failed", "failed",
-                          "batch_started", "resumed", "prepare", "chunk_started",
+                          "chunk_started", "chunk_failed", "failed"])
+        self.assertEqual(self._kinds(retry_timeline),
+                         ["batch_started", "resumed", "prepare", "chunk_started",
                           "chunk_done", "done"])
 
     def test_success_trim_keeps_the_two_accounts(self) -> None:

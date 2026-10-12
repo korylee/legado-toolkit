@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """JVM 校验的 HTTP 编排层（S2）。
 
-三个端点：
+四个端点：
   GET  /api/jvm/readiness  环境就绪检查（只读，不下载、不构建）
+  POST /api/jvm/refresh    后台刷新 runtime snapshot
   POST /api/jvm/run        提交批量校验（进入 JVM lane 后由任务体后台执行）
   GET  /api/jvm/results    最近一批结论（从 meta 读，供列表合并展示）
 
@@ -223,6 +224,13 @@ async def jvm_daemon_stop():
 def jvm_readiness():
     conf = settings_store.load().get("jvm", {})
     return readiness(conf.get("app_repo", ""), conf.get("android_sdk_dir", ""))
+
+
+@router.post("/refresh", status_code=202)
+async def jvm_refresh():
+    job_id = runner.submit("jvm_refresh", {}, lane="jvm", lane_kind="batch")
+    return {"job_id": job_id, "kind": "jvm_refresh",
+            "events": "/api/jobs/%s/stream" % job_id}
 
 
 def _pick_directory(title: str):

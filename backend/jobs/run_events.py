@@ -28,8 +28,8 @@ _LOCK = threading.Lock()
 EVENTS_NAME = "events.jsonl"
 FAILURES_NAME = "failures.jsonl"
 
-#: 清场时保留的文件（**唯一一份**：批量校验与调试共用）。
-KEEP_ON_TRIM = (EVENTS_NAME, FAILURES_NAME)
+#: 清场时保留事件、失败账本及其 per-job attempts 容器（唯一一份，共批量校验与调试使用）。
+KEEP_ON_TRIM = (EVENTS_NAME, FAILURES_NAME, "attempts")
 
 
 def append_event(run_dir: Optional[pathlib.Path], kind: str, **fields: Any) -> None:

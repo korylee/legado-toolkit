@@ -72,6 +72,28 @@ class ValidateDaemonProtocolTests(unittest.TestCase):
         self.assertEqual(seen["payload"]["owner_chunk"], "2/4")
         self.assertEqual(seen["payload"]["owner_source_name"], "example source")
 
+    def test_request_failure_includes_daemon_process_and_log_context(self) -> None:
+        with mock.patch.object(jvm_validate_daemon, "_exchange",
+                               side_effect=jvm_validate_daemon.ValidateDaemonError(
+                                   "连不上 Validate daemon(port=58966): reset")), \
+             mock.patch.object(jvm_validate_daemon, "_read_info",
+                               return_value={"pid": 52096, "port": 58966}), \
+             mock.patch.object(jvm_validate_daemon, "_pid_alive", return_value=False), \
+             mock.patch.object(jvm_validate_daemon, "_read_current_operation",
+                               return_value={"job_id": "job-1", "chunk": "1/2", "pid": 4000}), \
+             mock.patch.object(jvm_validate_daemon, "_log_tail", return_value="last daemon line"), \
+             mock.patch.object(jvm_validate_daemon, "_PROC", None):
+            with self.assertRaises(jvm_validate_daemon.ValidateDaemonError) as caught:
+                jvm_validate_daemon.request({
+                    "file": "source.json", "keyword": "x", "concurrency": 1,
+                    "timeout": 10, "depth": "search", "owner_job_id": "job-1",
+                    "owner_chunk": "1/2",
+                }, 58966, 10)
+        message = str(caught.exception)
+        self.assertIn("daemon pid=52096 port=58966 alive=False", message)
+        self.assertIn("owner job=job-1 chunk=1/2 pid=4000", message)
+        self.assertIn("last daemon line", message)
+
     def test_run_tracks_and_clears_operation_owner(self) -> None:
         with tempfile.TemporaryDirectory(prefix="validate_owner_") as root:
             marker = pathlib.Path(root) / "current.json"

@@ -91,12 +91,12 @@ _JOB_LIGHT_COLUMNS = (
     # 闸门（JSON 的 false 经 json_extract 出来是 0）。
     " json_extract(%s, '$.ok') AS result_ok_flag,"
     " json_extract(%s, '$.reason') AS result_reason,"
-    # 运行目录：批量校验放在 `payload.manifest.run_dir`、调试 job 放在 `payload.run_dir`
-    # （两处都是提交时冻结的）。SQL 侧一次抽好——观测端不该为了一个路径去解析
-    # 上百 KB 的 result_json。
+    # 执行目录在 `payload.manifest.run_dir` / `payload.run_dir`；批量 job 的时间线目录
+    # 单独冻结在 `payload.timeline_dir`。SQL 侧一次抽好，观测端不解析大块 payload/result。
     " COALESCE(json_extract(%s, '$.run_dir'),"
-    " json_extract(%s, '$.manifest.run_dir')) AS result_run_dir"
-    % ((_VALID_RESULT,) * 6 + (_VALID_PAYLOAD,) * 2)
+    " json_extract(%s, '$.manifest.run_dir')) AS result_run_dir,"
+    " json_extract(%s, '$.timeline_dir') AS result_timeline_dir"
+    % ((_VALID_RESULT,) * 6 + (_VALID_PAYLOAD,) * 3)
 )
 DB_NAME = "sources.sqlite3"
 

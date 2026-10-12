@@ -8,6 +8,7 @@ patch 缩到毫秒级，睡眠只用于确定「谁先排队」，不赌执行�
 from __future__ import annotations
 
 import asyncio
+import pathlib
 import unittest
 from unittest import mock
 
@@ -40,6 +41,32 @@ class LaneSchedulerTests(unittest.TestCase):
 
         # 后到的调试越过排在前面的批量；两个批量之间先来后到
         self.assertEqual(self._order(go), ["d1", "b1"])
+
+    def test_debug_then_current_batch_resume_then_new_batch(self) -> None:
+        async def go():
+            lane = runner._Lane()
+            order = []
+
+            queued = [asyncio.Event() for _ in range(3)]
+
+            async def worker(kind, name, ready):
+                ready.set()
+                await lane.acquire(kind)
+                order.append(name)
+                lane.release()
+
+            await lane.acquire("batch")
+            workers = [
+                asyncio.create_task(worker("batch_resume", "resume", queued[0])),
+                asyncio.create_task(worker("batch", "new-batch", queued[1])),
+                asyncio.create_task(worker("debug", "debug", queued[2])),
+            ]
+            await asyncio.gather(*(event.wait() for event in queued))
+            lane.release()
+            await asyncio.gather(*workers)
+            return order
+
+        self.assertEqual(self._order(go), ["debug", "resume", "new-batch"])
 
     def test_aging_lets_batch_run_but_debug_still_wins_the_boundary(self) -> None:
         async def go():
@@ -116,6 +143,104 @@ class LaneSchedulerTests(unittest.TestCase):
             lane.release()
 
         asyncio.run(go())
+
+
+class RunnerSubmissionTests(unittest.TestCase):
+    def test_jvm_run_gets_job_scoped_timeline_dir(self):
+        run_dir = pathlib.Path("C:/data/runs/batch-1")
+        saved = {}
+        task = object()
+
+        class _Store:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def create_job(self, job_id, _kind, **kwargs):
+                saved.update(id=job_id, payload=kwargs["payload"])
+
+        def discard_coroutine(coro):
+            coro.close()
+            return task
+
+        payload = {"manifest": {"run_dir": str(run_dir)}}
+        with mock.patch.object(runner, "HANDLERS", {"jvm_run": object()}), \
+             mock.patch.object(runner, "Store", _Store), \
+             mock.patch.object(runner.uuid, "uuid4",
+                               return_value=mock.Mock(hex="0123456789abcdef")), \
+             mock.patch.object(runner.asyncio, "create_task",
+                               side_effect=discard_coroutine), \
+             mock.patch.object(runner, "TASKS", {}):
+            job_id = runner.submit("jvm_run", payload)
+
+        self.assertEqual(saved["payload"]["manifest"]["run_dir"], str(run_dir))
+        self.assertEqual(saved["payload"]["timeline_dir"],
+                         str(run_dir / "attempts" / job_id))
+
+
+class DebugSubmissionGateTests(unittest.TestCase):
+    def test_debug_submit_is_rejected_when_jvm_lane_has_work(self):
+        cases = [
+            [{"kind": "jvm_debug", "status": "pending"}],
+            [{"kind": "jvm_refresh", "status": "running"}],
+        ]
+        for active_jobs in cases:
+            with self.subTest(active_jobs=active_jobs):
+                created = []
+
+                class _Store:
+                    def __enter__(self):
+                        return self
+
+                    def __exit__(self, *_args):
+                        return None
+
+                    def list_jobs(self, **_kwargs):
+                        return active_jobs
+
+                    def create_job(self, *_args, **_kwargs):
+                        created.append(True)
+
+                with mock.patch.object(runner, "HANDLERS", {"jvm_debug": object()}), \
+                     mock.patch.object(runner, "Store", _Store), \
+                     mock.patch.object(runner, "TASKS", {}):
+                    with self.assertRaises(runner.JvmLaneBusyError):
+                        runner.submit("jvm_debug", {})
+                self.assertEqual(created, [])
+
+    def test_debug_submit_is_allowed_ahead_of_validation(self):
+        saved = {}
+        task = object()
+
+        class _Store:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def list_jobs(self, **_kwargs):
+                return [{"kind": "jvm_run", "status": "running"}]
+
+            def create_job(self, job_id, kind, **kwargs):
+                saved.update(id=job_id, kind=kind, payload=kwargs["payload"])
+
+        def discard_coroutine(coro):
+            coro.close()
+            return task
+
+        with mock.patch.object(runner, "HANDLERS", {"jvm_debug": object()}), \
+             mock.patch.object(runner, "Store", _Store), \
+             mock.patch.object(runner.uuid, "uuid4",
+                               return_value=mock.Mock(hex="debugjob123456789")), \
+             mock.patch.object(runner.asyncio, "create_task",
+                               side_effect=discard_coroutine), \
+             mock.patch.object(runner, "TASKS", {}):
+            job_id = runner.submit("jvm_debug", {"source": {"bookSourceUrl": "x"}})
+        self.assertEqual(saved["id"], job_id)
+        self.assertEqual(saved["kind"], "jvm_debug")
 
 
 if __name__ == "__main__":

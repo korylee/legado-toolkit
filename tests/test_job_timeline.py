@@ -21,7 +21,7 @@ from unittest import mock
 from fastapi import HTTPException
 
 from backend.api import job_timeline
-from backend.jobs import run_events
+from backend.jobs import run_events, runner
 from core.store import Store
 
 
@@ -52,6 +52,23 @@ class JobTimelineTests(unittest.TestCase):
         with path.open("a", encoding="utf-8") as f:
             for row in rows:
                 f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+    def test_retry_job_reads_only_its_attempt_timeline(self) -> None:
+        attempt_dir = self.run_dir / "attempts" / "retry-1"
+        attempt_dir.mkdir(parents=True)
+        self._append_events({"kind": "old_attempt_failed"})
+        (attempt_dir / run_events.EVENTS_NAME).write_text(
+            json.dumps({"kind": "retry_started"}, ensure_ascii=False) + "\n",
+            encoding="utf-8")
+        with Store(self.db) as st:
+            st.create_job("retry-1", "jvm_run", retry_of="original", payload={
+                "manifest": {"run_dir": str(self.run_dir)},
+                "timeline_dir": str(attempt_dir),
+            })
+            st.update_job("retry-1", status="running")
+        with Store(self.db) as st:
+            frame = job_timeline.run_frame(st, "retry-1", 0, 0)
+        self.assertEqual([event["kind"] for event in frame["events"]], ["retry_started"])
 
     def test_running_job_serves_incremental_events(self) -> None:
         """after 是行号游标：不重发之前的事件，cursor 报到文件末尾。"""

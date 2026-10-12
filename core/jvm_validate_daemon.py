@@ -214,7 +214,11 @@ def request(cfg: Dict[str, Any], port: int, timeout: float) -> Dict[str, Any]:
     }
     if cfg.get("profile"):
         payload["profile"] = str(cfg["profile"])
-    result = _exchange(payload, port, timeout)
+    try:
+        result = _exchange(payload, port, timeout)
+    except ValidateDaemonError as exc:
+        context = _request_failure_context(port)
+        raise ValidateDaemonError("%s；诊断：%s" % (exc, context)) from exc
     if "code" not in result:
         raise ValidateDaemonError("Validate daemon 的应答缺 code: %r" % result)
     return result
@@ -239,6 +243,37 @@ def _log_tail(lines: int = 12) -> str:
     except OSError:
         return ""
     return " / ".join(text.strip().splitlines()[-lines:])
+
+
+def _request_failure_context(port: int) -> str:
+    info = _read_info()
+    try:
+        pid = int(info.get("pid") or 0)
+    except (TypeError, ValueError):
+        pid = 0
+    try:
+        alive = _pid_alive(pid) if pid else False
+    except OSError:
+        alive = "unknown"
+    parts = ["daemon pid=%s port=%s alive=%s" %
+             (pid or "unknown", info.get("port") or port, alive)]
+    owner = _read_current_operation()
+    if owner:
+        parts.append("owner job=%s chunk=%s pid=%s" % (
+            owner.get("job_id") or "?", owner.get("chunk") or "?",
+            owner.get("pid") or "?"))
+    process = _PROC
+    if process is not None and process.pid == pid:
+        try:
+            exit_code = process.poll()
+        except OSError:
+            exit_code = None
+        if exit_code is not None:
+            parts.append("daemon exit_code=%s" % exit_code)
+    tail = _log_tail(8)
+    if tail:
+        parts.append("daemon log tail=" + tail[-1000:])
+    return "; ".join(parts)
 
 
 def _kill_proc() -> None:

@@ -125,8 +125,11 @@ async def jvm_debug(body: JvmDebugRequest):
                             proxy=resolve_proxy(), readiness=readiness_result,
                             target=body.target, query=body.query,
                             key_override=bool(str(body.key or "").strip()))
-    # JVM 与批量校验共用一条 lane，**调试档优先**（LANE_PRIORITY：debug=0 / batch=10）
-    job_id = runner.submit("jvm_debug", payload, lane="jvm", lane_kind="debug")
+    # JVM 与批量校验共用一条 lane：批量占用时调试排在下一块之前；已有调试/刷新冲突才返回 409。
+    try:
+        job_id = runner.submit("jvm_debug", payload, lane="jvm", lane_kind="debug")
+    except runner.JvmLaneBusyError as exc:
+        raise HTTPException(409, str(exc))
     return {"job_id": job_id, "kind": "jvm_debug",
             "events": "/api/jobs/%s/stream" % job_id}
 

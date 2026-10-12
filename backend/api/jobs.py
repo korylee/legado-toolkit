@@ -304,6 +304,8 @@ def _job_detail(job: Dict[str, Any], raw: bool = False) -> Dict[str, Any]:
 async def create_job(body: JobCreate):
     try:
         job_id = runner.submit(body.kind, body.payload)
+    except runner.JvmLaneBusyError as exc:
+        raise HTTPException(409, str(exc))
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     return {"job_id": job_id, "kind": body.kind, "events": "/api/jobs/%s/stream" % job_id}

@@ -207,14 +207,16 @@ def _failures_from_result(parsed: Dict[str, Any]) -> Dict[str, Any]:
 def _run_dir_of(row: Dict[str, Any]) -> pathlib.Path:
     """运行目录。
 
-    批量校验的目录在**提交时就冻结进了 payload**（导出清单那一步决定的），所以从轻量行的
-    ``result_run_dir`` 取（SQL 侧已抽好，见 ``core.store._JOB_LIGHT_COLUMNS``——不为一个
-    路径去解析上百 KB 的 result_json）。
+    新批量任务优先从轻量行读取独立的 ``result_timeline_dir``；旧任务没有该字段时回退到
+    ``result_run_dir``。两条路径都由 SQL 预先提取，不解析上百 KB 的 ``result_json``。
 
     调试的目录是**按任务号现算**的（提交时还不知道 job_id，见
     ``backend/jobs/jvm_debug_job.run_dir_of``）：约定 ``runs/debug-<job_id>``。
     取不到给一个不存在的路径，读文件自然返回空。
     """
+    timeline_dir = str(row.get("result_timeline_dir") or "")
+    if timeline_dir:
+        return pathlib.Path(timeline_dir)
     value = str(row.get("result_run_dir") or "")
     if value:
         return pathlib.Path(value)
