@@ -6,15 +6,20 @@
 #   - 新 URL         -> 写入管理库，按原分组推断健康状态（无信号默认待验证）
 #   - 同 URL 同规则   -> 重复，跳过
 #   - 同 URL 不同规则 -> 冲突，不覆盖候选库；原始内容留存 data/imports/conflicts/
+import asyncio
+import ipaddress
 import json
 import os
+import socket
 import time
 from typing import Any, Dict, List
+from urllib.parse import urlsplit
 
+import aiohttp
 from fastapi import APIRouter, Depends, HTTPException
 
 from backend.deps import get_store
-from backend.schemas import ImportBody
+from backend.schemas import ImportBody, ImportUrlRequest
 from core.loader import _normalize_url, fingerprint
 from core.models import BOOK_SOURCE_TYPE_NAMES
 from core.organizer import STATUS_GROUP_NAMES, infer_health_from_group
@@ -23,6 +28,104 @@ from core.sanitize import clean_source
 from core.tags import extract_user_tags_from_group, merge_group
 
 router = APIRouter()
+
+_REMOTE_JSON_MAX_BYTES = 8 * 1024 * 1024
+_REMOTE_JSON_TIMEOUT = aiohttp.ClientTimeout(total=20, connect=5, sock_read=10)
+
+
+class _PinnedResolver(aiohttp.abc.AbstractResolver):
+    def __init__(self, addresses):
+        self.addresses = addresses
+
+    async def resolve(self, host, port=0, family=socket.AF_INET):
+        return [
+            {"hostname": host, "host": address, "port": port,
+             "family": af, "proto": socket.IPPROTO_TCP,
+             "flags": socket.AI_NUMERICHOST}
+            for af, address in self.addresses
+        ]
+
+    async def close(self):
+        return None
+
+
+async def _public_https_target(value: str):
+    try:
+        parsed = urlsplit(str(value or "").strip())
+        port = parsed.port
+    except ValueError as exc:
+        raise HTTPException(400, "JSON 链接格式不正确") from exc
+    if (parsed.scheme.lower() != "https" or not parsed.hostname
+            or parsed.username or parsed.password or port not in (None, 443)):
+        raise HTTPException(400, "只支持无账号信息的 HTTPS JSON 链接（默认端口或 443）")
+    host = parsed.hostname.rstrip(".")
+    try:
+        records = await asyncio.wait_for(
+            asyncio.get_running_loop().getaddrinfo(host, 443, type=socket.SOCK_STREAM),
+            timeout=5)
+    except asyncio.TimeoutError as exc:
+        raise HTTPException(502, "JSON 链接域名解析超时") from exc
+    except OSError as exc:
+        raise HTTPException(400, "链接域名无法解析：%s" % exc) from exc
+    addresses = []
+    for family, _socktype, _proto, _canonname, sockaddr in records:
+        address = sockaddr[0].split("%", 1)[0]
+        try:
+            ip = ipaddress.ip_address(address)
+        except ValueError as exc:
+            raise HTTPException(400, "链接域名解析结果无效") from exc
+        if not ip.is_global:
+            raise HTTPException(400, "链接域名必须解析到公网地址")
+        pair = (family, address)
+        if pair not in addresses:
+            addresses.append(pair)
+    if not addresses:
+        raise HTTPException(400, "链接域名没有可用的公网地址")
+    return parsed, host, addresses
+
+
+async def _fetch_remote_json(url: str) -> str:
+    parsed, host, addresses = await _public_https_target(url)
+    connector = aiohttp.TCPConnector(resolver=_PinnedResolver(addresses), use_dns_cache=False)
+    try:
+        async with aiohttp.ClientSession(
+                connector=connector, timeout=_REMOTE_JSON_TIMEOUT,
+                trust_env=False) as session:
+            async with session.get(
+                    parsed.geturl(), allow_redirects=False,
+                    headers={"Accept": "application/json"}) as response:
+                if 300 <= response.status < 400:
+                    raise HTTPException(400, "JSON 链接发生跳转，请改用最终 HTTPS 链接")
+                if response.status != 200:
+                    raise HTTPException(502, "获取 JSON 失败（HTTP %d）" % response.status)
+                if (response.content_length is not None
+                        and response.content_length > _REMOTE_JSON_MAX_BYTES):
+                    raise HTTPException(413, "JSON 文件超过 8 MB 上限")
+                chunks = []
+                size = 0
+                async for chunk in response.content.iter_chunked(65536):
+                    size += len(chunk)
+                    if size > _REMOTE_JSON_MAX_BYTES:
+                        raise HTTPException(413, "JSON 文件超过 8 MB 上限")
+                    chunks.append(chunk)
+    except HTTPException:
+        raise
+    except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
+        raise HTTPException(502, "获取 JSON 失败：%s" % exc) from exc
+    try:
+        content = b"".join(chunks).decode("utf-8-sig")
+        data = json.loads(content)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise HTTPException(400, "链接内容不是有效的 UTF-8 JSON") from exc
+    if not isinstance(data, list):
+        raise HTTPException(400, "链接内容不是书源 JSON 数组")
+    return content
+
+
+@router.post("/url")
+async def fetch_import_url(body: ImportUrlRequest):
+    content = await _fetch_remote_json(body.url)
+    return {"content": content, "source": body.url.strip()}
 
 
 def _normalize_group(source, allowed_user_tags):

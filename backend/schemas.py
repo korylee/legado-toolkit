@@ -96,6 +96,10 @@ class SourceSave(BaseModel):
     lock_system_tags: bool = False
 
 
+class ImportUrlRequest(BaseModel):
+    url: str
+
+
 class ImportBody(BaseModel):
     content: str = ""
     source: str = ""

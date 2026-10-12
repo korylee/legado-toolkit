@@ -3,10 +3,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+import socket
 import tempfile
 import unittest
+from unittest import mock
+from urllib.parse import urlsplit
 
 _TMP_ROOT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".tmp")
 os.makedirs(_TMP_ROOT, exist_ok=True)
@@ -160,6 +164,66 @@ class ImportValidationTests(_ImportCase):
         self.assertEqual(res["invalid_count"], 2)
         self.assertEqual(res["new_count"], 1)
         self.assertIsNotNone(self.store.get_source("https://ok.example"))
+
+
+class ImportUrlTests(unittest.TestCase):
+    def test_fetch_returns_json_array_without_network(self) -> None:
+        from backend.api import imports
+
+        raw = b'[{"bookSourceUrl":"https://example.com"}]'
+
+        class _Response:
+            status = 200
+            content_length = len(raw)
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            class _Content:
+                async def iter_chunked(self, _size):
+                    yield raw
+
+            content = _Content()
+
+        class _Session:
+            def __init__(self, **_kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            def get(self, *_args, **_kwargs):
+                return _Response()
+
+        async def fake_target(_url):
+            return urlsplit("https://example.com/sources.json"), "example.com", [
+                (socket.AF_INET, "93.184.216.34")]
+
+        with mock.patch.object(imports, "_public_https_target", side_effect=fake_target), \
+             mock.patch.object(imports.aiohttp, "ClientSession", _Session):
+            content = asyncio.run(imports._fetch_remote_json(
+                "https://example.com/sources.json"))
+        self.assertEqual(json.loads(content), [{"bookSourceUrl": "https://example.com"}])
+
+    def test_import_url_rejects_non_https_before_network(self) -> None:
+        from backend.api import imports
+        from backend.schemas import ImportUrlRequest
+        from fastapi import HTTPException
+
+        with mock.patch.object(imports.aiohttp, "ClientSession") as session:
+            with self.assertRaises(HTTPException) as caught:
+                asyncio.run(imports.fetch_import_url(
+                    ImportUrlRequest(url="http://example.com/sources.json")))
+
+        self.assertEqual(caught.exception.status_code, 400)
+        self.assertIn("HTTPS", caught.exception.detail)
+        session.assert_not_called()
 
 
 if __name__ == "__main__":
