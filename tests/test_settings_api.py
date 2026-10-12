@@ -71,8 +71,6 @@ class PatchSemanticsTests(SettingsApiTestCase):
     def test_reset_endpoint_restores_defaults(self):
         patch_settings(SettingsPatch(network={"proxy": "http://p:1"}))
         reset_settings()
-        self.assertEqual(S.load(), S.DEFAULTS | {"schema_version": S.load()["schema_version"]}
-                         if False else S.load())
         self.assertEqual(S.load()["network"], S.DEFAULTS["network"])
 
     def test_response_carries_values_defaults_and_limits(self):
