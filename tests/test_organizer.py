@@ -14,7 +14,7 @@ def source(group: str = "") -> dict:
         "bookSourceName": "测试源",
         "bookSourceUrl": "https://example.com",
         "bookSourceGroup": group,
-        "bookSourceComment": "说明\n[原分组] 📖小说/✅★★★★★,命中《斗破苍穹》,规则完整",
+        "bookSourceComment": "说明\n[原分组] 📖小说/✅★★★★★,命中《斗破苍穹》",
         "ruleSearch": {"bookList": ".book"},
         "ruleToc": {"chapterList": ".chapter"},
         "ruleContent": {"content": "#content"},
@@ -71,10 +71,10 @@ class OrganizerTests(unittest.TestCase):
         self.assertEqual(group_title(0, Health.PENDING), "📖小说,待验证")
 
     def test_organize_removes_hit_marker_and_original_group_line(self) -> None:
-        raw = source("📖小说/✅★★★★★,命中《斗破苍穹》,规则完整")
+        raw = source("📖小说/✅★★★★★,命中《斗破苍穹》")
         raw["bookSourceComment"] = (
             "// Error: timeout\n说明\n"
-            "[原分组] 📖小说/✅★★★★★,命中《斗破苍穹》,规则完整"
+            "[原分组] 📖小说/✅★★★★★,命中《斗破苍穹》"
         )
         record = build_record(raw, 0)
         record.health = Health.OK
@@ -126,16 +126,16 @@ class OrganizerTests(unittest.TestCase):
         self.assertEqual(group_title(0, infer_health_from_group("自用")),
                          "📖小说,待验证")
 
-    def test_system_quality_and_user_tags_are_written(self) -> None:
-        raw = source("📖小说/✅★★★★★,规则完整,番茄,正版,原创")
+    def test_system_rule_incomplete_and_user_tags_are_written(self) -> None:
+        raw = source("📖小说/✅★★★★★,规则不完整,番茄,正版,原创")
         record = build_record(raw, 0)
         record.health = Health.OK
-        record.quality_tags = ["规则完整"]
+        record.quality_tags = ["规则不完整"]
 
         result = organize_sources([record])
 
         self.assertEqual(result[0]["bookSourceGroup"],
-                         "📖小说,可用,规则完整,番茄,正版,原创")
+                         "📖小说,可用,规则不完整,番茄,正版,原创")
 
 
 class HealthTableCoverageTests(unittest.TestCase):

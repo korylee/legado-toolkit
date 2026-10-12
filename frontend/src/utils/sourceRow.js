@@ -50,7 +50,7 @@ export function userTagsOf(row) {
 }
 
 // group_name 是系统标签的逗号拼接串。类型和健康状态表格里已各自单独成列展示，
-// 这里只取不重复的质量标签（规则完整），避免同一信息渲染两遍。
+// 这里只取不重复的规则质量标签（规则不完整），避免同一信息渲染两遍。
 export function qualityTagsOf(row) {
   return splitTags(row.group_name || "").filter((t) => isQualityTag(t));
 }

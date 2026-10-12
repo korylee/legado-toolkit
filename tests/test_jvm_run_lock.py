@@ -98,7 +98,14 @@ class _Base(unittest.TestCase):
         self.seen_urls = urls
         f = pathlib.Path(dest_path or (self.tmp / "batch_src.json"))
         f.parent.mkdir(parents=True, exist_ok=True)
-        f.write_text(json.dumps([{"bookSourceUrl": "https://a.com"}]), encoding="utf-8")
+        f.write_text(json.dumps([{
+            "bookSourceUrl": "https://a.com", "bookSourceType": 0,
+            "searchUrl": "/search?q={{key}}",
+            "ruleSearch": {"bookList": ".book", "name": ".name",
+                           "bookUrl": ".item@href"},
+            "ruleToc": {"chapterList": ".chapter"},
+            "ruleContent": {"content": ".content"},
+        }]), encoding="utf-8")
         return f
 
     def _fake_gradle(self, args_path=None, runtime=None, **kwargs) -> int:

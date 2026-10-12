@@ -26,7 +26,10 @@ def make_source(group: str, url: str = "https://example.com",
         "bookSourceType": source_type,
         "bookSourceGroup": group,
         "enabled": True,
-        "ruleSearch": {"bookList": ".book"},
+        "searchUrl": "/search?q={{key}}",
+        "ruleSearch": {"bookList": ".book", "name": ".name", "bookUrl": ".item@href"},
+        "ruleToc": {"chapterList": ".chapter"},
+        "ruleContent": {"content": ".content"},
     }
 
 
@@ -134,26 +137,47 @@ class StoreTagTests(unittest.TestCase):
             self.assertEqual(row["group_name"], "📖小说,可用")
             self.assertEqual(row["user_tags"], "原创")
 
-    def test_type_change_rebuilds_type_tag_keeps_health_quality(self) -> None:
+    def test_type_change_rebuilds_type_tag_and_removes_quality_tag(self) -> None:
         with Store(self.db) as st:
             st.upsert_sources([make_source(
-                "📥下载,可用,原创,规则完整",
+                "📥下载,可用,原创",
                 url="https://type-change.example",
                 source_type=3,
             )])
             st.upsert_sources([make_source(
-                "📥下载,可用,原创,规则完整",
+                "📥下载,可用,原创",
                 url="https://type-change.example",
                 source_type=0,
             )])
             row = st.conn.execute(
                 "SELECT group_name, user_tags FROM sources").fetchone()
-            self.assertEqual(row["group_name"], "📖小说,可用,规则完整")
+            self.assertEqual(row["group_name"], "📖小说,可用")
             self.assertEqual(row["user_tags"], "原创")
             self.assertEqual(
                 st.export_sources()[0]["bookSourceGroup"],
-                "📖小说,可用,规则完整,原创",
+                "📖小说,可用,原创",
             )
+
+    def test_rule_incomplete_tag_tracks_current_config_even_when_status_locked(self) -> None:
+        with Store(self.db) as st:
+            complete = make_source("📖小说,可用,原创", url="https://rules.example")
+            st.upsert_sources([complete])
+            self.assertNotIn("规则不完整", st.get_source("https://rules.example")["bookSourceGroup"])
+
+            incomplete = dict(complete, ruleContent={})
+            st.upsert_sources([incomplete])
+            self.assertIn("规则不完整", st.get_source("https://rules.example")["bookSourceGroup"])
+
+            st.set_system_tags_override(["https://rules.example"], "📖小说,已失效")
+            st.upsert_sources([dict(complete, ruleToc={})])
+            group = st.get_source("https://rules.example")["bookSourceGroup"]
+            self.assertIn("已失效", group)
+            self.assertIn("规则不完整", group)
+
+            st.upsert_sources([complete])
+            group = st.get_source("https://rules.example")["bookSourceGroup"]
+            self.assertIn("已失效", group)
+            self.assertNotIn("规则不完整", group)
 
     def test_add_remove_rename_merge(self) -> None:
         with Store(self.db) as st:

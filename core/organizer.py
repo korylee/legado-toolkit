@@ -13,7 +13,8 @@ import re
 from typing import Any, Dict, List
 
 from core.models import BookSourceRecord, Health, BOOK_SOURCE_TYPE_NAMES, HEALTH_NAMES
-from core.tags import extract_user_tags_from_group, merge_group, parse_group_tags
+from core.tags import (RULE_INCOMPLETE_TAG, extract_user_tags_from_group,
+                      merge_group, parse_group_tags)
 
 # 分组排序：类型优先，健康次之，验证事实由列表单独展示
 TYPE_ORDER = {0: 0, 2: 1, 1: 2, 3: 3, 4: 4}
@@ -91,8 +92,8 @@ def _clean_comment(comment: str) -> str:
 
 
 def quality_tags_str(rec: BookSourceRecord) -> str:
-    """返回可进系统分组的质量标签；规则完整是系统标签。"""
-    tags = [t for t in rec.quality_tags if t in ("规则完整",)]
+    """返回由当前规则配置推导的质量标签。"""
+    tags = [t for t in rec.quality_tags if t == RULE_INCOMPLETE_TAG]
     return ",".join(tags) if tags else ""
 
 def sort_records(records: List[BookSourceRecord]) -> List[BookSourceRecord]:
@@ -135,7 +136,7 @@ def organize_sources(
     for rec in records:
         new_rec = dict(rec.raw)  # 浅拷贝，保留全部字段
         # 主分组：类型 + 生命周期状态；验证事实在列表和报告明细中展示
-        # 系统标签 = 类型 + 健康状态 + 规则完整
+        # 系统标签 = 类型 + 健康状态 + 当前配置推导的规则不完整状态
         system_group = group_title(rec.source_type, rec.health)
         system_quality = quality_tags_str(rec)
         if system_quality:

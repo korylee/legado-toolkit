@@ -292,6 +292,9 @@ async function deleteJob() {
         </div>
       </template>
 
+      <div v-if="detail && detail.skipped_rule_incomplete" class="td-warn">
+        已跳过 {{ detail.skipped_rule_incomplete }} 条规则不完整的源，未执行校验。
+      </div>
       <div v-if="job.error" class="td-warn">
         {{ job.error }}
         <el-button v-if="canRefreshSnapshot" link type="primary" size="small"

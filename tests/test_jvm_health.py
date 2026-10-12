@@ -206,12 +206,12 @@ class ChecksRowTests(unittest.TestCase):
     def test_row_without_url_is_skipped(self) -> None:
         self.assertIsNone(H.checks_row({"state": "ok"}, batch="b"))
 
-    def test_rule_tags_come_from_the_static_rules(self) -> None:
+    def test_incomplete_rule_tag_comes_from_the_current_source_config(self) -> None:
         raw = {"bookSourceUrl": "https://a.com", "ruleToc": {"chapterList": ".x"},
                "ruleContent": {"content": ".c"}}
         it = H.checks_row({"url": "https://a.com", "state": "ok", "stage": "search",
                            "hit": 1, "sample": ["x"], "cost_ms": 1}, batch="b", raw=raw)
-        self.assertIn("规则完整", it["quality_tags"])
+        self.assertEqual(it["quality_tags"], ["规则不完整"])
 
 
 class StoreChecksTests(unittest.TestCase):

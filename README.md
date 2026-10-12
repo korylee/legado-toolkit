@@ -12,7 +12,7 @@ Legado（阅读）书源管理工具链：FastAPI + SQLite + Vue 3。
   待校验、规则冲突待审）
 - **批量校验**：走本机引擎（JVM 里跑「阅读」的真源码），分搜索 / 目录 / 正文段选深度；
   有效期内的源复用缓存（提示写明新校验几条、复用几条）；严格遵守源声明的 `concurrentRate`
-- **分组与标签**：系统标签（类型 / 健康 / 规则完整度）自动重建，健康状态可人工锁定；
+- **分组与标签**：系统标签（类型 / 健康 / 规则质量）自动重建，健康状态可人工锁定；
   用户标签独立存储，支持增删改、合并、规范化
 - **调试与修复**：调试抽屉逐段摊开证据（本机引擎或连 App）；页面缓存 5 分钟内不重复联网；
   失效归因分桶；AI 只提议、每条都过验证
@@ -167,8 +167,8 @@ JVM 常驻后台（也可 `python scripts/jvm_debug_direct.py --daemon-stop` 停
 
 ### 系统标签说明
 
-系统标签由程序维护，枚举只有一份：显示名在 `core/models.py` 的 `HEALTH_NAMES`，
-分组/判定词表在 `core/tags.py` 的 `SYSTEM_STATUS_TAG_ORDER`（无 emoji）；前端从
+系统标签由程序维护，枚举只有一份：健康度显示名在 `core/models.py` 的 `HEALTH_NAMES`，
+状态与质量标签在 `core/tags.py` 的 `SYSTEM_STATUS_TAG_ORDER` / `SYSTEM_QUALITY_TAG_ORDER`；前端从
 `GET /api/sources/tags/meta` 拿，界面上点开筛选就能看到全部。
 
 五档按**下一步动作**划分——**两档该不该合成一档，看动作是否相同**（不是语义相近、
@@ -186,6 +186,9 @@ JVM 常驻后台（也可 `python scripts/jvm_debug_direct.py --daemon-stop` 停
 是**没有 `checks` 行**（统计条上是灰 chip、筛选项里可选，不进健康枚举）。失败**原因**
 （超时 / 异常 / DNS…）不丢，落在校验记录的 `error` 与详情里。
 
+**规则不完整**是质量标签，不是健康度结论：按书源类型所需的搜索、目录与正文规则配置自动计算；
+修改源规则后自动更新。批量校验跳过这类源并在任务结果中报告数量，不将它们记成校验失败。
+
 ---
 
 ## 核心 API
@@ -200,9 +203,10 @@ JVM 常驻后台（也可 `python scripts/jvm_debug_direct.py --daemon-stop` 停
 | POST /api/sources/purge | 清空回收站（**唯一**的硬删除路径），先落快照再删 |
 | POST /api/import | `conflict_strategy`：`keep`（默认，冲突进待审）/ `overwrite`（覆盖） |
 | POST /api/import/url | 拉取公网 HTTPS JSON 数组用于预览；限时、限 8 MB，不自动写入 |
+| POST /api/import/preview | 只读解析导入内容，并统计规则不完整源 |
 | POST /api/rules/jvm-debug | **本机引擎调试**（JVM 里跑 App 真源码，含 JS 规则）：提交即返回任务号，结果看任务明细 |
 | POST /api/rules/app-push | 推送会**改 App 数据**，所以必须显式触发（由预检三态决定要不要先推） |
-| POST /api/jvm/run | 批量校验建一条任务（`kind=jvm_run`，关页面不丢）；范围 `urls` / `filter`，本次参数走 `params` |
+| POST /api/jvm/run | 批量校验建一条任务（`kind=jvm_run`，关页面不丢）；范围 `urls` / `filter`，本次参数走 `params`；规则不完整的源会跳过并报告数量 |
 | POST /api/jvm/refresh | 后台刷新本机 runtime snapshot，结果通过任务流查看 |
 | POST /api/rules/suggest-rule | AI 只提议：每条都过验证，验不了的单独标「只能连 App 试」 |
 | GET /api/settings | 全局设置，同时下发 `defaults` 与 `limits`（前端不硬编码上下界） |

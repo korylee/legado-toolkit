@@ -309,7 +309,11 @@ async function runJvmBatch() {
     if (!r.started) {
       // 没起来的几种原因要分开说：另一个本机引擎任务在跑（reason）、环境就绪检查没过（readiness）、
       // 选中的源一条都没匹配上 / 筛选没命中（reason）——都说成「自检未通过」会把原因指反
-      ElMessage.warning(r.reason || "环境就绪检查未通过，不能校验");
+      const reason = r.reason || "环境就绪检查未通过，不能校验";
+      const skipped = r.skipped_rule_incomplete && !r.reason
+        ? "；已跳过 " + r.skipped_rule_incomplete + " 条规则不完整的源"
+        : "";
+      ElMessage.warning(reason + skipped);
       jvmRunning.value = false;
       return;
     }
@@ -353,7 +357,10 @@ async function runJvmBatch() {
             "校验完成：" +
               (res.count || 0) +
               " 条结论已入库" +
-              (res.checks ? "（健康档位 " + res.checks + " 条）" : ""),
+              (res.checks ? "（健康档位 " + res.checks + " 条）" : "") +
+              (res.skipped_rule_incomplete
+                ? "，另跳过 " + res.skipped_rule_incomplete + " 条规则不完整的源"
+                : ""),
           );
         }
         // **把结论留在页面上**（复用单条校验那条结果条）：批量校验提交时弹的明细弹窗

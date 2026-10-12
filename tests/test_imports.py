@@ -68,6 +68,23 @@ class ImportApiTests(_ImportCase):
         self.assertEqual(result["conflict_count"], 0)
         source = self.store.get_source("https://new.example")
         self.assertIn("待验证", source.get("bookSourceGroup", ""))
+        self.assertIn("规则不完整", source.get("bookSourceGroup", ""))
+
+    def test_preview_counts_incomplete_rules_without_importing(self) -> None:
+        from backend.api.imports import preview_import
+        from backend.schemas import ImportBody
+
+        incomplete = make_source("https://incomplete.example")
+        complete = make_source("https://complete.example")
+        complete["ruleSearch"] = {
+            "bookList": ".book", "name": ".name", "bookUrl": ".item@href",
+        }
+        complete["ruleToc"] = {"chapterList": ".chapter"}
+        complete["ruleContent"] = {"content": ".content"}
+        result = preview_import(ImportBody(content=json.dumps([incomplete, complete])))
+
+        self.assertEqual(result, {"total": 2, "rules_incomplete": 1})
+        self.assertIsNone(self.store.get_source("https://incomplete.example"))
 
     def test_import_keeps_defaults_and_drops_unknown_tags(self) -> None:
         # 空库第一次导入也要过滤：默认标签 R18 / 正版 保留，陌生标签直接清。

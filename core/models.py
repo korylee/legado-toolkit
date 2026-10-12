@@ -184,7 +184,7 @@ class BookSourceRecord:
     # ---- 验证结果 ----
     search_hit: str = ""         # 命中的测试作品名（空=未命中/未测）
     search_response_ms: int = 0    # 搜索请求响应耗时
-    quality_tags: List[str] = field(default_factory=list)  # 如 ["规则完整"]
+    quality_tags: List[str] = field(default_factory=list)  # 如 ["规则不完整"]
     # ---- 深度验证结果（probe_depth >= 2 时填充；None=未验证/无法验证）----
     probe_depth: int = 1             # 实际执行的验证深度（1=浅探测 / 2=+目录 / 3=+正文）
     chapter_count: int = 0           # 目录解析出的章节数

@@ -92,6 +92,48 @@ def make_record(raw, source_type=0, search_hit="测试书"):
 
 
 
+class StaticRuleCompletenessTests(unittest.TestCase):
+    @staticmethod
+    def _source(source_type=0):
+        source = {
+            "bookSourceType": source_type,
+            "searchUrl": "/search?q={{key}}",
+            "ruleSearch": {"bookList": ".item", "name": ".name", "bookUrl": ".item@href"},
+            "ruleToc": {"chapterList": ".chapter"},
+            "ruleContent": {"content": ".content"},
+        }
+        return source
+
+    def test_required_rules_define_completeness_without_parsing_them(self):
+        complete = self._source()
+        self.assertIs(checker.static_rule_complete(complete), True)
+
+        for path in (
+            ("searchUrl",),
+            ("ruleSearch", "bookList"),
+            ("ruleSearch", "name"),
+            ("ruleSearch", "bookUrl"),
+            ("ruleToc", "chapterList"),
+            ("ruleContent", "content"),
+        ):
+            with self.subTest(path=path):
+                source = self._source()
+                target = source
+                for key in path[:-1]:
+                    target = target[key]
+                target[path[-1]] = "  "
+                self.assertIs(checker.static_rule_complete(source), False)
+
+        download = self._source(source_type=3)
+        download["ruleToc"] = {}
+        download["ruleContent"] = {}
+        self.assertIs(checker.static_rule_complete(download), True)
+
+    def test_unsupported_source_type_is_not_mislabelled_incomplete(self):
+        self.assertIs(checker.static_rule_complete(self._source(source_type=4)), None)
+        self.assertIs(checker.static_rule_complete(None), None)
+
+
 class BuildRecordSearchUrlTests(unittest.TestCase):
     """`searchUrl` 的 `@` 后缀必须**先剥、再判 `has_search`**。
 

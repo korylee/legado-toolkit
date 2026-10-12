@@ -47,16 +47,17 @@ function beforeUpload() { return false; }   // 手动解析，不自动上传
 //: 这条路现在也通）。默认 keep：外部源默认不该覆盖你已经在用的规则。
 const strategy = ref("keep");
 
-function setPreview(text, source, tab) {
+async function setPreview(text, source, tab) {
   const data = JSON.parse(text);
   if (!Array.isArray(data)) throw new Error("不是 JSON 数组");
+  const rules = await api.post("/import/preview", { content: text });
   rawText.value = text;
   sourceName.value = source || "";
   previewTab.value = tab;
   preview.value = {
     count: data.length,
     noUrl: data.filter((s) => !s || typeof s !== "object" || !s.bookSourceUrl).length,
-    noSearch: data.filter((s) => !s || typeof s !== "object" || !s.searchUrl).length,
+    rulesIncomplete: Number(rules.rules_incomplete || 0),
     types: data.reduce((acc, s) => {
       const k = s && typeof s === "object" ? (s.bookSourceType ?? 0) : "无效";
       acc[k] = (acc[k] || 0) + 1;
@@ -71,7 +72,7 @@ async function parseLocal() {
   loading.value = true;
   try {
     const text = await file.value.text();
-    const count = setPreview(text, file.value.name, "file");
+    const count = await setPreview(text, file.value.name, "file");
     ElMessage.success("解析成功，" + count + " 条");
   } catch (e) {
     ElMessage.error("解析失败: " + e.message);
@@ -87,7 +88,7 @@ async function parseUrl() {
   clearPreview();
   try {
     const fetched = await api.post("/import/url", { url: url.value.trim() });
-    const count = setPreview(fetched.content, fetched.source || url.value.trim(), "url");
+    const count = await setPreview(fetched.content, fetched.source || url.value.trim(), "url");
     ElMessage.success("读取成功，" + count + " 条");
   } catch (e) {
     ElMessage.error("读取 JSON 链接失败：" + e.message);
@@ -96,16 +97,19 @@ async function parseUrl() {
   }
 }
 
-function parsePaste() {
+async function parsePaste() {
   if (!pasteText.value.trim()) return ElMessage.warning("先粘贴书源 JSON");
+  loading.value = true;
   clearPreview();
   try {
     const parsed = JSON.parse(pasteText.value);
     const data = Array.isArray(parsed) ? parsed : [parsed];
-    const count = setPreview(JSON.stringify(data), "粘贴内容", "paste");
+    const count = await setPreview(JSON.stringify(data), "粘贴内容", "paste");
     ElMessage.success("解析成功，" + count + " 条");
   } catch (e) {
     ElMessage.error("解析失败: " + e.message);
+  } finally {
+    loading.value = false;
   }
 }
 
@@ -204,7 +208,7 @@ async function doImport() {
       <el-descriptions :column="2" border size="small">
         <el-descriptions-item label="条目数">{{ preview.count }}</el-descriptions-item>
         <el-descriptions-item label="缺 bookSourceUrl">{{ preview.noUrl }}</el-descriptions-item>
-        <el-descriptions-item label="无搜索规则">{{ preview.noSearch }}</el-descriptions-item>
+        <el-descriptions-item label="规则不完整">{{ preview.rulesIncomplete }}</el-descriptions-item>
         <el-descriptions-item label="类型分布">{{ JSON.stringify(preview.types) }}</el-descriptions-item>
       </el-descriptions>
     </div>

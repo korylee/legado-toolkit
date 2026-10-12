@@ -125,12 +125,21 @@ class _Base(unittest.TestCase):
                        encoding="utf-8")
         return {"code": 0, "cost_ms": 1}
 
-    def _put_source(self, url: str, name: str) -> None:
+    def _put_source(self, url: str, name: str, **overrides) -> None:
         # 用真 API 写源（`upsert_sources` 会建表+算 fingerprint）：比手写 INSERT 更接近
         # 生产路径，也不会因为漏 NOT NULL 列而炸
+        source = {
+            "bookSourceName": name, "bookSourceUrl": url,
+            "bookSourceType": 0, "enabled": True,
+            "searchUrl": "/search?q={{key}}",
+            "ruleSearch": {"bookList": ".book", "name": ".name",
+                           "bookUrl": ".item@href"},
+            "ruleToc": {"chapterList": ".chapter"},
+            "ruleContent": {"content": ".content"},
+        }
+        source.update(overrides)
         with Store(self.db) as st:
-            st.upsert_sources([{"bookSourceName": name, "bookSourceUrl": url,
-                                "enabled": True}])
+            st.upsert_sources([source])
 
     def _call(self, urls=None, filt=None, params=None, run_job=True) -> dict:
         """请求（预检：范围 / 空范围原因 / 建任务）**+ 把任务跑完**。
@@ -165,6 +174,28 @@ class _Base(unittest.TestCase):
 
 
 class ScopeTests(_Base):
+    def test_incomplete_sources_are_skipped_and_reported(self) -> None:
+        self._put_source("https://incomplete.example", "缺规则源", ruleContent={})
+
+        result = self._call(urls=["https://a.com", "https://incomplete.example"])
+
+        self.assertTrue(result["started"])
+        self.assertEqual(result["skipped_rule_incomplete"], 1)
+        self.assertEqual(result["count"], 1)
+        self.assertEqual(len(self._batch()), 1)
+        self.assertEqual(self._batch()[0]["bookSourceUrl"], "https://A.com/")
+
+    def test_all_incomplete_sources_do_not_start_a_job(self) -> None:
+        self._put_source("https://incomplete.example", "缺规则源", ruleToc={})
+
+        result = self._call(urls=["https://incomplete.example"], run_job=False)
+
+        self.assertFalse(result["started"])
+        self.assertEqual(result["skipped_rule_incomplete"], 1)
+        self.assertIn("规则不完整", result["reason"])
+        self.assertEqual(self.gradle_calls, 0)
+        self.assertEqual(self.daemon_calls, 0)
+
     def test_payload_without_manifest_is_rejected_with_reason(self) -> None:
         """没有清单就拒绝：连带显式路径的旧 payload 也不放行（生产只走清单）。
 

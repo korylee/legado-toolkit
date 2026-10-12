@@ -332,29 +332,42 @@ def build_domain_url(url: str) -> str:
 # ------------------------------------------------------------ 校验公共逻辑
 
 
-def _static_toc_ok(raw: Optional[Dict[str, Any]]) -> bool:
-    """静态判定：ruleToc.chapterList 非空（规则存在，不保证能解析出章节）。"""
-    if not raw:
-        return False
-    toc = raw.get("ruleToc") or {}
-    if not isinstance(toc, dict):
-        return False
-    return bool(str(toc.get("chapterList", "") or ""))
+def _has_rule_value(value: Any) -> bool:
+    return isinstance(value, str) and bool(value.strip())
 
 
-def _static_content_ok(raw: Optional[Dict[str, Any]]) -> bool:
-    """静态判定：ruleContent.content 非空（规则存在，不保证能解析出正文）。"""
-    if not raw:
-        return False
-    content = raw.get("ruleContent") or {}
-    if not isinstance(content, dict):
-        return False
-    return bool(str(content.get("content", "") or ""))
+def static_rule_complete(raw: Optional[Dict[str, Any]]) -> Optional[bool]:
+    """静态判定书源是否具备最低可用规则；不执行或解释规则文本。
 
+    小说 / 听书 / 漫画源要能搜索到书、解析目录和正文；下载源只需要搜索结果能
+    指向目标。书名、列表与详情链接是搜索入口的必要项，作者、封面等展示字段可选。
+    不支持的类型或非对象输入返回 None，不能把「无法判定」冒充成「规则不完整」。
+    """
+    if not isinstance(raw, dict):
+        return None
+    try:
+        source_type = int(raw.get("bookSourceType", 0) or 0)
+    except (TypeError, ValueError):
+        return None
+    if source_type not in (0, 1, 2, 3):
+        return None
 
-def static_rule_complete(raw: Optional[Dict[str, Any]]) -> bool:
-    """静态判定：目录 + 正文规则均齐全（quality_tags 里的「规则完整」标签依据）。"""
-    return _static_toc_ok(raw) and _static_content_ok(raw)
+    search = raw.get("ruleSearch")
+    if not isinstance(search, dict):
+        search = {}
+    search_url = raw.get("searchUrl") or search.get("url")
+    search_ready = all(_has_rule_value(value) for value in (
+        search_url, search.get("bookList"), search.get("name"), search.get("bookUrl")))
+    if not search_ready:
+        return False
+    if source_type == 3:
+        return True
+
+    toc = raw.get("ruleToc")
+    content = raw.get("ruleContent")
+    toc_list = toc.get("chapterList") if isinstance(toc, dict) else None
+    content_rule = content.get("content") if isinstance(content, dict) else None
+    return _has_rule_value(toc_list) and _has_rule_value(content_rule)
 
 
 def _decode_body(body: bytes) -> str:

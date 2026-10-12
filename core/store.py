@@ -19,10 +19,11 @@ import threading
 import time
 from typing import Any, Dict, List, Optional, Sequence
 
-from core.checker import CACHE_VERSION
+from core.checker import CACHE_VERSION, static_rule_complete
 
 from core.tags import (
     DEFAULT_USER_TAGS as _DEFAULT_USER_TAGS,
+    RULE_INCOMPLETE_TAG as _RULE_INCOMPLETE_TAG,
     SYSTEM_QUALITY_TAGS as _SYSTEM_QUALITY_TAGS,
     SYSTEM_STATUS_TAGS as _SYSTEM_STATUS_TAGS,
     SYSTEM_TYPE_TAGS as _SYSTEM_TYPE_TAGS,
@@ -36,7 +37,7 @@ from core.tags import (
     split_system_user as _split_group,
 )
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 #: 本进程内已经建过 schema 的库（绝对路径）。
 #:
@@ -446,24 +447,56 @@ class Store:
 
 # sources ------------------------------------------------------------
     def _system_group_for(self, source_type: int, raw_group: str) -> str:
-        """按 source_type 重建类型标签，保留健康状态和规则完整标签。"""
+        """按 source_type 重建类型与状态标签；规则质量标签由 raw_json 单独推导。"""
         from core.models import BOOK_SOURCE_TYPE_NAMES
         from core.organizer import group_title, infer_health_from_group
 
         system, _user = _split_group(raw_group)
+        system = [t for t in system if t not in _SYSTEM_QUALITY_TAGS]
         # 兜底口径同 models.type_name：未定义类型（如 4）留空，由 _merge_group 丢弃空段
         type_tag = BOOK_SOURCE_TYPE_NAMES.get(int(source_type), "")
         status_tags = [t for t in system if t in _SYSTEM_STATUS_TAGS]
-        quality_tags = [t for t in system if t in _SYSTEM_QUALITY_TAGS]
         has_old_type = any(t in _SYSTEM_TYPE_TAGS for t in system)
         if has_old_type or status_tags:
-            # 已有显式系统标签：以表单类型为准，保留状态/规则完整
             base = [type_tag] + status_tags[:1]
         else:
-            # 没有系统类型/状态时，按旧分组推断健康度
             base = _parse_group(group_title(int(source_type),
                                             infer_health_from_group(raw_group)))
-        return _merge_group(base, quality_tags)
+        return _merge_group(base, [])
+
+    def refresh_rule_quality_tags(self, urls=None) -> int:
+        """按当前 raw_json 重算派生质量标签，不读取旧标签或 checks 结论。"""
+        keys = self._tag_urls(urls) if urls is not None else None
+        if urls is not None and not keys:
+            return 0
+        rows = []
+        if keys is None:
+            rows = self.conn.execute(
+                "SELECT id, raw_json, group_name FROM sources WHERE deleted_at = ''").fetchall()
+        else:
+            for start in range(0, len(keys), self._SQL_VAR_CHUNK):
+                part = keys[start:start + self._SQL_VAR_CHUNK]
+                marks = ",".join("?" for _ in part)
+                rows.extend(self.conn.execute(
+                    "SELECT id, raw_json, group_name FROM sources "
+                    "WHERE deleted_at = '' AND source_url IN (%s)" % marks, part).fetchall())
+        updates = []
+        for row in rows:
+            try:
+                raw = json.loads(row["raw_json"] or "{}")
+            except (TypeError, ValueError):
+                raw = None
+            tokens = [tag for tag in _parse_group(row["group_name"] or "")
+                      if tag not in _SYSTEM_QUALITY_TAGS]
+            if static_rule_complete(raw) is False:
+                tokens.append(_RULE_INCOMPLETE_TAG)
+            group_name = _merge_group(tokens, [])
+            if group_name != (row["group_name"] or ""):
+                updates.append((group_name, row["id"]))
+        if updates:
+            with self.conn:
+                self.conn.executemany("UPDATE sources SET group_name = ? WHERE id = ?", updates)
+        return len(updates)
 
     def _source_view(self, raw_json: str, group_name: str, user_tags: str):
         """把 raw_json、系统标签、用户标签合并成对外的书源对象。"""
@@ -557,6 +590,7 @@ class Store:
             "fingerprint=excluded.fingerprint, updated_at=excluded.updated_at")
         with self.conn:
             self.conn.executemany(sql, rows)
+        self.refresh_rule_quality_tags([row[0] for row in rows])
         return len(rows)
 
     def get_source(self, url: str) -> Optional[Dict[str, Any]]:
@@ -822,9 +856,11 @@ class Store:
         keys = self._tag_urls(urls)
         if not value or not keys:
             return 0
-        return self._update_many(
+        updated = self._update_many(
             "UPDATE sources SET group_name=?, system_tags_locked=1, updated_at=?"
             " WHERE source_url IN", (value, now()), keys)
+        self.refresh_rule_quality_tags(keys)
+        return updated
 
     def clear_system_tags_override(self, urls) -> int:
         """解除人工锁定，并按最近校验结果重建系统标签。"""
@@ -1027,9 +1063,10 @@ class Store:
         return out
 
     def rebuild_system_tags(self, urls=None) -> int:
-        """按类型 + 最近校验结果 + 规则完整度重建系统标签；锁定行跳过。"""
-        from core.models import Health
+        """按类型 + 最近校验结果重建标签；规则质量始终按当前 raw_json 推导。"""
+        from core.models import BOOK_SOURCE_TYPE_NAMES, Health
         from core.organizer import group_title
+
         where, args = "", []
         if urls is not None:
             keys = self._tag_urls(urls)
@@ -1038,24 +1075,32 @@ class Store:
             where = " WHERE v.source_url IN (%s)" % ",".join("?" * len(keys))
             args = keys
         rows = list(self.conn.execute(
-            "SELECT v.id, v.source_type, v.group_name, v.health, "
-            "v.quality_tags, v.system_tags_locked "
-            "FROM v_sources v" + where, args))
+            "SELECT v.id, v.source_url, v.source_type, v.group_name, v.health, "
+            "v.system_tags_locked, s.raw_json "
+            "FROM v_sources v JOIN sources s ON s.id = v.id" + where, args))
         updates = []
         for row in rows:
+            try:
+                raw = json.loads(row["raw_json"] or "{}")
+            except (TypeError, ValueError):
+                raw = None
+            incomplete = static_rule_complete(raw) is False
+            old_tags = _parse_group(row["group_name"] or "")
+            old_tags = [tag for tag in old_tags if tag not in _SYSTEM_QUALITY_TAGS]
             if row["system_tags_locked"]:
-                continue
-            health = row["health"] or Health.PENDING
-            base = group_title(int(row["source_type"] or 0), health)
-            quality = _normalize_tags(row["quality_tags"] or "")
-            if "规则完整" in quality:
-                base = _merge_group(_parse_group(base), ["规则完整"])
-            if base != (row["group_name"] or ""):
-                updates.append((base, row["id"]))
+                base = old_tags
+            else:
+                base = _parse_group(group_title(
+                    int(row["source_type"] or 0), row["health"] or Health.PENDING))
+            if incomplete:
+                base.append(_RULE_INCOMPLETE_TAG)
+            group_name = _merge_group(base, [])
+            if group_name != (row["group_name"] or ""):
+                updates.append((group_name, row["id"]))
         if not updates:
             return 0
         with self.conn:
-            self.conn.executemany("UPDATE sources SET group_name=? WHERE id=?", updates)
+            self.conn.executemany("UPDATE sources SET group_name = ? WHERE id = ?", updates)
         return len(updates)
 
     def stats(self) -> Dict[str, Any]:

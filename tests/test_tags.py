@@ -41,6 +41,14 @@ class TagUtilsTests(unittest.TestCase):
         self.assertTrue(is_system_tag("可用"))
         self.assertFalse(is_system_tag("原创"))
 
+    def test_incomplete_rule_tag_is_system(self) -> None:
+        from core.tags import RULE_INCOMPLETE_TAG, SYSTEM_QUALITY_TAG_ORDER
+
+        self.assertEqual(SYSTEM_QUALITY_TAG_ORDER, (RULE_INCOMPLETE_TAG,))
+        self.assertTrue(is_system_tag(RULE_INCOMPLETE_TAG))
+        self.assertEqual(split_system_user([RULE_INCOMPLETE_TAG, "原创"]),
+                         ([RULE_INCOMPLETE_TAG], ["原创"]))
+
     def test_download_source_type_tag_is_system(self) -> None:
         # 类型标签对齐 Legado：3 是「只提供下载服务的网站」，标签为「📥下载」
         self.assertTrue(is_system_tag("📥下载"))

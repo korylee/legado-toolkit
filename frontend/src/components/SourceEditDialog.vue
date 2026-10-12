@@ -165,7 +165,7 @@ const currentStatus = computed(
   () => systemTags.value.find((t) => isStatusTag(t)) || "",
 );
 
-/** 质量标签（如「规则完整」）：由校验判定，用户改不了，只能看。 */
+/** 质量标签（如「规则不完整」）：由当前源规则配置推导，用户不能手动编辑。 */
 const qualityTags = computed(
   () => systemTags.value.filter((t) => isQualityTag(t)),
 );

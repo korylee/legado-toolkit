@@ -80,6 +80,7 @@ class JobDetailShapeTests(unittest.TestCase):
         long_stderr = "x" * 4100
         result = {
             "checked": 2, "cached": 0, "fetched": 2,
+            "skipped_rule_incomplete": 3,
             "chunk_reports": [
                 {"index": 0, "ok": True, "count": 2,
                  "execution_mode": "validate_daemon", "cost_sec": 12.5},
@@ -97,6 +98,7 @@ class JobDetailShapeTests(unittest.TestCase):
 
         self.assertIsNone(detail["result"])
         self.assertEqual(detail["chunk_report_total"], 2)
+        self.assertEqual(detail["skipped_rule_incomplete"], 3)
         self.assertFalse(detail["chunk_reports_truncated"])
         self.assertEqual(len(detail["chunk_reports"]), 2)
         self.assertEqual(detail["chunk_reports"][0]["execution_mode"], "validate_daemon")

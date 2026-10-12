@@ -32,6 +32,7 @@ from core.checker import (CACHE_VERSION, classify_transport_error, dns_verdict_t
 from core.loader import _normalize_url, fingerprint
 from core.models import Engine, Health
 from core.settings_store import DEPTH_CONTENT, DEPTH_SEARCH, DEPTH_TOC
+from core.tags import RULE_INCOMPLETE_TAG
 
 #: 归因结果。前七个与本地传输层那套**同名同义**（`classify_transport_error` /
 #: `err_desc` 直接认它们）；后两个是 App 结论特有的桶。
@@ -227,7 +228,8 @@ def checks_row(row: Dict[str, Any], *, batch: str, checked_at: str = "",
         "search_hit": _hit_name(row),
         "search_response_ms": search_ms,
         "search_probed": bool(search_ms),
-        "quality_tags": ["规则完整"] if static_rule_complete(raw) else [],
+        "quality_tags": ([RULE_INCOMPLETE_TAG]
+                         if static_rule_complete(raw) is False else []),
         "probe_depth": _STAGE_DEPTH.get(stage, DEPTH_SEARCH),
         "chapter_count": int(row.get("toc_count") or 0),
         "toc_complete": toc_ok,

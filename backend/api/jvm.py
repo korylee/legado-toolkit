@@ -31,6 +31,7 @@ from backend.jobs.jvm_exec import (_build_jvm_manifest, _cleanup_run_dir,
                                    _export_sources_file, _write_args)
 from backend.schemas import JvmRunRequest
 from core import settings_store
+from core.checker import static_rule_complete
 from core.jvm_direct import execution_readiness
 from core.jvm_env import readiness
 from core.loader import _normalize_url
@@ -289,6 +290,21 @@ async def jvm_run(body: Optional[JvmRunRequest] = None):
     if want_filter and not want_urls and not rows:
         _cleanup_run_dir(run_dir)
         return {"started": False, "reason": "当前筛选没有命中任何源，不用跑"}
+
+    skipped_rule_incomplete = sum(
+        1 for row in rows if static_rule_complete(row) is False)
+    if skipped_rule_incomplete:
+        rows = [row for row in rows if static_rule_complete(row) is not False]
+        src_file.write_text(json.dumps(rows, ensure_ascii=False), encoding="utf-8", newline="\n")
+        if not rows:
+            _cleanup_run_dir(run_dir)
+            return {
+                "started": False,
+                "skipped_rule_incomplete": skipped_rule_incomplete,
+                "reason": ("跳过 %d 条规则不完整的源；没有可校验的书源"
+                           % skipped_rule_incomplete),
+            }
+
     # **本次覆盖**：逐键过 coerce（未知键丢弃、越界收敛到区间内），只作用于
     # 这一次批量校验，不写回设置（理由见 schemas）。白名单见 JVM_RUN_PARAMS
     eff = dict(conf)
@@ -320,10 +336,12 @@ async def jvm_run(body: Optional[JvmRunRequest] = None):
                 "reason": exec_conf.get("reason") or "单条 JVM 执行态未就绪",
                 "readiness": st_conf,
                 "execution_readiness": exec_conf,
+                "skipped_rule_incomplete": skipped_rule_incomplete,
             }
     elif not preparation_ready:
         _cleanup_run_dir(run_dir)
-        return {"started": False, "readiness": st_conf}
+        return {"started": False, "readiness": st_conf,
+                "skipped_rule_incomplete": skipped_rule_incomplete}
     # 绝对路径的理由同 _export_sources_file：这个路径是给**另一个进程**
     # （CWD = App 仓库根）用的，相对路径会落到 App 仓库里去
     out_path = run_dir / "results.jsonl"
@@ -341,6 +359,7 @@ async def jvm_run(body: Optional[JvmRunRequest] = None):
     prep = {
         "started": True,
         "count": len(rows),
+        "skipped_rule_incomplete": skipped_rule_incomplete,
         "execution_plan": "validate_daemon",
     }
     execution_plan = "validate_daemon"

@@ -290,6 +290,7 @@ def _job_detail(job: Dict[str, Any], raw: bool = False) -> Dict[str, Any]:
     if job.get("kind") == "jvm_debug":
         detail["debug_input"] = _debug_run_input(job)
     if job.get("kind") == "jvm_run" and isinstance(parsed, dict):
+        detail["skipped_rule_incomplete"] = int(parsed.get("skipped_rule_incomplete") or 0)
         detail.update(_chunk_detail_reports(parsed))
         prepared = parsed.get("daemon_prepare")
         if isinstance(prepared, dict):

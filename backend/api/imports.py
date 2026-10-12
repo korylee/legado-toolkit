@@ -20,6 +20,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from backend.deps import get_store
 from backend.schemas import ImportBody, ImportUrlRequest
+from core.checker import static_rule_complete
 from core.loader import _normalize_url, fingerprint
 from core.models import BOOK_SOURCE_TYPE_NAMES
 from core.organizer import STATUS_GROUP_NAMES, infer_health_from_group
@@ -128,6 +129,30 @@ async def fetch_import_url(body: ImportUrlRequest):
     return {"content": content, "source": body.url.strip()}
 
 
+@router.post("/preview")
+def preview_import(body: ImportBody):
+    data = _parse_import_content(body.content)
+    return {
+        "total": len(data),
+        "rules_incomplete": sum(
+            1 for source in data if isinstance(source, dict)
+            and static_rule_complete(source) is False),
+    }
+
+
+def _parse_import_content(raw_content: str):
+    content = str(raw_content or "").strip()
+    if not content:
+        raise HTTPException(400, "content 不能为空")
+    try:
+        data = json.loads(content)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(400, "JSON 解析失败: %s" % exc) from exc
+    if not isinstance(data, list):
+        raise HTTPException(400, "内容不是书源数组（应为 JSON 数组）")
+    return data
+
+
 def _normalize_group(source, allowed_user_tags):
     """为导入的新源规范系统标签：按原分组推断健康状态，无信号默认「待验证」。
 
@@ -160,15 +185,7 @@ def _write_conflicts(conflicts):
 
 @router.post("")
 def import_sources(body: ImportBody, st=Depends(get_store)):
-    content = (body.content or "").strip()
-    if not content:
-        raise HTTPException(400, "content 不能为空")
-    try:
-        data = json.loads(content)
-    except json.JSONDecodeError as e:
-        raise HTTPException(400, "JSON 解析失败: %s" % e)
-    if not isinstance(data, list):
-        raise HTTPException(400, "内容不是书源数组（应为 JSON 数组）")
+    data = _parse_import_content(body.content)
 
     new_count = duplicate_count = conflict_count = invalid_count = updated_count = 0
     overwrite = str(getattr(body, "conflict_strategy", "keep") or "keep") == "overwrite"

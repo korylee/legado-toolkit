@@ -25,7 +25,8 @@ SYSTEM_TYPE_TAGS = {"📖小说", "🎧听书", "🎨漫画", "📥下载"}
 #: 是写出去的那一侧，两张表必须同集合——`tests/test_tags.py` 有一致性用例钉着。
 SYSTEM_STATUS_TAG_ORDER: Tuple[str, ...] = ("可用", "待验证", "已失效", "需登录",
                                             "需翻墙")
-SYSTEM_QUALITY_TAG_ORDER: Tuple[str, ...] = ("规则完整",)
+RULE_INCOMPLETE_TAG = "规则不完整"
+SYSTEM_QUALITY_TAG_ORDER: Tuple[str, ...] = (RULE_INCOMPLETE_TAG,)
 SYSTEM_STATUS_TAGS = set(SYSTEM_STATUS_TAG_ORDER)
 SYSTEM_QUALITY_TAGS = set(SYSTEM_QUALITY_TAG_ORDER)
 SYSTEM_TAGS = SYSTEM_TYPE_TAGS | SYSTEM_STATUS_TAGS | SYSTEM_QUALITY_TAGS
