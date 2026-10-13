@@ -203,13 +203,20 @@ JVM 常驻后台（也可 `python scripts/jvm_debug_direct.py --daemon-stop` 停
 | POST /api/sources/purge | 清空回收站（**唯一**的硬删除路径），先落快照再删 |
 | POST /api/import | `conflict_strategy`：`keep`（默认，冲突进待审）/ `overwrite`（覆盖） |
 | POST /api/import/url | 拉取公网 HTTPS JSON 数组用于预览；限时、限 8 MB，不自动写入 |
-| POST /api/import/preview | 只读解析导入内容，并统计规则不完整源 |
+| POST /api/import/preview | 只读解析导入内容，并统一统计新增/重复/冲突/无效/规则不完整 |
+| GET /api/import/repositories | 获取静态配置声明的仓库和前端展示能力 |
+| POST /api/import/repositories/{id}/browse | 空关键词读取列表，有关键词时按配置搜索；统一分页返回 |
+| GET /api/import/repositories/{id}/collections | 获取该仓库的书源集列表 |
+| POST /api/import/repositories/{id}/collection-details | 获取选中合集的完整书源数组，进入现有导入预览 |
+| POST /api/import/repositories/{id}/details | 按选择的仓库条目取回书源 JSON，不保留仓库关联 |
 | POST /api/rules/jvm-debug | **本机引擎调试**（JVM 里跑 App 真源码，含 JS 规则）：提交即返回任务号，结果看任务明细 |
 | POST /api/rules/app-push | 推送会**改 App 数据**，所以必须显式触发（由预检三态决定要不要先推） |
 | POST /api/jvm/run | 批量校验建一条任务（`kind=jvm_run`，关页面不丢）；范围 `urls` / `filter`，本次参数走 `params`；规则不完整的源会跳过并报告数量 |
 | POST /api/jvm/refresh | 后台刷新本机 runtime snapshot，结果通过任务流查看 |
 | POST /api/rules/suggest-rule | AI 只提议：每条都过验证，验不了的单独标「只能连 App 试」 |
 | GET /api/settings | 全局设置，同时下发 `defaults` 与 `limits`（前端不硬编码上下界） |
+
+仓库协议映射位于 `data/config/import_repositories.json`；`views` 声明 `browse` / `collections` 页面，`browse.search.query_param` 配置存在时启用搜索，否则 browse 仅展示列表。`browse` 下的 list/search 共用 pagination 与 response 映射；search.path 可省略以复用 list endpoint。合集详情可用 `collection_details.path_template` 按合集 ID 读取完整书源数组，也可配置 `url_field` 从目录项读取 HTTPS JSON 链接；两种方式都会进入同一导入预览。编辑后重启后端生效。
 
 任务进度走 `GET /api/jobs/{id}/stream`（SSE；断流回落 `…/timeline`）。导出与订阅按 `/docs` 用。
 
@@ -221,7 +228,7 @@ JVM 常驻后台（也可 `python scripts/jvm_debug_direct.py --daemon-stop` 停
 cache/imports/out/config/app_probe 等）——**新增子目录要自己补一条**，
 别以为整个 data/ 都被忽略了。
 
-**事实来源是 `data/sources.sqlite3`（管理库）：给 Legado 的 JSON 是交付格式，不是事实来源**；
+**事实来源是 `data/sources.sqlite3`（管理库）：给 Legado 的 JSON 是交付格式**；
 管理库请定期备份（`Store.backup()` 现成）；`data/config/`（全局设置 + LLM 配置）含 API Key，**勿提交**。
 
 | 路径 | 用途 |
@@ -233,8 +240,7 @@ cache/imports/out/config/app_probe 等）——**新增子目录要自己补一�
 | `data/archive/` | 历史产物归档（可回溯，不删） |
 | `data/app_probe/` | App / JVM 实测产物：调试 NDJSON 与侧车、批量校验导出、常驻日志 |
 
-**操作纪律**：新增源走 Web「新增」，外部源走 Web「导入」；规则冲突要人工判断，
-确实更好再用导入对话框的 `overwrite`（覆盖后特征变化会强制复查）。
+**操作纪律**：新增源走 Web「新增」，外部源走 Web「导入」；规则冲突要人工判断，确实更好再用导入对话框的 `overwrite`（覆盖后特征变化会强制复查）。
 
 ---
 

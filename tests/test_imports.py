@@ -81,10 +81,55 @@ class ImportApiTests(_ImportCase):
         }
         complete["ruleToc"] = {"chapterList": ".chapter"}
         complete["ruleContent"] = {"content": ".content"}
-        result = preview_import(ImportBody(content=json.dumps([incomplete, complete])))
+        result = preview_import(ImportBody(content=json.dumps([incomplete, complete])),
+                                st=self.store)
 
-        self.assertEqual(result, {"total": 2, "rules_incomplete": 1})
+        self.assertEqual(result["total"], 2)
+        self.assertEqual(result["counts"]["new"], 2)
+        self.assertEqual(result["counts"]["rules_incomplete"], 1)
+        self.assertEqual([item["status"] for item in result["items"]], ["new", "new"])
+        self.assertEqual([item["rules_incomplete"] for item in result["items"]], [True, False])
         self.assertIsNone(self.store.get_source("https://incomplete.example"))
+
+    def test_preview_reuses_import_fingerprint_conflict_policy(self) -> None:
+        from backend.api.imports import preview_import
+        from backend.schemas import ImportBody
+
+        current = make_source("https://existing.example")
+        self._import([current])
+        changed = make_source("https://existing.example",
+                              "https://example.com/changed?q={{key}}")
+
+        keep = preview_import(ImportBody(content=json.dumps([changed])), st=self.store)
+        overwrite = preview_import(
+            ImportBody(content=json.dumps([changed]), conflict_strategy="overwrite"),
+            st=self.store,
+        )
+
+        self.assertEqual(keep["items"][0]["status"], "conflict")
+        self.assertEqual(overwrite["items"][0]["status"], "update")
+        self.assertEqual(self.store.get_source("https://existing.example")["searchUrl"],
+                         current["searchUrl"])
+
+    def test_preview_reuses_import_conflict_and_override_policy(self) -> None:
+        from backend.api.imports import preview_import
+        from backend.schemas import ImportBody
+
+        current = make_source("https://existing.example")
+        self._import([current])
+        changed = make_source("https://existing.example",
+                              "https://example.com/changed?q={{key}}")
+
+        keep = preview_import(ImportBody(content=json.dumps([changed])), st=self.store)
+        overwrite = preview_import(
+            ImportBody(content=json.dumps([changed]), conflict_strategy="overwrite"),
+            st=self.store,
+        )
+
+        self.assertEqual(keep["items"][0]["status"], "conflict")
+        self.assertEqual(overwrite["items"][0]["status"], "update")
+        self.assertEqual(self.store.get_source("https://existing.example")["searchUrl"],
+                         current["searchUrl"])
 
     def test_import_keeps_defaults_and_drops_unknown_tags(self) -> None:
         # 空库第一次导入也要过滤：默认标签 R18 / 正版 保留，陌生标签直接清。
@@ -181,6 +226,274 @@ class ImportValidationTests(_ImportCase):
         self.assertEqual(res["invalid_count"], 2)
         self.assertEqual(res["new_count"], 1)
         self.assertIsNotNone(self.store.get_source("https://ok.example"))
+
+
+class RepositoryApiTests(unittest.TestCase):
+    @staticmethod
+    def _browse_repository():
+        return {
+            "id": "browse-library", "name": "浏览库",
+            "base_url": "https://repository.example",
+            "views": [{"id": "browse", "label": "书源", "type": "browse"}],
+            "display": {"title": "name", "updated_at": "updated_at", "domain": "url"},
+            "browse": {
+                "list": {"path": "/catalog"},
+                "search": {"path": "/search", "query_param": "q",
+                           "fixed_params": {"kind": "sources"}},
+                "pagination": {
+                    "page_param": "page", "page_size_param": "size", "page_size": 20,
+                    "response_page": "current", "response_page_size": "page_size",
+                    "response_total": "count",
+                },
+                "response": {
+                    "response_items": "results",
+                    "fields": {"id": "id", "name": "name", "url": "url",
+                               "updated_at": "created"},
+                },
+            },
+            "details": {"path_template": "/source/{id}", "response_items": ""},
+        }
+
+    def test_repository_catalog_exposes_configured_views_and_field_map(self) -> None:
+        from backend.api.imports import list_import_repositories
+        from backend.import_repositories import _REPOSITORIES
+
+        config = self._browse_repository()
+        with mock.patch.dict(_REPOSITORIES, {config["id"]: config}, clear=True):
+            result = list_import_repositories()
+        self.assertEqual([item["id"] for item in result["items"]], [config["id"]])
+        repository = result["items"][0]
+        self.assertEqual([view["type"] for view in repository["views"]], ["browse"])
+        self.assertEqual(repository["capabilities"], {"list": True, "search": True})
+        self.assertEqual(repository["display"]["updated_at"], "updated_at")
+        self.assertNotIn("base_url", repository)
+
+    def test_browse_empty_query_uses_list_operation(self) -> None:
+        from backend.api import imports
+        from backend.import_repositories import _REPOSITORIES
+        from backend.schemas import RepositoryBrowseRequest
+
+        config = self._browse_repository()
+        seen = {}
+
+        async def fake_fetch(repository, url):
+            seen.update(repository=repository["id"], url=url)
+            return {"results": [
+                        {"id": "source-1", "name": "源",
+                         "url": "https://book.example",
+                         "created": 1791816547.5},
+                        {"id": "source-2", "name": "新源",
+                         "url": "https://new-book.example",
+                         "created": 1791816548},
+                    ],
+                    "count": 31, "current": 1, "page_size": 20}
+
+        class Store:
+            def live_fingerprints(self):
+                return {"https://book.example": "fingerprint"}
+
+        with (
+            mock.patch.dict(_REPOSITORIES, {config["id"]: config}, clear=True),
+            mock.patch.object(imports, "_fetch_repository_payload", side_effect=fake_fetch),
+        ):
+            result = asyncio.run(imports.browse_import_repository(
+                config["id"], RepositoryBrowseRequest(query="", page=1), Store()))
+
+        self.assertEqual(seen["repository"], config["id"])
+        self.assertEqual(seen["url"], "https://repository.example/catalog?page=1&size=20")
+        self.assertEqual(result["items"][0]["updated_at"], 1791816547.5)
+        self.assertTrue(result["items"][0]["in_library"])
+        self.assertFalse(result["items"][1]["in_library"])
+        self.assertEqual(result["pagination"], {"page": 1, "pageSize": 20, "total": 31})
+
+    def test_collection_only_repository_is_config_driven(self) -> None:
+        from backend.api import imports
+        from backend.import_repositories import _REPOSITORIES
+        from backend.schemas import RepositoryCollectionRequest
+
+        config = {
+            "id": "set-library", "name": "集合库", "base_url": "https://sets.example",
+            "views": [{"id": "collections", "label": "书源集", "type": "collections"}],
+            "display": {"title": "name", "domain": "url"},
+            "collection_list": {
+                "path_template": "/sets", "response_items": "data",
+                "fields": {"id": "id", "name": "title"},
+            },
+            "collection_details": {
+                "path_template": "/sets/{collection_id}/sources",
+                "response_items": "",
+            },
+            "details": {"path_template": "/source/{id}", "response_items": ""},
+        }
+        payloads = [
+            {"data": [{"id": "set-1", "title": "精选"}]},
+            [{"bookSourceName": "书源", "bookSourceUrl": "https://book.example"}],
+        ]
+        urls = []
+
+        async def fake_fetch(repository, url):
+            urls.append(url)
+            return payloads.pop(0)
+
+        with mock.patch.dict(_REPOSITORIES, {"set-library": config}, clear=True), \
+             mock.patch.object(imports, "_fetch_repository_payload", side_effect=fake_fetch):
+            catalog = imports.list_import_repositories()
+            collections = asyncio.run(imports.list_repository_collections("set-library"))
+            sources = asyncio.run(imports.get_import_repository_collection(
+                "set-library", RepositoryCollectionRequest(
+                    collection_id="set-1")))
+
+        descriptor = next(item for item in catalog["items"] if item["id"] == "set-library")
+        self.assertEqual(descriptor["views"], [
+            {"id": "collections", "label": "书源集", "type": "collections"},
+        ])
+        self.assertEqual(collections["items"][0]["name"], "精选")
+        self.assertEqual(sources["sources"][0]["bookSourceName"], "书源")
+        self.assertEqual(urls[1], "https://sets.example/sets/set-1/sources")
+
+    def test_collection_details_can_fetch_configured_external_json_link(self) -> None:
+        from backend.api import imports
+        from backend.import_repositories import _REPOSITORIES
+        from backend.schemas import RepositoryCollectionRequest
+
+        config = {
+            "id": "external-sets", "name": "外链合集", "base_url": "https://index.example",
+            "views": [{"id": "collections", "label": "合集", "type": "collections"}],
+            "display": {},
+            "collection_list": {"path_template": "/sets", "response_items": "",
+                                "fields": {"id": "id", "name": "name"}},
+            "collection_details": {"url_field": "link", "response_items": ""},
+        }
+
+        async def fake_fetch(url, *, follow_public_redirects=False):
+            self.assertEqual(url, "https://cdn.example/sources.json")
+            self.assertTrue(follow_public_redirects)
+            return [{"bookSourceName": "源", "bookSourceUrl": "https://book.example"}]
+
+        with (
+            mock.patch.dict(_REPOSITORIES, {config["id"]: config}, clear=True),
+            mock.patch.object(imports, "_fetch_remote_payload", side_effect=fake_fetch),
+        ):
+            result = asyncio.run(imports.get_import_repository_collection(
+                config["id"], RepositoryCollectionRequest(
+                    collection_id="1", collection_url="https://cdn.example/sources.json")))
+
+        self.assertEqual(result["sources"][0]["bookSourceName"], "源")
+
+    def test_repository_transport_rejects_hosts_outside_adapter_config(self) -> None:
+        from backend.api import imports
+        from fastapi import HTTPException
+
+        with self.assertRaises(HTTPException) as caught:
+            imports._validate_repository_url(
+                self._browse_repository(), "https://attacker.example/collect")
+        self.assertEqual(caught.exception.status_code, 500)
+
+    def test_browse_keyword_uses_search_operation(self) -> None:
+        from backend.api import imports
+        from backend.import_repositories import _REPOSITORIES
+        from backend.schemas import RepositoryBrowseRequest
+
+        config = self._browse_repository()
+        seen = {}
+
+        async def fake_fetch(repository, url):
+            seen.update(repository=repository["id"], url=url)
+            return {"results": [{"id": "item-1", "name": "漫画",
+                                 "url": "https://m.example",
+                                 "created": 1790925308.821104}],
+                    "count": 1, "current": 1, "page_size": 20}
+
+        class Store:
+            def live_fingerprints(self):
+                return {}
+
+        with (
+            mock.patch.dict(_REPOSITORIES, {config["id"]: config}, clear=True),
+            mock.patch.object(imports, "_fetch_repository_payload", side_effect=fake_fetch),
+        ):
+            result = asyncio.run(imports.browse_import_repository(
+                config["id"], RepositoryBrowseRequest(query="漫画", page=1), Store()))
+
+        self.assertEqual(seen["repository"], config["id"])
+        self.assertIn("/search?", seen["url"])
+        self.assertIn("kind=sources", seen["url"])
+        self.assertIn("q=%E6%BC%AB%E7%94%BB", seen["url"])
+        self.assertEqual(result["items"][0]["updated_at"], 1790925308.821104)
+        self.assertEqual(result["pagination"], {"page": 1, "pageSize": 20, "total": 1})
+
+    def test_search_overlay_without_path_reuses_list_endpoint(self) -> None:
+        from backend.import_repositories import browse_url
+
+        config = self._browse_repository()
+        config["browse"]["search"].pop("path")
+        self.assertEqual(
+            browse_url(config, "关键词", 2),
+            "https://repository.example/catalog?kind=sources&q=%E5%85%B3%E9%94%AE%E8%AF%8D&page=2&size=20",
+        )
+
+    def test_details_are_normalized_to_source_arrays(self) -> None:
+        from backend.api import imports
+        from backend.import_repositories import _REPOSITORIES
+        from backend.schemas import RepositoryDetailsRequest
+
+        config = self._browse_repository()
+        seen = []
+
+        async def fake_fetch(repository, url):
+            seen.append(url)
+            return [{"bookSourceName": "源", "bookSourceUrl": "https://m.example"}]
+
+        with (
+            mock.patch.dict(_REPOSITORIES, {config["id"]: config}, clear=True),
+            mock.patch.object(imports, "_fetch_repository_payload", side_effect=fake_fetch),
+        ):
+            result = asyncio.run(imports.get_import_repository_details(
+                config["id"], RepositoryDetailsRequest(
+                    ids=["89e6bde2-ab94-4fec-a710-c269afcf6e84"])))
+
+        self.assertEqual(result["items"][0]["sources"][0]["bookSourceName"], "源")
+        self.assertTrue(seen[0].endswith(
+            "/source/89e6bde2-ab94-4fec-a710-c269afcf6e84"))
+
+    def test_details_reject_non_source_entries_instead_of_dropping(self) -> None:
+        from backend.api import imports
+        from backend.import_repositories import _REPOSITORIES
+        from backend.schemas import RepositoryDetailsRequest
+        from fastapi import HTTPException
+
+        config = self._browse_repository()
+
+        async def fake_fetch(_repository, _url):
+            return [{"bookSourceName": "源", "bookSourceUrl": "https://m.example"}, "bad"]
+
+        with (
+            mock.patch.dict(_REPOSITORIES, {config["id"]: config}, clear=True),
+            mock.patch.object(imports, "_fetch_repository_payload", side_effect=fake_fetch),
+        ):
+            with self.assertRaises(HTTPException) as caught:
+                asyncio.run(imports.get_import_repository_details(
+                    config["id"], RepositoryDetailsRequest(ids=["source-1"])))
+        self.assertEqual(caught.exception.status_code, 502)
+
+    def test_invalid_repository_item_id_is_rejected_before_transport(self) -> None:
+        from backend.api import imports
+        from backend.import_repositories import _REPOSITORIES
+        from backend.schemas import RepositoryDetailsRequest
+        from fastapi import HTTPException
+
+        config = self._browse_repository()
+
+        with (
+            mock.patch.dict(_REPOSITORIES, {config["id"]: config}, clear=True),
+            mock.patch.object(imports, "_fetch_repository_payload") as fetch,
+        ):
+            with self.assertRaises(HTTPException) as caught:
+                asyncio.run(imports.get_import_repository_details(
+                    config["id"], RepositoryDetailsRequest(ids=["../private"])))
+
+        self.assertEqual(caught.exception.status_code, 400)
+        fetch.assert_not_called()
 
 
 class ImportUrlTests(unittest.TestCase):

@@ -100,6 +100,20 @@ class ImportUrlRequest(BaseModel):
     url: str
 
 
+class RepositoryBrowseRequest(BaseModel):
+    query: str = Field(default="", max_length=120)
+    page: int = Field(default=1, ge=1, le=10000)
+
+
+class RepositoryDetailsRequest(BaseModel):
+    ids: List[str] = Field(min_length=1, max_length=20)
+
+
+class RepositoryCollectionRequest(BaseModel):
+    collection_id: str = Field(min_length=1, max_length=128)
+    collection_url: Optional[str] = Field(default=None, max_length=2048)
+
+
 class ImportBody(BaseModel):
     content: str = ""
     source: str = ""

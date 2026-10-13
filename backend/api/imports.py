@@ -12,14 +12,16 @@ import json
 import os
 import socket
 import time
+from copy import deepcopy
 from typing import Any, Dict, List
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 import aiohttp
 from fastapi import APIRouter, Depends, HTTPException
 
 from backend.deps import get_store
-from backend.schemas import ImportBody, ImportUrlRequest
+from backend.schemas import (ImportBody, ImportUrlRequest, RepositoryCollectionRequest,
+                             RepositoryDetailsRequest, RepositoryBrowseRequest)
 from core.checker import static_rule_complete
 from core.loader import _normalize_url, fingerprint
 from core.models import BOOK_SOURCE_TYPE_NAMES
@@ -85,9 +87,11 @@ async def _public_https_target(value: str):
     return parsed, host, addresses
 
 
-async def _fetch_remote_json(url: str) -> str:
-    parsed, host, addresses = await _public_https_target(url)
+async def _fetch_remote_payload(url: str, *, follow_public_redirects: bool = False,
+                                _redirects: int = 0) -> Any:
+    parsed, _host, addresses = await _public_https_target(url)
     connector = aiohttp.TCPConnector(resolver=_PinnedResolver(addresses), use_dns_cache=False)
+    redirect_target = None
     try:
         async with aiohttp.ClientSession(
                 connector=connector, timeout=_REMOTE_JSON_TIMEOUT,
@@ -96,31 +100,167 @@ async def _fetch_remote_json(url: str) -> str:
                     parsed.geturl(), allow_redirects=False,
                     headers={"Accept": "application/json"}) as response:
                 if 300 <= response.status < 400:
-                    raise HTTPException(400, "JSON 链接发生跳转，请改用最终 HTTPS 链接")
-                if response.status != 200:
+                    location = response.headers.get("Location", "")
+                    if not follow_public_redirects:
+                        raise HTTPException(400, "JSON 链接发生跳转，请改用最终 HTTPS 链接")
+                    if not location or _redirects >= 3:
+                        raise HTTPException(400, "JSON 链接跳转次数过多或目标无效")
+                    redirect_target = urljoin(parsed.geturl(), location)
+                elif response.status != 200:
                     raise HTTPException(502, "获取 JSON 失败（HTTP %d）" % response.status)
-                if (response.content_length is not None
-                        and response.content_length > _REMOTE_JSON_MAX_BYTES):
-                    raise HTTPException(413, "JSON 文件超过 8 MB 上限")
-                chunks = []
-                size = 0
-                async for chunk in response.content.iter_chunked(65536):
-                    size += len(chunk)
-                    if size > _REMOTE_JSON_MAX_BYTES:
+                else:
+                    if (response.content_length is not None
+                            and response.content_length > _REMOTE_JSON_MAX_BYTES):
                         raise HTTPException(413, "JSON 文件超过 8 MB 上限")
-                    chunks.append(chunk)
+                    chunks = []
+                    size = 0
+                    async for chunk in response.content.iter_chunked(65536):
+                        size += len(chunk)
+                        if size > _REMOTE_JSON_MAX_BYTES:
+                            raise HTTPException(413, "JSON 文件超过 8 MB 上限")
+                        chunks.append(chunk)
     except HTTPException:
         raise
     except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
         raise HTTPException(502, "获取 JSON 失败：%s" % exc) from exc
+    if redirect_target:
+        return await _fetch_remote_payload(
+            redirect_target, follow_public_redirects=True, _redirects=_redirects + 1)
     try:
-        content = b"".join(chunks).decode("utf-8-sig")
-        data = json.loads(content)
+        return json.loads(b"".join(chunks).decode("utf-8-sig"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise HTTPException(400, "链接内容不是有效的 UTF-8 JSON") from exc
+
+
+async def _fetch_remote_json(url: str) -> str:
+    data = await _fetch_remote_payload(url)
     if not isinstance(data, list):
         raise HTTPException(400, "链接内容不是书源 JSON 数组")
-    return content
+    return json.dumps(data, ensure_ascii=False)
+
+
+def _repository_or_404(repository_id: str) -> Dict[str, Any]:
+    from backend.import_repositories import get_repository
+
+    repository = get_repository(repository_id)
+    if repository is None:
+        raise HTTPException(404, "书源仓库不存在")
+    return repository
+
+
+def _validate_repository_url(repository: Dict[str, Any], url: str) -> None:
+    base = urlsplit(repository["base_url"])
+    target = urlsplit(url)
+    if (base.scheme != "https" or not base.hostname or base.port not in (None, 443)
+            or target.scheme != "https" or target.hostname != base.hostname
+            or target.port not in (None, 443) or target.username or target.password):
+        raise HTTPException(500, "书源仓库请求超出配置主机")
+
+
+async def _fetch_repository_payload(repository: Dict[str, Any], url: str) -> Any:
+    _validate_repository_url(repository, url)
+    return await _fetch_remote_payload(url)
+
+
+@router.get("/repositories")
+def list_import_repositories():
+    from backend.import_repositories import list_repositories
+
+    return {"items": list_repositories()}
+@router.post("/repositories/{repository_id}/browse")
+async def browse_import_repository(
+        repository_id: str, body: RepositoryBrowseRequest,
+        st=Depends(get_store)):
+    from backend.import_repositories import browse_url, normalize_browse_result, supports_view
+
+    repository = _repository_or_404(repository_id)
+    if not supports_view(repository, "browse"):
+        raise HTTPException(400, "该书源仓库不支持浏览")
+    query = body.query.strip()
+    try:
+        url = browse_url(repository, query, body.page)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    payload = await _fetch_repository_payload(repository, url)
+    try:
+        result = normalize_browse_result(repository, payload, query)
+    except ValueError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    live_urls = st.live_fingerprints()
+    for item in result["items"]:
+        url = _normalize_url(str(item.get("url") or ""))
+        item["in_library"] = url in live_urls if url else None
+    return result
+
+
+
+
+
+
+@router.get("/repositories/{repository_id}/collections")
+async def list_repository_collections(repository_id: str):
+    from backend.import_repositories import collection_list_url, normalize_collections, supports_view
+
+    repository = _repository_or_404(repository_id)
+    if not supports_view(repository, "collections") or "collection_list" not in repository:
+        raise HTTPException(400, "该书源仓库不支持书源集浏览")
+    payload = await _fetch_repository_payload(
+        repository, collection_list_url(repository))
+    try:
+        return {"items": normalize_collections(repository, payload)}
+    except ValueError as exc:
+        raise HTTPException(502, str(exc)) from exc
+
+
+@router.post("/repositories/{repository_id}/collection-details")
+async def get_import_repository_collection(repository_id: str,
+                                          body: RepositoryCollectionRequest):
+    from backend.import_repositories import (collection_details_url,
+                                             normalize_collection_details, supports_view)
+
+    repository = _repository_or_404(repository_id)
+    if not supports_view(repository, "collections") or "collection_details" not in repository:
+        raise HTTPException(400, "该书源仓库不支持书源合集导入")
+    try:
+        url = collection_details_url(
+            repository, body.collection_id, body.collection_url or "")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if repository["collection_details"].get("url_field"):
+        payload = await _fetch_remote_payload(url, follow_public_redirects=True)
+    else:
+        payload = await _fetch_repository_payload(repository, url)
+    try:
+        return {"sources": normalize_collection_details(repository, payload)}
+    except ValueError as exc:
+        raise HTTPException(502, str(exc)) from exc
+
+
+@router.post("/repositories/{repository_id}/details")
+async def get_import_repository_details(
+        repository_id: str, body: RepositoryDetailsRequest):
+    from backend.import_repositories import detail_url, normalize_details
+
+    repository = _repository_or_404(repository_id)
+    semaphore = asyncio.Semaphore(5)
+
+    async def fetch_one(item_id: str):
+        try:
+            url = detail_url(repository, item_id)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        async with semaphore:
+            payload = await _fetch_repository_payload(repository, url)
+        try:
+            sources = normalize_details(repository, payload)
+        except ValueError as exc:
+            raise HTTPException(502, "仓库详情格式无效（%s）" % item_id) from exc
+        if not sources:
+            raise HTTPException(502, "仓库详情没有书源（%s）" % item_id)
+        return {"id": item_id, "sources": sources}
+
+    return {"items": await asyncio.gather(
+        *(fetch_one(item_id) for item_id in dict.fromkeys(body.ids)))}
 
 
 @router.post("/url")
@@ -130,14 +270,54 @@ async def fetch_import_url(body: ImportUrlRequest):
 
 
 @router.post("/preview")
-def preview_import(body: ImportBody):
+def preview_import(body: ImportBody, st=Depends(get_store)):
     data = _parse_import_content(body.content)
-    return {
-        "total": len(data),
-        "rules_incomplete": sum(
-            1 for source in data if isinstance(source, dict)
-            and static_rule_complete(source) is False),
-    }
+    overwrite = body.conflict_strategy == "overwrite"
+    known_user_tags = st.known_user_tags()
+    live_fingerprints = st.live_fingerprints()
+    items = []
+    counts = {"new": 0, "duplicate": 0, "conflict": 0,
+              "update": 0, "invalid": 0, "rules_incomplete": 0}
+
+    for index, original in enumerate(data):
+        if not isinstance(original, dict):
+            counts["invalid"] += 1
+            items.append({"index": index, "name": "", "url": "", "status": "invalid"})
+            continue
+        source = deepcopy(original)
+        clean_source(source)
+        url = _normalize_url(str(source.get("bookSourceUrl", "") or ""))
+        name = str(source.get("bookSourceName", "") or "")
+        if not url:
+            counts["invalid"] += 1
+            items.append({"index": index, "name": name, "url": "", "status": "invalid"})
+            continue
+
+        existing = live_fingerprints.get(url) or None
+        current_fingerprint = fingerprint(source)
+        if existing is None:
+            status = "new"
+            _normalize_group(source, known_user_tags)
+            live_fingerprints[url] = fingerprint(source)
+            counts["new"] += 1
+        elif current_fingerprint == existing:
+            status = "duplicate"
+            counts["duplicate"] += 1
+        elif overwrite:
+            status = "update"
+            counts["update"] += 1
+            _normalize_group(source, known_user_tags)
+            live_fingerprints[url] = fingerprint(source)
+        else:
+            status = "conflict"
+            counts["conflict"] += 1
+
+        incomplete = static_rule_complete(source) is False
+        if incomplete:
+            counts["rules_incomplete"] += 1
+        items.append({"index": index, "name": name, "url": url,
+                      "status": status, "rules_incomplete": incomplete})
+    return {"total": len(data), "counts": counts, "items": items}
 
 
 def _parse_import_content(raw_content: str):
