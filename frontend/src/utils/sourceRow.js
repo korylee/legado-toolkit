@@ -91,6 +91,9 @@ export function tagCellsOf(row) {
 //: 「状态是我锁的」，不代表这条源有标签。
 export const hasAnyTag = (row) => !!(qualityTagsOf(row).length || userTagsOf(row).length);
 
+//: 源自身的启用开关（列表出参 0/1，源对象 bool）。停用行置灰、名称后带小字。
+export const isDisabled = (row) => row?.enabled === 0 || row?.enabled === false;
+
 //: 深度列上的**结果**标记。深度只说「验到哪」，而 4★/5★ 依赖的是 toc/content 的
 //: 实测结果——depth≥3 里约一半是「验了但没过」（实测：depth 3 有 118 条目录不完整，
 //: depth 4 有 8 条正文不可用）。取**最深的那个有结论的**：正文优先、其次目录；

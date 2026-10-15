@@ -51,6 +51,7 @@ import {
   depthText,
   hasAnyTag,
   healthCell,
+  isDisabled,
   jvmStateLabel,
   jvmSteps,
   lockedStatus,
@@ -396,15 +397,13 @@ const { runningCount: jobRunning, activeJobs, upsertJob, watchJob } = useJobs();
 
 /** 结果条 / 在跑条上的「查看」：直接打开那一条的明细弹窗（在跑时就是进度条）。 */
 function openJobDetail(jobId = "") {
-  // 跑到一半时还没有摘要（checkResult 要终态才写），这时要看的是**在跑的那条**；
-  // 跑完再看的是刚写进摘要的那条
-  taskDetailJobId.value = String(
+  const id = String(
     jobId ||
     (checkResult.value && checkResult.value.jobId) ||
     checkJobId.value ||
     jvmJobId.value ||
     "");
-  taskDetailOpen.value = true;
+  taskDetailRef.value?.open(id);
 }
 
 const query = reactive({
@@ -593,6 +592,8 @@ function clearSelection() {
 function isSelected(row) {
   return selectedUrls.value.has(row.source_url);
 }
+//: 停用行置灰（移动卡片在 SourceCard 里用同一判定）
+const rowClassName = ({ row }) => (isDisabled(row) ? "row-disabled" : "");
 function toggleCard(row) {
   selected.value = toggleSelected(selected.value, row.source_url, !isSelected(row));
 }
@@ -1332,6 +1333,7 @@ onUnmounted(() => {
         stripe
         size="small"
         height="100%"
+        :row-class-name="rowClassName"
         @select="onRowSelect"
         @select-all="onSelectAll"
       >
@@ -1346,6 +1348,7 @@ onUnmounted(() => {
             <a href="#" @click.prevent="openEdit(row)">{{
               row.name || "（无名）"
             }}</a>
+            <span v-if="isDisabled(row)" class="muted disabled-note">已停用</span>
           </template>
         </el-table-column>
         <el-table-column label="类型" width="88" align="center">
@@ -1839,6 +1842,14 @@ onUnmounted(() => {
     overflow-x: auto;
     -webkit-overflow-scrolling: touch;
   }
+}
+/* 停用的源：整行压暗 + 名称后跟一行小字说明原因（行类名见 rowClassName） */
+:deep(.row-disabled) {
+  opacity: 0.55;
+}
+.disabled-note {
+  margin-left: 6px;
+  font-size: 12px;
 }
 </style>
 <!-- 全量校验弹框：只允许 body 内部滚动，弹窗自己不滚。弹窗内部是 teleport 到 body 的，

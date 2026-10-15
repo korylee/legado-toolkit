@@ -9,7 +9,7 @@
 // 所以它拿不到"这一行是不是选中"以外的任何信息。
 import { Refresh, EditPen, Delete, VideoPlay } from "@element-plus/icons-vue";
 import { engineLabel } from "../utils/health";
-import { depthClass, depthText, hasAnyTag, healthCell, tagCellsOf,
+import { depthClass, depthText, hasAnyTag, healthCell, isDisabled, tagCellsOf,
          typeLabel } from "../utils/sourceRow";
 
 const props = defineProps({
@@ -26,13 +26,14 @@ const toggle = () => emit("toggle", props.row);
 </script>
 
 <template>
-  <div class="src-card" :class="{ sel: selected }" @click="toggle">
+  <div class="src-card" :class="{ sel: selected, off: isDisabled(row) }" @click="toggle">
     <div class="chk" @click.stop>
       <el-checkbox :model-value="selected" @change="toggle" />
     </div>
     <div class="main">
       <div class="row1">
         <span class="nm">{{ row.name || "（无名）" }}</span>
+        <span v-if="isDisabled(row)" class="muted nowrap">已停用</span>
         <!-- 深度结论留在这里、**带红绿着色**（与桌面「验证」列同口径）：卡片上
              扫一眼找坏源全靠这个颜色，删掉它等于把这项能力收走。
              所以另一份要去掉——原来 meta 行还并排写着「目录✓ 正文✗」，同一件事
@@ -91,6 +92,8 @@ const toggle = () => emit("toggle", props.row);
   display: flex; gap: 10px; align-items: flex-start;
 }
 .src-card.sel { border-color: #409eff; background: #ecf5ff; }
+/* 停用的源不参与校验，也不该被 App 用——整卡压暗，名称后另有「已停用」小字说明原因 */
+.src-card.off { opacity: 0.55; }
 .src-card .chk { flex: 0 0 auto; padding-top: 1px; }
 .src-card .main { flex: 1 1 auto; min-width: 0; }
 .src-card .row1 { display: flex; align-items: baseline; gap: 8px; }
