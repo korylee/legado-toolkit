@@ -42,6 +42,29 @@
 验收：设备不在场时，撞边界的源仍能拿到渲染后的运行时 DOM 材料，界面明确标这是取证而不是结论；撞边界且 App 通道不可用时，界面给的是能执行的动作或明确原因；`matched` 阶段缺口不出现在五格主动作位。
 指针：appservice/test/io/legado/app/service/BrowserBridge.kt，appservice/test/io/legado/app/service/DebugService.kt，core/agent_plan.py，frontend/src/utils/webviewCapability.js
 
+### 条目：jvm-range-disabled-source · 校验时把「已停用」与「不存在」分开说
+状态：todo
+依赖：无
+优先级：P2
+背景：勾到停用源时只报「一条都没匹配上（可能已删除，或 URL 改过）」，分不出是停用还是不
+  存在。表格已经能显示「已停用」（`tagCellsOf` 从 `enabled` 派生），缺的是提交时的具体提示。
+约束：确切的停用 URL 要单独查一次——导出结果里它与「不存在」长得一样；不要为了提示把停用
+  写进 `group_name`。停用源是否纳入显式勾选的范围要先定，筛选 / 全量仍跳过。
+验收：勾一条停用源时，界面说的是哪几条已停用、不会被校验。
+指针：backend/api/jvm.py，backend/jobs/jvm_exec.py
+
+### 条目：import-preview-conflict-count · 预览里的冲突数不该随策略变
+状态：todo
+依赖：无
+优先级：P2
+背景：`POST /api/import/preview` 的 conflict 与 update 是 `elif` 互斥分支：选「保留现有的」
+  时同一批显示「规则冲突 N」，切到「用导入的覆盖」就变成「将覆盖 N」、「规则冲突」显示 0
+  ——同一个文件在两种策略下冲突数不同，覆盖时看不出有几条是冲突、会被覆盖。
+约束：冲突计数与策略解耦（冲突永远计，覆盖时另加 update），覆盖的正当性正是建立在「预览
+  已把冲突摊开」之上；口径只改这一处，不动 `POST /api/import` 的判定。
+验收：同一次预览在两种策略下「规则冲突」数一致；覆盖策略下两个数字同时可见，各有断言。
+指针：backend/api/imports.py，frontend/src/components/ImportDialog.vue
+
 ## 2 · 按需
 
 ### 条目：s5a-a32 · S5-A3-2 表单登录入口

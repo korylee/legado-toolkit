@@ -22,11 +22,21 @@ import { api } from "./client";
 // 取值就是后端 core.fetch 的那三个常量（后端按同一份枚举校验，对不上给 400）。
 // 下面两个调试入口一律**对象传参**：形参七八个，位置传参在 JS 下不设防——
 // 801a0ec 曾整体右移一位（signal 位吃到 "auto"，fetch 当场抛 TypeError）。
-export const appDebug = ({ source, target, query, host, port, push = false,
-                           cache = "auto", signal = null }) =>
-  api.post("/rules/app-debug",
-           { source, target, query, host, port, push, cache },
-           signal ? { signal } : {});
+export const appDebug = ({
+  source,
+  target,
+  query,
+  host,
+  port,
+  push = false,
+  cache = "auto",
+  signal = null,
+}) =>
+  api.post(
+    "/rules/app-debug",
+    { source, target, query, host, port, push, cache },
+    signal ? { signal } : {},
+  );
 
 // 本机引擎调试（S5-A4）：**App 的真引擎跑在本机**（Robolectric 里跑 App 源码），
 // 不填 IP、不推送、不用预检——本机什么都有。
@@ -45,13 +55,22 @@ export const appDebug = ({ source, target, query, host, port, push = false,
 //
 // timeout **不传**（null）就吃设置里的 debug.timeout——默认值只有后端一份
 // （AGENTS #8）；前端曾经写死 60，与桥的渲染上限同值、互相掐死。
-export const jvmDebug = ({ source, target, query, timeout = null, cookie = "",
-                           cache = "auto", signal = null }) =>
-  api.post("/rules/jvm-debug",
-           timeout == null
-             ? { source, target, query, cookie, cache }
-             : { source, target, query, timeout, cookie, cache },
-           signal ? { signal } : {});
+export const jvmDebug = ({
+  source,
+  target,
+  query,
+  timeout = null,
+  cookie = "",
+  cache = "auto",
+  signal = null,
+}) =>
+  api.post(
+    "/rules/jvm-debug",
+    timeout == null
+      ? { source, target, query, cookie, cache }
+      : { source, target, query, timeout, cookie, cache },
+    signal ? { signal } : {},
+  );
 
 // 调试前预检：把「静默无响应」拆成 unreachable / missing / ready 三种状态。
 export const appPreflight = (source, host, port) =>
@@ -70,10 +89,20 @@ export const appPush = (source, host, port) =>
 // 自己报的样本挑一遍（外加登录墙判断），一个模型请求都不发，所以换步骤时可以自动跑。
 export const suggestRule = (body) => api.post("/rules/suggest-rule", body);
 
-export const verifyCandidate = (source, field, rule, target, query, timeout = null) =>
-  api.post("/rules/verify-candidate", timeout == null
-    ? { source, field, rule, target, query }
-    : { source, field, rule, target, query, timeout });
+export const verifyCandidate = (
+  source,
+  field,
+  rule,
+  target,
+  query,
+  timeout = null,
+) =>
+  api.post(
+    "/rules/verify-candidate",
+    timeout == null
+      ? { source, field, rule, target, query }
+      : { source, field, rule, target, query, timeout },
+  );
 
 // 规则域的结构事实（规则组 → 求值步骤）。判据的唯一一份在 core/verify.py，
 // 前端抄一份的话后端改了求值位置就静默判错新鲜度。
