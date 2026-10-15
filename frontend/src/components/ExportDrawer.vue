@@ -39,20 +39,36 @@ const hasFilter = computed(() => {
   return !!(f.q || f.health || f.group || f.tag || (f.urls && f.urls.length)
     || (f.type !== null && f.type !== undefined && f.type !== ""));
 });
-const link = computed(() => {
+const fileUrl = computed(() => {
   if (!generated.value) return "";
-  return "yuedu://booksource/importonline?src=" +
-    encodeURIComponent("http://" + host.value + ":" + port.value + generated.value.url);
+  return "http://" + host.value + ":" + port.value + generated.value.url;
 });
+const link = computed(() =>
+  fileUrl.value
+    ? "yuedu://booksource/importonline?src=" + encodeURIComponent(fileUrl.value)
+    : "",
+);
 const hostBad = computed(() =>
   !host.value || ["localhost", "127.0.0.1", "::1"].includes(host.value));
 
 async function makeQr() {
-  qrDataUrl.value = link.value
-    ? await QRCode.toDataURL(link.value, { width: 240, margin: 1 })
-    : "";
+  const payload = fileUrl.value;
+  if (!payload) {
+    qrDataUrl.value = "";
+    return;
+  }
+  try {
+    qrDataUrl.value = await QRCode.toDataURL(payload, {
+      width: 360,
+      margin: 4,
+      errorCorrectionLevel: "L",
+    });
+  } catch (error) {
+    qrDataUrl.value = "";
+    console.warn("二维码生成失败", error);
+  }
 }
-watch(link, makeQr);
+watch([fileUrl, link], makeQr);
 watch(() => props.modelValue, async (v) => {
   if (!v) return;
   generated.value = null;
@@ -114,9 +130,9 @@ async function refreshHits() {
   } catch (e) { /* 忽略 */ }
 }
 
-async function copyLink() {
+async function copyFileUrl() {
   try {
-    await navigator.clipboard.writeText(link.value);
+    await navigator.clipboard.writeText(fileUrl.value);
     ElMessage.success("链接已复制");
   } catch (e) {
     ElMessage.warning("复制失败，请手动选中文本");
@@ -177,12 +193,18 @@ async function delHistory(uid) {
 
       <div class="qr-box">
         <img v-if="qrDataUrl" :src="qrDataUrl" alt="二维码" />
+        <p v-if="fileUrl.length > 1800" class="qr-warning">
+          链接较长，二维码扫描兼容性可能有限；请点“在手机上打开”。
+        </p>
       </div>
 
       <el-button type="success" size="large" style="width: 100%; margin-top: 12px"
                  tag="a" :href="link">
         在手机上打开
       </el-button>
+      <p class="file-link" style="margin: 12px 0 0">
+        <a :href="fileUrl" target="_blank" rel="noopener">{{ fileUrl }}</a>
+      </p>
 
       <p v-if="generated.kind === 'export'"
          class="muted" style="margin: 12px 0 0; text-align: center">
@@ -202,11 +224,11 @@ async function delHistory(uid) {
     <el-divider style="margin: 16px 0" />
 
     <!-- 次要功能全部折叠，默认只占一行 -->
-    <el-collapse v-model="tabs">
-      <el-collapse-item name="link" title="手动复制链接">
-        <el-input v-model="link" type="textarea" :rows="3" readonly />
-        <el-button :icon="CopyDocument" style="width: 100%; margin-top: 8px" @click="copyLink">
-          复制
+    <el-collapse v-model="tabs" v-if="generated">
+      <el-collapse-item name="link" title="复制文件链接">
+        <el-input :model-value="fileUrl" type="textarea" :rows="3" readonly />
+        <el-button :icon="CopyDocument" style="width: 100%; margin-top: 8px" @click="copyFileUrl">
+          复制文件链接
         </el-button>
       </el-collapse-item>
 
@@ -254,6 +276,7 @@ async function delHistory(uid) {
   border-radius: 8px;
 }
 .qr-box img { width: 240px; height: 240px; }
+.qr-warning { max-width: 320px; color: #e6a23c; text-align: center; }
 
 .hist-row {
   display: flex; align-items: center; gap: 10px;
@@ -261,9 +284,10 @@ async function delHistory(uid) {
   border-bottom: 1px solid #f0f2f5;
 }
 .hist-row .mono { flex: 1 1 auto; }
+.file-link { overflow-wrap: anywhere; text-align: center; }
 
 /* 手机上抽屉占满宽 */
 @media (max-width: 900px) {
-  .qr-box img { width: 200px; height: 200px; }
+  .qr-box img { width: 300px; height: 300px; }
 }
 </style>
