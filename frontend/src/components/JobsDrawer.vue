@@ -44,9 +44,8 @@ const loading = ref(false);
 const jobs = ref([]);
 //: 后端下发的列表条数上限；到顶时界面要说明还有更早的没显示
 const listLimit = ref(0);
-const detailOpen = ref(false);
-const detailJobId = ref("");
 const isMobile = useMobile();
+const detailRef = ref(null);
 
 const STATUS_TYPES = ["running", "cancel_requested", "pending"];
 
@@ -123,18 +122,23 @@ async function deleteJobRow(row) {
 }
 
 function openDetail(row) {
-  detailJobId.value = row.id;
-  detailOpen.value = true;
+  detailRef.value?.open(row.id);
 }
 
 // 有在跑任务时把列表刷一遍：进度靠共享状态是活的，但**新出现的任务**（别处提交的）
-// 只有重拉才知道。没有在跑任务就完全不动
+// 只有重拉才知道。没有在跑任务就完全不动。
+// 计时器**按需启停**：抽屉常驻主布局，onMounted 永久起计时器的话，整个会话
+// 都在每 5 秒空醒一次（回调里再判 visible/active 挡住请求，计时器本身还在跑）。
 let timer = null;
-function ensureTicker() {
-  if (timer) return;
-  timer = window.setInterval(() => {
-    if (visible.value && active.value.size) load();
-  }, 5000);
+function syncTicker() {
+  const needed = visible.value && active.value.size > 0;
+  if (needed && !timer) {
+    timer = window.setInterval(() => {
+      if (visible.value && active.value.size) load();
+    }, 5000);
+  } else if (!needed && timer) {
+    stopTicker();
+  }
 }
 function stopTicker() {
   if (timer) window.clearInterval(timer);
@@ -144,15 +148,17 @@ function stopTicker() {
 // 打开抽屉时拉一次最新列表
 watch(() => props.modelValue, async (open) => {
   if (open) await load();
+  syncTicker();
 }, { immediate: true });
 
 // 提交任务的页面会 upsert 进共享状态，但列表快照要重拉。
 // **抽屉关着就不用拉**：那时没有读者，等在打开时那一次 load 里补（它本来就拉最新）
 watch(() => active.value.size, (n, prev) => {
+  syncTicker();
   if (visible.value && n !== prev) load();
 });
 
-onMounted(() => { load(); ensureTicker(); });
+onMounted(() => { load(); syncTicker(); });
 onUnmounted(stopTicker);
 
 // 父组件提交完任务后调一下，让列表快照刷新
@@ -251,7 +257,7 @@ defineExpose({ refresh: load });
       只显示最近 {{ listLimit }} 条，更早的任务不在列表里。
     </p>
 
-    <TaskDetailDialog v-model="detailOpen" :job-id="detailJobId" @changed="load" />
+    <TaskDetailDialog ref="detailRef" @changed="load" />
   </el-drawer>
 </template>
 

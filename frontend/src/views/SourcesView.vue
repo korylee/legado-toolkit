@@ -114,8 +114,7 @@ let stopCheck = null;
 const checkingUrls = ref(new Set());
 const checkJobId = ref("");
 //: 明细弹窗（在跑时是进度条、结束后是结果）——它替代了原先那个只报进度的临时弹窗
-const taskDetailOpen = ref(false);
-const taskDetailJobId = ref("");
+const taskDetailRef = ref(null);
 
 //: 在跑条的一句话：一条就说清它在跑什么、跑到哪；多条只说条数（明细在弹窗里）
 const runningJobsText = computed(() => {
@@ -308,8 +307,7 @@ async function runJvmBatch() {
   try {
     const r = await jvmRun(payload);
     if (!r.started) {
-      // 没起来的几种原因要分开说：另一个本机引擎任务在跑（reason）、环境就绪检查没过（readiness）、
-      // 选中的源一条都没匹配上 / 筛选没命中（reason）——都说成「自检未通过」会把原因指反
+      // 没起来的原因在接口 reason——它已经带上了没匹配上的具体 URL，这里不要再拼一遍
       const reason = r.reason || "环境就绪检查未通过，不能校验";
       const skipped = r.skipped_rule_incomplete && !r.reason
         ? "；已跳过 " + r.skipped_rule_incomplete + " 条规则不完整的源"
@@ -318,11 +316,22 @@ async function runJvmBatch() {
       jvmRunning.value = false;
       return;
     }
+    // 部分匹配：任务照跑，但「已选 N 条」与实跑条数不一致必须说出来，否则用户以为全跑了
+    // （与「选中全部 N 条」那条静默截断同一类）
+    if (Array.isArray(r.missing_urls) && r.missing_urls.length) {
+      ElMessage.warning(
+        "已选 " +
+          (r.requested_urls || []).length +
+          " 条，实际校验 " +
+          (r.matched_urls || []).length +
+          " 条；未进入范围：" +
+          r.missing_urls.join("、"),
+      );
+    }
     // 任务的**条数**用预检算好的那个：界面上说"全量"而实际只跑了一部分，
     // 是设置页时代最难发现的一处截断
     jvmJobId.value = r.job_id || "";
-    taskDetailJobId.value = r.job_id || "";
-    taskDetailOpen.value = true;
+    taskDetailRef.value?.open(r.job_id);
     upsertJob({
       id: r.job_id,
       status: "pending",
@@ -1403,6 +1412,11 @@ onUnmounted(() => {
                         : "未校验"
                   }}
                 </div>
+                <!-- 失败原因（checks.error）：状态名说「什么档」，这句说「为什么」。
+                     只在失败/待验证时显示——通过的源没有 error，写了也是空行 -->
+                <div v-if="row.check_error" class="muted">
+                  原因：{{ row.check_error }}
+                </div>
                 <div>
                   搜索：{{
                     row.search_hit ? "命中《" + row.search_hit + "》" : "未命中"
@@ -1599,8 +1613,7 @@ onUnmounted(() => {
     <ImportDialog v-model="importVisible" @imported="load" />
     <!-- 任务明细弹窗：在跑时是进度条，结束后是结果。列表页的在跑条、结果条、
          批量校验提交后都走这一个，不再各弹一个只报进度的框 -->
-    <TaskDetailDialog v-model="taskDetailOpen" :job-id="taskDetailJobId"
-                      @changed="jobsRef?.refresh()" />
+    <TaskDetailDialog ref="taskDetailRef" @changed="jobsRef?.refresh()" />
     <JobsDrawer ref="jobsRef" v-model="jobsVisible" />
 
     <!-- 批量校验的确认弹框：**一台引擎**（在 JVM 里跑「阅读」App 的真源码）。

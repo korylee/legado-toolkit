@@ -31,18 +31,25 @@ import { useJobs } from "../composables/useJobs";
 import { healthNeedsAction } from "../utils/tags";
 import JobTimeline from "./JobTimeline.vue";
 
-const props = defineProps({
-  modelValue: { type: Boolean, default: false },
-  jobId: { type: String, default: "" },
-});
-const emit = defineEmits(["update:modelValue", "changed"]);
+const emit = defineEmits(["changed"]);
 
-const visible = computed({
-  get: () => props.modelValue,
-  set: (v) => emit("update:modelValue", v),
-});
+const visible = ref(false);
+const jobId = ref("");
 
-const { watchJob, frameOf } = useJobs();
+function open(id) {
+  if (!id) return;
+  jobId.value = String(id);
+  visible.value = true;
+}
+
+function close() {
+  visible.value = false;
+  jobId.value = "";
+}
+
+defineExpose({ open, close });
+
+const { watchJob, frameOf, jobById } = useJobs();
 
 const detail = ref(null);
 const detailLoading = ref(false);
@@ -57,7 +64,7 @@ let stopWatch = null;
 //: 盖成轻量版（比如 summary 丢掉 changed_items）——那是两个投影，不能直接叠。
 const job = computed(() => {
   const d = detail.value || {};
-  const l = (frameOf(props.jobId) || {}).job || {};
+  const l = (frameOf(jobId.value) || {}).job || jobById(jobId.value) || {};
   return {
     ...d,
     status: l.status || d.status,
@@ -72,7 +79,7 @@ const summary = computed(() => (detail.value || {}).summary || null);
 const inFlight = computed(() => jobIsInFlight(job.value.status));
 const snapshotRefreshedJobId = ref("");
 const canRefreshSnapshot = computed(() =>
-  snapshotRefreshedJobId.value !== props.jobId && jobCanRefreshRuntimeSnapshot(job.value));
+  snapshotRefreshedJobId.value !== jobId.value && jobCanRefreshRuntimeSnapshot(job.value));
 const refreshingSnapshot = ref(false);
 let stopRefreshWatch = null;
 //: 变坏的那几条排在最前：结果态真正的入口是「哪些源坏了」，不是「有几条变化」——
@@ -111,13 +118,13 @@ function stopClock() {
 }
 
 async function loadDetail() {
-  const id = props.jobId;
+  const id = jobId.value;
   if (!id) return;
   nowMs.value = Date.now();
   detailLoading.value = true;
   try {
     const data = await getJobDetail(id);
-    if (id === props.jobId) detail.value = data;
+    if (id === jobId.value) detail.value = data;
   } catch (e) {
     ElMessage.error("加载任务结果失败：" + e.message);
   } finally {
@@ -125,12 +132,12 @@ async function loadDetail() {
   }
 }
 
-watch(() => [props.modelValue, props.jobId], ([open, id]) => {
+watch(() => [visible.value, jobId.value], ([isOpen, id]) => {
   stopClock();
   if (stopWatch) { stopWatch(); stopWatch = null; }
   detail.value = null;
   rawOpen.value = false;
-  if (!open || !id) return;
+  if (!isOpen || !id) return;
   nowMs.value = Date.now();
   // 状态走那一条流（每个任务一条，与时间线共用）；本地时钟只负责让「已跑多久 /
   // 多久没更新」这两个数自己涨——时间在走，即使状态没变。
@@ -158,7 +165,7 @@ async function cancelJob() {
     await ElMessageBox.confirm(jobCancelHint(job.value.kind), "取消任务", {
       type: "warning", confirmButtonText: "取消任务", cancelButtonText: "返回",
     });
-    await cancelJobApi(props.jobId);
+    await cancelJobApi(jobId.value);
     ElMessage.success("已请求取消任务");
     emit("changed");
   } catch (e) {
@@ -168,7 +175,7 @@ async function cancelJob() {
 
 async function refreshRuntimeSnapshot() {
   if (refreshingSnapshot.value) return;
-  const originalJobId = props.jobId;
+  const originalJobId = jobId.value;
   refreshingSnapshot.value = true;
   try {
     const submitted = await jvmRefresh();
@@ -210,9 +217,9 @@ async function retryJob() {
       again ? "再次运行" : "重试任务",
       { type: "warning", confirmButtonText: again ? "再次运行" : "重试", cancelButtonText: "返回" },
     );
-    const created = await retryJobApi(props.jobId);
+    const created = await retryJobApi(jobId.value);
     ElMessage.success("已创建新任务");
-    visible.value = false;
+    close();
     emit("changed", created.job_id || "");
   } catch (e) {
     if (e !== "cancel" && e !== "close") ElMessage.error("提交重试失败：" + e.message);
@@ -224,9 +231,9 @@ async function deleteJob() {
     await ElMessageBox.confirm("删除后将移除任务记录和结果，不能恢复。", "删除任务", {
       type: "warning", confirmButtonText: "删除", cancelButtonText: "返回",
     });
-    await deleteJobApi(props.jobId);
+    await deleteJobApi(jobId.value);
     ElMessage.success("任务已删除");
-    visible.value = false;
+    close();
     emit("changed", "");
   } catch (e) {
     if (e !== "cancel" && e !== "close") ElMessage.error("删除任务失败：" + e.message);
@@ -335,7 +342,7 @@ async function deleteJob() {
       <el-button v-if="jobIsTerminal(job.status)" @click="retryJob">
         {{ job.status === "done" ? "再次运行" : "重试" }}
       </el-button>
-      <el-button type="primary" @click="visible = false">关闭</el-button>
+      <el-button type="primary" @click="close">关闭</el-button>
     </template>
   </el-dialog>
 </template>
