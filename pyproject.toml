@@ -19,6 +19,7 @@ dependencies = [
     # 列在正式依赖而不是 optional extra：漏装时 uvicorn 会**静默**退回轮询，
     # 而 uv sync 默认不装 extra —— 那种静默降级正是本项目一直在消灭的东西
     "watchfiles>=0.21",
+    "regex>=2026.9.29",
 ]
 
 [tool.setuptools]

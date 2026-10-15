@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class SourceOut(BaseModel):
@@ -366,6 +366,29 @@ class JobOut(BaseModel):
     created_at: str = ""
     updated_at: str = ""
     result_json: str = ""
+
+
+class NameRule(BaseModel):
+    id: str = Field(default="", max_length=80)
+    name: str = Field(min_length=1, max_length=120)
+    description: str = Field(default="", max_length=300)
+    pattern: str = Field(min_length=1, max_length=500)
+    replacement: str = Field(default="", max_length=200)
+    flags: str = ""
+    enabled: bool = True
+    confidence: float = Field(default=0.85, ge=0, le=1)
+
+    @field_validator("name")
+    @classmethod
+    def nonblank(cls, value):
+        if not value.strip():
+            raise ValueError("规则名称不能为空")
+        return value.strip()
+
+
+class NameRulesPreviewIn(BaseModel):
+    rules: List[NameRule] = Field(default_factory=list, max_length=50)
+    sample: str = Field(default="", max_length=500)
 
 
 class NamePreviewIn(BaseModel):

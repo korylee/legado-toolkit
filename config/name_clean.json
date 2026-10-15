@@ -1,0 +1,65 @@
+{
+  "default_confidence": 0.95,
+  "rules": [
+    {
+      "id": "remove_tech_marker",
+      "name": "技术标记",
+      "description": "清理括号内标记及名称末尾的 API、VIP 兼容版、独立版字样。",
+      "pattern": "[（(\\[【][^）)\\]】]{0,80}?(?:api|自写|导入|兼容版|独立版|精校|转载|转)[^）)\\]】]{0,80}?[）)\\]】]|(?<![A-Za-z])api(?![A-Za-z])|vip兼容版",
+      "replacement": " ",
+      "flags": "i",
+      "enabled": true,
+      "confidence": 0.95
+    },
+    {
+      "id": "remove_address",
+      "name": "网址或域名",
+      "description": "清理名称中附带的完整网址、域名和独立的裸域名后缀。",
+      "pattern": "https?://[A-Za-z0-9\\-._~:/?#\\[\\]@!$&'*+,;=%]+|(?<![\\w.-])(?:[a-z0-9-]+\\.)+(?:com\\.cn|net\\.cn|org\\.cn|com|cn|net|org|info|cc|tv|me|io|xyz|top|vip|la|us|uk|co|site|club|online|app|pro|link|art|fun|store|shop|wang|xin|ren|mobi|asia|biz|name|tw|hk|jp|kr|de|fr|ru|in|eu|ws|fm|im|li|gd|gg|to|at|be|ch|it|nl|se|no|dk|fi|pl|cz|es|pt|gr)(?::\\d+)?(?:/[^\\s，,、;；|（）()\\[\\]【】<>《》]*)?",
+      "replacement": " ",
+      "flags": "i",
+      "enabled": true,
+      "confidence": 0.98
+    },
+    {
+      "id": "remove_timestamp",
+      "name": "时间戳",
+      "description": "清理括号内或由短横线、下划线分隔的日期；普通数字后缀保留。",
+      "pattern": "[（(\\[【]\\s*20\\d{2}[-/.年]\\d{1,2}[-/.月]\\d{1,2}日?\\s*[）)\\]】]|[（(\\[【]\\s*20\\d{6}\\s*[）)\\]】]|[-_]\\s*20\\d{2}[-/.年]\\d{1,2}[-/.月]\\d{1,2}日?$|[-_]\\s*20\\d{6}$",
+      "replacement": "",
+      "flags": "",
+      "enabled": true,
+      "confidence": 0.85
+    },
+    {
+      "id": "remove_copy_marker",
+      "name": "分享署名",
+      "description": "清理 #署名形式的尾标，纯数字角标不会匹配。",
+      "pattern": "(?<![A-Za-z])[#＃]{1,2}(?!\\d+$)[^\\s#]{1,24}$",
+      "replacement": "",
+      "flags": "",
+      "enabled": true,
+      "confidence": 0.95
+    },
+    {
+      "id": "remove_empty_bracket",
+      "name": "空括号",
+      "description": "清理空括号及被前序规则清空内容的括号。",
+      "pattern": "[（(\\[【]\\s*[）)\\]】]|(?:\\(\\)|（ ）|\\[\\]|【】)",
+      "replacement": "",
+      "flags": "",
+      "enabled": true,
+      "confidence": 0.95
+    },
+    {
+      "id": "strip_decor",
+      "name": "首尾装饰符号",
+      "description": "清理首尾 Emoji、装饰标点和空白；保留括号内评级、井号及数字角标。",
+      "pattern": "^(?:\\p{Extended_Pictographic}(?:\\uFE0F|\\p{M})*)+\\s*|^(?:\\uFE0F|\\p{M})+\\s*|^[\\p{P}\\p{S}--[+()（）\\[\\]【】#＃]]+\\s*|^\\s+|(?:[\\p{P}\\p{S}--[+()（）\\[\\]【】#＃]]|\\s)+$",
+      "replacement": "",
+      "flags": "",
+      "enabled": true,
+      "confidence": 0.85
+    }
+  ]
+}

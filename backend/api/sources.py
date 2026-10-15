@@ -2,14 +2,15 @@
 import collections
 from typing import Any, Optional
 
+import regex as re
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from core.loader import _normalize_url
 from core.quality import SHORT_CONTENT_CHARS, short_content_note
 from backend.deps import get_store
-from backend.schemas import (MergeIn, MergeUndoIn, NameApplyIn, NamePreviewIn, NameUndoIn,
-                             SourceDeleteIn, SourcePage, SourceSave, TagDelete, TagMerge,
-                             TagPatch, TagRename)
+from backend.schemas import (MergeIn, MergeUndoIn, NameApplyIn, NamePreviewIn, NameRulesPreviewIn,
+                             NameUndoIn, SourceDeleteIn, SourcePage, SourceSave, TagDelete,
+                             TagMerge, TagPatch, TagRename)
 
 router = APIRouter()
 
@@ -323,29 +324,55 @@ def list_deleted(limit: int = Query(200, ge=1, le=1000),
 # 三步走：preview（只读建议）→ apply（改名，返回旧名）→ undo（回写旧名）。
 # 写路径**不共用 `save_source`**：那条会 `set_user_tags` 整组覆盖，漏传就把标签
 # 清空（lessons §三十五 记过）。改名会同时更新 raw_json 与 fingerprint 列，
-# 见 `Store.set_source_name`。
+# 见 `Store.set_source_name`。清洗判据在 config/name_clean.json（core/name_clean 加载）。
+
+
+@router.get("/names/rules")
+def get_name_rules():
+    from core.name_clean import load_config
+    config = load_config()
+    return {"config": config}
+
+
+@router.post("/names/rules/preview")
+def preview_name_rules(body: NameRulesPreviewIn, st=Depends(get_store)):
+    from core.name_clean import clean_source_name, clean_sources, load_config
+
+    try:
+        rules = [rule.model_dump() for rule in body.rules]
+        builtin = [rule for rule in load_config()["rules"] if rule.get("enabled", True)]
+        sample = clean_source_name(body.sample, builtin + rules)
+        pairs = st.name_pairs()
+        matches = clean_sources(
+            [{"bookSourceUrl": row["url"], "bookSourceName": row["name"]}
+             for row in pairs], rules=rules)
+        matched = [row for row in matches if row["changed"]]
+        labels = {rule["id"]: rule["name"] for rule in rules}
+        labels["no_safe_fallback"] = "清理结果为空，已保留原名称"
+        return {"sample": sample, "matches": matched[:100],
+                "match_count": len(matched), "reason_labels": labels}
+    except (ValueError, re.error) as exc:
+        raise HTTPException(400, str(exc))
 
 
 @router.post("/names/preview")
 def preview_names(body: NamePreviewIn, st=Depends(get_store)):
-    """名称清洗预演：**只读**，返回「会变成什么」的清单。
-
-    一次算全库而不是逐条问后端：`clean_source_name` 要拿「库里已有哪些名字」判
-    「去掉后缀后会不会与已有名字撞车」，逐条问的话每条的判据都不一样。
-    """
-    from core.name_clean import REASON_LABELS, clean_sources
+    """名称清洗预演：按项目配置中的正则规则只读生成建议。"""
+    from core.name_clean import clean_sources, load_config
 
     rows = st.name_pairs(body.urls)
-    items = clean_sources([{"bookSourceUrl": r["url"], "bookSourceName": r["name"]}
-                           for r in rows])
+    config = load_config()
+    items = clean_sources(
+        [{"bookSourceUrl": r["url"], "bookSourceName": r["name"]} for r in rows],
+        rules=config["rules"])
     changed = [i for i in items if i["changed"]]
-    # 「撞车」提示：改完之后这个新名字是否与**别的源**重名（用清洗后的名字算）。
-    # 那正是下一步「同名档」要摊开的东西，提前标出来，免得到时候一片同名还看不出因果。
+    labels = {rule["id"]: rule["name"] for rule in config["rules"]}
+    labels["no_safe_fallback"] = "清理结果为空，已保留原名称"
     final = collections.Counter(str(i["new_name"]).strip() for i in items)
-    for i in changed:
-        i["collides"] = final[str(i["new_name"]).strip()] > 1
+    for item in changed:
+        item["collides"] = final[str(item["new_name"]).strip()] > 1
     return {"items": changed, "total": len(rows), "changed": len(changed),
-            "reason_labels": REASON_LABELS}
+            "reason_labels": labels}
 
 
 @router.post("/names/apply")

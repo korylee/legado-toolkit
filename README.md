@@ -165,6 +165,10 @@ JVM 常驻后台（也可 `python scripts/jvm_debug_direct.py --daemon-stop` 停
 - 开发（`pnpm dev`）：http://127.0.0.1:5173 ，带热更新
 - 构建过前端（`pnpm build`）：只起后端即可，http://127.0.0.1:8787/
 
+### 名称清洗规则
+
+名称清洗规则从项目配置文件 `config/name_clean.json` 读取，界面只展示规则并预演，不写回配置。`rules` 数组逐条注册规则元数据与正则表达式；`default_confidence` 控制名称清洗筛选器的默认规则范围。调整配置后重新预演即可生效。版本号与数字角标默认保留。
+
 ### 系统标签说明
 
 系统标签由程序维护，枚举只有一份：健康度显示名在 `core/models.py` 的 `HEALTH_NAMES`，

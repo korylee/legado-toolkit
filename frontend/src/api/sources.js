@@ -57,6 +57,8 @@ export const undoMerge = (body) => api.post("/sources/merge/undo", body);
 // 名称清洗三步：preview 只读出建议 → apply 改名并**返回旧名** → undo 拿旧名回写。
 // 撤销不需要另存快照：apply 的返回体本身就是回滚信息（一次会话内有效，刷新即失效）。
 export const previewNames = (urls = []) => api.post("/sources/names/preview", { urls });
+export const getNameRules = () => api.get("/sources/names/rules");
+export const previewNameRules = (body) => api.post("/sources/names/rules/preview", body);
 export const applyNames = (changes) => api.post("/sources/names/apply", { changes });
 export const undoNames = (prev) => api.post("/sources/names/undo", { prev });
 
