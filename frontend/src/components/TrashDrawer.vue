@@ -5,7 +5,7 @@
 // 留在这儿），按 URL 恢复会含糊。已经有在用版本的 URL 会被拒绝并单独报出来。
 //
 // 清空是**唯一**的硬删除路径，后端先落快照再删。
-import { ref, computed, watch } from "vue";
+import { ref, computed, watch, nextTick } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { listDeleted, purgeTrash, restoreSources } from "../api/sources";
 import { useMobile } from "../composables/useMobile";
@@ -13,23 +13,53 @@ import { useMobile } from "../composables/useMobile";
 const props = defineProps({ modelValue: { type: Boolean, default: false } });
 const emit = defineEmits(["update:modelValue", "changed"]);
 
+const rows = ref([]);
+const total = ref(0);
+const loading = ref(false);
+
 const isMobile = useMobile();
 const visible = computed({
   get: () => props.modelValue,
   set: (v) => emit("update:modelValue", v),
 });
-const rows = ref([]);
-const total = ref(0);
-const loading = ref(false);
-const selected = ref([]);
+const selectedIds = ref(new Set());
+const tableRef = ref(null);
+const syncingSelection = ref(false);
 const showHeight = computed(() => (isMobile.value ? "58vh" : "calc(100vh - 260px)"));
+
+async function clearSelection() {
+  selectedIds.value = new Set();
+  syncingSelection.value = true;
+  tableRef.value?.clearSelection();
+  await nextTick();
+  syncingSelection.value = false;
+}
+
+async function syncSelection(rows) {
+  const available = new Set((rows || []).map((row) => row.id));
+  selectedIds.value = new Set([...selectedIds.value].filter((id) => available.has(id)));
+  syncingSelection.value = true;
+  tableRef.value?.clearSelection();
+  for (const row of rows || []) {
+    if (selectedIds.value.has(row.id)) tableRef.value?.toggleRowSelection(row, true);
+  }
+  await nextTick();
+  syncingSelection.value = false;
+}
+
+function onSelectionChange(rows) {
+  if (syncingSelection.value) return;
+  selectedIds.value = new Set((rows || []).map((row) => row.id));
+}
 
 async function load() {
   loading.value = true;
   try {
     const res = await listDeleted(500, 0);
-    rows.value = res.items;
-    total.value = res.total;
+    rows.value = res.items || [];
+    total.value = res.total || 0;
+    await nextTick();
+    syncSelection(rows.value);
   } catch (e) {
     ElMessage.error("加载回收站失败: " + e.message);
   } finally {
@@ -54,6 +84,7 @@ function reportRestore(res) {
 
 async function restoreOne(row) {
   try {
+    await clearSelection();
     reportRestore(await restoreSources([row.id]));
     await load();
     emit("changed");
@@ -63,10 +94,11 @@ async function restoreOne(row) {
 }
 
 async function restoreSelected() {
-  if (!selected.value.length) return ElMessage.warning("先勾选要恢复的源");
+  const ids = [...selectedIds.value];
+  if (!ids.length) return ElMessage.warning("先勾选要恢复的源");
   try {
-    reportRestore(await restoreSources(selected.value.map((r) => r.id)));
-    selected.value = [];
+    await clearSelection();
+    reportRestore(await restoreSources(ids));
     await load();
     emit("changed");
   } catch (e) {
@@ -90,7 +122,7 @@ async function purgeAll() {
   try {
     const res = await purgeTrash();
     ElMessage.success("已清空 " + res.purged + " 条；快照 " + res.snapshot);
-    selected.value = [];
+    await clearSelection();
     await load();
     emit("changed");
   } catch (e) {
@@ -111,17 +143,17 @@ async function purgeAll() {
 
     <div class="toolbar" style="margin-bottom: 10px">
       <el-button @click="load">刷新</el-button>
-      <el-button type="success" :disabled="!selected.length" @click="restoreSelected">
-        恢复选中 ({{ selected.length }})
+      <el-button type="success" :disabled="!selectedIds.size" @click="restoreSelected">
+        恢复选中 ({{ selectedIds.size }})
       </el-button>
       <span class="grow" />
       <span class="muted">共 {{ total }} 条</span>
       <el-button type="danger" plain :disabled="!total" @click="purgeAll">清空回收站</el-button>
     </div>
 
-    <el-table :data="rows" v-loading="loading" border size="small"
-              :height="showHeight"
-              @selection-change="(v) => (selected = v)">
+    <el-table ref="tableRef" :data="rows" v-loading="loading" border size="small"
+              :height="showHeight" row-key="id" reserve-selection
+              @selection-change="onSelectionChange">
       <el-table-column type="selection" width="42" />
       <el-table-column prop="name" label="名称" min-width="150" show-overflow-tooltip>
         <template #default="{ row }">{{ row.name || "（无名）" }}</template>
