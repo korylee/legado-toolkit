@@ -93,7 +93,7 @@ const lastRunAt = ref(null);
 const lastRunMs = ref(0);
 const lastRunInput = ref(null);
 
-const { watchJob } = useJobs();
+const { watchJob, frameOf } = useJobs();
 
 function errorMessage(e) {
   if (e && e.message) return String(e.message);
