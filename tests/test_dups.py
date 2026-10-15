@@ -2,11 +2,13 @@
 """找重复源（只读清单）的离线用例。
 
 要守的是**判据本身**：这份清单是用来指导删源的，判宽了会让人删掉还能用的源，
-判窄了这份清单就没用（库里的重复一条都找不出来）。三种输入各要一组：
+判窄了这份清单就没用（库里的重复一条都找不出来）。判据是**四个核心字段**
+（searchUrl / ruleSearch.bookList / ruleToc.chapterList / ruleContent.content），
+三种输入各要一组：
 
-  - 只是署名/排序/备注不同（真重复，地址不同）→ 必须成组
-  - 规则本身不同（比如 searchUrl 换了）→ 必须**不**成组
-  - 域名不同、规则相同（镜像站）→ 成组，但标成"跨域名"，不当作可自动处理的那类
+  - 只是署名/元数据/转发噪音不同（真重复，地址不同）→ 必须成组
+  - 核心字段不同（换版式：searchUrl 换路径、列表/目录/正文选择器换）→ 必须**不**成组
+  - 域名不同、核心字段相同（镜像站）→ 成组，但标成"跨域名"，不当作可自动处理的那类
 
 外加「建议保留哪条」的优先级：**能用 > 地址干净 > 导入早**。
 """
@@ -31,28 +33,91 @@ def src(url: str, name: str = "站", **extra) -> dict:
 
 
 class SignatureTests(unittest.TestCase):
-    """哪些字段参与比较——这是整套判据的地基。"""
+    """哪些字段参与比较——这是整套判据的地基（四个核心字段）。"""
 
-    def test_only_non_behavioral_fields_are_excluded(self) -> None:
+    def test_metadata_and_forwarding_noise_do_not_count(self) -> None:
+        """地址署名/名称/排序/时间/分组/备注/checkKeyWord 都不是行为。"""
         a = src("https://a.com#x", bookSourceName="名字一", customOrder=1,
-                lastUpdateTime=1, respondTime=9,
+                weight=0, lastUpdateTime=1, respondTime=9, concurrentRate=None,
+                enabledExplore=False, header=None, loginUrl="",
                 bookSourceGroup="📖小说", bookSourceComment="来自某某分享")
         b = src("https://a.com#y", bookSourceName="名字二", customOrder=2,
-                lastUpdateTime=2, respondTime=8,
+                weight=-5, lastUpdateTime=2, respondTime=8, concurrentRate=0,
+                enabledExplore=True, header={}, loginUrl=None,
                 bookSourceGroup="别的组", bookSourceComment="")
         self.assertEqual(rule_signature(a), rule_signature(b),
-                         "地址/名称/排序/时间/耗时/分组/备注都不该参与比较")
+                         "元数据与转发噪音不该把同一条源拆散")
 
-    def test_rule_change_makes_it_a_different_source(self) -> None:
-        a = src("https://a.com")
-        b = src("https://a.com")
-        b["searchUrl"] = "/search?q={{key}}"
-        self.assertNotEqual(rule_signature(a), rule_signature(b))
+    def test_core_rule_change_makes_it_a_different_source(self) -> None:
+        """四个核心字段任何一个变了都是换源——po5 #77 那类改版要拦住。"""
+        cases = [
+            {"searchUrl": "/other?q={{key}}"},
+            {"ruleSearch": {"bookList": "class.other"}},
+            {"ruleToc": {"chapterList": "class.other"}},
+            {"ruleContent": {"content": "id.other"}},
+        ]
+        for extra in cases:
+            self.assertNotEqual(
+                rule_signature(src("https://a.com")),
+                rule_signature(src("https://a.com", **extra)),
+                "核心字段 %s 变了必须分家" % list(extra)[0])
 
-    def test_type_and_switches_count(self) -> None:
+    def test_search_url_relative_forms_are_one_request(self) -> None:
+        """App 拿 bookSourceUrl 当 baseUrl 补全 searchUrl（WebBook.searchBookAwait
+        → AnalyzeUrl → NetworkUtils.getAbsoluteURL）：三种写法发出同一个请求。"""
+        a = src("https://a.com", searchUrl="https://a.com/so.php?q={{key}}")
+        b = src("https://a.com#", searchUrl="so.php?q={{key}}")
+        c = src("https://a.com/", searchUrl="/so.php?q={{key}}")
+        self.assertEqual(rule_signature(a), rule_signature(b))
+        self.assertEqual(rule_signature(a), rule_signature(c))
+
+    def test_search_url_option_tail_is_stripped(self) -> None:
+        """`,{json}` 选项是 App 才懂的东西（AGENTS #20），不参与比较。"""
+        a = src("https://a.com", searchUrl="/so.php?q={{key}}")
+        b = src("https://a.com",
+                searchUrl='/so.php?q={{key}},{"webView":true}')
+        self.assertEqual(rule_signature(a), rule_signature(b))
+
+    def test_blank_rule_variants_are_the_same(self) -> None:
+        """空值三态（null / "" / 缺键）行为相同——po5.net 三条转发里全有。"""
         a = src("https://a.com")
-        b = src("https://a.com", bookSourceType=2)
-        self.assertNotEqual(rule_signature(a), rule_signature(b))
+        b = src("https://a.com", ruleToc={"chapterList": "class.ch", "isVip": ""},
+                ruleContent={"content": "id.c", "replaceRegex": None})
+        self.assertEqual(rule_signature(a), rule_signature(b))
+
+    def test_check_keyword_does_not_split_duplicates(self) -> None:
+        """checkKeyWord 只服务校验/调试（上游 App 不拿它搜书），不在核心字段里。"""
+        a = src("https://www.bequw.com")
+        b = src("https://www.bequw.com/#xsw8093",
+                ruleSearch={"bookList": "class.item", "checkKeyWord": "剑来"})
+        self.assertEqual(rule_signature(a), rule_signature(b))
+        groups = find_dup_groups([a, b])
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(groups[0]["redundant"], 1)
+
+    def test_po5_three_forwards_are_one_group(self) -> None:
+        """po5.net 三条转发（裸域 / # / #🎃）核心字段一致，必须成组；
+        #77 是改版源，核心字段不同，留在组外。"""
+        forwards = [
+            src("https://www.po5.net", name="五二书库",
+                searchUrl="/so/search.php?q={{key}}"),
+            src("https://www.po5.net#", name="五二书库",
+                searchUrl="so/search.php?q={{key}}"),
+            src("https://www.po5.net#🎃", name="五二书库🎃",
+                searchUrl="https://www.po5.net/so/search.php?q={{key}}",
+                ruleContent={"content": "id.c", "nextContentUrl": ""}),
+        ]
+        revamp = src("https://www.po5.net#77", name="52书库",
+                     searchUrl="/so/search.php?q={{key}}",
+                     ruleSearch={"bookList": ".content article"},
+                     ruleToc={"chapterList": ".list .mulu a"},
+                     ruleContent={"content": "#nr1 p:not(:last-of-type)@textNodes"})
+        groups = find_mergeable_groups(forwards + [revamp])
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(len(groups[0]["members"]), 3, "三条转发成一组")
+        self.assertTrue(all(m["url"] != "https://www.po5.net#77"
+                            for m in groups[0]["members"]),
+                        "改版源不该混进重复组")
 
 
 class HostTests(unittest.TestCase):
@@ -77,7 +142,7 @@ class GroupingTests(unittest.TestCase):
         self.assertEqual(len(groups[0]["members"]), 4)
 
     def test_name_difference_still_groups(self) -> None:
-        """改名不等于换源：同规则、不同名称也要成组（A 档名称不参与比较）。"""
+        """改名不等于换源：同规则、不同名称也要成组（比较里名称不参与）。"""
         groups = find_dup_groups([src("https://a.com", "名字一"),
                                   src("https://a.com#x", "名字二")])
         self.assertEqual(len(groups), 1)

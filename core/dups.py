@@ -1,22 +1,31 @@
 # -*- coding: utf-8 -*-
-"""找重复书源（**只读**）：**行为字段**完全相同，只有地址/名称/排序/备注/分组不同的那些。
+"""找重复书源（**只读**）：决定「这条源怎么干活」的**核心字段**相同的那些。
 
-**为什么不能按域名去重**：同一个域名下常有多个**不同的**源——实测
-``m.suixkan.com`` 一个域名下有 5 种（「随心看吧」4 条重复 + 「阅友小说」2 种 +
-「随心看」1 条），按域名合并会把能用的源误删。
+**为什么按核心字段、不按全量字段**：一条源的行为由四个字段决定——
 
-**为什么不能按地址去重**（App 的 ``getSourceKey()``、库里的 URL 唯一索引同理）：键是
-地址原文，而分享圈的习惯是在地址后面挂署名——``#guaner`` / ``#♤guaner`` / ``#关耳`` /
-``#🎃`` 都是同一条源被转发几次的产物，地址不同、内容一字不差。"署名不同即两个源"
-在这里恰好一条都抓不到。
+  ``searchUrl``             搜什么（请求发到哪）
+  ``ruleSearch.bookList``   搜索结果怎么列
+  ``ruleToc.chapterList``   目录怎么取
+  ``ruleContent.content``   正文怎么读
 
-所以这里换一个判据：**比"行为字段"**——把与"这条源怎么工作"无关的字段排除再比。
+这四个之外的字段要么是展示/元数据（名称、排序、备注、分组、校验词），要么是
+转发链路上的噪音（同一字段 null / "" / 缺键三种形态、``concurrentRate: 0``
+等价于不写、``enabledExplore`` 开着但 ``exploreUrl`` 是空的空开关）。全量比对
+会被这些噪音拆散——po5.net 三条转发在四字段上完全一致，全量比对却一条都抓不到。
 
-名称是展示名，改名不等于换源——**A 档按行为字段比较，名称不参与**；
-App 的 ``getSourceKey()`` 仍按地址原文认源，两件事互不影响。
+**为什么不能按地址去重**（App 的 ``getSourceKey()``、库里的 URL 唯一索引同理）：
+键是地址原文，而分享圈的习惯是在地址后面挂署名——``#guaner`` / ``#♤guaner`` /
+``#关耳`` / ``#🎃`` 都是同一条源被转发几次的产物，地址不同、内容一字不差。
 
-**输出只读**：只打印/写报告，绝不改库。删哪条由人定——跨域名的组（镜像站）尤其
-需要人看一眼，程序分不出"两个都能用"和"一个是坏的镜像"。
+**为什么域名只是硬边界不是判据**：同一域名下可以住多种真不同的源（改版前后、
+多作者各写一套）。四字段把「行为相同」钉住，域名把「能合并」钉住：同域名 +
+四字段相同 → 可合并档；四字段相同但跨域名 → 镜像档（只提示）；同域名但四字段
+不同 → 各自独立，不是重复。
+
+名称是展示名，改名不等于换源——比较里不参与；App 的 ``getSourceKey()`` 仍按
+地址原文认源，两件事互不影响。
+
+**输出只读**：只打印/写报告，绝不改库。删哪条由人定。
 """
 
 from __future__ import annotations
@@ -29,17 +38,12 @@ from urllib.parse import urlsplit
 
 from core.loader import _normalize_url
 from core.models import Health
+from core.urls import abs_url, split_url_options
 
-#: 与「这条源怎么工作」无关的字段，比较时排除。每一条都有理由，**不要图省事扩大**：
-#:   bookSourceUrl    地址本身——重复的正是"地址不同、内容相同"这种东西
-#:   bookSourceName   展示名——改名不等于换源，同规则不同名照样是重复
-#:   customOrder      App 里的手动排序序号（每条源天然不同）
-#:   lastUpdateTime   导入/保存时间
-#:   respondTime      上次响应耗时（运行元数据）
-#:   bookSourceGroup  分组——本项目自己的工具会重建它，不是源的内容
-#:   bookSourceComment 备注——分享时常被塞进水印/来源字样
-NON_BEHAVIORAL = ("bookSourceUrl", "bookSourceName", "customOrder", "lastUpdateTime",
-                  "respondTime", "bookSourceGroup", "bookSourceComment")
+#: 决定「这条源怎么干活」的核心字段。**不要图省事扩大**：每加一个字段都是在
+#: 重新引入全量比对被否决的那批噪音——要加先回答「上游 App 拿它改变哪一步行为」。
+CORE_FIELDS = ("searchUrl", "ruleSearch.bookList", "ruleToc.chapterList",
+               "ruleContent.content")
 
 #: 端口后缀。``\d*`` 而不是 ``\d+``：库里真实存在 `http://app.wanshu.com:` 这种
 #: 端口写空了的畸形地址，按 ``\d+`` 去不掉那个冒号，于是一个**同域名**的重复组
@@ -47,10 +51,78 @@ NON_BEHAVIORAL = ("bookSourceUrl", "bookSourceName", "customOrder", "lastUpdateT
 _PORT_RE = re.compile(r":\d*$")
 
 
+def _pick(raw: Dict[str, Any], path: str) -> Any:
+    """按点号路径取值（一层嵌套），取不到返回 None。"""
+    section, _, field = path.partition(".")
+    part = (raw or {}).get(section)
+    if isinstance(part, dict):
+        return part.get(field)
+    return None
+
+
+def _prune_blank(v: Any) -> Any:
+    """递归剔除「没写」的值（None / 空串 / 空白串 / 空容器）。
+
+    同一条源被不同工具导出，空规则一会是 ``null``、一会是 ``""``、一会整个键
+    没有——上游 App 反序列化后行为完全相同（空规则等于没写规则）。
+    """
+    if isinstance(v, dict):
+        out = {k: pv for k, v2 in v.items()
+               if (pv := _prune_blank(v2)) not in (None, "", [], {})}
+        return out
+    if isinstance(v, str):
+        return v.strip() or None
+    if isinstance(v, list):
+        out = [pv for pv in (_prune_blank(x) for x in v) if pv not in (None, "", [], {})]
+        return out or None
+    return v
+
+
+def _search_url_key(src: Dict[str, Any]) -> str:
+    """searchUrl 的比较键：剥 `,{json}` 选项、**剥站点前缀**、去署名与尾斜杠。
+
+    App 拿 ``bookSourceUrl`` 当 baseUrl 把 searchUrl 拼成完整地址再发（WebBook.
+    searchBookAwait → AnalyzeUrl → NetworkUtils.getAbsoluteURL，已查证），
+    ``so.php?q=…``、``/so.php?q=…``、``https://www.po5.net/so.php?q=…`` 三种写法
+    发出去的是**同一个请求**；转发圈顺手改写法的比挂署名还常见。
+
+    补全后又把 scheme+host+端口剥掉：重复分组的**站点维度由 site_key 承担**
+    （mergeable/mirror 的分组键），指纹只管「路径与参数」。不剥的话 host 会从
+    searchUrl 侧漏进指纹——同一条源的镜像站（规则一字不差、域名不同）会被
+    误判成不同源，镜像档就永远空了。相对写法补全只是为了归一 ``./x`` / ``x``
+    这类路径形态，补全完再剥是同一条链路的两半。
+    """
+    raw = str(src.get("searchUrl", "") or "")
+    pure, _opts = split_url_options(raw)
+    pure = pure.strip()
+    if not pure:
+        return ""
+    if not pure.startswith(("http://", "https://", "javascript:")):
+        base = str(src.get("bookSourceUrl", "") or "").split("#", 1)[0].strip()
+        pure = abs_url(base, pure)
+    if pure.startswith(("http://", "https://")):
+        # 剥 scheme://host[:port]，保留路径与查询；找不到分隔的 "/" 就没有路径
+        rest = pure.split("://", 1)[1]
+        slash = rest.find("/")
+        pure = rest[slash:] if slash != -1 else ""
+    return _normalize_url(pure).rstrip("/")
+
+
+def _core_parts(raw: Dict[str, Any]) -> Dict[str, Any]:
+    """抽四个核心字段并各自归一。"""
+    src = raw or {}
+    return {
+        "searchUrl": _search_url_key(src),
+        "ruleSearch.bookList": _prune_blank(_pick(src, "ruleSearch.bookList")),
+        "ruleToc.chapterList": _prune_blank(_pick(src, "ruleToc.chapterList")),
+        "ruleContent.content": _prune_blank(_pick(src, "ruleContent.content")),
+    }
+
+
 def rule_signature(raw: Dict[str, Any]) -> str:
-    """行为指纹：排除 :data:`NON_BEHAVIORAL`（含名称）后，规范化 JSON 的 sha1。"""
-    d = {k: v for k, v in (raw or {}).items() if k not in NON_BEHAVIORAL}
-    blob = json.dumps(d, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    """行为指纹：四个核心字段归一后的 sha1。"""
+    blob = json.dumps(_core_parts(raw), sort_keys=True,
+                      ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha1(blob.encode("utf-8")).hexdigest()
 
 
