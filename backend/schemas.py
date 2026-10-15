@@ -27,6 +27,11 @@ class SourceOut(BaseModel):
     #: 界面用它标出处——藏"选择"不藏"证据来源"（口径见 lessons §七十二）。
     #: **Optional**：没有 checks 行的源这一列是 NULL（同 health），
     #: 声明成 `str` 会让「从未校验过的源」把整页的出参校验带走（AGENTS #22）
+    #: 校验失败的原因（`checks.error`）：引擎归因后给用户看的那句判词
+    #: （「连接被重置(典型被墙特征)」这类）。空串 = 通过或没有结论。
+    #: **Optional**：视图 LEFT JOIN，没有 checks 行的源这一列是 NULL（同 health），
+    #: 声明成 `str` 会把「从未校验过的源」的整页出参校验带走（AGENTS #22）
+    check_error: Optional[str] = None
     engine: Optional[str] = None
     jvm_state: str = ""
     #: 结论跑到的最深一段（search/toc/content）。列表 tooltip 按它决定展示哪几行：

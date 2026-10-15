@@ -37,7 +37,7 @@ from core.tags import (
     split_system_user as _split_group,
 )
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 10
 
 #: 本进程内已经建过 schema 的库（绝对路径）。
 #:
@@ -305,10 +305,12 @@ class Store:
     ]}
 
     #: v_sources 视图每次重建：CREATE VIEW IF NOT EXISTS 不会更新已存在的视图定义
+    #: `check_error` 是 `checks.error`（校验失败给用户看的判词）——列表 tooltip
+    #: 要显示它，不透出的话用户只看到「报错」两个字、看不到为什么（AGENTS #4）
     VIEW_DDL = """CREATE VIEW v_sources AS
         SELECT s.id, s.source_url, s.name, s.source_type, s.group_name, s.enabled,
                s.user_tags, s.system_tags_locked, s.fingerprint, s.deleted_at, s.updated_at,
-               c.health, c.checked_at, c.probe_depth,
+               c.health, c.checked_at, c.probe_depth, c.error AS check_error,
                c.toc_complete, c.content_ok, c.search_hit, c.quality_tags, c.engine
         FROM sources s
         LEFT JOIN checks c ON c.id = (%s)""" % _latest_check_id_sql("s")
@@ -358,6 +360,8 @@ class Store:
         self.conn.execute(self.VIEW_DDL)
         self.conn.execute(
             "INSERT OR IGNORE INTO meta(key, value) VALUES (?, ?)", ("schema_version", "1"))
+        # 同源分组改为批量改名工具。DDL 不再创建旧分组表；已有库中的历史表保留，
+        # 不迁移也不清空它们，用户标签与书源记录保持原样。
         self.conn.execute("UPDATE meta SET value = ? WHERE key = ?",
                           (str(SCHEMA_VERSION), "schema_version"))
         self.conn.commit()

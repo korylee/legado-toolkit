@@ -103,6 +103,8 @@ def list_sources(
             it["jvm_rendered"] = _jvm_field(j.get("rendered"), bool, "jvm_rendered", url)
             it["jvm_render_reason"] = _jvm_field(
                 j.get("render_reason"), str, "jvm_render_reason", url) or ""
+            #: 校验失败的原因：checks.error 经视图透出（字段解释在 SourceOut）
+            it["check_error"] = str(it.get("check_error") or "")
     except Exception as exc:
         # 静默吞掉的话，「为什么列表上看不到 JVM 结论」就永远查不出来——
         # 这里至少要留下痕迹（ lessons §二：不接受静默失败）
