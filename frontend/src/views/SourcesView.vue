@@ -1594,16 +1594,7 @@ onUnmounted(() => {
 
     <GroupManagerDrawer v-model="tagManagerVisible" @changed="onTagsChanged" />
     <TrashDrawer v-model="trashVisible" @changed="load" />
-    <!-- 第 3 步的「去跑全量校验」直接复用批量校验那条链路：关掉抽屉、打开确认框。
-         参数（含「忽略缓存」）都在那个框里选，不在这里再摆一套 -->
-    <TidyDrawer
-      v-model="tidyVisible"
-      @changed="load"
-      @request-check="
-        tidyVisible = false;
-        openCheckDialog([]);
-      "
-    />
+    <TidyDrawer v-model="tidyVisible" :initial-query="query.q" @changed="load" />
     <ExportDrawer
       v-model="exportVisible"
       :selected="selected"
