@@ -278,15 +278,29 @@ async def jvm_run(body: Optional[JvmRunRequest] = None):
     # 不能在这里抢 `RUN_LOCK`：否则多个请求仍会在 HTTP 层直接失败，而不是进入队列。
     with Store() as st:
         run_dir = data_dir() / "app_probe" / "runs" / ("batch-" + uuid4().hex)
-        src_file = _export_sources_file(st, want_urls, want_filter,
-                                        dest_path=run_dir / "sources.json")
+        src_file = _export_sources_file(
+            st, want_urls, want_filter, dest_path=run_dir / "sources.json")
     rows = json.loads(src_file.read_text(encoding="utf-8"))
+    match_report = {}
+    if want_urls:
+        matched_match = {
+            _normalize_url(str(row.get("bookSourceUrl") or "")) for row in rows
+        }
+        match_report = {
+            "requested": want_urls,
+            "matched": [url for url in want_urls if _normalize_url(url) in matched_match],
+            "missing": [url for url in want_urls if _normalize_url(url) not in matched_match],
+        }
     if want_urls and not rows:
         _cleanup_run_dir(run_dir)
-        # 一条都没匹配上：**说清楚**，别开一次空跑（那会让用户以为「跑过了、源没问题」）
+        missing = match_report["missing"]
         return {"started": False,
-                "reason": "选中的 %d 条源一条都没匹配上（可能已被删除，或 URL 改过）"
-                          % len(want_urls)}
+                "requested_urls": match_report["requested"],
+                "matched_urls": match_report["matched"],
+                "missing_urls": missing,
+                "reason": "选中的 %d 条源一条都没匹配上：%s"
+                          "（库中可能已删除、已停用，或 URL 与所选不同）"
+                          % (len(want_urls), "、".join(missing))}
     if want_filter and not want_urls and not rows:
         _cleanup_run_dir(run_dir)
         return {"started": False, "reason": "当前筛选没有命中任何源，不用跑"}
@@ -361,6 +375,9 @@ async def jvm_run(body: Optional[JvmRunRequest] = None):
         "count": len(rows),
         "skipped_rule_incomplete": skipped_rule_incomplete,
         "execution_plan": "validate_daemon",
+        **({"requested_urls": match_report["requested"],
+           "matched_urls": match_report["matched"],
+           "missing_urls": match_report["missing"]} if want_urls else {}),
     }
     execution_plan = "validate_daemon"
     # 分块大小（提交即冻结）：settings 的 jvm.chunk_size，越界值已被 coerce 收敛
@@ -385,8 +402,8 @@ async def jvm_run(body: Optional[JvmRunRequest] = None):
     # 要给前端算「N/N」——不给的话状态条永远停在 0
     job_id = runner.submit(
         "jvm_run",
-         {"prep": prep, "total": len(rows), "manifest": manifest,
-          "run_dir": str(run_dir),
+        {"prep": prep, "total": len(rows), "manifest": manifest,
+         "run_dir": str(run_dir),
           "source_file": str(src_file), "args_file": str(args_path),
           "out_path": str(out_path), "runtime": dict(st_conf.get("runtime") or {}),
           "single": single,

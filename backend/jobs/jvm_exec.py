@@ -271,9 +271,10 @@ def _export_sources_file(st, urls: Optional[List[str]] = None,
 
     **三种范围，顺序即优先级**：
 
-    1. `urls` 非空 —— 只导出这几条（列表页勾选的源）。**两边都先归一再比**（AGENTS #5）：
-       前端给的是库里归一化过的 `source_url`，而这里读的是源 JSON 里 `bookSourceUrl`
-       的原文——不归一就会一条都匹配不上，而表现是「跑完了但列没变」，不报错。
+    1. `urls` 非空 —— 只导出这几条（列表页勾选的源）。**两边都先 `_normalize_url` 再比**
+       （AGENTS #5）：前端给的是库里的 `source_url`，而这里读的是源 JSON 里
+       `bookSourceUrl` 的原文——不归一就会一条都匹配不上，而表现是「跑完了但列没变」，
+       不报错。**匹配按源身份，fragment 保留**：同站不同署名的两条源在库里就是两条。
     2. `filt` 非空 —— 当前筛选命中的全部源（复用 `Store.export_by_filter`，不受分页限制）。
        形状与 `POST /api/export` 的 `filter` 一致（同一个前端对象直接递过来）。
     3. 都没有 —— 全部在用源。
@@ -299,6 +300,7 @@ def _export_sources_file(st, urls: Optional[List[str]] = None,
         views = st.export_sources()
     out = []
     for view in views:
+        # 停用源不进校验范围（勾到它时提交入口会报「没匹配上」）。
         if not view.get("enabled", 1):
             continue
         # `export_sources()` 给的是**解析好的书源对象**（`Store._source_view` 的输出，

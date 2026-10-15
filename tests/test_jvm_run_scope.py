@@ -387,6 +387,15 @@ class ScopeTests(_Base):
         got = [s["bookSourceUrl"] for s in self._batch()]
         self.assertEqual(got, ["https://A.com/"], "选中的那条要按原文导出（给 JVM 用的是原文）")
 
+    def test_selector_does_not_merge_distinct_fragment_sources(self) -> None:
+        """勾 `https://A.com/#分享` 不能把库里那条 `https://A.com/` 一起带出来：
+        范围匹配按源身份，忽略 fragment 会一次导出整组。"""
+        r = self._call(urls=["https://A.com/#分享"], run_job=False)
+        self.assertFalse(r["started"])
+        self.assertEqual(r["missing_urls"], ["https://A.com/#分享"])
+        self.assertEqual(r["matched_urls"], [])
+        self.assertEqual(self.batch_seen, [], "一条也不许导出")
+
     def test_only_selected_sources_are_exported(self) -> None:
         self._call(urls=["https://b.com", "https://c.com"])
         self.assertEqual(sorted(s["bookSourceUrl"] for s in self._batch()),
@@ -400,10 +409,23 @@ class ScopeTests(_Base):
         self.assertEqual(self.gradle_calls, 0)
         self.assertEqual(self.daemon_calls, 1)
 
+    def test_partial_match_still_runs_and_reports_the_gap(self) -> None:
+        """勾 2 条只匹配到 1 条：照跑，但少掉的那条要能看见——否则「已选 2 条」与实际
+        只跑 1 条之间的差额是静默的（与「选中全部 N 条」那条静默截断同一类）。"""
+        r = self._call(urls=["https://a.com", "https://nope.com"])
+        self.assertTrue(r["started"])
+        self.assertEqual(r["matched_urls"], ["https://a.com"])
+        self.assertEqual(r["missing_urls"], ["https://nope.com"])
+        self.assertEqual([s["bookSourceUrl"] for s in self._batch()], ["https://A.com/"])
+
     def test_unmatched_selection_is_refused_with_a_reason(self) -> None:
         r = self._call(urls=["https://nope.com"])
         self.assertFalse(r["started"])
         self.assertIn("一条都没匹配上", r["reason"])
+        self.assertEqual(r["requested_urls"], ["https://nope.com"])
+        self.assertEqual(r["matched_urls"], [])
+        # 具体是哪条没匹配上要出现在 reason 里：否则用户只能猜
+        self.assertIn("https://nope.com", r["reason"])
         self.assertEqual(self.gradle_calls, 0, "匹配不上就不该开跑（空批会被读成「都没问题」）")
 
     def test_all_sources_are_exported_in_full(self) -> None:
