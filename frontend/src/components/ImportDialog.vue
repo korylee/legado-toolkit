@@ -4,6 +4,7 @@ import { ref, computed, watch } from "vue";
 import { ElMessage } from "element-plus";
 import { api } from "../api/client";
 import ImportRepositoryBrowser from "./ImportRepositoryBrowser.vue";
+import RepositorySourcePreviewDrawer from "./RepositorySourcePreviewDrawer.vue";
 
 const props = defineProps({ modelValue: { type: Boolean, default: false } });
 const emit = defineEmits(["update:modelValue", "imported"]);
@@ -23,6 +24,8 @@ const rawText = ref("");
 const preview = ref(null);
 const loading = ref(false);
 const result = ref(null);
+const repositorySelection = ref(null);
+const repositoryPreviewVisible = ref(false);
 let previewRequestId = 0;
 
 function clearPreview() {
@@ -47,21 +50,11 @@ function beforeUpload() {
     return false;
 } // 手动解析，不自动上传
 
-async function onRepositoryPreview({ sources, sourceName: repositorySource }) {
-    loading.value = true;
-    clearPreview();
-    try {
-        const count = await setPreview(
-            JSON.stringify(sources),
-            repositorySource,
-            "repository",
-        );
-        ElMessage.success("已读取 " + count + " 条书源，确认预览后再导入");
-    } catch (error) {
-        ElMessage.error("仓库书源预览失败：" + error.message);
-    } finally {
-        loading.value = false;
-    }
+// 仓库导入自成闭环：挑选、预览与确认导入都在 RepositorySourcePreviewDrawer
+// 里完成（可选导入后自动校验），这里只接收「已导入」事件刷新外层列表。
+function onRepositoryPreview({ sources, sourceName }) {
+    repositorySelection.value = { sources: sources || [], sourceName: sourceName || "" };
+    repositoryPreviewVisible.value = true;
 }
 
 //: 同 URL 但规则不同时怎么办。**只对「在用」的那行有意义**——回收站里的同 URL
@@ -305,10 +298,7 @@ async function doImport() {
             </el-tab-pane>
         </el-tabs>
 
-        <div
-            v-if="activeTab !== 'repository' || previewTab === 'repository'"
-            class="conflict-options"
-        >
+        <div v-if="activeTab !== 'repository'" class="conflict-options">
             <span class="conflict-label">同 URL 不同规则</span>
             <div>
                 <el-radio-group v-model="strategy">
@@ -435,6 +425,14 @@ async function doImport() {
             :closable="false"
             style="margin-top: 10px"
             :title="result.error"
+        />
+
+        <!-- 仓库导入：挑选/预览/导入/校验全在抽屉内闭环，这里只承接它的入口与结果 -->
+        <RepositorySourcePreviewDrawer
+            v-model="repositoryPreviewVisible"
+            :sources="repositorySelection?.sources || []"
+            :source-name="repositorySelection?.sourceName || ''"
+            @imported="emit('imported')"
         />
     </el-dialog>
 </template>

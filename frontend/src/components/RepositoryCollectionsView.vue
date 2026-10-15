@@ -1,10 +1,11 @@
 <script setup>
 defineProps({
   collections: { type: Array, default: () => [] },
+  pagination: { type: Object, default: () => ({ page: 1, pageSize: 20, total: 0 }) },
   loading: { type: Boolean, default: false },
   detailsLoading: { type: Boolean, default: false },
 });
-const emit = defineEmits(["select-collection"]);
+const emit = defineEmits(["select-collection", "collection-page"]);
 </script>
 
 <template>
@@ -31,12 +32,22 @@ const emit = defineEmits(["select-collection"]);
       <el-button
         type="primary"
         :loading="detailsLoading"
-        :disabled="detailsLoading"
         @click="emit('select-collection', collection)"
       >
         预览并导入
       </el-button>
     </el-card>
+    <el-pagination
+      v-if="pagination.total > pagination.pageSize"
+      small
+      background
+      layout="total, prev, pager, next"
+      :current-page="pagination.page"
+      :page-size="pagination.pageSize"
+      :total="pagination.total"
+      :disabled="loading"
+      @current-change="(page) => emit('collection-page', page)"
+    />
   </div>
 </template>
 

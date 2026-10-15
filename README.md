@@ -210,7 +210,7 @@ JVM 常驻后台（也可 `python scripts/jvm_debug_direct.py --daemon-stop` 停
 | POST /api/import/preview | 只读解析导入内容，并统一统计新增/重复/冲突/无效/规则不完整 |
 | GET /api/import/repositories | 获取静态配置声明的仓库和前端展示能力 |
 | POST /api/import/repositories/{id}/browse | 空关键词读取列表，有关键词时按配置搜索；统一分页返回 |
-| GET /api/import/repositories/{id}/collections | 获取该仓库的书源集列表 |
+| GET /api/import/repositories/{id}/collections?page=1 | 获取该仓库的书源合集列表，支持分页 |
 | POST /api/import/repositories/{id}/collection-details | 获取选中合集的完整书源数组，进入现有导入预览 |
 | POST /api/import/repositories/{id}/details | 按选择的仓库条目取回书源 JSON，不保留仓库关联 |
 | POST /api/rules/jvm-debug | **本机引擎调试**（JVM 里跑 App 真源码，含 JS 规则）：提交即返回任务号，结果看任务明细 |
@@ -220,7 +220,7 @@ JVM 常驻后台（也可 `python scripts/jvm_debug_direct.py --daemon-stop` 停
 | POST /api/rules/suggest-rule | AI 只提议：每条都过验证，验不了的单独标「只能连 App 试」 |
 | GET /api/settings | 全局设置，同时下发 `defaults` 与 `limits`（前端不硬编码上下界） |
 
-仓库协议映射位于 `data/config/import_repositories.json`；`views` 声明 `browse` / `collections` 页面，`browse.search.query_param` 配置存在时启用搜索，否则 browse 仅展示列表。`browse` 下的 list/search 共用 pagination 与 response 映射；search.path 可省略以复用 list endpoint。合集详情可用 `collection_details.path_template` 按合集 ID 读取完整书源数组，也可配置 `url_field` 从目录项读取 HTTPS JSON 链接；两种方式都会进入同一导入预览。编辑后重启后端生效。
+`views` 只声明 `type` / `label`，API 从 `type` 派生前端 tab id；仓库协议映射位于 `data/config/import_repositories.json`。`browse.search.query_param` 配置存在时启用搜索，否则 browse 仅展示列表。list/search 默认读取 JSON；`format: "html"` 可按 `html.item_selector`、字段选择器与总数规则解析服务端 HTML，仍返回统一分页结果。详情可用 `format: "html_json"` 从 HTML 内容页提取 JSON 下载链接；合集详情也可用 `path_template` 按 ID 获取完整书源数组，或用 `url_field` 读取目录提供的 HTTPS JSON 链接。所有方式最终进入同一导入预览。编辑后重启后端生效。
 
 任务进度走 `GET /api/jobs/{id}/stream`（SSE；断流回落 `…/timeline`）。导出与订阅按 `/docs` 用。
 

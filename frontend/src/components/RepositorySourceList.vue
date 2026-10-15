@@ -1,4 +1,6 @@
 <script setup>
+import { domainOf } from "../utils/domain";
+
 const props = defineProps({
     items: { type: Array, default: () => [] },
     pagination: {
@@ -10,26 +12,16 @@ const props = defineProps({
     loading: { type: Boolean, default: false },
     detailsLoading: { type: Boolean, default: false },
     display: { type: Object, default: () => ({}) },
+    preview: { type: Function, default: null },
 });
-const emit = defineEmits([
-    "toggle",
-    "toggle-page",
-    "clear-selection",
-    "page",
-    "preview",
-]);
-
-function domainOf(item) {
-    const url = String(item[props.display.domain] || "");
-    try {
-        return new URL(url).host;
-    } catch {
-        return url || "域名未知";
-    }
-}
+const emit = defineEmits(["toggle", "toggle-page", "clear-selection", "page"]);
 
 function updatedAtOf(item) {
-    const timestamp = Number(item[props.display.updated_at]);
+    const value = item[props.display.updated_at];
+    if (typeof value === "string" && value && !/^\d+(\.\d+)?$/.test(value)) {
+        return value;
+    }
+    const timestamp = Number(value);
     if (!Number.isFinite(timestamp) || timestamp <= 0) return "更新时间未知";
     const date = new Date(timestamp < 1e12 ? timestamp * 1000 : timestamp);
     return Number.isNaN(date.getTime())
@@ -42,7 +34,8 @@ function updatedAtOf(item) {
     <div v-if="items.length" class="repository-results">
         <div class="repository-results-toolbar">
             <span class="muted"
-                >共 {{ pagination.total }} 条，已选 {{ selectedCount }} 条</span
+                >共 {{ pagination.total }} 条，已选 {{ selectedCount }} 条（最多
+                20 条）</span
             >
             <div>
                 <el-button link size="small" @click="emit('toggle-page')"
@@ -74,23 +67,47 @@ function updatedAtOf(item) {
                         <div class="repository-card-title">
                             <span>{{ item[display.title] || item.name }}</span>
                             <el-tag
-                                v-if="item.in_library === true"
-                                size="small"
-                                type="warning"
-                            >
-                                已存在
-                            </el-tag>
-                            <el-tag
-                                v-else-if="item.in_library === false"
+                                v-if="item.in_library"
                                 size="small"
                                 type="info"
                             >
-                                库中无同 URL
+                                已存在
+                            </el-tag>
+                            <el-tag v-else size="small" type="success">
+                                未入库
                             </el-tag>
                         </div>
                         <div class="repository-card-meta">
-                            <span>{{ domainOf(item) }}</span>
-                            <span>{{ updatedAtOf(item) }}</span>
+                            <span
+                                v-if="display.domain && item[display.domain]"
+                                >{{ domainOf(item[display.domain]) }}</span
+                            >
+                            <span
+                                v-if="
+                                    display.updated_at &&
+                                    item[display.updated_at]
+                                "
+                                >{{ updatedAtOf(item) }}</span
+                            >
+                            <span v-if="display.author && item[display.author]"
+                                >用户：{{ item[display.author] }}</span
+                            >
+                            <span
+                                v-if="display.version && item[display.version]"
+                                >{{ item[display.version] }}</span
+                            >
+                            <span
+                                v-if="
+                                    display.features && item[display.features]
+                                "
+                                >{{ item[display.features] }}</span
+                            >
+                            <span
+                                v-if="
+                                    display.downloads && item[display.downloads]
+                                "
+                                >下载：{{ item[display.downloads] }}</span
+                            >
                         </div>
                     </div>
                 </div>
@@ -117,7 +134,7 @@ function updatedAtOf(item) {
                 type="primary"
                 :loading="detailsLoading"
                 :disabled="!selectedCount"
-                @click="emit('preview')"
+                @click="preview?.()"
                 >获取所选详情（{{ selectedCount }}）</el-button
             >
         </div>
@@ -210,6 +227,7 @@ function updatedAtOf(item) {
 .repository-card-meta {
     min-width: 0;
     gap: 8px;
+    flex-wrap: wrap;
 }
 .repository-card-meta > span {
     overflow: hidden;

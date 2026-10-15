@@ -1,7 +1,8 @@
 <script setup>
+import { computed } from "vue";
 import RepositorySourceList from "./RepositorySourceList.vue";
 
-defineProps({
+const props = defineProps({
     query: { type: String, default: "" },
     capabilities: { type: Object, default: () => ({}) },
     result: { type: Object, required: true },
@@ -14,6 +15,7 @@ defineProps({
     selected: { type: Object, required: true },
     selectedCount: { type: Number, default: 0 },
     display: { type: Object, default: () => ({}) },
+    onPreview: { type: Function, default: null },
 });
 const emit = defineEmits([
     "update:query",
@@ -22,8 +24,11 @@ const emit = defineEmits([
     "toggle-page",
     "clear-selection",
     "page",
-    "preview",
 ]);
+const emptyDescription = computed(() => {
+    if (props.query.trim()) return "没有找到书源";
+    return props.capabilities.list ? "暂无书源" : "输入关键词搜索书源";
+});
 </script>
 
 <template>
@@ -51,21 +56,15 @@ const emit = defineEmits([
         :loading="loading"
         :details-loading="detailsLoading"
         :display="display"
+        :preview="onPreview"
         @toggle="(...args) => emit('toggle', ...args)"
         @toggle-page="emit('toggle-page')"
         @clear-selection="emit('clear-selection')"
         @page="emit('page', $event)"
-        @preview="emit('preview')"
     />
     <el-empty
         v-if="!loading && !result.items.length"
-        :description="
-            query.trim()
-                ? '没有找到书源'
-                : capabilities.list
-                  ? '暂无书源'
-                  : '输入关键词搜索书源'
-        "
+        :description="emptyDescription"
     />
 </template>
 

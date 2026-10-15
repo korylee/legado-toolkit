@@ -70,6 +70,25 @@ class ImportApiTests(_ImportCase):
         self.assertIn("待验证", source.get("bookSourceGroup", ""))
         self.assertIn("规则不完整", source.get("bookSourceGroup", ""))
 
+    def test_import_strips_url_fragment_and_compares_on_the_base_url(self) -> None:
+        """导入身份去 fragment：`X##甲` 入库存 `X`，再导入 `X##乙` 与那条 `X` 比规则。"""
+        first = self._import([make_source("https://sig.example##分享者甲")])
+        self.assertEqual(first["new_count"], 1)
+        stored = self.store.get_source("https://sig.example")
+        self.assertIsNotNone(stored)
+        self.assertEqual(stored["bookSourceUrl"], "https://sig.example")
+
+        same = self._import([make_source("https://sig.example##分享者乙")])
+        self.assertEqual(same["duplicate_count"], 1)
+        self.assertEqual(same["new_count"], 0)
+        self.assertEqual(self.store.count_sources(), 1, "同一条源不该占两行")
+
+        changed = self._import([make_source("https://sig.example##分享者丙",
+                                            "https://example.com/other?q={{key}}")])
+        self.assertEqual(changed["conflict_count"], 1)
+        self.assertEqual(changed["new_count"], 0)
+        self.assertEqual(self.store.count_sources(), 1)
+
     def test_preview_counts_incomplete_rules_without_importing(self) -> None:
         from backend.api.imports import preview_import
         from backend.schemas import ImportBody
@@ -234,7 +253,7 @@ class RepositoryApiTests(unittest.TestCase):
         return {
             "id": "browse-library", "name": "浏览库",
             "base_url": "https://repository.example",
-            "views": [{"id": "browse", "label": "书源", "type": "browse"}],
+            "views": [{"label": "书源", "type": "browse"}],
             "display": {"title": "name", "updated_at": "updated_at", "domain": "url"},
             "browse": {
                 "list": {"path": "/catalog"},
@@ -264,6 +283,7 @@ class RepositoryApiTests(unittest.TestCase):
         self.assertEqual([item["id"] for item in result["items"]], [config["id"]])
         repository = result["items"][0]
         self.assertEqual([view["type"] for view in repository["views"]], ["browse"])
+        self.assertEqual(repository["views"][0]["id"], "browse")
         self.assertEqual(repository["capabilities"], {"list": True, "search": True})
         self.assertEqual(repository["display"]["updated_at"], "updated_at")
         self.assertNotIn("base_url", repository)
@@ -313,7 +333,7 @@ class RepositoryApiTests(unittest.TestCase):
 
         config = {
             "id": "set-library", "name": "集合库", "base_url": "https://sets.example",
-            "views": [{"id": "collections", "label": "书源集", "type": "collections"}],
+            "views": [{"label": "书源集", "type": "collections"}],
             "display": {"title": "name", "domain": "url"},
             "collection_list": {
                 "path_template": "/sets", "response_items": "data",
@@ -358,7 +378,7 @@ class RepositoryApiTests(unittest.TestCase):
 
         config = {
             "id": "external-sets", "name": "外链合集", "base_url": "https://index.example",
-            "views": [{"id": "collections", "label": "合集", "type": "collections"}],
+            "views": [{"label": "合集", "type": "collections"}],
             "display": {},
             "collection_list": {"path_template": "/sets", "response_items": "",
                                 "fields": {"id": "id", "name": "name"}},
@@ -378,6 +398,146 @@ class RepositoryApiTests(unittest.TestCase):
                 config["id"], RepositoryCollectionRequest(
                     collection_id="1", collection_url="https://cdn.example/sources.json")))
 
+        self.assertEqual(result["sources"][0]["bookSourceName"], "源")
+
+    def test_browse_html_directory_normalizes_items_and_pagination(self) -> None:
+        from backend.api import imports
+        from backend.import_repositories import _REPOSITORIES
+        from backend.schemas import RepositoryBrowseRequest
+
+        config = self._browse_repository()
+        config["browse"]["pagination"] = {"page_param": "page", "page_size": 20}
+        config["browse"].pop("response")
+        config["browse"]["list"].update({
+            "format": "html",
+            "html": {
+                "item_selector": ".entry",
+                "fields": {
+                    "id": {"selector": "h2 > a", "attribute": "href",
+                           "pattern": "/content/id/(\\d+)\\.html$"},
+                    "name": {"selector": "h2 > a"},
+                    "author": {"selector": ".author", "pattern": "用户：(.+)"},
+                },
+                "pagination": {"total_selector": ".count",
+                               "total_pattern": "共有(\\d+)条数据"},
+            },
+        })
+        page_html = (
+            '<div class="count">共有45条数据</div>'
+            '<div class="entry"><h2><a href="/content/id/42.html">示例源</a></h2>'
+            '<span class="author">用户：alice</span></div>'
+        )
+        seen = {}
+
+        async def fake_text(_repository, url):
+            seen["url"] = url
+            return page_html
+
+        class Store:
+            def live_fingerprints(self):
+                return {}
+
+        with (
+            mock.patch.dict(_REPOSITORIES, {config["id"]: config}, clear=True),
+            mock.patch.object(imports, "_fetch_repository_text", side_effect=fake_text),
+        ):
+            result = asyncio.run(imports.browse_import_repository(
+                config["id"], RepositoryBrowseRequest(page=3), Store()))
+
+        self.assertEqual(seen["url"], "https://repository.example/catalog?page=3")
+        self.assertEqual(result["items"][0]["id"], "42")
+        self.assertEqual(result["items"][0]["author"], "alice")
+        self.assertEqual(result["pagination"], {"page": 3, "pageSize": 20, "total": 45})
+
+    def test_html_collection_catalog_uses_requested_page_and_total(self) -> None:
+        from backend.api import imports
+        from backend.import_repositories import _REPOSITORIES
+
+        config = {
+            "id": "html-sets", "name": "HTML 合集", "base_url": "https://sets.example",
+            "views": [{"label": "合集", "type": "collections"}],
+            "display": {},
+            "collection_list": {
+                "path_template": "/sets", "page_param": "page", "page_size": 20,
+                "format": "html",
+                "html": {
+                    "item_selector": ".ylist",
+                    "fields": {
+                        "id": {"selector": "h2 > a", "attribute": "href",
+                               "pattern": "/id/(\\d+)\\.html$"},
+                        "name": {"selector": "h2 > a"},
+                        "total": {"selector": ".count", "pattern": "源数量：(\\d+)"},
+                    },
+                    "pagination": {"total_selector": ".all-count",
+                                   "total_pattern": "共有(\\d+)条数据"},
+                },
+            },
+            "collection_details": {"path_template": "/sets/{collection_id}.html",
+                                   "response_items": ""},
+        }
+        seen = {}
+
+        async def fake_text(_repository, url):
+            seen["url"] = url
+            return ('<div class="all-count">共有41条数据</div><div class="ylist">'
+                    '<h2><a href="/id/7.html">合集七</a></h2>'
+                    '<span class="count">源数量：18</span></div>')
+
+        with (
+            mock.patch.dict(_REPOSITORIES, {config["id"]: config}, clear=True),
+            mock.patch.object(imports, "_fetch_repository_text", side_effect=fake_text),
+        ):
+            result = asyncio.run(imports.list_repository_collections(config["id"], page=2))
+
+        self.assertEqual(seen["url"], "https://sets.example/sets?page=2")
+        self.assertEqual(result["items"][0]["id"], "7")
+        self.assertEqual(result["items"][0]["total"], 18)
+        self.assertEqual(result["pagination"], {"page": 2, "pageSize": 20, "total": 41})
+
+    def test_html_collection_detail_resolves_json_import_link(self) -> None:
+        from backend.api import imports
+        from backend.import_repositories import _REPOSITORIES
+        from backend.schemas import RepositoryCollectionRequest
+
+        config = {
+            "id": "html-details", "name": "HTML 合集", "base_url": "https://sets.example",
+            "views": [{"label": "合集", "type": "collections"}],
+            "display": {},
+            "collection_list": {"path_template": "/sets", "response_items": "",
+                                "fields": {"id": "id", "name": "name"}},
+            "collection_details": {
+                "path_template": "/sets/{collection_id}.html",
+                "format": "html_json",
+                "json_link_selector": "a[href^='yuedu://booksource/importonline']",
+                "response_items": "",
+            },
+        }
+        seen = {}
+
+        async def fake_text(_repository, url):
+            seen["page"] = url
+            return ('<a href="yuedu://booksource/importonline?src='
+                    'https://sets.example/sets/7.json">导入</a>')
+
+        async def fake_json(_repository, url, **options):
+            seen["json"] = url
+            seen["options"] = options
+            return [{"bookSourceName": "源", "bookSourceUrl": "https://book.example"}]
+
+        with (
+            mock.patch.dict(_REPOSITORIES, {config["id"]: config}, clear=True),
+            mock.patch.object(imports, "_fetch_repository_text", side_effect=fake_text),
+            mock.patch.object(imports, "_fetch_repository_payload", side_effect=fake_json),
+        ):
+            result = asyncio.run(imports.get_import_repository_collection(
+                config["id"], RepositoryCollectionRequest(collection_id="7")))
+
+        self.assertEqual(seen["page"], "https://sets.example/sets/7.html")
+        self.assertEqual(seen["json"], "https://sets.example/sets/7.json")
+        self.assertEqual(seen["options"], {
+            "follow_public_redirects": False,
+            "allowed_redirect_hosts": None,
+        })
         self.assertEqual(result["sources"][0]["bookSourceName"], "源")
 
     def test_repository_transport_rejects_hosts_outside_adapter_config(self) -> None:

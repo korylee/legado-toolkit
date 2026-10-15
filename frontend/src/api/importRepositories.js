@@ -6,9 +6,9 @@ export const browseImportRepository = (repositoryId, body) =>
     `/import/repositories/${encodeURIComponent(repositoryId)}/browse`,
     body,
   );
-export const listImportRepositoryCollections = (repositoryId) =>
+export const listImportRepositoryCollections = (repositoryId, page = 1) =>
   api.get(
-    `/import/repositories/${encodeURIComponent(repositoryId)}/collections`,
+    `/import/repositories/${encodeURIComponent(repositoryId)}/collections?page=${page}`,
   );
 export const getImportRepositoryCollection = (repositoryId, collection) =>
   api.post(

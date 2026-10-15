@@ -13,11 +13,11 @@ import os
 import socket
 import time
 from copy import deepcopy
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 from urllib.parse import urljoin, urlsplit
 
 import aiohttp
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from backend.deps import get_store
 from backend.schemas import (ImportBody, ImportUrlRequest, RepositoryCollectionRequest,
@@ -88,7 +88,8 @@ async def _public_https_target(value: str):
 
 
 async def _fetch_remote_payload(url: str, *, follow_public_redirects: bool = False,
-                                _redirects: int = 0) -> Any:
+                                allowed_redirect_hosts: Optional[set[str]] = None,
+                                as_text: bool = False, _redirects: int = 0) -> Any:
     parsed, _host, addresses = await _public_https_target(url)
     connector = aiohttp.TCPConnector(resolver=_PinnedResolver(addresses), use_dns_cache=False)
     redirect_target = None
@@ -98,7 +99,7 @@ async def _fetch_remote_payload(url: str, *, follow_public_redirects: bool = Fal
                 trust_env=False) as session:
             async with session.get(
                     parsed.geturl(), allow_redirects=False,
-                    headers={"Accept": "application/json"}) as response:
+                    headers={"Accept": "text/html,application/json" if as_text else "application/json"}) as response:
                 if 300 <= response.status < 400:
                     location = response.headers.get("Location", "")
                     if not follow_public_redirects:
@@ -106,6 +107,10 @@ async def _fetch_remote_payload(url: str, *, follow_public_redirects: bool = Fal
                     if not location or _redirects >= 3:
                         raise HTTPException(400, "JSON 链接跳转次数过多或目标无效")
                     redirect_target = urljoin(parsed.geturl(), location)
+                    redirect_host = (urlsplit(redirect_target).hostname or "").rstrip(".").lower()
+                    if (allowed_redirect_hosts is not None
+                            and redirect_host not in allowed_redirect_hosts):
+                        raise HTTPException(400, "JSON 链接跳转到未配置的主机")
                 elif response.status != 200:
                     raise HTTPException(502, "获取 JSON 失败（HTTP %d）" % response.status)
                 else:
@@ -125,11 +130,16 @@ async def _fetch_remote_payload(url: str, *, follow_public_redirects: bool = Fal
         raise HTTPException(502, "获取 JSON 失败：%s" % exc) from exc
     if redirect_target:
         return await _fetch_remote_payload(
-            redirect_target, follow_public_redirects=True, _redirects=_redirects + 1)
+            redirect_target, follow_public_redirects=True,
+            allowed_redirect_hosts=allowed_redirect_hosts,
+            as_text=as_text, _redirects=_redirects + 1)
+    content = b"".join(chunks)
     try:
-        return json.loads(b"".join(chunks).decode("utf-8-sig"))
+        if as_text:
+            return content.decode("utf-8-sig")
+        return json.loads(content.decode("utf-8-sig"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise HTTPException(400, "链接内容不是有效的 UTF-8 JSON") from exc
+        raise HTTPException(400, "链接内容不是有效的 UTF-8 文档") from exc
 
 
 async def _fetch_remote_json(url: str) -> str:
@@ -157,9 +167,35 @@ def _validate_repository_url(repository: Dict[str, Any], url: str) -> None:
         raise HTTPException(500, "书源仓库请求超出配置主机")
 
 
-async def _fetch_repository_payload(repository: Dict[str, Any], url: str) -> Any:
+async def _fetch_repository_payload(
+        repository: Dict[str, Any], url: str, *, follow_public_redirects: bool = False,
+        allowed_redirect_hosts: Optional[set[str]] = None) -> Any:
     _validate_repository_url(repository, url)
-    return await _fetch_remote_payload(url)
+    return await _fetch_remote_payload(
+        url, follow_public_redirects=follow_public_redirects,
+        allowed_redirect_hosts=allowed_redirect_hosts)
+
+
+async def _fetch_repository_text(repository: Dict[str, Any], url: str) -> str:
+    _validate_repository_url(repository, url)
+    return await _fetch_remote_payload(url, as_text=True)
+
+
+async def _fetch_json_from_html_detail(
+        repository: Dict[str, Any], page_url: str, spec: Dict[str, Any]) -> Any:
+    from backend.import_repositories import extract_json_link
+
+    document = await _fetch_repository_text(repository, page_url)
+    try:
+        json_url = extract_json_link(
+            document, page_url, spec["json_link_selector"])
+    except ValueError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    return await _fetch_repository_payload(
+        repository, json_url,
+        follow_public_redirects=bool(spec.get("follow_public_redirects")),
+        allowed_redirect_hosts=set(spec.get("allowed_redirect_hosts", []))
+        if spec.get("allowed_redirect_hosts") is not None else None)
 
 
 @router.get("/repositories")
@@ -171,7 +207,8 @@ def list_import_repositories():
 async def browse_import_repository(
         repository_id: str, body: RepositoryBrowseRequest,
         st=Depends(get_store)):
-    from backend.import_repositories import browse_url, normalize_browse_result, supports_view
+    from backend.import_repositories import (browse_format, browse_url,
+                                             normalize_browse_result, supports_view)
 
     repository = _repository_or_404(repository_id)
     if not supports_view(repository, "browse"):
@@ -181,14 +218,16 @@ async def browse_import_repository(
         url = browse_url(repository, query, body.page)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
-    payload = await _fetch_repository_payload(repository, url)
+    payload = (await _fetch_repository_text(repository, url)
+               if browse_format(repository, query) == "html"
+               else await _fetch_repository_payload(repository, url))
     try:
-        result = normalize_browse_result(repository, payload, query)
+        result = normalize_browse_result(repository, payload, query, body.page)
     except ValueError as exc:
         raise HTTPException(502, str(exc)) from exc
     live_urls = st.live_fingerprints()
     for item in result["items"]:
-        url = _normalize_url(str(item.get("url") or ""))
+        url = _import_key(str(item.get("url") or ""))
         item["in_library"] = url in live_urls if url else None
     return result
 
@@ -198,16 +237,21 @@ async def browse_import_repository(
 
 
 @router.get("/repositories/{repository_id}/collections")
-async def list_repository_collections(repository_id: str):
-    from backend.import_repositories import collection_list_url, normalize_collections, supports_view
+async def list_repository_collections(
+        repository_id: str, page: int = Query(default=1, ge=1, le=10000)):
+    from backend.import_repositories import (collection_list_url, normalize_collections,
+                                             supports_view)
 
     repository = _repository_or_404(repository_id)
     if not supports_view(repository, "collections") or "collection_list" not in repository:
         raise HTTPException(400, "该书源仓库不支持书源集浏览")
-    payload = await _fetch_repository_payload(
-        repository, collection_list_url(repository))
+    spec = repository["collection_list"]
+    url = collection_list_url(repository, page)
+    payload = (await _fetch_repository_text(repository, url)
+               if spec.get("format") == "html"
+               else await _fetch_repository_payload(repository, url))
     try:
-        return {"items": normalize_collections(repository, payload)}
+        return normalize_collections(repository, payload, page)
     except ValueError as exc:
         raise HTTPException(502, str(exc)) from exc
 
@@ -226,7 +270,10 @@ async def get_import_repository_collection(repository_id: str,
             repository, body.collection_id, body.collection_url or "")
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
-    if repository["collection_details"].get("url_field"):
+    detail_spec = repository["collection_details"]
+    if detail_spec.get("format") == "html_json":
+        payload = await _fetch_json_from_html_detail(repository, url, detail_spec)
+    elif detail_spec.get("url_field"):
         payload = await _fetch_remote_payload(url, follow_public_redirects=True)
     else:
         payload = await _fetch_repository_payload(repository, url)
@@ -250,7 +297,11 @@ async def get_import_repository_details(
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
         async with semaphore:
-            payload = await _fetch_repository_payload(repository, url)
+            detail_spec = repository["details"]
+            if detail_spec.get("format") == "html_json":
+                payload = await _fetch_json_from_html_detail(repository, url, detail_spec)
+            else:
+                payload = await _fetch_repository_payload(repository, url)
         try:
             sources = normalize_details(repository, payload)
         except ValueError as exc:
@@ -286,7 +337,7 @@ def preview_import(body: ImportBody, st=Depends(get_store)):
             continue
         source = deepcopy(original)
         clean_source(source)
-        url = _normalize_url(str(source.get("bookSourceUrl", "") or ""))
+        url = _import_url(source)
         name = str(source.get("bookSourceName", "") or "")
         if not url:
             counts["invalid"] += 1
@@ -350,6 +401,23 @@ def _normalize_group(source, allowed_user_tags):
     return source
 
 
+def _import_key(url: str) -> str:
+    """导入身份键：URL 去 fragment 再归一（署名不是源身份）。"""
+    return _normalize_url(str(url or "").split("#", 1)[0].strip())
+
+
+def _import_url(source) -> str:
+    """把 `bookSourceUrl` 就地换成去 fragment 的原文，返回导入身份键。
+
+    必须就地改写：`raw_json` 存的是这里的原文，只改比对键会让它与 `source_url` 列分叉。
+    比对键与入库键也必须是同一个，否则 `upsert_sources` 按 `source_url` 找不到那条，
+    判定说「覆盖」而实际新增一行。
+    """
+    raw = str(source.get("bookSourceUrl", "") or "")
+    source["bookSourceUrl"] = raw.split("#", 1)[0].strip()
+    return _import_key(source["bookSourceUrl"])
+
+
 def _write_conflicts(conflicts):
     """把冲突源原样留存到文件，返回文件路径（无冲突返回空串）。"""
     if not conflicts:
@@ -384,13 +452,16 @@ def import_sources(body: ImportBody, st=Depends(get_store)):
     live_fp = st.live_fingerprints()
     to_create: List[Dict[str, Any]] = []
     to_overwrite: List[Dict[str, Any]] = []
+    # 真正落库的 URL（新建 + 覆盖）：导入后校验要按它提交范围——重复/冲突/
+    # 无效的都没落库，不该进校验范围（重复的结论已是新的，校验是纯浪费）。
+    imported_urls: List[str] = []
 
     for item in data:
         if not isinstance(item, dict):
             invalid_count += 1
             continue
         clean_source(item)
-        url = _normalize_url(str(item.get("bookSourceUrl", "") or ""))
+        url = _import_url(item)
         if not url:
             invalid_count += 1
             continue
@@ -403,6 +474,7 @@ def import_sources(body: ImportBody, st=Depends(get_store)):
             _normalize_group(item, allowed_user_tags)
             to_create.append(item)
             new_count += 1
+            imported_urls.append(url)
             # 同一份文件里出现两次同一个 URL 时，第二次要算「重复」而不是又建一遍——
             # 批量化之后循环里不再落库，所以得自己把状态补上
             live_fp[url] = fingerprint(item)
@@ -414,6 +486,7 @@ def import_sources(body: ImportBody, st=Depends(get_store)):
             _normalize_group(item, allowed_user_tags)
             to_overwrite.append(item)
             updated_count += 1
+            imported_urls.append(url)
             live_fp[url] = fingerprint(item)
         else:
             conflict_count += 1
@@ -437,4 +510,6 @@ def import_sources(body: ImportBody, st=Depends(get_store)):
         "total": len(data),
         "conflict_urls": conflict_urls,
         "conflict_file": _write_conflicts(conflict_sources),
+        # 真正落库的 URL（新建 + 覆盖）：导入后校验按它提交范围
+        "imported_urls": imported_urls,
     }
