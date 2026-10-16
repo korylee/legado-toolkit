@@ -19,7 +19,6 @@ from core.agent_plan import (FIX_KINDS, FIX_TARGETS, GAP_CODES, PROBE_KINDS,
                              build_plan)
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-FRONTEND = ROOT / "frontend" / "src" / "utils" / "debugDecision.js"
 
 #: 口袋漫画那一步的真实形状：正文规则为空、页面判到 L3、本机引擎没有运行时材料。
 #: `values_count` 是引擎给的事实（`planBody` 一直带它）：0 条 = 规则没选中任何节点。
@@ -202,33 +201,60 @@ class AgentPlanRouteTests(unittest.TestCase):
 
 
 class FrontendWordTableParityTests(unittest.TestCase):
-    """跨语言契约：后端出的**码与动作种类**，前端那张词表必须逐项覆盖。"""
+    """跨语言契约：后端出的**码与动作种类**，前端消费方必须逐项覆盖。
 
-    @classmethod
-    def setUpClass(cls):
-        cls.text = FRONTEND.read_text(encoding="utf-8")
-        block = cls.text.split("export const GAP_TEXT = {", 1)[1].split("\n};", 1)[0]
-        cls.gap_keys = set(re.findall(r"^\s{2}([a-z_]+):", block, re.M))
+    2026-10-16 工作台减法：诊断卡随「诊断与建议」块退场，前端不再有 GAP_TEXT 词表
+    （`frontend/src/utils/debugDecision.js` 已删）。这些断言转钉**后端自身的封闭性**：
+    码与动作种类仍须互洽，等 Agent 侧新消费方出现时再补它的词表契约。
+    """
 
-    def test_every_gap_code_has_a_sentence(self):
-        missing = sorted(set(GAP_CODES) - self.gap_keys)
-        self.assertEqual([], missing, "这些缺口码在前端没有句子：%s" % missing)
+    def test_gap_codes_and_action_kinds_stay_self_consistent(self):
+        self.assertTrue(GAP_CODES, "缺口码表不应为空")
+        self.assertTrue(FIX_KINDS, "fix 动作种类不应为空")
+        self.assertTrue(PROBE_KINDS, "取证通道不应为空")
 
-    def test_no_sentence_for_an_unknown_code(self):
-        extra = sorted(self.gap_keys - set(GAP_CODES))
-        self.assertEqual([], extra, "前端有后端不认识的缺口码：%s" % extra)
 
-    def test_every_fix_kind_and_target_is_handled(self):
-        for kind in FIX_KINDS:
-            self.assertIn('fix.kind === "%s"' % kind, self.text, "fix 种类没处理：%s" % kind)
-        for target in FIX_TARGETS:
-            self.assertIn('fix.target === "%s"' % target, self.text,
-                          "fix 目标没处理：%s" % target)
+class ExecutionActionParityTests(unittest.TestCase):
+    """执行动作词表的后端自洽：路由动作 ↔ 执行 kind ↔ 预算类。
 
-    def test_every_probe_channel_has_a_button_word(self):
-        for kind in PROBE_KINDS:
-            self.assertIn('probe.kind === "%s"' % kind, self.text,
-                          "取证通道没处理：%s" % kind)
+    ``core/agent_actions`` 是权威。前端执行侧词表（`debugAction.ACTION_KINDS` /
+    `agentBudget.js`）已随诊断卡退场删除；Agent 消费方重接时按同一原则补回契约。
+    """
+
+    def test_router_actions_are_all_known(self):
+        """路由返回的每个 action 都在权威表里：拼写漂移当场红。"""
+        from core import agent_actions
+
+        for action in agent_actions.ACTIONS:
+            self.assertIn(action, agent_actions.ACTION_BUDGET,
+                          "路由动作缺预算类：%s" % action)
+
+    def test_budget_classes_are_a_closed_vocabulary(self):
+        """预算类只有三种：evidence-budget 的执行者按它计数，多一种就多一种漏计。"""
+        from core import agent_actions
+
+        for action, budget in agent_actions.ACTION_BUDGET.items():
+            self.assertIn(budget, ("free", "evidence", "model_call"),
+                          "%s 的预算类不在词表内：%s" % (action, budget))
+
+    def test_execution_budget_expands_every_route_action(self):
+        from core import agent_actions
+
+        for action, kinds in agent_actions.EXECUTION_ACTIONS.items():
+            # inspect_runtime / ask_user / stop_unsupported 这类「交模型/交人工/
+            # 终止」的动作没有执行 kind 是合法的：它们不落到调试动作链上
+            # （预算仍记 model_call/evidence，终止动作本身 free）。
+            if action in ("inspect_runtime", "ask_user", "stop_unsupported"):
+                continue
+            self.assertTrue(kinds, "路由动作 %s 没有展开出执行 kind" % action)
+
+    def test_model_call_actions_are_exactly_the_spending_ones(self):
+        """发模型请求的动作与 /suggest-rule 的「花钱须显式触发」边界对齐：不多、不少。"""
+        from core import agent_actions
+
+        spending = sorted(a for a, b in agent_actions.ACTION_BUDGET.items()
+                          if b == "model_call")
+        self.assertEqual(spending, ["suggest_api_rule", "suggest_rule"])
 
 
 if __name__ == "__main__":

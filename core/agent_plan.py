@@ -16,6 +16,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any, Dict, List, Optional
 
+from core.agent_actions import budget_class, fix_kinds, probe_kinds
+
 #: 缺口码：**元组顺序就是优先级**。前端按这些码取中文句子，契约测试逐码比对。
 GAP_CODES = (
     "rule_missing",        # 规则为空：全局前置，换通道也读不出东西
@@ -32,12 +34,14 @@ GAP_CODES = (
     "unknown",             # 引擎暂时无法判定
 )
 
-#: `fix` 的动作种类（前端据此映射到现成事件；不认识的一律不渲染）
-FIX_KINDS = ("edit_rule", "rerun", "run_debug", "apply_candidate")
+#: `fix` 的动作种类（前端据此映射到现成事件；不认识的一律不渲染）。
+#: **权威来源在 `core/agent_actions.fix_kinds`**——这里只导入，别处不再抄一份
+#: （AGENTS #10：同一份清单只在一处维护，另一处留指针）。
+FIX_KINDS = fix_kinds()
 #: 改源时改哪儿：补规则 / 换选择器 / 按层模板 / 登录
 FIX_TARGETS = ("rule", "selector", "layer", "login")
-#: 取证通道
-PROBE_KINDS = ("app", "jvm")
+#: 取证通道（权威来源同上：`core/agent_actions.probe_kinds`）
+PROBE_KINDS = probe_kinds()
 #: AI 提议的材料形状：喂错材料等于让它在错的东西上生成
 MATERIAL_KINDS = {
     "L1": "page_html", "L2": "runtime_dom", "L3": "runtime_object",

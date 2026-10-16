@@ -24,6 +24,37 @@ ACTIONS = (
     "ask_user",
     "stop_unsupported",
 )
+
+#: 每个动作的**预算类**——每轮 Agent 循环的计数维度
+#: （``agent-evidence-budget`` 的协议位：字段从第一天就在，实现以后接）。
+#: free 不计数；evidence 消耗取证次数（打真实引擎 / 读证据）；
+#: model_call 发模型请求（花钱的动作只能由用户显式触发，见 ``/suggest-rule``）。
+ACTION_BUDGET = {
+    "suggest_rule": "model_call",
+    "edit_rule": "free",
+    "run_jvm_debug": "evidence",
+    "run_app_debug": "evidence",
+    "inspect_runtime": "evidence",
+    "suggest_api_rule": "model_call",
+    "ask_user": "free",
+    "stop_unsupported": "free",
+}
+
+#: 路由动作 → 五格执行动作的对应：``agent_plan`` 的 fix/probe 与前端
+#: ``debugAction.ACTION_KINDS`` 是执行侧词表，靠这层映射与路由侧对齐
+#: （两份清单没法共享代码，契约测试逐项比对——AGENTS #22⑤）。
+#: ``inspect_runtime`` 暂无执行侧实现（前端没有对应的 kind）：映射留空，
+#: 有了再加——映射到一个预算类不符的动作等于把取证说成免费。
+EXECUTION_ACTIONS = {
+    "edit_rule": ("edit_rule",),
+    "run_jvm_debug": ("run_debug",),
+    "run_app_debug": ("run_debug",),
+    "inspect_runtime": (),
+    "suggest_rule": ("apply_candidate", "apply_and_rerun"),
+    "suggest_api_rule": ("apply_candidate",),
+    "ask_user": (),
+    "stop_unsupported": (),
+}
 REASON_CODES = (
     "candidate_available",
     "rule_missing",
@@ -237,3 +268,31 @@ def parse_agent_proposal(
     except (TypeError, ValueError) as exc:
         _fail("invalid_json", "Agent 输出不是合法 JSON：%s" % exc)
     return validate_agent_proposal(payload, available_evidence_refs=available_evidence_refs)
+
+
+def budget_class(action: str) -> str:
+    """动作的预算类；不认识的按 free 兜底（调用方本就该先验 action）。"""
+    return ACTION_BUDGET.get(str(action or ""), "free")
+
+
+def fix_kinds() -> tuple:
+    """解决类动作——``agent_plan.FIX_KINDS`` 的权威来源。
+
+    五格 fix 是**执行侧**词表（前端 ``debugAction.ACTION_KINDS`` 的子集），
+    从路由动作的映射展开得到：路由说「该 edit_rule」，执行侧能落的是哪几个 kind
+    由这层映射钉住。
+    """
+    out: list[str] = []
+    for action in ("edit_rule", "run_jvm_debug", "run_app_debug"):
+        for kind in EXECUTION_ACTIONS.get(action, ()):
+            if kind not in out:
+                out.append(kind)
+    # rerun 不来自路由（它是「结果已过期」的执行动作），执行侧补上
+    if "rerun" not in out:
+        out.append("rerun")
+    return tuple(out)
+
+
+def probe_kinds() -> tuple:
+    """取证类动作——``agent_plan.PROBE_KINDS`` 的权威来源（换通道观测的通道词表）。"""
+    return ("app", "jvm")
