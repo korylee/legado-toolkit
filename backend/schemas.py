@@ -438,8 +438,8 @@ class MergeUndoIn(BaseModel):
 class AgentPlanRequest(BaseModel):
     """首屏五格决策（现状 / 解决 / 取证 / AI 补足）的输入：**前端已观测到的事实**。
 
-    判据一份在 `core/agent_plan`；这里只转交事实，不收也不产文案——中文句子在前端按
-    缺口码取词（`frontend/src/utils/debugDecision.js`，机检扫的是那份）。
+    判据一份在 `core/agent_plan`；这里只转交事实，不收也不产文案——中文句子在消费侧按
+    缺口码取词，两侧逐项比对见 `tests/test_agent_plan.py`。
     """
 
     layer: str = ""

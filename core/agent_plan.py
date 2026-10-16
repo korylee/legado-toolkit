@@ -4,9 +4,9 @@
 判据只此一份：界面、受限 Agent（`core.agent_router`）与以后的批处理都要回答「这一步下一步
 做什么」，别处只消费它的输出。
 
-**中文句子不在这里**：前端按缺口码与动作种类取词（`frontend/src/utils/debugDecision.js`，
-文案机检扫的是那份），两侧逐项比对由 `tests/test_agent_plan.py` 钉住——所以这里只出**码**与
-**动作种类**。
+**中文句子不在这里**：这里只出**码**与**动作种类**，取词在消费侧；两侧逐项比对由
+`tests/test_agent_plan.py` 钉住（消费侧退场期间钉的是后端自洽，重接见 TODO
+`agent-evidence-budget`）。
 
 两条本地约定：`GAP_CODES` 的**元组顺序就是优先级**（只取第一个，其余进 `deferred_gaps`）；
 **没给的事实不当成假**（读不到 ≠ 没有，AGENTS #12），每条判据都先确认那个事实真的在上下文里。

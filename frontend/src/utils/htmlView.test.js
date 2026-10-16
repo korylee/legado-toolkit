@@ -6,7 +6,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { decodeEntities, formatHtml } from "./htmlView.js";
+import { decodeEntities, formatHtml, formatMaterial } from "./htmlView.js";
+
+test("材料查看器仅改变显示，HTML 与 JSON 格式化不覆盖原文", () => {
+  const html = "<div><p>甲</p></div>";
+  assert.equal(formatMaterial(html), formatHtml(html));
+  assert.equal(formatMaterial('{"a":1}'), '{\n  "a": 1\n}');
+  assert.equal(formatMaterial('{坏的 JSON'), '{坏的 JSON');
+  assert.equal(formatMaterial('正文 < 3'), '正文 < 3');
+});
 
 test("具名与数字实体都展开", () => {
   assert.equal(decodeEntities("a&nbsp;b"), "a\u00a0b");

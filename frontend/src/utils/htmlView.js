@@ -215,3 +215,18 @@ export function formatHtml(html, options = {}) {
   }
   return out.join("\n");
 }
+
+/** Display-only formatting; original bytes remain the source for copy and search. */
+export function formatMaterial(raw) {
+  const text = String(raw == null ? "" : raw);
+  const trimmed = text.trim();
+  if (!trimmed) return "";
+  if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+    try {
+      return JSON.stringify(JSON.parse(text), null, 2);
+    } catch {
+      return text;
+    }
+  }
+  return /<\/?[a-z][\s>]/i.test(text) ? formatHtml(text) : text;
+}

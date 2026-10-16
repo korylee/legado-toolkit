@@ -8,10 +8,9 @@
 
 from __future__ import annotations
 
-import os
-import re
 import unittest
 
+from core import agent_context
 from core.page_layer import (WANT_LINK, WANT_LIST, WANT_MEDIA, WANT_TEXT,
                              classify_page, has_wanted, page_stats)
 
@@ -130,34 +129,31 @@ class ClassifyTests(unittest.TestCase):
                 self.assertIsNotNone(has_wanted(page_stats(STATIC), want))
 
 
-class FrontendStatKeyParityTests(unittest.TestCase):
-    """界面读页面统计用的键名，必须真的存在于 `page_stats()` 的输出里。
+class StatKeyParityTests(unittest.TestCase):
+    """读页面统计的那一侧，键名必须真的存在于 `page_stats()` 的输出里。
 
-    为什么钉这条：键名唯一一份在 `core/page_layer.page_stats`（AGENTS #7/#8），而消费点在
-    前端——首屏改造后是 `frontend/src/utils/debugDecision.js`，统计字段被拼进「现状」那句，
-    读法可能是 `ps.<键>`，也可能是 `<对象>.stats.<键>`，**两种都要扫**。
-    实测曾经在组件里把 `images_with_src` 读成 `imagesWithSrc`，界面上就显示
-    「带 src 的只有 undefined 个」——不报错、不进日志（AGENTS #12：读字段前先确认它存在）。
+    为什么钉这条：键名唯一一份在 `core/page_layer.page_stats`（AGENTS #7/#8），而读取方是
+    `core/agent_context._STAT_KEYS`——两处各写一份键名就必然漂：实测曾经有人把
+    `images_with_src` 读成 `imagesWithSrc`，拿到恒是 None，界面上显示「带 src 的只有
+    undefined 个」——不报错、不进日志（AGENTS #12：读字段前先确认它存在）。
     **扫不到任何预期键就说明读取点又搬家了**，这条闸门会空转成假绿。
+
+    读取点原在前端（`frontend/src/utils/debugDecision.js`），2026-10-16 工作台减法把它删了；
+    闸门跟着读取点搬到这里。前端再出现消费方时，把 `READ_RE` 那一侧补回来。
     """
 
-    FRONTEND = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                            "frontend", "src", "utils", "debugDecision.js")
-    #: 必须扫到这些键：扫不到就说明读取点搬走了
+    #: 必须真被读到：少了它就说明读取点搬走了（当前读取方是 agent_context）
     EXPECTED = {"links", "images", "images_with_src"}
-    #: 两种合法的读取写法：`ps.<键>` 与 `<对象>.stats.<键>`
-    READ_RE = re.compile(r"(?:\bps|\.stats)\.([A-Za-z_][A-Za-z0-9_]*)")
 
-    def test_frontend_reads_only_backend_stat_keys(self):
-        with open(self.FRONTEND, encoding="utf-8") as handle:
-            source = handle.read()
-        used = set(self.READ_RE.findall(source))
+    def test_stat_keys_exist_in_page_stats(self):
         available = set(page_stats(""))
+        used = set(agent_context._STAT_KEYS)
         unknown = used - available
-        self.assertFalse(unknown, "界面读了 page_stats 里没有的键：%s（可用：%s）"
+        self.assertFalse(unknown, "读取方读了 page_stats 里没有的键：%s（可用：%s）"
                          % (sorted(unknown), sorted(available)))
         self.assertTrue(self.EXPECTED <= used,
-                        "没扫到预期的统计键读取（变量改名了？）：%s" % sorted(self.EXPECTED - used))
+                        "读取方不再读这些统计键（读取点搬走了？）：%s"
+                        % sorted(self.EXPECTED - used))
 
 
 if __name__ == "__main__":

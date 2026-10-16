@@ -150,9 +150,14 @@ function rerunFromStep(stepName) {
     ((result.value || {}).steps || []).find((s) => s.name === stepName) || {};
   if (stepName === "search") return debugRun(); // 搜索段重跑 = 整链入口
   if (!String(step.url || "").trim()) {
-    return ElMessage.warning(
+    // 返回**标准结果体**而不是只弹提示：调用方（apply_and_rerun 的结果合同）
+    // 要能从返回值读出「这次没跑成」，error 形状与 startRun 的失败体同构
+    ElMessage.warning(
       "上一轮结果里没有这一步的链接。先跑一次完整调试，再重试这一步",
     );
+    return Promise.resolve({
+      error: "上一轮结果里没有这一步的链接，先跑一次完整调试",
+    });
   }
   return startRun({
     source: source.value,
@@ -312,6 +317,7 @@ onUnmounted(() => {
       :source="source || {}"
       :enabled-cookie-jar="!!((source || {}).enabledCookieJar)"
       :draft-revision="workspace.state.draftRevision"
+      :on-rerun="rerunFromStep"
       @apply-rule="onApplyRule"
       @rerun-from="rerunFromStep"
       @goto="focusRuleField"

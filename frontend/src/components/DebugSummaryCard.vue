@@ -9,10 +9,6 @@ const emit = defineEmits(["action", "probe", "evidence"]);
 <template>
   <section class="debug-summary" :class="'is-' + summary.status">
     <div class="debug-summary-head">
-      <div>
-        <b>{{ summary.step.label || "调试" }}</b>
-        <span class="muted debug-summary-status">{{ summary.statusLabel }}</span>
-      </div>
       <div class="debug-summary-meta">
         <el-tag v-if="summary.run.channel" size="small"
                 :type="summary.run.channel === 'app' ? 'success' : 'primary'">
