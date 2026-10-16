@@ -366,7 +366,6 @@ def launcher_from_args(dump: Dict[str, Any], idle_sec: int = DEFAULT_IDLE_SEC,
                        on_note: Optional[Callable[[str], None]] = None,
                        fallback: Optional[Callable[[], Tuple[int, float, str, str]]] = None,
                        args_file: Optional[str] = None,
-                       fallback_name: str = "直起",
                        ) -> Callable[[], Tuple[int, float, str, str]]:
     """返回一个给 `run_jvm_debug(launcher=...)` 用的可调用对象：**优先 daemon，失败回落**。
 
@@ -375,7 +374,8 @@ def launcher_from_args(dump: Dict[str, Any], idle_sec: int = DEFAULT_IDLE_SEC,
 
     `fallback` 是回落目标：CLI/开发默认走**直起**（快、且 dump 新鲜时等价）；**产品那条
     传 Gradle**（`core.jvm_debug.default_launcher`）——Gradle 一定会先编译，所以它是
-    「无论如何都能跑对」的那条。`fallback_name` 只影响提示语里怎么称呼它。
+    「无论如何都能跑对」的那条。提示语不区分回落叫什么：用户只需要知道「这次慢」与
+    「怎么恢复快速」，不需要知道拉起方式的名字。
     """
     def _run() -> Tuple[int, float, str, str]:
         t0 = time.time()
@@ -385,11 +385,12 @@ def launcher_from_args(dump: Dict[str, Any], idle_sec: int = DEFAULT_IDLE_SEC,
             r = request(cfg, int(info["port"]), timeout=int(cfg["timeout"]) + slack_sec)
             return int(r.get("code", -1)), time.time() - t0, "", ""
         except Exception as e:
-            # **没走成常驻要说出来**：静默会把「常驻一直没生效」藏起来（用户只看到
-            # 「也没快多少」，下次还得再踩一遍）。措辞照界面的规矩：说结果、别用内部黑话
-            # （「降级/回落」这类过程词在 `tools/check_copy.py` 的术语表里是禁的）。
+            # **没走成快速启动要说出来**：静默会把「快速通道一直没生效」藏起来（用户只看到
+            # 「也没快多少」，下次还得再踩一遍）。措辞照界面的规矩：说结果与恢复办法，
+            # 别用内部黑话（「降级/回落/常驻进程/Gradle」这类词用户无从行动）。
             if on_note is not None:
-                on_note("这次没能用常驻进程（%s），已改用%s（启动慢一些）" % (e, fallback_name))
+                on_note("快速启动没走成（%s），这次用了慢速方式；"
+                        "跑一次「刷新引擎快照」可恢复" % e)
             fn = fallback or jvm_direct.direct_launcher(
                 dump, timeout=int(cfg["timeout"]) + slack_sec + 60)
             rc, _cost, so, se = fn()

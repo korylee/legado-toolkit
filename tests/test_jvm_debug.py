@@ -296,17 +296,18 @@ class RunJvmDebugTests(_RunCase):
         self.assertEqual(r["cost_sec"], 2.5, "时长要用**这条**拉起方式量的那个")
 
     def test_launch_notes_are_surfaced_on_the_first_step(self) -> None:
-        """**降落必须说出来**（D2）：常驻回落了却静默，用户只会觉得「也没快多少」，
+        """**降落必须说出来**（D2）：快速通道回落了却静默，用户只会觉得「也没快多少」，
         而真正的问题（daemon 起不来）永远没人发现。附注落在第一条 step 上——
         抽屉已经在渲染它（`.debug-notes`）。"""
         def fake_default(notes, **kwargs):
-            notes.append("这次没能用常驻进程（DaemonError: 起不来），已改用 Gradle（启动慢一些）")
+            notes.append("快速启动没走成（DaemonError: 起不来），这次用了慢速方式；"
+                         "跑一次「刷新引擎快照」可恢复")
             return self._fake_launcher(events=self._fixture_events(), meta={"code": 0})
 
         self._patch("default_launcher", fake_default)
         r = self._run()
         notes = r["steps"][0]["notes"]
-        self.assertTrue(any("没能用常驻进程" in n for n in notes), notes)
+        self.assertTrue(any("快速启动没走成" in n for n in notes), notes)
         self.assertTrue(r["steps"][0]["has_notes"])
 
     def test_cache_mode_is_forwarded_to_page_fetch(self) -> None:
@@ -408,7 +409,9 @@ class DefaultLauncherTests(unittest.TestCase):
             rc, _cost, _so, _se = run()
         self.assertEqual(gradle_calls, [1], "回落目标必须是 Gradle")
         self.assertEqual(rc, 0)
-        self.assertTrue(any("Gradle" in n for n in notes), notes)
+        # 提示不区分回落叫什么（用户只需要知道「这次慢」与怎么恢复），
+        # 「落没落到 Gradle」由上面的 gradle_calls 断言守
+        self.assertTrue(any("快速启动没走成" in n for n in notes), notes)
 
 
 class RuntimeDumpConsistencyTests(unittest.TestCase):

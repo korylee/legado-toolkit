@@ -236,22 +236,23 @@ def default_launcher(notes: List[str], args_path: Optional[pathlib.Path] = None,
 
     try:
         if jvm_direct.dump_is_stale():
-            notes.append("这次没能用常驻进程（dump 过期，建议先运行一次 --refresh），"
-                         "已改用 Gradle（启动慢一些）")
+            notes.append("这次引擎启动走了慢速通道，本次调试会慢一些；"
+                         "在任务中心跑一次「刷新引擎快照」可恢复快速启动")
             return fallback
         dump = jvm_direct.load_dump(warn_stale=False)
         if env_snapshot is not None:
             mismatch = _runtime_dump_mismatch(dump, env_snapshot)
             if mismatch:
-                notes.append("这次没能用常驻进程（运行环境与当前自检不同：%s），已改用 Gradle（启动慢一些）"
+                notes.append("运行环境与最近一次快照不同（%s），这次走了慢速启动；"
+                             "在任务中心跑一次「刷新引擎快照」可恢复快速启动"
                              % mismatch)
                 return fallback
     except Exception as e:                       # dump 读不了（权限/损坏）也别挡住调试
-        notes.append("这次没能用常驻进程（读 dump 失败：%s），已改用 Gradle（启动慢一些）" % e)
+        notes.append("引擎状态读不出来（%s），这次走了慢速启动" % e)
         return fallback
     return jvm_daemon.launcher_from_args(
         dump, on_note=notes.append, fallback=fallback,
-        args_file=str(target_args), fallback_name="Gradle")
+        args_file=str(target_args))
 
 
 def verify_generated(source: Dict[str, Any], keyword: str, detail_url: str = "",

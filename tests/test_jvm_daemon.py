@@ -234,8 +234,8 @@ class FallbackTests(_Base):
             rc, cost, _so, _se = run()
         self.assertEqual(direct_calls, [1], "daemon 挂了就必须回落直起")
         self.assertEqual(rc, 0)
-        self.assertTrue(any("没能用常驻进程" in n for n in notes),
-                        "没走成常驻必须说出来，不能静默：%s" % notes)
+        self.assertTrue(any("快速启动没走成" in n for n in notes),
+                        "没走成快速通道必须说出来，不能静默：%s" % notes)
 
     def test_uses_daemon_when_available(self) -> None:
         notes: list = []
