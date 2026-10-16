@@ -417,3 +417,19 @@ dump 环境里就是静默继承：直起 JVM 沿用冻结值读不到参数、�
 像引擎的限制。
 
 → 已提炼为 AGENTS #25：运行观测只有一条读法、一个生产者，界面不许自己取数。
+
+## 九十三、浏览器里跑不了依赖页面环境的 webJs：同步桥是硬边界
+
+症状：想在本机浏览器里执行源里依赖页面环境的 `webJs`（`java.ajax(url)` 这类），第一反应是
+CDP `Runtime.addBinding` 把调用桥回宿主——做出来是「看起来能跑、偶尔拿空」的半支持。
+根因：`addBinding` 是**异步通知**，而 App 规则里的 `java.ajax` / `java.connect` 是**同步调用**，
+JS 侧没有可用的阻塞原语把异步应答等回来。
+
+判据：浏览器 shim 只覆盖**高频低风险**的纯计算面（`source.getKey`、result、cookie 读取、
+base64 / md5 / url 编码、log、简单缓存），**不做**同步网络——真要做的前提是浏览器带
+`--disable-web-security --user-data-dir=<临时目录>` 启动并用页内同步 XHR（跨域同步 XHR
+会被拦，缺这个前提稳定拿空）；前奏照搬 App 的 `getInjectionString`；**明确不做**
+「在浏览器里重建 App 的 JS 运行时」。覆盖不到的 API 必须报「未覆盖」，不许返回空值假结果。
+另路：需要运行时数据时走「取材料」（渲染后的 DOM / 运行时对象交给判定方），不在浏览器里跑规则。
+
+→ 已提炼为 AGENTS #4（未覆盖要显式说，不静默返空）；取材料路线见 TODO `agent-pocket-comic`。
