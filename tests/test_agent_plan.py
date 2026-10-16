@@ -141,12 +141,32 @@ class DecisionGapTests(unittest.TestCase):
         self.assertEqual(plan["fix"], {"kind": "rerun"})
 
     def test_missing_facts_are_not_read_as_false(self):
-        """没给的事实不当成假（AGENTS #12）：空上下文只该有一条「层判不了」。"""
+        """没给的事实不当成假（AGENTS #12）。
+
+        空上下文 = 这一步还没跑过：唯一说得出口的缺口是 no_engine（下一步是
+        跑调试），App 侧事实缺口（页面没记录等）不得出现——「还没跑」不是
+        「App 没记录」。
+        """
         plan = build_plan(build_agent_context({}))
-        self.assertIsNone(plan["gap"])
-        self.assertIsNone(plan["fix"])
+        self.assertEqual(plan["gap"]["code"], "no_engine")
+        self.assertEqual(plan["fix"], {"kind": "run_debug"})
         self.assertIsNone(plan["probe"])
-        self.assertEqual(plan["action"], "stop_unsupported")
+        self.assertEqual(
+            [g["code"] for g in plan["deferred_gaps"]],
+            [], "App 侧事实缺口不该在「还没跑」时出场")
+
+    def test_not_yet_run_suppresses_app_side_fact_gaps(self):
+        """截图那个形状：规则空 + 没跑过 + 页面观测全空。
+
+        主缺口是 no_engine（先跑一次调试），rule_missing 降级进折叠；
+        page_not_recorded 不得出场（page_id 空是因为还没跑）。
+        """
+        plan = plan_for(POCKET_COMIC, step={"verdict": "", "values_count": 0})
+        self.assertEqual(plan["gap"]["code"], "no_engine")
+        self.assertEqual(plan["fix"], {"kind": "run_debug"})
+        codes = [g["code"] for g in plan["deferred_gaps"]]
+        self.assertIn("rule_missing", codes, "规则确实空，降级进折叠而不是消失")
+        self.assertNotIn("page_not_recorded", codes)
 
     def test_every_layer_gets_a_full_five_slot_plan(self):
         """L1–L4 都要能填满五格：**填不出格是缺陷**，不是可接受的空。"""

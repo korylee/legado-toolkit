@@ -19,9 +19,12 @@ from typing import Any, Dict, List, Optional
 from core.agent_actions import budget_class, fix_kinds, probe_kinds
 
 #: 缺口码：**元组顺序就是优先级**。前端按这些码取中文句子，契约测试逐码比对。
+#: `no_engine` 压过 `rule_missing`：下一步动作不同才分先后——还没跑时唯一能说的
+#: 是「先跑一次调试」（跑起来才拿得到页面证据，规则空也会被真实验证）；跑过之后
+#: 规则空才是主动作（#24③ 的「全局前置」语义是「换通道白费」，跑调试不是换通道）。
 GAP_CODES = (
-    "rule_missing",        # 规则为空：全局前置，换通道也读不出东西
-    "no_engine",           # 还没有真实引擎结果：后面的判断都无从谈起
+    "no_engine",          # 还没有真实引擎结果：后面的判断都无从谈起
+    "rule_missing",       # 规则为空：跑过之后它就是第一优先
     "page_not_recorded",   # App 没为这一步记录页面
     "no_url",              # App 没请求这一步的页面，也没有可用的章节链接
     "page_fetch_missing",  # 页面没抓回来
@@ -63,11 +66,18 @@ def _mapping(value: Any) -> Mapping[str, Any]:
 
 
 def _decision_gaps(context: Mapping[str, Any]) -> List[Dict[str, Any]]:
-    """按优先级排出缺口（只出码）。顺序即 `GAP_CODES`。"""
+    """按优先级排出缺口（只出码）。顺序即 `GAP_CODES`。
+
+    事实分两层：**引擎结果**（`verdict` 非空 = 这一步真的跑过）与**引擎结果里
+    的观测**（页面记录、命中数…）。App 侧事实缺口（页面没记录 / 没有 URL /
+    页面没抓回）只在有引擎结果时判——「还没跑」不是「App 没记录」，没跑的
+    时候唯一说得出口的缺口是 `no_engine`（AGENTS #12：没给的事实不当成假）。
+    """
     layer = str(context.get("layer") or "")
     target = _mapping(context.get("target"))
     step = _mapping(context.get("step"))
     channel = str(context.get("channel") or "")
+    engine_ran = bool(str(step.get("verdict") or "").strip())
     gaps: List[Dict[str, Any]] = []
 
     def add(code: str) -> None:
@@ -76,14 +86,15 @@ def _decision_gaps(context: Mapping[str, Any]) -> List[Dict[str, Any]]:
     rule_empty = target.get("rule_empty") is True
     if rule_empty:
         add("rule_missing")
-    if channel and channel not in ("app", "jvm"):
+    if not engine_ran:
         add("no_engine")
-    if "page_id" in step and not str(step.get("page_id") or "").strip():
-        add("page_not_recorded")
-    elif "has_url" in step and step.get("has_url") is not True:
-        add("no_url")
-    elif "has_url" in step and context.get("page_present") is False:
-        add("page_fetch_missing")
+    if engine_ran:
+        if "page_id" in step and not str(step.get("page_id") or "").strip():
+            add("page_not_recorded")
+        elif "has_url" in step and step.get("has_url") is not True:
+            add("no_url")
+        elif "has_url" in step and context.get("page_present") is False:
+            add("page_fetch_missing")
     if context.get("webview_unsupported") is True:
         # 这一段 App 走了 WebView 的某条能力边界，本机引擎**跑不了**它：给换通道的动作，
         # 不给「改规则」。与上面同族——判据只认显式给的事实（读不到 ≠ 有，见文件头约定）
@@ -105,7 +116,10 @@ def _decision_gaps(context: Mapping[str, Any]) -> List[Dict[str, Any]]:
         add("stale")
     if not gaps and step.get("verdict") == "unknown":
         add("unknown")
-    return gaps
+    # 收口排序：add() 的调用顺序跟着判据块走，不保证等于 GAP_CODES——
+    # 「元组顺序就是优先级」在这里落地成事实，而不是靠调用方自觉
+    order = {code: i for i, code in enumerate(GAP_CODES)}
+    return sorted(gaps, key=lambda g: order.get(g["code"], len(order)))
 
 
 def _first_candidate_rule(context: Mapping[str, Any]) -> str:
