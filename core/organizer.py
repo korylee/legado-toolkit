@@ -148,15 +148,3 @@ def organize_sources(
             new_rec["bookSourceComment"] = _clean_comment(rec.raw.get("bookSourceComment", ""))
         result.append(new_rec)
     return result
-
-
-def summarize_grouping(records: List[BookSourceRecord]) -> List[Dict[str, Any]]:
-    """生成分组统计（供报告使用）。"""
-    from collections import Counter
-    counter: Counter = Counter()
-    for r in records:
-        if not r.enabled:
-            continue
-        counter[group_title(r.source_type, r.health)] += 1
-    summary = [{"group": g, "count": c} for g, c in counter.most_common()]
-    return summary

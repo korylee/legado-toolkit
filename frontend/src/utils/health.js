@@ -32,21 +32,6 @@ export const ENGINE_LABELS = {
 export const healthLabel = (health) => HEALTH_LABELS.value[health] || health || "未知";
 export const engineLabel = (engine) => ENGINE_LABELS[engine] || engine || "未记录";
 
-// 星级旁边那个「这一级是实测来的，还是按规则推的」。
-//
-// 真源是后端 `core/checker.py` 的 `evaluate_stars`（返回 "measured" / "static" / ""）。
-// **为什么要这个词**：3★ 有两种完全不同的来源——搜索实测命中 / 只是静态规则齐全——
-// 而界面上长得一模一样。4★/5★ 同样可能是推的（目录正文验不了时会回退静态规则）。
-//
-// 空串表示「没有可标注的来源」（0★ 不可达），此时**不渲染**。
-// **不要兜底成「实测」**——那正是这一维要消灭的事：把「不知道」说成「验过了」。
-export const STAR_BASIS_LABELS = {
-  measured: "实测",
-  static: "仅规则",
-};
-
-export const starBasisLabel = (basis) => STAR_BASIS_LABELS[basis] || "";
-
 /**
  * 把 transitions.changed 分桶转成可读文案的数组。
  *

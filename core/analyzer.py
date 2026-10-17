@@ -245,18 +245,6 @@ def _elem_self_selector(el) -> str:
     if cls:
         return "".join(f".{c}" for c in cls[:3])
     return el.name or "div"
-def _selector_from_elem(anchor, list_item, tag):
-    """兼容旧调用：按 tag 在列表项内定位元素后生成路径。"""
-    if tag == "a":
-        elems = [a for a in list_item.find_all("a", href=True)
-                 if not any(h in (a.get("href") or "").lower() for h in STATIC_LINK_HINTS)]
-    elif tag == "img":
-        elems = list_item.find_all("img")
-    else:
-        elems = list_item.find_all(tag)
-    if not elems:
-        return ""
-    return _path_selector(elems[0], list_item)
 def analyze_search_page(html: str, keyword: str) -> dict:
     """分析搜索页，返回自动推断的 Legado 规则。"""
     from core.html import make_soup

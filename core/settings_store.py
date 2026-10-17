@@ -16,7 +16,6 @@
 from __future__ import annotations
 
 import json
-import math
 import os
 import re
 from typing import Any, Dict, Optional
@@ -146,20 +145,6 @@ def _to_int(value: Any, default: int, lo: int, hi: int) -> int:
         return int(_clamp(int(float(value)), lo, hi))
     except (TypeError, ValueError, OverflowError):
         return default
-
-
-def _to_float(value: Any, default: float, lo: float, hi: float) -> float:
-    if isinstance(value, bool):
-        return default
-    try:
-        f = float(value)
-    except (TypeError, ValueError):
-        return default
-    # nan 必须显式挡掉：json 里写不出 nan，但 NaN/Infinity 能被 Python 的 json
-    # 读进来，而 min/max 对 nan 的比较恒为 False，clamp 会静默给出错值
-    if not math.isfinite(f):
-        return default
-    return _clamp(f, lo, hi)
 
 
 def _to_proxy(value: Any) -> str:

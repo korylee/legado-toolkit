@@ -4,7 +4,6 @@ import io.legado.app.data.entities.BookSource
 import io.legado.app.model.analyzeRule.AnalyzeRule
 import io.legado.app.model.analyzeRule.AnalyzeRule.Companion.setCoroutineContext
 import io.legado.app.model.analyzeRule.RuleData
-import kotlinx.coroutines.runBlocking
 import org.jsoup.nodes.Element
 import kotlin.coroutines.coroutineContext
 
@@ -48,16 +47,5 @@ object RuleEvaluation {
                 "truncated" to false, "values" to listOf(analyzer.getString(rule, isUrl = true)))
             else -> error("未知规则执行模式：$mode")
         }
-    }
-
-    fun evaluateBlocking(
-        source: BookSource,
-        html: String,
-        baseUrl: String,
-        rule: String,
-        mode: String,
-        limit: Int,
-    ): Map<String, Any?> = runBlocking {
-        evaluate(source, html, baseUrl, rule, mode, limit)
     }
 }

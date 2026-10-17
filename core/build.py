@@ -61,7 +61,10 @@ def load_sources(path: str) -> list:
     if isinstance(data, dict) and isinstance(data.get("sources"), list):
         return data["sources"]
     return []
+
+
 def save_sources(path: str, sources: list) -> None:
     """写回书源 JSON（保持数组格式，缩进 2）。"""
     with open(path, "w", encoding="utf-8") as f:
         json.dump(sources, f, ensure_ascii=False, indent=2)
+

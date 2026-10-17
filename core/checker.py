@@ -187,16 +187,6 @@ def is_login_wall(text: str, enabled_cookie_jar: bool = False) -> bool:
     return classify_http_status(200, text, enabled_cookie_jar) == Health.AUTH
 
 
-def is_inconclusive(health: str) -> bool:
-    """这个结论是「我们没测出来」吗（待验证档：超时、异常、从未校验…）。
-
-    **名字说的是这件事本身，不是它的成因**：早先叫 `is_transient`（瞬时网络
-    错误），但档位收拢后这一档的含义就是「没有结论」——它既包含瞬时抖动，
-    也包含「压根没跑过」。当前没有消费方；判据本身是 `Health.PENDING` 的定义。
-    """
-    return health == Health.PENDING
-
-
 def err_desc(err: str, detail: str = "") -> str:
     """失败原因 → 中文描述（用于诊断信息）。
 

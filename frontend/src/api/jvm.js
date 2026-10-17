@@ -14,4 +14,3 @@ export const stopJvmDaemon = () => api.post("/jvm/daemon/stop");
 export const pickJvmAppRepo = () => api.post("/jvm/pick-app-repo");
 export const pickJvmAndroidSdk = () => api.post("/jvm/pick-android-sdk");
 export const jvmRun = (body = {}) => api.post("/jvm/run", body);
-export const jvmResults = () => api.get("/jvm/results");

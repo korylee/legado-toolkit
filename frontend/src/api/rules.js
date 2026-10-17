@@ -80,43 +80,6 @@ export const appPreflight = (source, host, port) =>
 export const appPush = (source, host, port) =>
   api.post("/rules/app-push", { source, host, port });
 
-// 让 AI 给**某一步**提候选规则。模型只提议：这条链不做本地判定，能把候选填进表单
-// 之后由用户点「验证并应用」走本机引擎验收（`/rules/verify-candidate`）。
-// 没配模型 / 模型输出不是 JSON 都从 llm 三态（ok|off|error|dry_run）+ error 里读。
-//
-// **这是一个会花钱的动作，必须由用户显式触发**（同 appPush 那条边界）：
-// 只在按钮的点击回调里调，不得自动调用。唯一的例外是 dry_run=true——它只按候选
-// 自己报的样本挑一遍（外加登录墙判断），一个模型请求都不发，所以换步骤时可以自动跑。
-export const suggestRule = (body) => api.post("/rules/suggest-rule", body);
-
-export const verifyCandidate = (
-  source,
-  field,
-  rule,
-  target,
-  query,
-  timeout = null,
-) =>
-  api.post(
-    "/rules/verify-candidate",
-    timeout == null
-      ? { source, field, rule, target, query }
-      : { source, field, rule, target, query, timeout },
-  );
-
 // 规则域的结构事实（规则组 → 求值步骤）。判据的唯一一份在 core/verify.py，
 // 前端抄一份的话后端改了求值位置就静默判错新鲜度。
 export const rulesMeta = () => api.get("/rules/meta");
-
-// 从已抓到的 HTML 里找候选规则（交互候选面板）。启发式的唯一一份在后端
-// core/candidates；前端只在换页/换步时调一次（不逐键），点选与逐键高亮仍在本机。
-// 返回 {candidates: [{rule, count, samples, hits, uniq, ratio}]}——**空列表是个
-// 结论**（页面上确实没有），不是失败。
-export const ruleCandidates = (html, kind, limit = 6) =>
-  api.post("/rules/candidates", { html, kind, limit });
-
-// 首屏五格决策（现状 / 解决 / 取证 / AI 补足）。判据的唯一一份在 `core/agent_plan`：
-// 缺口唯一、fix 与 probe 分栏、AI 只认合格材料。这里**只提交观测到的事实**，
-// 返回的 `gap` / `fix` / `probe` / `ai` 直接渲染（中文句子在前端按码取词）。
-// 它不发请求、不落库、不调用模型，所以换步骤/换页面时可以自动调。
-export const agentPlan = (facts) => api.post("/rules/agent-plan", facts);
