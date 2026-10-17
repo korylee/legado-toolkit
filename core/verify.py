@@ -61,6 +61,10 @@ def strip_evidence(verify_result):
             new_step["values"] = []
         if "matched_html" in new_step:
             new_step["matched_html"] = ""
+        if "structured" in new_step:
+            # 结构化结果与 values 同性质（引擎产出的材料原文），落库的结论行不带它；
+            # 消费方（前端摘要 / Agent 验收）读的是调试返回体，不受这里影响
+            del new_step["structured"]
         steps.append(new_step)
     # pages 是「页面列表」，整份都是证据，直接置空；steps 已换新列表，入参不受影响
     return {**verify_result, "steps": steps, "pages": []}

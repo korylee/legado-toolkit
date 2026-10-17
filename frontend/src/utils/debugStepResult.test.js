@@ -23,6 +23,30 @@ test("multi-line values concatenate and a lone └ is an explicit empty", () => 
   assert.deepEqual(actual.fields, [{ label: "正文样本", value: "《甲》第一段\n第二段" }]);
 });
 
+test("structured result wins over event parsing; full book list totals replace ◇ lines", () => {
+  const actual = stepResult({ name: "search", verdict: "pass", values: [
+    "◇书籍总数:20",
+  ], structured: {
+    total: 20, truncated: false, items: [
+      { name: "甲书", author: "作者A", kind: "都市", word_count: "120万",
+        latest_chapter: "第10章", book_url: "/book/1" },
+    ],
+  } });
+  assert.equal(actual.total, 20);
+  const labels = Object.fromEntries(actual.fields.map((f) => [f.label, f.value]));
+  assert.equal(labels["书名"], "甲书");
+  assert.deepEqual(actual.fields.filter((f) => f.url).map((f) => f.label),
+    ["详情页"]);
+});
+
+test("no structured falls back to event-line parsing as before", () => {
+  const actual = stepResult({ name: "search", verdict: "pass", url: "https://site/s", values: [
+    "┌获取书名", "└甲书", "◇书籍总数:20",
+  ] });
+  assert.equal(actual.total, 20);
+  assert.deepEqual(actual.fields.map((f) => f.label), ["书名"]);
+});
+
 test("missing observations are omitted entirely, with the real error retained", () => {
   const actual = stepResult({ name: "search", verdict: "fail", reason: "搜索请求失败", values: ["⇒开始搜索"] });
   assert.equal(actual.total, null);

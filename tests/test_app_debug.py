@@ -21,7 +21,7 @@ from core.app_debug import (
     EMPTY_CONTENT_REASON, RENDER_FAIL_TODO,
     engine_pages,
     MAX_MATCHED_CHARS, MAX_PAGES, PAGE_IDS, build_steps, collect_debug_events,
-    fetch_debug_pages, matched_map, run_app_debug,
+    fetch_debug_pages, matched_map, run_app_debug, structured_map,
 )
 from core.fetch import CacheMiss, Fetched
 
@@ -166,6 +166,52 @@ class MatchedHtmlTests(unittest.TestCase):
 
     def test_blank_html_is_dropped(self):
         self.assertEqual(matched_map({"u": {"s": "   ", "t": "<i></i>"}}), {"u": {"t": "<i></i>"}})
+
+
+class StructuredMapTests(unittest.TestCase):
+    """第四期 `structured` 闸门：形状/尺寸/失败原因三条纪律。
+
+    材料给前端摘要与 Agent 验收用——坏了丢块并留日志，超长截断写明，
+    采集失败的**原因要走到用户眼前**（进对应段 notes，AGENTS #4）。
+    """
+
+    def test_clip_over_long_values_with_note(self):
+        got = structured_map({"steps": {"content": {"content": "字" * 3000}}})
+        self.assertLess(len(got["content"]["content"]), 2100)
+        self.assertIn("已截断", got["content"]["content"])
+
+    def test_items_are_clipped_per_field(self):
+        got = structured_map({"steps": {"search": {
+            "items": [{"name": "甲" * 3000}]}}})
+        self.assertIn("已截断", got["search"]["items"][0]["name"])
+
+    def test_fails_reach_the_notes_of_the_right_step(self):
+        """steps 空但 fails 有内容：原因并进对应段 notes——静默丢的话
+        「摘要一直回落事件行」没人知道为什么（AGENTS #4）。"""
+        steps = build_steps(SAMPLE, structured={
+            "_fails": ["search 段结构化采集没跑成（KoinApplication）"]})
+        search = step_of(steps, "search")
+        self.assertFalse("structured" in search)
+        self.assertTrue(any("结构化采集没采成" in n and "search" in n
+                            for n in search["notes"]))
+        # 别的段不被别人的原因污染
+        toc = step_of(steps, "toc")
+        self.assertFalse(any("结构化采集" in n for n in toc["notes"]))
+
+    def test_whole_run_failure_notes_every_step(self):
+        """整段失败（fails 不带段名前缀）：每段都该知道自己没采成。"""
+        steps = build_steps(SAMPLE, structured={
+            "_fails": ["结构化采集整段没跑成（OutOfMemoryError）"]})
+        for s in steps:
+            self.assertTrue(any("结构化采集没采成" in n for n in s["notes"]),
+                            "%s 段没收到整段失败原因" % s["name"])
+
+    def test_happy_steps_are_not_polluted(self):
+        steps = build_steps(SAMPLE, structured={
+            "search": {"total": 3, "items": [{"name": "甲"}]}, "_fails": []})
+        self.assertEqual(step_of(steps, "search")["structured"]["total"], 3)
+        self.assertFalse(any("结构化采集没采成" in n for n in step_of(steps, "search")["notes"]),
+                         "采成了的段不许带采集失败附注")
 
 
 def step_of(steps, name):

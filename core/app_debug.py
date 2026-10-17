@@ -639,13 +639,19 @@ def matched_map(raw: Any) -> Dict[str, Dict[str, str]]:
     return out
 
 
-def build_steps(events: Sequence[Any], matched: Optional[Dict[str, Dict[str, str]]] = None
+def build_steps(events: Sequence[Any], matched: Optional[Dict[str, Dict[str, str]]] = None,
+                structured: Optional[Dict[str, Any]] = None
                 ) -> List[Dict[str, Any]]:
     """**纯函数**：事件列表 → ``steps[]``（只做分段与判定，不抓页面）。
 
     ``matched``：``{url: {step: html}}``——**本机引擎**把每段规则命中的 DOM 记下来带回来
     （第三期 `matched_html` 回填）。按**每段自己的 url + 段名**取，
     所以分段语义只有这一份（Kotlin 那边只记 URL，不认段）。
+
+    ``structured``：``{"steps": {step: {字段: 值}}, "v": 版本, "fails": [...]}``——
+    第四期结构化采集（形状闸门 :func:`structured_map`）。按**段名**直接取（Kotlin 侧
+    采集时就按段记），与 ``matched`` 按 url 取不同——那是因为采集页本来就是按段的
+    `︾开始解析X页` 事件配的 URL。
 
     ``events`` 可以是 ``collect_debug_events`` 的返回值（``{"t","text"}``），
     也可以是裸文本列表——聚合只用到文本，这样测试不必构造事件字典。
@@ -658,6 +664,7 @@ def build_steps(events: Sequence[Any], matched: Optional[Dict[str, Dict[str, str
       - ``values``：该段内所有事件原文（已去耗时前缀，保留 ┌/└ 成对结构）
       - ``url``：段内 ``≡获取成功:<URL>`` 的 URL（没有则空）
       - ``matched_html``：本机引擎那一路带回来的命中 DOM（没有则空串——设备 WS 只推文本）
+      - ``structured``：本机引擎的结构化字段结果（没有则缺省——设备通道没有）
       - ``notes``：该段里的 ``◇`` 统计行
     """
     texts = [(_event_text(e)) for e in (events or [])]
@@ -705,7 +712,76 @@ def build_steps(events: Sequence[Any], matched: Optional[Dict[str, Dict[str, str
             matched_html=((matched or {}).get(url) or {}).get(name, ""),
             detail=detail,
         ))
+        # 结构化结果按**段名**直接取（Kotlin 采集时就按段记）；没有就不设键——
+        # 设备通道没有这份材料，消费方用 `step.get("structured")` 判存在，别信默认值
+        step_structured = (structured or {}).get(name)
+        if step_structured:
+            steps[-1]["structured"] = step_structured
+        else:
+            # 该段没采成：Kotlin 的 fails 是带段名的（`search 段…` / `toc 段…`，
+            # 整段失败不带前缀），归到对应段的 notes——「摘要为什么回落事件行」
+            # 要走到用户眼前，不静默（AGENTS #4）。步进顺序与 Kotlin 写入顺序一致。
+            fails = [str(f) for f in ((structured or {}).get("_fails") or [])]
+            mine = [f for f in fails if f.startswith(name + " ")]
+            if not mine and fails and not any(f.startswith(s + " ") for s in SEGMENT_NAMES.values() for f in fails):
+                mine = fails   # 整段失败：每段都该知道自己没采成
+            if mine:
+                steps[-1]["notes"] = list(steps[-1]["notes"]) + [
+                    "结构化采集没采成：" + f for f in mine]
+                steps[-1]["has_notes"] = True
     return steps
+
+
+#: ``structured`` 的形状闸门（第四期）。**形状不对整块丢掉并打日志**（与
+#: :func:`matched_map` / :func:`engine_pages` 同一条纪律，AGENTS #22②）：
+#: 它是给前端摘要与 Agent 验收用的材料，不该把整个调试结果带走，也不该静默
+#: ——静默的后果是「摘要一直回落事件行解析」而没人知道为什么。
+#: 顺手做**尺寸收敛**：上游上限（``StructuredResult.LIST_LIMIT`` / ``VALUE_MAX``）
+#: 跨语言只能靠契约测试钉住（``TestStructuredParity``），这里再兜一层——
+#: 超长字段截断并写明，不静默吞（AGENTS #4）。
+STRUCTURED_STR_MAX = 2000
+
+
+def _structured_clip(value: Any) -> Any:
+    if isinstance(value, str) and len(value) > STRUCTURED_STR_MAX:
+        return value[:STRUCTURED_STR_MAX] + "…（已截断：共 %d 字符）" % len(value)
+    return value
+
+
+def structured_map(raw: Any) -> Dict[str, Dict[str, Any]]:
+    if not isinstance(raw, dict):
+        if raw:
+            print("[app_debug] structured 形状不对（期望 {steps, v, fails}，实测 %s），已忽略"
+                  % type(raw).__name__, file=sys.stderr)
+        return {}
+    steps = raw.get("steps")
+    if not isinstance(steps, dict):
+        if steps:
+            print("[app_debug] structured.steps 形状不对（期望 {段名：{字段：值}}，实测 %s），"
+                  "已忽略" % type(steps).__name__, file=sys.stderr)
+        return {}
+    out: Dict[str, Any] = {}
+    for step, fields in steps.items():
+        if not (isinstance(fields, dict) and fields):
+            continue
+        kept: Dict[str, Any] = {}
+        for key, value in fields.items():
+            if isinstance(value, list):
+                kept[str(key)] = [
+                    {k: _structured_clip(v) for k, v in item.items()}
+                    if isinstance(item, dict) else _structured_clip(item)
+                    for item in value
+                ]
+            else:
+                kept[str(key)] = _structured_clip(value)
+        out[str(step)] = kept
+    # fails 要能走到用户眼前（AGENTS #4）：两个哨兵键随 steps 一起带出去，
+    # `build_steps` 负责把它们并进对应段的 notes——整块丢掉的话「摘要一直回落
+    # 事件行」就没人知道为什么。
+    fails = raw.get("fails")
+    if isinstance(fails, list) and fails:
+        out["_fails"] = [str(f)[:200] for f in fails]
+    return out
 
 
 def _event_text(event: Any) -> str:

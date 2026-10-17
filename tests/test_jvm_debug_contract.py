@@ -234,6 +234,62 @@ class TestMatchedStepNameParity(unittest.TestCase):
         self.assertEqual(got, MATCHED_NODES_LIMIT, "两侧的命中节点上限漂了")
 
 
+class TestStructuredParity(unittest.TestCase):
+    """结构化采集（第四期）的**词汇与版本轴**两侧必须一致。
+
+    为什么要有这条：`structured` 的形状是 `{"steps": {段名: 字段}}`，**段名由 Kotlin
+    写、由 Python 取**（`build_steps(structured=...)` 按段名查）。与 matched 的区别：
+    采集页由 App 的 payload 管道枚举（`Debug.EventKind`）直接配段，不靠正则扣事件文本；
+    但**段名映射本身**仍是 Kotlin 侧的 when 字面量——两边各改一边的后果不是报错，
+    是那一步的结构化材料永远空着，前端静默回落事件行解析（AGENTS #4 / #22⑤）。
+
+    对照的是**源码字面量**（不跑 Kotlin），与 `TestMatchedStepNameParity` 同一个套路。
+    """
+
+    KOTLIN = (pathlib.Path(__file__).parent.parent /
+              "appservice/test/io/legado/app/service/StructuredResult.kt")
+    DEBUG = (pathlib.Path(__file__).parent.parent /
+             "appservice/test/io/legado/app/service/DebugService.kt")
+
+    def test_step_names_are_names_python_actually_asks_for(self):
+        from core.app_debug import SEGMENT_NAMES
+        text = self.DEBUG.read_text(encoding="utf-8")
+        block = text.split("val stepKey = when (event.kind)", 1)
+        self.assertEqual(len(block), 2, "DebugService.kt 里找不到 stepKey 的 when 分派")
+        body = block[1].split("return@collect", 1)[0]
+        kotlin_names = set(re.findall(r'->\s*"([a-z]+)"', body))
+        self.assertTrue(kotlin_names, "stepKey when 里没记出任何段名")
+        unknown = sorted(n for n in kotlin_names if n not in set(SEGMENT_NAMES.values()))
+        self.assertEqual(unknown, [], "这些段名 Python 永远不会取：%s" % unknown)
+
+    def test_collector_step_names_cover_the_debug_pipeline(self):
+        """采集器覆盖的段与 DebugService 事件分派到的段一致：少一段就少一份材料。"""
+        kt = self.KOTLIN.read_text(encoding="utf-8")
+        block = kt.split("val STEP_NAMES = listOf(", 1)
+        self.assertEqual(len(block), 2, "StructuredResult.kt 里找不到 STEP_NAMES")
+        names = set(re.findall(r'"([^"]*)"', block[1].split(")", 1)[0]))
+        self.assertEqual(names, {"search", "explore", "bookUrl", "toc", "content"},
+                         "结构化采集的段名漂了：bookUrl 段是详情字段组的材料，不能缺")
+
+    def test_schema_version_is_stamped(self):
+        """结构化结果必须带版本轴（AGENTS #5b）：字段集/口径一变要 bump，库里的
+        旧结论行才能和新口径区分。"""
+        kt = self.KOTLIN.read_text(encoding="utf-8")
+        self.assertRegex(kt, r"const val SCHEMA_VERSION = \d+")
+        self.assertIn('"v" to SCHEMA_VERSION', kt, "structured 里没盖版本戳")
+
+    def test_limits_match_the_python_side(self):
+        """条数/字段长度上限两侧一致：Kotlin 产材料、Python 闸门兜底——
+        上限各改一边的话，Python 的截断永远不生效或白白截断。"""
+        from core.app_debug import STRUCTURED_STR_MAX
+        kt = self.KOTLIN.read_text(encoding="utf-8")
+        block = kt.split("const val VALUE_MAX = ", 1)
+        self.assertEqual(len(block), 2, "StructuredResult.kt 里找不到 VALUE_MAX")
+        self.assertEqual(int(re.match(r"\d+", block[1]).group(0)), STRUCTURED_STR_MAX,
+                         "Kotlin VALUE_MAX 与 Python STRUCTURED_STR_MAX 漂了")
+        self.assertRegex(kt, r"const val LIST_LIMIT = \d+")
+
+
 class TestWebViewBoundaryCodeParity(unittest.TestCase):
     """WebView 能力边界的**码**：Kotlin 产、前端按码取句子，两侧必须逐词一致。
 

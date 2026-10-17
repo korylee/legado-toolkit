@@ -27,8 +27,13 @@ class RuleEvaluationTest {
     private fun source() = BookSource(
         bookSourceUrl = "http://example.com", bookSourceName = "测试源")
 
-    private fun analyzer(): AnalyzeRule = AnalyzeRule(RuleData(), source())
-        .setContent(html, "http://example.com/search")
+    private fun analyzer(): AnalyzeRule {
+        val rule = AnalyzeRule(RuleData(), source())
+            .setContent(html, "http://example.com/search")
+        // URL 取值（isUrl = true）要重定向基准才绝对化
+        rule.setRedirectUrl("http://example.com/search")
+        return rule
+    }
 
     @Test
     fun list_rules_return_app_elements_and_text_values() {

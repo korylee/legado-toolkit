@@ -98,6 +98,9 @@ object DebugService {
      */
     const val MATCH_BUDGET_MS = 30_000L
 
+    /** 结构化采集的预算（毫秒）：解析不另发请求，但 `@js:` 规则可能要跑脚本。 */
+    const val STRUCTURED_BUDGET_MS = 60_000L
+
     /** 单个页面取数的上限（毫秒）：一个 URL 卡住不该把整段回填拖到预算用尽。 */
     const val MATCH_FETCH_TIMEOUT_MS = 10_000L
 
@@ -108,6 +111,9 @@ object DebugService {
      * 一页正文几十万字符很常见，而侧车是要落磁盘的。
      */
     const val MAX_ENGINE_HTML_CHARS = 400_000
+
+    /** 解析用完整 body 的内存上限：超过它的页（多半是整本正文混进目录）连解析也不留。 */
+    const val MAX_PARSE_CHARS = 4_000_000
 
     /**
      * 每段最多记几个命中节点。**与 `core.quality.MATCHED_NODES_LIMIT` 同一个数**：
@@ -270,6 +276,16 @@ object DebugService {
         // 命中回填要抓哪些页面：事件里的 `≡获取成功:<URL>`，**按出现顺序、去重**
         // （详情页与目录页常常是同一个 URL，去重后只抓一次）。
         val urls = java.util.Collections.synchronizedSet(linkedSetOf<String>())
+        // 结构化采集要的「段 → URL」：**payload 事件本身就是结构化信号**——App 按管道
+        // 发（state=10/20/30/40 → SearchSource/InfoSource/TocSource/ContentSource，
+        // `Debug.EventKind`），message 前一行 `≡获取成功:<URL>` 就是页地址。不需要
+        // 也不应该用正则去扣事件文本——管道归属是 App 已经标好的枚举。只在收集线程里写。
+        val urlsByStep = java.util.Collections.synchronizedMap(linkedMapOf<String, String>())
+        // 这次调试入口是搜索还是发现：与 App 的分派同一判据（`Debug.kt` 里
+        // `key.startsWith("发现::")` 走 explore）——**列表段只记一个段名**，
+        // 侧车里不为没跑的那条管道多算一份材料。
+        val listStep = if (key.startsWith("发现::")) "explore" else "search"
+        var lastUrl = ""
         //: 引擎取回来的整页 HTML（{url: 整页}）。只在收集线程里写，收尾之后才读
         val engineHtml = EngineHtmlCollector()
         val collector = Thread {
@@ -282,12 +298,28 @@ object DebugService {
                             engineHtml.accept(event.message, event.kind.isSourcePayload)
                             if (event.kind.isSourcePayload) {
                                 dropped.incrementAndGet()
+                                // payload 的前一行 `≡获取成功` 上的 URL 就是这一步取到的页；
+                                // kind 是 App 标好的管道，SearchSource 按**这次入口**记成
+                                // search 或 explore（另一条管道根本没跑，不记）
+                                val stepKey = when (event.kind) {
+                                    io.legado.app.model.Debug.EventKind.SearchSource -> listStep
+                                    io.legado.app.model.Debug.EventKind.InfoSource -> "bookUrl"
+                                    io.legado.app.model.Debug.EventKind.TocSource -> "toc"
+                                    io.legado.app.model.Debug.EventKind.ContentSource -> "content"
+                                    else -> ""
+                                }
+                                if (stepKey.isNotEmpty() && lastUrl.isNotEmpty()) {
+                                    urlsByStep.putIfAbsent(stepKey, lastUrl)
+                                }
                                 return@collect
                             }
                             if (event.kind.isTerminal) sawTerminal.set(true)
+                            val text = event.message ?: ""
+                            // 非 payload 事件才可能带 `≡获取成功`；记住它，payload 来时就知道页址
+                            gotUrlOf(text)?.let { lastUrl = it }
                             // 收集在 payload 过滤**之后**：那一类事件的 text 是整页 HTML，
                             // 页面正文里出现「≡获取成功」这四个字是完全可能的
-                            gotUrlOf(event.message)?.let { urls.add(it) }
+                            gotUrlOf(text)?.let { urls.add(it) }
                             // 逐行 flush：崩了/超时也要留得下已经收到的那部分
                             synchronized(writer) {
                                 writer.write(encodeLine(event))
@@ -347,6 +379,18 @@ object DebugService {
         else runMatchedWithPhase(source, urls.toList(), engineHtml.pages())
         val matched = matchedResult.html
 
+        // ---------------------------------------------------------------- 结构化结果（第四期）
+        //
+        // 事件行（`┌获取X/└值`）的记账边界由上游决定且不对称（搜索段只有首条书记全字段、
+        // 目录段只有一行样本）——字符串截取永远在追上游的记账习惯。这里用**已收集的引擎
+        // 整页 + App 自己的解析器**把每步的字段值算成 `{段名: {字段: 值}}`（搜索段是
+        // 完整书目列表，不止首条），进侧车 `structured` 键，不进 NDJSON。
+        // 段→URL 从 payload 事件按 App 自己的管道枚举取（不扣事件文本）；页是引擎手上
+        // 那份，不另发请求。失败只记 `fails`，不带走主判定（同 matched 的纪律）。
+        // **worker 线程 + 本线程驱动主 looper**（同 matched）：`@js:` 规则回投 Main 的
+        // 话，调用线程的 runBlocking 会堵死主线程卡到超时。
+        val structured = runStructuredWithPhase(source, engineHtml.pages(), urlsByStep, key)
+
         // 浏览器进程要收掉：A2 起它可能被 shadow 拉起过。**常驻也收**（实测取舍见下）：
         // 留着能省 0.65s/次（实测 0.7s → 0.05s），但它会**一直占着浏览器 profile**
         // ——另一个 JVM（批量校验、一次性调试）撞上占用就「自愈」换临时 profile，
@@ -370,7 +414,17 @@ object DebugService {
         // 诊断落**侧车文件**，别只打 stderr：Gradle 默认**只在测试失败时**回显被测进程的
         // stdout/stderr，通过时全吞掉——调用方于是既看不到零事件的原因，也看不到
         // webView 警告。侧车让 A4 不依赖 Gradle 的日志开关就能拿到结构化结论。
+        //
+        // 【键的分层】（加新键前先看这一段）：
+        //   · 协议键 —— Python 侧有形状闸门在消费（jvm_debug 读 meta），改动键名/形状
+        //     必须同步 `core/app_debug.py` 与 `tests/test_jvm_debug_contract.py`；
+        //   · 排障键 —— 只服务人看侧车（stderr 也打一份摘要），删除/改名不影响判定，
+        //     但删之前 grep 一遍 `data/app_probe` 里的对拍脚本。
+        // 现有 47 键中协议键：code/code_text/events/dropped_payload/saw_terminal/
+        // timed_out/webview_unsupported/cookie_len/engine_html/matched_html/
+        // structured/network/error/hint。
         writeMeta(outPath + ".meta.json", mapOf(
+            // ---- 协议键：Python 侧消费（形状闸门见各键注释）----
             "code" to code,
             "code_text" to codeText(code),
             "events" to n,
@@ -378,42 +432,25 @@ object DebugService {
             "saw_terminal" to sawTerminal.get(),
             "timed_out" to timedOut.get(),
             "webview_unsupported" to ShadowBackstageWebView.webviewUnsupported.toList(),
-            // A3：这次带没带登录态（0 = 没带：该域没登录过，或浏览器不可用）
+            // 这次带没带登录态（0 = 没带：该域没登录过，或浏览器不可用）
             "cookie_len" to cookieInj.len,
-            "cookie_note" to cookieInj.note,
-            "shadow_cookie_len" to ShadowBackstageWebView.lastCookieLen.get(),
-            "shadow_cookie_note" to ShadowBackstageWebView.lastCookieNote.get(),
-            // shadow 是否真的被走到（S5-A2 的落地标志）。普通源必须是 0：
-            // 不是 0 就说明 shadow 挂宽了，会把「真实现的结果」换成我们的桩。
-            "shadow_webview_calls" to ShadowBackstageWebView.calls.get(),
-            "shadow_rendered" to ShadowBackstageWebView.rendered.get(),
-            "shadow_last_url" to ShadowBackstageWebView.lastUrl.get(),
-            "shadow_last_js_len" to ShadowBackstageWebView.lastJsLen.get(),
-            "shadow_last_is_rule" to ShadowBackstageWebView.lastIsRule.get(),
-            "shadow_last_render_ms" to ShadowBackstageWebView.lastRenderMs.get(),
-            "shadow_last_reason" to ShadowBackstageWebView.lastReason.get(),
             // L4 的材料：这一页**实际发过的接口请求**（XHR / Fetch，带响应体）。
             // 与 `engine_html` 一样是**证据**，不进 NDJSON（那要与设备 WS 同构）；
             // 形状闸门在 Python 侧（`core/app_debug.network_entries`），坏了整块丢掉。
             "network" to ShadowBackstageWebView.lastNetwork.orEmpty(),
-            "network_events" to ShadowBackstageWebView.lastNetworkEvents,
-            "network_types" to ShadowBackstageWebView.lastNetworkTypes,
-            "network_drops" to ShadowBackstageWebView.lastNetworkDrops,
-            "browser_cleanup" to BrowserBridge.lastCleanupNote,
-            "timeout_sec" to timeoutSec,
-            "key" to key,
-            "source_name" to (source.bookSourceName ?: ""),
-            "source_url" to (source.bookSourceUrl ?: ""),
-            // 命中回填（形状闸门在 Python 侧：`core/app_debug.matched_map`）。
-            // 四个计数是给排障的人看的：`urls` 是事件里出现过的 URL 数，`hits` 是真正
-            // 记下来的（URL, 段名）对数——两个数差太远说明规则没命中或页面取不到，
-            // 原因在 `matched_fail` 里。
             // 引擎取回来的**整页 HTML**（`{url: 整页}`）：payload 事件里带的 body，
             // 以前按「同构」丢掉——留着之后 Python 侧的 `pages[]` 优先用它（App 手上
             // 那一份，比我们另抓一遍真），我们只补引擎没给的页
             "engine_html" to engineHtml.result(),
-            "engine_html_urls" to engineHtml.result().size,
+            // 命中回填（形状闸门在 Python 侧：`core/app_debug.matched_map`）
             "matched_html" to matched,
+            // 结构化结果（形状闸门在 Python 侧：`core/app_debug.structured_map`）。
+            // `v` 是它的版本轴（AGENTS #5b）——字段集或口径一变要 bump。
+            // steps/fails 都在这一个键里，不另抄一份计数（另一份必然漂，AGENTS #10）。
+            "structured" to structured,
+            "error" to failure.get(),
+            "hint" to if (code == ZERO_EVENT) ZERO_EVENT_HINT else "",
+            // ---- 排障键：人看侧车用（四个计数差太远说明规则没命中或页面取不到）----
             "matched_urls" to urls.size,
             "matched_hits" to matched.values.sumOf { it.size },
             "matched_skipped" to matchedResult.stats.skipped,
@@ -422,8 +459,27 @@ object DebugService {
             "matched_engine_miss" to matchedResult.stats.engineMiss,
             "matched_engine_truncated" to matchedResult.stats.engineTruncated,
             "matched_fail" to matchedResult.fails,
-            "error" to failure.get(),
-            "hint" to if (code == ZERO_EVENT) ZERO_EVENT_HINT else "",
+            "engine_html_urls" to engineHtml.result().size,
+            "network_events" to ShadowBackstageWebView.lastNetworkEvents,
+            "network_types" to ShadowBackstageWebView.lastNetworkTypes,
+            "network_drops" to ShadowBackstageWebView.lastNetworkDrops,
+            "browser_cleanup" to BrowserBridge.lastCleanupNote,
+            "timeout_sec" to timeoutSec,
+            "key" to key,
+            "source_name" to (source.bookSourceName ?: ""),
+            "source_url" to (source.bookSourceUrl ?: ""),
+            // shadow 是否真的被走到（S5-A2 的落地标志）。普通源必须是 0：
+            // 不是 0 就说明 shadow 挂宽了，会把「真实现的结果」换成我们的桩。
+            "shadow_cookie_len" to ShadowBackstageWebView.lastCookieLen.get(),
+            "shadow_cookie_note" to ShadowBackstageWebView.lastCookieNote.get(),
+            "shadow_webview_calls" to ShadowBackstageWebView.calls.get(),
+            "shadow_rendered" to ShadowBackstageWebView.rendered.get(),
+            "shadow_last_url" to ShadowBackstageWebView.lastUrl.get(),
+            "shadow_last_js_len" to ShadowBackstageWebView.lastJsLen.get(),
+            "shadow_last_is_rule" to ShadowBackstageWebView.lastIsRule.get(),
+            "shadow_last_render_ms" to ShadowBackstageWebView.lastRenderMs.get(),
+            "shadow_last_reason" to ShadowBackstageWebView.lastReason.get(),
+            "cookie_note" to cookieInj.note,
         ))
 
         System.err.println(
@@ -477,12 +533,18 @@ object DebugService {
         val body: String,
         val truncated: Boolean,
         val originalLength: Int,
+        /** 完整 body（仅内存，不落侧车）：**给解析用**——截断的 JSON 解不出字段，
+         *  拿截断版硬解析只会产出「字段全空」的假结果（AGENTS #4：像规则失效，
+         *  其实是材料被截了）。超过 [MAX_PARSE_CHARS] 连解析也不留（内存护栏）。 */
+        val fullBody: String,
     ) {
         fun isReusable(): Boolean = !truncated && body.isNotBlank()
+        fun bodyForParse(): String = if (fullBody.isEmpty()) body else fullBody
     }
 
     internal class EngineHtmlCollector(
         private val limit: Int = DebugService.MAX_ENGINE_HTML_CHARS,
+        private val parseLimit: Int = DebugService.MAX_PARSE_CHARS,
     ) {
         private val out = LinkedHashMap<String, EnginePage>()
         private var lastUrl = ""
@@ -500,6 +562,7 @@ object DebugService {
                 body = body.take(limit),
                 truncated = body.length > limit,
                 originalLength = body.length,
+                fullBody = if (body.length <= parseLimit) body else "",
             )
         }
 
@@ -586,6 +649,41 @@ object DebugService {
         } finally {
             ShadowBackstageWebView.phase.set("debug")
         }
+    }
+
+    /** 结构化采集的执行壳：**worker 线程 + 本线程驱动主 looper**（同 [runMatched]），
+     *  没跑的管道（urlsByStep 里没有的段）自然采不出东西。失败吞成侧车 `fails`。
+     *  phase 与 finally 恢复同 [runMatchedWithPhase]（收尾前不再有别的段）。 */
+    private fun runStructuredWithPhase(
+        source: BookSource,
+        enginePages: Map<String, EnginePage>,
+        urlsByStep: Map<String, String>,
+        searchKey: String,
+    ): Map<String, Any> {
+        if (enginePages.isEmpty()) return emptyMap()
+        ShadowBackstageWebView.phase.set("structured")
+        val done = java.util.concurrent.atomic.AtomicBoolean(false)
+        val out = java.util.concurrent.atomic.AtomicReference<Map<String, Any>>(null)
+        val worker = Thread {
+            runCatching {
+                StructuredResult.collect(source, enginePages, urlsByStep, searchKey)
+            }.onSuccess { result ->
+                out.set(result)
+            }.onFailure { e ->
+                out.set(linkedMapOf(
+                    "steps" to emptyMap<String, Any>(), "v" to StructuredResult.SCHEMA_VERSION,
+                    "fails" to listOf("结构化采集整段没跑成（${e::class.simpleName}: ${e.message?.take(80)}）"),
+                ))
+            }
+            done.set(true)
+        }
+        worker.isDaemon = true
+        worker.name = "structured-result"
+        worker.start()
+        driveMainLooperUntil(done, System.currentTimeMillis() + STRUCTURED_BUDGET_MS + 5_000)
+        runCatching { worker.join(2_000) }
+        ShadowBackstageWebView.phase.set("debug")
+        return out.get() ?: emptyMap()
     }
 
     private fun runMatched(

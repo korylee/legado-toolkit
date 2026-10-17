@@ -29,7 +29,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from uuid import uuid4
 
 from core.app_debug import (build_steps, engine_pages, fetch_debug_pages, matched_map,
-                            network_entries)
+                            network_entries, structured_map)
 from core.debug_keys import EXPLORE_PREFIX
 from core.fetch import CACHE_AUTO
 from core.paths import ARGS_PARTS, data_path
@@ -577,8 +577,10 @@ def run_jvm_debug(source: Dict[str, Any],
         return out
 
     # 第三期 matched_html 回填：本机引擎会把每段规则命中的 DOM 带回来，
-    # 形状 {url: {step: html}}——**过一道显式闸门**（AGENTS #22），不合法就整块忽略并留日志
-    steps = build_steps(events_raw, matched=matched_map(meta.get("matched_html")))
+    # 形状 {url: {step: html}}——**过一道显式闸门**（AGENTS #22），不合法就整块忽略并留日志。
+    # structured 的失败原因由 build_steps 并进对应段的 notes（AGENTS #4），这里不用接。
+    steps = build_steps(events_raw, matched=matched_map(meta.get("matched_html")),
+                        structured=structured_map(meta.get("structured")))
     # 拉起方式的痕迹进附注（回落了要说出来；正常走常驻时这里是空的）。
     # 放最后一段附注**之前**：先讲「这次是怎么跑起来的」，再讲「跑的过程中缺了什么」
     if launch_notes and steps:

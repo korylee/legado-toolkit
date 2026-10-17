@@ -80,24 +80,80 @@ const FIELDS = {
   ],
 };
 
-const URL_LABELS = { bookUrl: "目录链接" };
+// 结构化结果的字段映射（Kotlin StructuredResult 的 items/详情字段名）。
+// 有 structured 时优先用它——那是引擎按同一套解析器算的，字段集固定、搜索段是
+// 完整书目；没有（连 App 通道 / 引擎没回填）才回落事件行解析。
+// 列表项瘦身后（Kotlin 侧只留定位字段）没有 intro/cover_url，这里也删——
+// 消费的字段集与生产侧对齐，别造「引擎没给的字段」。
+const STRUCTURED_FIELDS = {
+  search: [
+    { key: "name", label: "书名" },
+    { key: "author", label: "作者" },
+    { key: "kind", label: "分类" },
+    { key: "word_count", label: "字数" },
+    { key: "latest_chapter", label: "最新章节" },
+    { key: "book_url", label: "详情页", url: true },
+  ],
+  explore: [
+    { key: "name", label: "书名" },
+    { key: "author", label: "作者" },
+    { key: "kind", label: "分类" },
+    { key: "book_url", label: "详情页", url: true },
+  ],
+  bookUrl: [
+    { key: "name", label: "书名" },
+    { key: "author", label: "作者" },
+    { key: "kind", label: "分类" },
+    { key: "word_count", label: "字数" },
+    { key: "last_chapter", label: "最新章节" },
+    { key: "intro", label: "简介" },
+    { key: "cover_url", label: "封面", url: true },
+    { key: "toc_url", label: "目录链接", url: true },
+  ],
+};
+
+/** 结构化条目 → 摘要字段。值为空/缺失的条目照旧省略，不造「未取到」。 */
+function structuredFields(name, structured) {
+  if (name === "toc" && Array.isArray(structured.chapter_list)) {
+    const first = structured.chapter_list[0];
+    return first ? [{ label: "章节样本", value: String(first) }] : [];
+  }
+  if (name === "content") {
+    const value = text(structured.content);
+    return value ? [{ label: "正文样本", value }] : [];
+  }
+  const defs = STRUCTURED_FIELDS[name];
+  if (!defs) return [];
+  const item = Array.isArray(structured.items) ? structured.items[0] : structured;
+  if (!item) return [];
+  return defs.map(({ key, label, url }) => {
+    const value = text(item[key]);
+    if (!value) return null; // 引擎取到的就是空，与事件里单独一行 └ 同义
+    return url === true ? { label, value, url } : { label, value };
+  }).filter(Boolean);
+}
 
 export function stepResult(step = {}) {
   const name = text(step.name);
   const values = Array.isArray(step.values) ? step.values : [];
-  const fields = (FIELDS[name] || []).map(({ event, label, url }) => {
-    const value = observedField(values, event);
-    if (value === null) return null; // 事件里没记
-    return { label, value, url };
-  }).filter(Boolean).map(({ label, value, url }) => url === true ? { label, value, url } : { label, value });
-  const total = ["search", "explore", "toc"].includes(name)
-    ? observedCount(name, values) : null;
+  const structured = step.structured && typeof step.structured === "object"
+    ? step.structured : null;
+  // 条数：structured.total 是引擎解析出的完整结果数；没有才回落事件里的 ◇ 行
+  const total = structured && Number.isFinite(structured.total)
+    ? structured.total
+    : (["search", "explore", "toc"].includes(name) ? observedCount(name, values) : null);
+  const fields = structured
+    ? structuredFields(name, structured)
+    : (FIELDS[name] || []).map(({ event, label, url }) => {
+      const value = observedField(values, event);
+      if (value === null) return null; // 事件里没记
+      return { label, value, url };
+    }).filter(Boolean).map(({ label, value, url }) => url === true ? { label, value, url } : { label, value });
   return {
     name,
     total,
     totalLabel: name === "toc" ? "目录总数" : "书籍总数",
     fields,
-    urlFieldLabels: (URL_LABELS[name] || "").split(",").filter(Boolean),
     reason: text(step.reason || (step.verdict === "fail" ? step.detail : "")),
     verdict: text(step.verdict) || "unknown",
   };
