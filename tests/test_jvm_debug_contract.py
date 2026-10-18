@@ -183,6 +183,29 @@ class TestLoginMarkerParity(unittest.TestCase):
                          "两侧的登录墙特征词漂了：改一边就得改另一边（权威在 core/models.py）")
 
 
+class TestAntiBotMarkerParity(unittest.TestCase):
+    """反爬/人机验证特征词两侧逐词相同——判「需人工过验证」的那份词表。
+
+    与 TestLoginMarkerParity 同一条纪律（AGENTS #22⑤）：判定在 JVM 里当场做
+    （`SourceCookies.antiBotMarkerOf`），权威在 `core/models.ANTI_BOT_MARKERS`
+    （BrowserBridge 的 CHALLENGE_MARKERS 也取它的子集）。漂了的后果不是报错：
+    同一个验证页在批量校验判 `human_check`、在浏览器桥那边却不等它——两头不讨好。
+    """
+
+    KOTLIN = (pathlib.Path(__file__).parent.parent /
+              "appservice/test/io/legado/app/service/SourceCookies.kt")
+
+    def test_anti_bot_markers_match_the_python_side(self):
+        from core.models import ANTI_BOT_MARKERS
+        text = self.KOTLIN.read_text(encoding="utf-8")
+        block = text.split("val ANTI_BOT_MARKERS = listOf(", 1)
+        self.assertEqual(len(block), 2, "SourceCookies.kt 里找不到 ANTI_BOT_MARKERS 字面量")
+        body = block[1].split(")", 1)[0]
+        kotlin_markers = [s for s in re.findall(r'"([^"]*)"', body)]
+        self.assertEqual(kotlin_markers, list(ANTI_BOT_MARKERS),
+                         "两侧的反爬特征词漂了：改一边就得改另一边（权威在 core/models.py）")
+
+
 class TestMatchedStepNameParity(unittest.TestCase):
     """命中回填（第三期）的**词汇与上限**两侧必须一致。
 

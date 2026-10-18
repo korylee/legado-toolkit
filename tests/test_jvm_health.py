@@ -107,6 +107,20 @@ class HealthTests(unittest.TestCase):
         for state in ("no_result", "timeout", "empty_js_shell", "invalid"):
             self.assertEqual(self._h(state=state), Health.PENDING)
 
+    def test_human_check_is_pending_not_dead_and_says_next_step(self) -> None:
+        """反爬/验证页：不下「源坏了」断言（临时门，过了就好），判词指向换通道。
+
+        与 login_wall 的差别：登录态我们能预热（profile cookie），人机验证**只有人**能过
+        ——所以它不是 AUTH 的「连 App 试登录」，而是「先人工过一次验证再复测」。
+        """
+        health, note = H.health_for({
+            "state": "human_check",
+            "reason": "搜索为空，搜索页是反爬/验证页（出现「cf-challenge」）→ 本机过不去，需人工过一次验证",
+        })
+        self.assertEqual(health, Health.PENDING)
+        self.assertIn("人工", note)
+        self.assertIn("本机过不去", note)
+
     def test_transport_causes_follow_the_local_table(self) -> None:
         self.assertEqual(self._h(state="error", reason="SocketException: Connection reset"),
                          Health.GFW)

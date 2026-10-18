@@ -127,6 +127,7 @@ export function depthClass(row) {
 export const JVM_STATE_LABELS = {
   ok: "搜索通过", no_result: "跑了但没出结果", empty_js_shell: "JS 规则是空壳",
   login_wall: "页面要求登录（不是源坏了）",
+  human_check: "页面要人工过验证（本机过不去）",
   timeout: "超时", error: "报错", invalid: "规则无效",
 };
 export function jvmStateLabel(state) { return JVM_STATE_LABELS[state] || state; }

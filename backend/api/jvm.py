@@ -48,6 +48,8 @@ STATE_LABEL = {
     #: A3：搜索为空 + 搜索页出现登录提示 → 需登录。**不是源坏了**，是这次没带登录态
     #: （结论里的 `cookie_len` 会说明带没带；`reason` 里有命中的那个词）
     "login_wall": "需登录（JVM）",
+    #: 搜索页是反爬/验证页 → 需人工过一次验证，本机引擎过不去（下一步：连 App 调试）
+    "human_check": "需人工过验证（JVM）",
     "timeout": "超时（JVM）",
     "error": "执行失败（JVM）",
     "invalid": "源 JSON 无效（JVM）",

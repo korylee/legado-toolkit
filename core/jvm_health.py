@@ -291,6 +291,11 @@ _STAGE_DEPTH = {"search": DEPTH_SEARCH, "toc": DEPTH_TOC, "content": DEPTH_CONTE
 _STATE_HEALTH = {
     "ok": Health.OK,
     "login_wall": Health.AUTH,
+    #: 搜索页是反爬/验证页（验证码、Cloudflare 挑战）：**不是源的规则错**，也不是
+    #: 「没出结果」——需人工过一次验证，本机引擎过不去。动作与 pending 不同
+    #: （连 App 试），但它是**站点的临时门**而非源坏了，不下 DEAD 断言，落 PENDING
+    #: 的保守档，下一步写在判词里（Kotlin 侧 reason 自带）。
+    "human_check": Health.PENDING,
     "no_result": Health.PENDING,
     "timeout": Health.PENDING,
     "empty_js_shell": Health.PENDING,

@@ -25,4 +25,17 @@ class SourceCookiesTest {
         assertEquals("", SourceCookies.loginMarkerOf(""))
         assertEquals("", SourceCookies.loginMarkerOf(null))
     }
+
+    @Test
+    fun anti_bot_marker_hits_and_clean_pages_miss() {
+        // 词表两侧一致性在 Python 契约测试（TestAntiBotMarkerParity）；这里钉匹配语义
+        assertEquals("cf-challenge", SourceCookies.antiBotMarkerOf("/cdn-cgi/l/chk_jschl?__cf_chl_tk=x"))
+        assertEquals("验证码", SourceCookies.antiBotMarkerOf("请输入验证码后继续"))
+        assertEquals("captcha", SourceCookies.antiBotMarkerOf("CAPTCHA required"))
+        // 正常页与 Cloudflare 邮箱保护脚本都不许命中（裸 cloudflare 不在表里）
+        assertEquals("", SourceCookies.antiBotMarkerOf("<html><body>目录 共 120 章</body></html>"))
+        assertEquals("", SourceCookies.antiBotMarkerOf(
+            "src=\"/cdn-cgi/scripts/5c5dd728/cloudflare-static/email-decode.min.js\""))
+        assertEquals("", SourceCookies.antiBotMarkerOf(null))
+    }
 }

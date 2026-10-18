@@ -139,18 +139,6 @@
 验收：疑似错误页的附注在报告与列表上都出现，且用的是同一个函数。
 指针：lessons §二，core/quality.py
 
-### 条目：antibot-jvm · anti-bot 墙在 JVM 侧仍报 no_result / error
-状态：todo
-依赖：无
-优先级：P2
-背景：`login_wall` 只认 `LOGIN_MARKERS`（「请登录」这类）；验证码 / Cloudflare 那类
-  （`ANTI_BOT_MARKERS`）没有对应状态，于是「需人工过一下」被读成「没出结果」。
-  异常归因已机器可读（`root_kind`）；anti-bot 是**页面内容**特征，不是
-  异常分类，别塞进那个码表。
-约束：判据照 `core/jvm_health.is_login_wall` 那套，**别新造**。
-验收：这类源不再被判成 no_result，而是有一个「需人工过一下」的状态。
-指针：lessons §五十八，core/jvm_health.py
-
 ### 条目：xa-1111 · XPath 规则在引擎侧的结论
 状态：todo
 依赖：无

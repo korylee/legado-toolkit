@@ -33,6 +33,7 @@ STATE_NOTE = {
     "ok": "搜索命中（App 引擎）",
     "empty_js_shell": "本机无法验证：源声明 webView，剥掉后页面疑似要 JS 渲染",
     "login_wall": "搜索页要求登录（本次可能没带登录态）",
+    "human_check": "搜索页是反爬/验证页，本机过不去（需人工过一次验证）",
     "no_result": "搜索成功但无结果（App 引擎，关键词无命中）",
     "timeout": "搜索超时（App 引擎）",
     "error": "执行出错（App 引擎）",

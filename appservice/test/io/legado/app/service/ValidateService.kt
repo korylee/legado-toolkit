@@ -552,13 +552,12 @@ object ValidateService {
                     val searchTxt = source.searchUrl ?: ""
                     val exploreTxt = source.exploreUrl ?: ""
                     val likelyShell = searchTxt.contains("webView", true) || exploreTxt.contains("webView", true)
-                    // 登录墙归因（A3）：**不猜**——抓一次搜索页文本，按与本地回放同一套判据
-                    // （状态 200 + 命中「请登录」这类词 + 源声明 cookieJar，见 core/checker.py
-                    // 的 is_login_wall）判「需登录」。只在「源声明了登录方式」时才去抓，
-                    // 免得给每条空结果源都多发一次请求
-                    val loginHit = if (!likelyShell && declaresLogin(source)) {
-                        detectLoginWall(effective, effectiveKeyword)
-                    } else ""
+                    // 登录墙 / 反爬墙归因（A3）：**不猜**——抓一次搜索页文本，按与本地
+                    // 回放同一套判据判「需登录」或「需人工过验证」。只在「源声明了登录
+                    // 方式或 cookieJar」时才去抓，免得给每条空结果源都多发一次请求。
+                    val wallHit = if (!likelyShell && mayHitWall(source)) {
+                        detectWall(effective, effectiveKeyword)
+                    } else WallHit("", "")
                     // **显式写 <String, Any?>**：靠推断的话，值全是 String/Int 时
                     // 会被推成公共父类型 `Comparable<*> & Serializable`，后面合并
                     // 复验结果（Any?）就编译不过——报错信息还指向 forEach 那一行
@@ -566,18 +565,21 @@ object ValidateService {
                         "url" to source.bookSourceUrl,
                         "name" to source.bookSourceName,
                         "state" to when {
-                            loginHit.isNotEmpty() -> "login_wall"
+                            wallHit.login.isNotEmpty() -> "login_wall"
+                            wallHit.antiBot.isNotEmpty() -> "human_check"
                             likelyShell -> "empty_js_shell"
                             else -> "no_result"
                         },
                         "stage" to DEPTH_SEARCH,
                         "keyword_used" to effectiveKeyword,
                         "reason" to when {
-                            loginHit.isNotEmpty() -> "搜索为空，搜索页出现「$loginHit」→ 需登录" +
+                            wallHit.login.isNotEmpty() -> "搜索为空，搜索页出现「${wallHit.login}」→ 需登录" +
                                 (if (cookieInj.len > 0)
                                     "（已带上该域的 cookie ${cookieInj.len} 字符，可能是登录态已失效）"
                                 else "（本次没带该域的 cookie：先在它的浏览器 profile 里登录一次，"
                                     + "或用 --cookie 手工给一条）")
+                            wallHit.antiBot.isNotEmpty() ->
+                                "搜索为空，搜索页是反爬/验证页（出现「${wallHit.antiBot}」）→ 本机过不去，需人工过一次验证"
                             likelyShell ->
                                 "剥掉 webView 选项后搜索为空；原源声明需要 webView（页面可能要 JS 渲染）→ 本机无法验证"
                             else -> "搜索成功但无结果（关键词：$effectiveKeyword）"
@@ -659,34 +661,41 @@ object ValidateService {
     }
 
     /**
-     * 源声明了登录方式吗（`loginUrl` / `loginUi` 任一非空）。
+     * 源声明了登录方式或 cookieJar 吗（`loginUrl` / `loginUi` / `enabledCookieJar` 任一）。
      *
-     * **这只是「要不要去查登录墙」的开关，不是判据**——判据是抓到的那页文本
-     * （[SourceCookies.loginMarkerOf]）。用元数据当开关，是为了不给每条空结果源都多发一次请求。
+     * **这只是「要不要去查登录/反爬墙」的开关，不是判据**——判据是抓到的那页文本
+     * （[SourceCookies.loginMarkerOf] / [antiBotMarkerOf]）。用元数据当开关，是为了
+     * 不给每条空结果源都多发一次请求。
      */
-    private fun declaresLogin(source: BookSource): Boolean =
-        !source.loginUrl.isNullOrBlank() || !source.loginUi.isNullOrBlank()
+    private fun mayHitWall(source: BookSource): Boolean =
+        !source.loginUrl.isNullOrBlank() || !source.loginUi.isNullOrBlank() ||
+            source.enabledCookieJar
+
+    /** 一次抓取、两个词表的结果：[login] / [antiBot] 各是命中的特征词（空串 = 没命中）。 */
+    private data class WallHit(val login: String, val antiBot: String)
 
     /**
-     * 抓一次搜索页，看是不是登录墙（返回命中的特征词；空串 = 不是）。
+     * 抓一次搜索页，看是不是登录墙或反爬墙（返回各自命中的特征词）。
      *
-     * 只看**文本**、不渲染：登录墙的特征词在静态 HTML 里就有。状态码也要 200——本地回放
-     * 那边 `is_login_wall` 就是这个门槛（403/503 是反爬/失效，不是登录墙）。
+     * 只看**文本**、不渲染：两类墙的特征词都在静态 HTML 里就有。状态码也要 200——本地回放
+     * 那边 `is_login_wall` 就是这个门槛（403/503 直接按状态分类，不走词表）。
      * 抓不到页面**不改变结论**（保持原来的 no_result / empty_js_shell），只打一行日志：
-     * 那不能吞成「不是登录墙」这种肯定断言（AGENTS #4）。
+     * 那不能吞成「不是墙」这种肯定断言（AGENTS #4）。
      */
-    private suspend fun detectLoginWall(source: BookSource, keyword: String): String {
+    private suspend fun detectWall(source: BookSource, keyword: String): WallHit {
         return try {
             val ruleData = RuleData()
             val analyzeUrl = AnalyzeUrl(
                 mUrl = source.searchUrl.orEmpty(), key = keyword, page = 1,
                 baseUrl = source.bookSourceUrl, source = source, ruleData = ruleData)
             val res = analyzeUrl.getStrResponseAwait()
-            if (res.code() != 200) "" else SourceCookies.loginMarkerOf(res.body)
+            if (res.code() != 200) WallHit("", "")
+            else WallHit(SourceCookies.loginMarkerOf(res.body),
+                         SourceCookies.antiBotMarkerOf(res.body))
         } catch (e: Throwable) {
-            System.err.println("[appservice] 登录墙检测失败（保持原结论）: " +
+            System.err.println("[appservice] 登录/反爬墙检测失败（保持原结论）: " +
                 "${e::class.simpleName}: ${e.message?.take(120)}")
-            ""
+            WallHit("", "")
         }
     }
 

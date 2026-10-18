@@ -38,6 +38,17 @@ object SourceCookies {
         "please log in", "please login", "login required", "sign in to continue",
     )
 
+    /**
+     * 反爬/人机验证特征词——同一条纪律：跨语言第二份，权威在 `core/models.py` 的
+     * `ANTI_BOT_MARKERS`（BrowserBridge 的 CHALLENGE_MARKERS 取的是它的子集）。
+     * 命中 ≠ 源坏了：下一步是「人过一次验证」，本机引擎过不去。
+     */
+    val ANTI_BOT_MARKERS = listOf(
+        "验证码", "人机验证", "安全验证", "滑动验证",
+        "cf-challenge", "__cf_chl", "captcha", "verify you are human",
+        "访问验证", "继续访问", "安全检测",
+    )
+
     /** 注入结果。[len] = 注进去的 cookie 串长度（**0 不是失败**：可能只是这个域没登录过）。 */
     data class Injected(val len: Int, val note: String)
 
@@ -88,5 +99,11 @@ object SourceCookies {
     fun loginMarkerOf(text: String?): String {
         val low = (text ?: "").lowercase()
         return LOGIN_MARKERS.firstOrNull { low.contains(it) } ?: ""
+    }
+
+    /** 命中的反爬特征词（没有则空串）。同 [loginMarkerOf]，大小写不敏感。 */
+    fun antiBotMarkerOf(text: String?): String {
+        val low = (text ?: "").lowercase()
+        return ANTI_BOT_MARKERS.firstOrNull { low.contains(it) } ?: ""
     }
 }
