@@ -102,9 +102,9 @@ class StartupWiringTests(_DataDirCase):
     def test_recovered_daemon_operation_is_reported_without_stopping(self) -> None:
         from backend.app import _report_recovered_daemon_operation
 
-        with mock.patch("core.jvm_validate_daemon.status",
+        with mock.patch("core.jvm_daemon.status",
                         return_value={"current_operation": {"job_id": "job-1"}}), \
-             mock.patch("core.jvm_validate_daemon.stop_idle") as stop, \
+             mock.patch("core.jvm_daemon.stop_idle") as stop, \
              mock.patch("builtins.print") as output:
             _report_recovered_daemon_operation(["job-1"])
         self.assertIn("未自动停止", output.call_args.args[0])
@@ -113,7 +113,7 @@ class StartupWiringTests(_DataDirCase):
     def test_daemon_status_read_error_does_not_escape_startup_report(self) -> None:
         from backend.app import _report_recovered_daemon_operation
 
-        with mock.patch("core.jvm_validate_daemon.status", side_effect=OSError("unavailable")), \
+        with mock.patch("core.jvm_daemon.status", side_effect=OSError("unavailable")), \
              mock.patch("builtins.print") as output:
             _report_recovered_daemon_operation(["job-1"])
         self.assertIn("unavailable", output.call_args.args[0])

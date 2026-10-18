@@ -127,7 +127,7 @@ test("只对带 runtime_snapshot 标识的 JVM 校验失败提供刷新", () => 
 });
 
 test("执行方式有中文词，未知值原样透出不伪装", () => {
-  assert.equal(executionModeLabel("validate_daemon"), "常驻引擎");
+  assert.equal(executionModeLabel("daemon"), "常驻引擎");
   assert.equal(executionModeLabel("gradle_fallback"), "Gradle 回退");
   assert.equal(executionModeLabel("unknown"), "未确定");
   assert.equal(executionModeLabel("mystery"), "mystery");

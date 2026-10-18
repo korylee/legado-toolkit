@@ -48,7 +48,7 @@ class JvmRunProgressTests(unittest.TestCase):
                              encoding="utf-8")
         manifest = jvm_exec._build_jvm_manifest(
             run_dir=run_dir, source_file=source_file, args_file=args_file,
-            out_path=out_path, single=single, execution_plan="validate_daemon",
+            out_path=out_path, single=single, execution_plan="daemon",
             allow_gradle_fallback=False, runtime={}, readiness={},
             execution_readiness={}, readiness_fingerprint="",
             readiness_checked_at="", source_count=(1 if single else 2),
@@ -92,10 +92,10 @@ class JvmRunProgressTests(unittest.TestCase):
              mock.patch.object(jvm_exec, "execution_readiness",
                                lambda dump=None: {"ok": True}), \
              mock.patch("core.jvm_direct.load_dump", return_value=dict(_DUMP)), \
-             mock.patch("core.jvm_validate_daemon.prepare",
+             mock.patch("core.jvm_daemon.prepare",
                         return_value={"outcome": "ready", "reason": ""}), \
-             mock.patch("core.jvm_validate_daemon.probe", return_value={"sig": "s"}), \
-             mock.patch("core.jvm_validate_daemon.run", daemon), \
+             mock.patch("core.jvm_daemon.probe", return_value={"sig": "s"}), \
+             mock.patch("core.jvm_daemon.run_validate", daemon), \
              mock.patch.object(jvm_api.runner, "Store",
                                lambda *a, **kw: Store(self.db)):
             return asyncio.run(

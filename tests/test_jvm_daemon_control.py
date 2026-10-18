@@ -35,7 +35,7 @@ class DaemonStatusTests(unittest.TestCase):
     """状态判定只依赖 job 终态与 OS 进程实例证据，不依赖年龄猜测。"""
 
     def _status(self, daemon, jobs=None, owner=None):
-        with mock.patch("core.jvm_validate_daemon.status", return_value=daemon), \
+        with mock.patch("core.jvm_daemon.status", return_value=daemon), \
              mock.patch.object(jvm_api, "Store", lambda: _Store(jobs, owner)):
             return jvm_api._daemon_status_with_jobs()
 
@@ -181,7 +181,7 @@ class DaemonStatusTests(unittest.TestCase):
         with mock.patch.object(jvm_api.runner, "lane", return_value=_Lane()), \
              mock.patch("core.jvm_debug.RUN_LOCK", threading.Lock()), \
              mock.patch.object(jvm_api, "_daemon_status_with_jobs", return_value=safe), \
-             mock.patch("core.jvm_validate_daemon.stop_idle",
+             mock.patch("core.jvm_daemon.stop_idle",
                         return_value={"stopped": True, "reason": "stopped"}) as stop:
             result = asyncio.run(jvm_api.jvm_daemon_stop())
         self.assertTrue(result["stopped"])
@@ -199,7 +199,7 @@ class DaemonStatusTests(unittest.TestCase):
         with mock.patch.object(jvm_api.runner, "lane", return_value=_Lane()), \
              mock.patch("core.jvm_debug.RUN_LOCK", threading.Lock()), \
              mock.patch.object(jvm_api, "_daemon_status_with_jobs", return_value=unsafe), \
-             mock.patch("core.jvm_validate_daemon.stop_idle") as stop:
+             mock.patch("core.jvm_daemon.stop_idle") as stop:
             with self.assertRaises(HTTPException) as caught:
                 asyncio.run(jvm_api.jvm_daemon_stop())
         self.assertEqual(caught.exception.status_code, 409)

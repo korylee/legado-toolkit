@@ -23,7 +23,7 @@ class ReadinessTests(unittest.TestCase):
                 "load",
                 lambda: {"jvm": {"app_repo": "X:/repo"}},
             ),
-            mock.patch("core.jvm_validate_daemon.prepare") as prepare,
+            mock.patch("core.jvm_daemon.prepare") as prepare,
         ):
             result = jvm_api.jvm_readiness()
         self.assertTrue(result["ok"])
@@ -37,7 +37,7 @@ class ReadinessTests(unittest.TestCase):
                 "load",
                 lambda: {"jvm": {"app_repo": ""}},
             ),
-            mock.patch("core.jvm_validate_daemon.prepare") as prepare,
+            mock.patch("core.jvm_daemon.prepare") as prepare,
         ):
             result = jvm_api.jvm_readiness()
         self.assertFalse(result["ok"])

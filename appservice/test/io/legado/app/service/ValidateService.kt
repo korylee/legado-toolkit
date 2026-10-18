@@ -669,7 +669,7 @@ object ValidateService {
      */
     private fun mayHitWall(source: BookSource): Boolean =
         !source.loginUrl.isNullOrBlank() || !source.loginUi.isNullOrBlank() ||
-            source.enabledCookieJar
+            source.enabledCookieJar == true
 
     /** 一次抓取、两个词表的结果：[login] / [antiBot] 各是命中的特征词（空串 = 没命中）。 */
     private data class WallHit(val login: String, val antiBot: String)

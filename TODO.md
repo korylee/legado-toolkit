@@ -165,25 +165,9 @@
 指针：appservice/test/io/legado/app/service/ValidateService.kt，core/settings_store.py，
 AGENTS.md #5b，lessons §五十三
 
-### 条目：daemon-merge · 两 daemon 合一（调试 daemon + 校验 daemon）
+### 条目：launch-simplify · 直起三件套收敛
 状态：todo
 依赖：无
-优先级：P2
-背景：`jvm_daemon`（329 行）与 `jvm_validate_daemon`（647 行）是同构客户端（都经
-  `jvm_direct` 直起、socket JSON 协议、版本键、idle 退出），Kotlin 侧
-  `DebugServiceDaemon(+Launcher)` 与 `ValidateServiceDaemon(+Launcher)` 同构成对；
-  而 `RUN_LOCK` 全局互斥——同一时刻至多一个引擎任务在跑，却可能驻留两个 JVM
-  （各 3g 堆上限）。`backend/api/jvm.py` 的 `_classify_validate_operation`（~100 行）
-  就是为第二个 daemon 单独补的状态分类。
-约束：先写**行为对拍清单**（同输入 → 同 NDJSON/侧车/结论行）再动协议；单 daemon
-  以 op=validate / op=debug 分派；合并后砍掉 `_classify_validate_operation` 那份协调代码。
-验收：单 daemon 跑通调试与批量校验两条链，对拍清单全绿，驻留 JVM 只剩一个。
-指针：core/jvm_daemon.py，core/jvm_validate_daemon.py，core/jvm_direct.py，
-backend/api/jvm.py，lessons §六十六 / §六十七
-
-### 条目：launch-simplify · 直起三件套收敛（依赖 daemon-merge）
-状态：todo
-依赖：daemon-merge
 优先级：P2
 背景：`jvm_direct`（414 行）+ `jvm_env`（620 行）+ `jvm_runtime_snapshot`（112 行）+
   `gradle_distribution`（161 行）≈ 1300 行只为「不起 Gradle 直起测试 JVM + 环境新鲜度」。

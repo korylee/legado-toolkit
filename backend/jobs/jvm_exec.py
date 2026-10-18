@@ -213,7 +213,7 @@ def _manifest_error(manifest: Any) -> str:
                               - set(manifest["params"]))
     if missing_params:
         return "JVM 任务 manifest 缺少执行参数：%s" % ", ".join(missing_params)
-    if manifest.get("execution_plan") not in ("validate_daemon", "gradle"):
+    if manifest.get("execution_plan") not in ("daemon", "gradle"):
         return "JVM 任务 manifest 结构不受支持：execution_plan 无效"
     expected = str(manifest.get("sha256") or "")
     if not expected:
@@ -788,34 +788,34 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
         # results.jsonl 读回；准备态不完整时，daemon 失败不能偷偷再开 Gradle。
         if single and args_path is not None:
             try:
-                from core import jvm_validate_daemon, jvm_direct
+                from core import jvm_daemon, jvm_direct
 
                 job_runner.update_phase(job_id, "configuring")
                 dump = jvm_direct.load_dump(warn_stale=False)
                 if execution_readiness_snapshot:
                     current_exec = execution_readiness(dump)
                     if not current_exec.get("ok"):
-                        raise jvm_validate_daemon.ValidateDaemonError(
+                        raise jvm_daemon.DaemonError(
                             current_exec.get("reason") or "单条 JVM 执行态在排队期间失效")
                 job_runner.update_phase(job_id, "running_validate")
                 _engine_t0 = time.monotonic()
-                daemon_response = jvm_validate_daemon.run(
+                daemon_response = jvm_daemon.run_validate(
                     dump, str(args_path),
                     owner={"job_id": job_id, "chunk": "single"})
                 _append_event(timeline_dir, "startup_stage", stage="daemon_request",
                                status="done", cost_sec=round(time.monotonic() - _engine_t0, 3),
-                               mode="validate_daemon")
+                               mode="daemon")
                 daemon_code = daemon_response.get("code")
                 if daemon_code != 0:
-                    raise jvm_validate_daemon.ValidateDaemonError(
+                    raise jvm_daemon.DaemonError(
                         "daemon 返回 code=%s%s" %
                         (daemon_code,
                          ("：" + str(daemon_response.get("error"))
                           if daemon_response.get("error") else "")))
                 if not out_path.exists():
-                    raise jvm_validate_daemon.ValidateDaemonError(
+                    raise jvm_daemon.DaemonError(
                         "daemon 返回成功但没有产出结果文件")
-                execution_mode = "validate_daemon"
+                execution_mode = "daemon"
                 execution_note = "单条校验复用常驻 Validate JVM"
             except Exception as exc:
                 daemon_failure = "常驻 Validate JVM 未完成：%s" % exc
@@ -830,13 +830,13 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
                         "exit": None,
                         "reason": (daemon_failure + "；完整 Gradle 准备态未通过，"
                                    "本次不回退 Gradle，避免再次触发冷启动/缺 SDK"),
-                        "execution_mode": "validate_daemon",
+                        "execution_mode": "daemon",
                         "execution_note": "单条执行态失败，未使用 Gradle fallback",
                         "readiness": readiness_snapshot or {},
                         "execution_readiness": execution_readiness_snapshot or {},
                     })
 
-        if execution_mode != "validate_daemon":
+        if execution_mode != "daemon":
             job_runner.update_phase(job_id, "starting_gradle")
             gradle = _normalize_gradle_result(
                 _run_gradle(args_path=args_path, runtime=runtime, job_id=job_id)
@@ -937,18 +937,18 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
             watch_why: Dict[str, bool] = {}
             if daemon_allowed and chunk_args is not None:
                 try:
-                    from core import jvm_validate_daemon, jvm_direct
+                    from core import jvm_daemon, jvm_direct
 
                     dump = jvm_direct.load_dump(warn_stale=False)
-                    info = jvm_validate_daemon.probe(dump)
+                    info = jvm_daemon.probe(dump)
                     if info is None:
-                        raise jvm_validate_daemon.ValidateDaemonError(
+                        raise jvm_daemon.DaemonError(
                             "daemon 探测未通过（未启动/忙/版本不符）")
                     job_runner.update_phase(job_id, "running_validate")
                     # socket 等待 = 每源预算 × 块源数 + 余量：Kotlin 侧对单次 op
                     # 的时长没有上限，这是 daemon-only 批量路径的唯一护栏；超时即报告
                     # 引擎失败，不把一次 daemon 故障放大成每块一次 Gradle 冷启动。
-                    per_source = int(jvm_validate_daemon.params_from_args(
+                    per_source = int(jvm_daemon.validate_params_from_args(
                         chunk_args)["timeout"])
                     wait = min(per_source * max(chunk_sources, 1) + 60,
                                _DAEMON_SOCKET_TIMEOUT_CAP)
@@ -958,11 +958,11 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
                         target=_watch_output_stall, daemon=True,
                         args=(chunk_out, min(_STALL_FACTOR * per_source,
                                              _STALL_CAP_SEC),
-                              tail_stop, jvm_validate_daemon.stop,
+                              tail_stop, jvm_daemon.stop,
                               _STALL_POLL_SEC, cancelled.is_set, watch_why))
                     watcher.start()
                     try:
-                        daemon_response = jvm_validate_daemon.run(
+                        daemon_response = jvm_daemon.run_validate(
                             dump, str(chunk_args), socket_timeout=wait,
                             owner={"job_id": job_id,
                                    "chunk": "%d/%d" % (idx + 1, total),
@@ -973,13 +973,13 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
                         tail_stop.set()
                     daemon_code = daemon_response.get("code")
                     if daemon_code != 0:
-                        raise jvm_validate_daemon.ValidateDaemonError(
+                        raise jvm_daemon.DaemonError(
                             "daemon 返回 code=%s%s" %
                             (daemon_code,
                              ("：" + str(daemon_response.get("error"))
                               if daemon_response.get("error") else "")))
                     if not chunk_out.exists():
-                        raise jvm_validate_daemon.ValidateDaemonError(
+                        raise jvm_daemon.DaemonError(
                             "daemon 返回成功但没有产出结果文件")
                     daemon_mode = True
                 except Exception as exc:
@@ -989,7 +989,7 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
                         # 否则取消要陪 Gradle 再跑一轮
                         return {"index": idx, "ok": False, "cancelled": True,
                                 "reason": "用户取消",
-                                "execution_mode": "validate_daemon",
+                                "execution_mode": "daemon",
                                 "daemon_failure": daemon_failure,
                                 "cost_sec": round(time.monotonic() - started, 1)}
                     if watch_why.get("stalled"):
@@ -1004,7 +1004,7 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
             if not daemon_mode and not stalled:
                 return {"index": idx, "ok": False, "exit": 1,
                         "reason": daemon_failure or "常驻 Validate JVM 未执行",
-                        "execution_mode": "validate_daemon",
+                        "execution_mode": "daemon",
                         "daemon_failure": daemon_failure or "常驻 Validate JVM 未执行",
                         "cost_sec": round(time.monotonic() - started, 1)}
             if daemon_mode:
@@ -1018,7 +1018,7 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
                 # 把「一条源挂死一块 11 分钟」压成「约 2 分钟、只付一次」
                 job_runner.update_phase(job_id, "isolating_stall")
                 _append_event(timeline_dir, "chunk_stalled", index=idx,
-                              mode="validate_daemon",
+                              mode="daemon",
                               reason="块内输出停滞，疑似慢源挂住引擎")
                 iso = _isolate_stalled_chunk(
                     chunk_rows=chunk_rows or [], chunk_dir=chunk_dir,
@@ -1038,7 +1038,7 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
                 elif iso.get("cancelled"):
                     return {"index": idx, "ok": False, "cancelled": True,
                             "reason": "用户取消",
-                            "execution_mode": "validate_daemon",
+                            "execution_mode": "daemon",
                             "daemon_failure": daemon_failure,
                             "cost_sec": round(time.monotonic() - started, 1)}
                 else:
@@ -1047,7 +1047,7 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
             if code != 0 or not chunk_out.exists():
                 return {"index": idx, "ok": False, "exit": code,
                         "reason": (daemon_failure or "Validate daemon 没有产出结果文件"),
-                        "execution_mode": "validate_daemon",
+                        "execution_mode": "daemon",
                         "daemon_failure": daemon_failure,
                         "cost_sec": round(time.monotonic() - started, 1)}
             # 读结果前先停本块轮询：终值以解析出的 rows 为准（理由同单条）
@@ -1064,7 +1064,7 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
             if chunk_dir is not None:
                 (chunk_dir / "DONE").write_text("", encoding="utf-8")
             return {"index": idx, "ok": True, "count": len(rows),
-                    "execution_mode": "validate_daemon",
+                    "execution_mode": "daemon",
                     "daemon_failure": daemon_failure,
                     "cost_sec": round(time.monotonic() - started, 1)}
         finally:
@@ -1084,7 +1084,7 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
         后续读结果/落库/DONE 照常走。仅 manifest 路径可用（需要 per-chunk 目录）。
         """
         from core import jvm_direct
-        from core import jvm_validate_daemon
+        from core import jvm_daemon
 
         params = manifest["params"]
         keyword = str(params["keyword"])
@@ -1092,8 +1092,8 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
         concurrency = int(params["concurrency"])
         depth = str(params["depth"])
         try:
-            jvm_validate_daemon.stop()
-            prep = jvm_validate_daemon.prepare(jvm_direct.load_dump(warn_stale=False))
+            jvm_daemon.stop()
+            prep = jvm_daemon.prepare(jvm_direct.load_dump(warn_stale=False))
             if prep.get("outcome") not in ("ready", "started"):
                 return {"ok": False,
                         "note": "引擎重启未就绪：%s" % (prep.get("reason")
@@ -1120,7 +1120,7 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
             _write_args(keyword, timeout, concurrency, iso_out, iso_src,
                         depth, args_path=iso_args)
             try:
-                resp = jvm_validate_daemon.run(
+                resp = jvm_daemon.run_validate(
                     dump, str(iso_args),
                     socket_timeout=timeout + _REMEDIAL_WAIT_MARGIN_SEC,
                     owner={"job_id": job_id,
@@ -1173,14 +1173,14 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
             _append_event(timeline_dir, "waiting_engine", elapsed_sec=elapsed_sec)
 
         try:
-            from core import jvm_direct, jvm_validate_daemon
+            from core import jvm_direct, jvm_daemon
 
             dump = jvm_direct.load_dump(warn_stale=False)
             gate = execution_readiness(dump)
             if not gate.get("ok"):
                 return {"outcome": "failed", "retryable": False,
                         "reason": gate.get("reason") or "JVM 执行态未就绪"}
-            return jvm_validate_daemon.prepare(
+            return jvm_daemon.prepare(
                 dump, busy_wait_sec=_DAEMON_BUSY_WAIT_SEC, on_wait=_notice)
         except Exception as exc:
             return {"outcome": "failed", "retryable": False, "reason": str(exc)}
@@ -1270,7 +1270,7 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
                              if not daemon_allowed else "")
             _append_event(timeline_dir, "chunk_started", index=idx,
                           total=len(chunks), count=len(chunk_rows),
-                          mode=("validate_daemon" if daemon_allowed else "unavailable"),
+                          mode=("daemon" if daemon_allowed else "unavailable"),
                           reason=(daemon_reason[:300] if daemon_reason else ""))
             work = asyncio.create_task(run_in_threadpool(
                 _chunk_work, idx, len(chunks), chunk_dir, chunk_args,
@@ -1325,13 +1325,13 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
         dist = Counter(r.get("state") for r in all_rows)
         # 块级执行方式统计。混合时保留历史值，差额写进 execution_note。
         daemon_blocks = sum(1 for r in chunk_reports
-                            if r.get("ok") and r.get("execution_mode") == "validate_daemon")
+                            if r.get("ok") and r.get("execution_mode") == "daemon")
         failed_blocks = sum(1 for r in chunk_reports if not r.get("ok"))
         result = dict(prep, **{
             "ok": not abort_reason, "exit": None if abort_reason else 0,
             "batch": batch, "count": len(all_rows), "dist": dict(dist),
             "checks": sum(r.get("count", 0) for r in chunk_reports if r.get("ok")),
-            "execution_mode": "validate_daemon",
+            "execution_mode": "daemon",
             "execution_note": ("批量 daemon 执行：%d 块完成、%d 块失败"
                                % (daemon_blocks, failed_blocks)),
             "checked": len(items), "cached": 0, "fetched": len(items),

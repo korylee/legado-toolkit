@@ -64,7 +64,7 @@ class JobDetailShapeTests(unittest.TestCase):
                 "changed": {"dead": 2},
                 "changed_items": [{"url": "https://a.example", "from": "ok", "to": "dead"}],
             },
-            "execution_mode": "validate_daemon",
+            "execution_mode": "daemon",
             "execution_note": "单条校验复用常驻 Validate JVM",
             "items": [{"url": "https://a.example"}],
         }))
@@ -72,7 +72,7 @@ class JobDetailShapeTests(unittest.TestCase):
         self.assertEqual(detail["summary"]["checked"], 2)
         self.assertEqual(detail["summary"]["changed_total"], 2)
         self.assertEqual(len(detail["summary"]["changed_items"]), 1)
-        self.assertEqual(detail["execution_mode"], "validate_daemon")
+        self.assertEqual(detail["execution_mode"], "daemon")
         self.assertIn("常驻 Validate JVM", detail["execution_note"])
         self.assertIsNone(detail["result"])
 
@@ -83,7 +83,7 @@ class JobDetailShapeTests(unittest.TestCase):
             "skipped_rule_incomplete": 3,
             "chunk_reports": [
                 {"index": 0, "ok": True, "count": 2,
-                 "execution_mode": "validate_daemon", "cost_sec": 12.5},
+                 "execution_mode": "daemon", "cost_sec": 12.5},
                 {"index": 1, "ok": False, "exit": 1,
                  "execution_mode": "gradle", "cost_sec": 8.0,
                  "daemon_failure": "daemon 探测未通过",
@@ -101,7 +101,7 @@ class JobDetailShapeTests(unittest.TestCase):
         self.assertEqual(detail["skipped_rule_incomplete"], 3)
         self.assertFalse(detail["chunk_reports_truncated"])
         self.assertEqual(len(detail["chunk_reports"]), 2)
-        self.assertEqual(detail["chunk_reports"][0]["execution_mode"], "validate_daemon")
+        self.assertEqual(detail["chunk_reports"][0]["execution_mode"], "daemon")
         self.assertEqual(detail["daemon_prepare"]["outcome"], "started")
         failed = detail["chunk_reports"][1]
         self.assertEqual(failed["daemon_failure"], "daemon 探测未通过")

@@ -148,9 +148,9 @@ def _classify_validate_operation(daemon: Dict[str, Any], active_jobs: list,
 
 
 def _daemon_status_with_jobs() -> Dict[str, Any]:
-    from core import jvm_validate_daemon
+    from core import jvm_daemon
 
-    daemon = jvm_validate_daemon.status()
+    daemon = jvm_daemon.status()
     with Store() as st:
         active = [j for j in st.list_jobs(limit=10000, statuses=ACTIVE_JOB_STATUSES)
                   if j.get("kind") in ("jvm_run", "jvm_debug")]
@@ -208,9 +208,9 @@ async def jvm_daemon_stop():
             snapshot = await run_in_threadpool(_daemon_status_with_jobs)
             if not snapshot.get("stop_allowed"):
                 raise HTTPException(409, str(snapshot.get("stop_reason") or "无法安全停止 daemon"))
-            from core import jvm_validate_daemon
+            from core import jvm_daemon
             result = await run_in_threadpool(
-                jvm_validate_daemon.stop_idle,
+                jvm_daemon.stop_idle,
                 owner_inactive=bool(snapshot.get("owner_inactive")),
                 expected_operation_id=(snapshot.get("current_operation") or {}).get("operation_id"))
             if not result.get("stopped"):
@@ -376,12 +376,12 @@ async def jvm_run(body: Optional[JvmRunRequest] = None):
         "started": True,
         "count": len(rows),
         "skipped_rule_incomplete": skipped_rule_incomplete,
-        "execution_plan": "validate_daemon",
+        "execution_plan": "daemon",
         **({"requested_urls": match_report["requested"],
            "matched_urls": match_report["matched"],
            "missing_urls": match_report["missing"]} if want_urls else {}),
     }
-    execution_plan = "validate_daemon"
+    execution_plan = "daemon"
     # 分块大小（提交即冻结）：settings 的 jvm.chunk_size，越界值已被 coerce 收敛
     cs = chunk_size
     n = len(rows)

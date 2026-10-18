@@ -63,7 +63,8 @@ class _FakeDaemon:
                 op = req.get("op")
                 resp = {"id": req.get("id"), "code": 0, "cost_ms": 7, "error": ""}
                 if op == "ping":
-                    resp.update(pid=self.pid, sig=self.sig)
+                    resp.update(kind="engine", ops=["debug", "validate"],
+                                pid=self.pid, sig=self.sig)
                 if op == "stop" and self.honor_stop:
                     conn.sendall((json.dumps(resp) + "\n").encode("utf-8"))
                     self._alive = False

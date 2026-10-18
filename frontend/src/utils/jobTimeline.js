@@ -5,9 +5,9 @@
 
 // 「这一块走的是哪条引擎」的取词（**唯一一份**）：块开始/结束/失败三处都说它。
 // 各写一遍时，分歧正好落在不报错的地方——同一块开头说 Gradle、结尾说常驻引擎。
-// 值域由后端给（`backend/jobs/jvm_exec.py` 的 execution_mode：validate_daemon / gradle）。
+// 值域由后端给（`backend/jobs/jvm_exec.py` 的 execution_mode：daemon / gradle）。
 function modeLabel(mode) {
-  if (mode === "validate_daemon") return "常驻引擎";
+  if (mode === "daemon") return "常驻引擎";
   if (mode === "gradle") return "Gradle";
   return "";
 }

@@ -25,10 +25,10 @@ from core.store import Store
 def _report_recovered_daemon_operation(recovered_job_ids: list[str]) -> None:
     if not recovered_job_ids:
         return
-    from core import jvm_validate_daemon
+    from core import jvm_daemon
 
     try:
-        operation = jvm_validate_daemon.status().get("current_operation") or {}
+        operation = jvm_daemon.status().get("current_operation") or {}
     except Exception as exc:
         print("警告：无法读取 Validate daemon 操作状态，未发送 stop：%s" % exc,
               flush=True)

@@ -10,14 +10,14 @@ test("里程碑与块事件说人话，并展示启动耗时", () => {
     formatTimelineEvent({ kind: "chunk_started", index: 2, count: 25, mode: "gradle" }).text,
     "第 3 块 开始（25 条 · Gradle）");
   assert.equal(
-    formatTimelineEvent({ kind: "chunk_started", index: 2, count: 25, mode: "validate_daemon" }).text,
+    formatTimelineEvent({ kind: "chunk_started", index: 2, count: 25, mode: "daemon" }).text,
     "第 3 块 开始（25 条 · 常驻引擎）");
   // 引擎未知（老事件没有 mode）时不许编一个：括号里只剩条数
   assert.equal(
     formatTimelineEvent({ kind: "chunk_started", index: 2, count: 25 }).text,
     "第 3 块 开始（25 条）");
   assert.equal(
-    formatTimelineEvent({ kind: "chunk_done", index: 2, count: 25, cost_sec: 17.2, mode: "validate_daemon" }).text,
+    formatTimelineEvent({ kind: "chunk_done", index: 2, count: 25, cost_sec: 17.2, mode: "daemon" }).text,
     "第 3 块 完成：25 条 · 17.2 秒 · 常驻引擎");
   assert.equal(
     formatTimelineEvent({ kind: "done", count: 75, cost_sec: 600 }).text,

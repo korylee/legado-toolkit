@@ -29,7 +29,7 @@ export function jobPhaseLabel(phase) {
 //: 「Gradle 回退」是最要紧的一档——它意味着这次没走常驻引擎、比预期慢，
 //: 而这正是用户在进度迟迟不动时想知道的。
 const EXECUTION_MODE_LABELS = {
-  validate_daemon: "常驻引擎",
+  daemon: "常驻引擎",
   gradle_fallback: "Gradle 回退",
   unknown: "未确定",
 };
