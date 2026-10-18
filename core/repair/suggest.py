@@ -292,12 +292,12 @@ def _outline(html: str, focus: str = "") -> str:
 def login_wall(html: str, enabled_cookie_jar: bool = False) -> bool:
     """这一页是不是登录墙 / 反爬挑战页。
 
-    判定表在 ``core.checker``（``is_login_wall`` → ``classify_http_status``），
+    判定表在 ``core.jvm_health``（``is_login_wall`` → ``classify_http_status``），
     这里不重写一份。**这条链路为什么也需要它**：抓到的是登录页时，模型看到的
     页面**不是 App 看到的那份**（App 带登录态），它提的建议既验不了也修不对——
     用户花的是冤枉钱。所以要把话说在前面，而不是等他点完再看到「取不到值」。
     """
-    from core.checker import is_login_wall
+    from core.jvm_health import is_login_wall
 
     try:
         return is_login_wall(str(html or ""), bool(enabled_cookie_jar))

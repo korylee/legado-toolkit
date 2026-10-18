@@ -35,7 +35,7 @@
    `result_json.items[].url` 来自 `build_record` 的**原文**——下游（就地回填、
    跳转、匹配）拿它当 key 时必须先归一，否则一条都对不上，且**不报错**。
    详见 lessons §五。
-5b. **结论行的版本轴**：每条校验结论带 `v`（`core/checker.CACHE_VERSION`，由
+5b. **结论行的版本轴**：每条校验结论带 `v`（`core/jvm_health.CACHE_VERSION`，由
    `core/jvm_health` 落库时写入）。判定口径一变——新增影响结论的探测维度，或
    `probe_depth`（`core/settings_store.PROBE_DEPTHS`，一根四档）的**编号含义**平移——
    必须 bump 一版：库里新旧口径的结论行长存（每源留最近一条），没有版本轴就分不出
@@ -85,7 +85,7 @@
      README = 是什么 / 怎么装 / 怎么用 / 接口与配置 **reference**（含按场景的命令表与健康
      五档的动作列）。**口径不再收成文档**：深度档位 / 缓存 TTL / 归因分桶的
      枚举与默认值都在 `core/`（`models.HEALTH_NAMES`、`settings_store`、
-     `dns_check` 的判定常量与 `checker` 的归因函数），文档要用就给符号名。同一张表、同一份清单、
+     `dns_check` 的判定常量与 `jvm_health` 的归因函数），文档要用就给符号名。同一张表、同一份清单、
      同一句告诫**只在一处维护**，另一处留一行指针。
      判据是实测的：同一份内容两处写，**腐烂只发生在一侧**；读者无从判断该信哪一份。
 11. **判定逻辑里不能放「我们自己写进去的结论」当输入。**

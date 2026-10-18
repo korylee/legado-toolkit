@@ -126,7 +126,7 @@
   落库只加列、不改判词。
 验收：结论行能记下当次关键词与 UA（以及 `webview_stripped`），新旧口径可区分；在此之上做一次
   `no_result` 复核批次——单关键词无结果的源经多词复核后才判坏。
-指针：AGENTS.md #5b，core/jvm_health.py，core/checker.py，lessons §五十一 / §五十三
+指针：AGENTS.md #5b，core/jvm_health.py，lessons §五十一 / §五十三
 
 ### 条目：note-half · 正文附注只做了一半：疑似错误页
 状态：todo
@@ -147,9 +147,9 @@
   （`ANTI_BOT_MARKERS`）没有对应状态，于是「需人工过一下」被读成「没出结果」。
   异常归因已机器可读（`root_kind`）；anti-bot 是**页面内容**特征，不是
   异常分类，别塞进那个码表。
-约束：判据照 `core/checker.is_login_wall` 那套，**别新造**。
+约束：判据照 `core/jvm_health.is_login_wall` 那套，**别新造**。
 验收：这类源不再被判成 no_result，而是有一个「需人工过一下」的状态。
-指针：lessons §五十八，core/checker.py
+指针：lessons §五十八，core/jvm_health.py
 
 ### 条目：xa-1111 · XPath 规则在引擎侧的结论
 状态：todo
@@ -176,5 +176,47 @@
   `ServiceJson` 形状钉，结论行的 `stage` 词表同步扩。
 指针：appservice/test/io/legado/app/service/ValidateService.kt，core/settings_store.py，
 AGENTS.md #5b，lessons §五十三
+
+### 条目：daemon-merge · 两 daemon 合一（调试 daemon + 校验 daemon）
+状态：todo
+依赖：无
+优先级：P2
+背景：`jvm_daemon`（329 行）与 `jvm_validate_daemon`（647 行）是同构客户端（都经
+  `jvm_direct` 直起、socket JSON 协议、版本键、idle 退出），Kotlin 侧
+  `DebugServiceDaemon(+Launcher)` 与 `ValidateServiceDaemon(+Launcher)` 同构成对；
+  而 `RUN_LOCK` 全局互斥——同一时刻至多一个引擎任务在跑，却可能驻留两个 JVM
+  （各 3g 堆上限）。`backend/api/jvm.py` 的 `_classify_validate_operation`（~100 行）
+  就是为第二个 daemon 单独补的状态分类。
+约束：先写**行为对拍清单**（同输入 → 同 NDJSON/侧车/结论行）再动协议；单 daemon
+  以 op=validate / op=debug 分派；合并后砍掉 `_classify_validate_operation` 那份协调代码。
+验收：单 daemon 跑通调试与批量校验两条链，对拍清单全绿，驻留 JVM 只剩一个。
+指针：core/jvm_daemon.py，core/jvm_validate_daemon.py，core/jvm_direct.py，
+backend/api/jvm.py，lessons §六十六 / §六十七
+
+### 条目：launch-simplify · 直起三件套收敛（依赖 daemon-merge）
+状态：todo
+依赖：daemon-merge
+优先级：P2
+背景：`jvm_direct`（414 行）+ `jvm_env`（620 行）+ `jvm_runtime_snapshot`（112 行）+
+  `gradle_distribution`（161 行）≈ 1300 行只为「不起 Gradle 直起测试 JVM + 环境新鲜度」。
+  这是「跳过 Gradle 入场费」的账单；daemon 合一后若收敛为「daemon + Gradle 兜底 boot」，
+  这批可缩成一条。
+约束：砍掉的代价是失败回落从秒级直起变一次 Gradle 编译，且 `scripts/jvm_debug_direct.py`
+  开发入口退场——先实测两条路的耗时差再拍板。
+验收：启动层只剩一条 boot 路径 + 一条回落，readiness 语义不回退（lessons §六十五/§六十七）。
+指针：core/jvm_direct.py，core/jvm_env.py，core/jvm_runtime_snapshot.py，appservice/legado-test.init.gradle
+
+### 条目：structured-provenance · structured 材料的请求来源记进侧车
+状态：todo
+依赖：无
+优先级：P2
+背景：structured 二次解析用的规则可能带 `@js:`，里面的 `java.ajax` 会**新发请求**——
+  structured 的值可能来自事件流之外的另一次抓取，与「用引擎手上那页」的注释承诺
+  有出入，侧车里没有记录材料来自哪次请求。
+约束：失败纪律同 matched（只记 fails 不动判定）；不要为了记录去改上游 Debug 流。
+验收：侧车里能看出 structured 各段的页是事件流那次还是另发的请求；出现第一例
+  「structured 值与事件对不上」时这条是排查入口。
+指针：appservice/test/io/legado/app/service/DebugService.kt（runStructuredWithPhase），
+StructuredResult.kt，core/app_debug.py
 
 ---

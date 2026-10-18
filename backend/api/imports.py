@@ -22,7 +22,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from backend.deps import get_store
 from backend.schemas import (ImportBody, ImportUrlRequest, RepositoryCollectionRequest,
                              RepositoryDetailsRequest, RepositoryBrowseRequest)
-from core.checker import static_rule_complete
+from core.jvm_health import static_rule_complete
 from core.loader import _normalize_url, fingerprint
 from core.models import BOOK_SOURCE_TYPE_NAMES
 from core.organizer import STATUS_GROUP_NAMES, infer_health_from_group

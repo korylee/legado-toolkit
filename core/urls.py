@@ -7,7 +7,7 @@ from typing import Any, Dict, Tuple
 from urllib.parse import urljoin
 
 #: Legado 的 URL 选项分隔：``url,{json}``。逗号两侧允许空白（实测源里见过）。
-#: 与 ``AnalyzeUrl.paramPattern`` 同语义，见 core/checker.py 的历史注释。
+#: 与 ``AnalyzeUrl.paramPattern`` 同语义（钉在 tests/test_checker_judge.py 的 UrlOptionTests）。
 _URL_OPTION_RE = re.compile(r"\s*,\s*(?=\{)")
 
 

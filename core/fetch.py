@@ -370,7 +370,8 @@ def fetch_ex(url: str, timeout: int = 15,
     _throttle(*_rate_key(source))
 
     # body 按 UTF-8 发：Legado 侧 url 选项的 body 也是字符串按请求 charset 编码，
-    # 这里没把 charset 选项铺进来（同 checker 的取舍，见 parse_search_request 注释）
+    # 这里没把 charset 选项铺进来——响应解码已有 utf-8 → gbk → gb2312 回退，
+    # 覆盖常见情况；真要按声明解码需要把它一路铺到这里，收益与改动面不成比例。
     data = body.encode("utf-8") if method == "POST" else None
     req = urllib.request.Request(url, data=data, headers=h, method=method)
 

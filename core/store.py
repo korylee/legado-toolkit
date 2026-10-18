@@ -19,7 +19,7 @@ import threading
 import time
 from typing import Any, Dict, List, Optional, Sequence
 
-from core.checker import CACHE_VERSION, static_rule_complete
+from core.jvm_health import CACHE_VERSION, static_rule_complete
 
 from core.tags import (
     DEFAULT_USER_TAGS as _DEFAULT_USER_TAGS,
@@ -286,7 +286,7 @@ class Store:
         ("system_tags_locked", "INTEGER NOT NULL DEFAULT 0"),
     ], "checks": [
         # 缓存版本 8 起的结论行轴：这行结论是"带着搜索探测"写下的吗？口径归
-        # `core/checker` 的 `CACHE_VERSION`。**不落这一列等于没修**：
+        # `core/jvm_health` 的 `CACHE_VERSION`。**不落这一列等于没修**：
         # item 里写了但没建列，读回来恒为 None，新旧口径在库里分不出来
         ("search_probed", "INTEGER DEFAULT 0"),
         # 结论**是谁判的**（core/models.Engine：jvm / device）。本机引擎与真机的
@@ -1192,17 +1192,16 @@ class Store:
 
         当前版本只保留每源最近一条，旧版本行留作追溯。
         当前读者都只取当前版本每源最新一条（`checks_map`、`last_check`、`v_sources`
-        视图），历史版本不参与当前状态。
-        瞬时网络的结论现在也会落库（见
-        `checker.save_cache_append`），所以仍需清理当前版本旧行。
+        视图），历史版本不参与当前状态。本机引擎的结论**每条都落库**（含待复检），
+        所以仍需清理当前版本旧行。
 
         **当前版本保留的必须是 `checks_map` 会返回的那一条**（同样是
         `checked_at DESC, id DESC`）。两边口径一旦不一致，就会出现"列表上显示的是
         A 行、而它刚被这次清理删掉"——表现是健康度莫名其妙变回上一条，且不报错。
 
-        调用点是 `AsyncChecker.run()` 存完之后（**所有写入路径的唯一收口**，
-        Web 任务与 CLI 都走它），不另开定时器；`jobs`/`exports` 那两套是"建新任务
-        时顺带扫"，这里没有对应的时机。
+        调用点是批量落库收口（`core.jvm_health.store_checks`）之后——
+        **所有写入路径的唯一收口**，Web 任务与 CLI 都走它；不另开定时器；
+        `jobs`/`exports` 那两套是"建新任务时顺带扫"，这里没有对应的时机。
         """
         with self.conn:
             cur = self.conn.execute(

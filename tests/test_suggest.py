@@ -243,7 +243,7 @@ class PreselectTests(unittest.TestCase):
 class LoginWallTests(unittest.TestCase):
     """登录墙：模型看到的页面不是 App 看到的那份（App 带登录态），先说清楚。
 
-    判定表在 core/checker，这里只验接线——`enabled_cookie_jar` 忘了传，
+    判定表在 core.jvm_health，这里只验接线——`enabled_cookie_jar` 忘了传，
     「200 + 登录词」那一档就永远不生效（「请登录」在正常页面导航栏里太常见）。
     """
 

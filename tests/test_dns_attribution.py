@@ -13,7 +13,7 @@ from __future__ import annotations
 import unittest
 
 from core import dns_check
-from core.checker import classify_transport_error, err_desc
+from core.jvm_health import classify_transport_error, err_desc
 from core.models import Health
 
 
@@ -160,7 +160,7 @@ class ClassifyDnsTests(unittest.TestCase):
 
     def _run(self, verdict: str):
         """直接测**判词本体** `dns_verdict_text`——映射才是要守的东西。"""
-        from core.checker import dns_verdict_text
+        from core.jvm_health import dns_verdict_text
         import asyncio
 
         async def fake(host):
@@ -192,7 +192,7 @@ class ClassifyDnsTests(unittest.TestCase):
             calls.append(host)
             return dns_check.POLLUTED, "（说明）"
         dns_check.probe = fake
-        from core.checker import dns_verdict_text
+        from core.jvm_health import dns_verdict_text
         import asyncio
         verdict = asyncio.run(fake("a.example"))
         dns_verdict_text(*verdict)

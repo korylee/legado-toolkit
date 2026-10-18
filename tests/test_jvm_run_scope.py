@@ -33,7 +33,7 @@ from backend.jobs import jvm_exec
 from backend.jobs import runner as jobs_runner
 from backend.schemas import JvmRunRequest
 from core import jvm_direct
-from core.checker import CACHE_VERSION
+from core.jvm_health import CACHE_VERSION
 from core.loader import _normalize_url
 from core.store import Store
 

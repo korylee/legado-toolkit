@@ -16,7 +16,7 @@ import unittest
 import uuid
 
 from core.store import Store
-from core.checker import CACHE_VERSION
+from core.jvm_health import CACHE_VERSION
 
 
 _ROOT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")

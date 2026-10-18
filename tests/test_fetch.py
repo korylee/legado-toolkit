@@ -320,9 +320,9 @@ class RateLimitTests(CacheIsolatedTestCase):
             def __exit__(self, *exc): return False
         return FakeResp()
 
-    def test_parser_is_the_same_object_checker_uses(self):
-        from core import checker, quality
-        self.assertIs(quality.rate_interval_ms, checker.rate_interval_ms)
+    def test_parser_is_the_same_object_every_caller_uses(self):
+        from core import quality
+        self.assertIs(F.rate_interval_ms, quality.rate_interval_ms)
 
     def test_rate_key_for_absent_or_unparsable_rates(self):
         # 不传 source 不能报错（add_source 的探测阶段就是没有源的状态），

@@ -31,9 +31,9 @@ from backend.jobs.jvm_exec import (_build_jvm_manifest, _cleanup_run_dir,
                                    _export_sources_file, _write_args)
 from backend.schemas import JvmRunRequest
 from core import settings_store
-from core.checker import static_rule_complete
 from core.jvm_direct import execution_readiness
 from core.jvm_env import readiness
+from core.jvm_health import static_rule_complete
 from core.loader import _normalize_url
 from core.paths import data_dir
 from core.store import ACTIVE_JOB_STATUSES, Store

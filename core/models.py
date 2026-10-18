@@ -240,8 +240,8 @@ def build_record(raw: Dict[str, Any], index: int) -> BookSourceRecord:
     # **把站点首页当搜索页打**：白费一次请求，而且结论无从解释。
     # 剥了再判，「我们回放不了的搜索」自然就落成「没有搜索」。
     #
-    # 后缀本身不必在这里解读：`parse_search_request` 才是**唯一**懂
-    # `@POST` / `@headers=` / `@Cookie=` 的地方，让它去认，别再存第二份。
+    # 后缀在这里只剥不解读：剥完的模板原样保留（含选项语法），交给
+    # core/urls 的解析去认 `,{json}`，这里不存第二份解释。
     if "@" in tpl:
         tpl = tpl.rpartition("@")[0]
     rec.search_url_template = tpl

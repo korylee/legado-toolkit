@@ -281,10 +281,11 @@ object DebugService {
         // `Debug.EventKind`），message 前一行 `≡获取成功:<URL>` 就是页地址。不需要
         // 也不应该用正则去扣事件文本——管道归属是 App 已经标好的枚举。只在收集线程里写。
         val urlsByStep = java.util.Collections.synchronizedMap(linkedMapOf<String, String>())
-        // 这次调试入口是搜索还是发现：与 App 的分派同一判据（`Debug.kt` 里
-        // `key.startsWith("发现::")` 走 explore）——**列表段只记一个段名**，
+        // 这次调试入口是搜索还是发现：与 App 的分派同一判据（上游 `Debug.kt` 是
+        // `key.contains("::")` 走 explore，**不是** `发现::` 前缀字面量——Python 拼 key
+        // 时只造 `发现::`，但判据本身按上游抄）。**列表段只记一个段名**，
         // 侧车里不为没跑的那条管道多算一份材料。
-        val listStep = if (key.startsWith("发现::")) "explore" else "search"
+        val listStep = if (key.contains("::")) "explore" else "search"
         var lastUrl = ""
         //: 引擎取回来的整页 HTML（{url: 整页}）。只在收集线程里写，收尾之后才读
         val engineHtml = EngineHtmlCollector()

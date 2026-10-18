@@ -250,6 +250,28 @@ class TestStructuredParity(unittest.TestCase):
               "appservice/test/io/legado/app/service/StructuredResult.kt")
     DEBUG = (pathlib.Path(__file__).parent.parent /
              "appservice/test/io/legado/app/service/DebugService.kt")
+    FRONTEND = (pathlib.Path(__file__).parent.parent /
+                "frontend/src/utils/debugStepResult.js")
+
+    def test_frontend_consumes_only_fields_the_engine_produces(self):
+        """前端 STRUCTURED_FIELDS 消费的字段键 ⊆ Kotlin 产出的字段名（AGENTS #22⑤）。
+
+        这是结构化材料的**第三份词表**（Kotlin 产、Python 闸门、前端展示）——
+        Kotlin 改名的话前端不报错，只是那一项静默消失（`!value` → 省略），
+        用户看到的是「引擎没取到」。逐词比对把「各改一边」拦在测试里。
+        """
+        kt = self.KOTLIN.read_text(encoding="utf-8")
+        produced = set(re.findall(r'"([a-z_]+)"\s+to', kt))
+        self.assertTrue({"total", "items", "chapter_list", "content"} <= produced,
+                        "Kotlin 侧结构化结果的形状键漂了：%s"
+                        % sorted({"total", "items", "chapter_list", "content"} - produced))
+        js = self.FRONTEND.read_text(encoding="utf-8")
+        block = js.split("const STRUCTURED_FIELDS = {", 1)
+        self.assertEqual(len(block), 2, "debugStepResult.js 里找不到 STRUCTURED_FIELDS")
+        consumed = set(re.findall(r'key:\s*"([a-z_]+)"', block[1].split("};", 1)[0]))
+        self.assertTrue(consumed, "STRUCTURED_FIELDS 里没解析出任何字段键")
+        unknown = sorted(consumed - produced)
+        self.assertEqual(unknown, [], "前端消费了引擎不产出的字段：%s" % unknown)
 
     def test_step_names_are_names_python_actually_asks_for(self):
         from core.app_debug import SEGMENT_NAMES
@@ -288,6 +310,19 @@ class TestStructuredParity(unittest.TestCase):
         self.assertEqual(int(re.match(r"\d+", block[1]).group(0)), STRUCTURED_STR_MAX,
                          "Kotlin VALUE_MAX 与 Python STRUCTURED_STR_MAX 漂了")
         self.assertRegex(kt, r"const val LIST_LIMIT = \d+")
+
+    def test_list_step_dispatch_matches_the_upstream_criterion(self):
+        """列表段的 search/explore 归属判据 = 上游 `Debug.kt` 的 `contains("::")`。
+
+        **不是** `startsWith("发现::")`：那是 Python 拼 key 时造的字面量，不是 App 的
+        分派判据（`core/debug_keys.py` 的注释同源）。判成 search 但 App 实际走了
+        explore 的话，`isSearch=true` 会拿搜索规则算发现页，材料与事件对不上。
+        """
+        text = self.DEBUG.read_text(encoding="utf-8")
+        self.assertIn('key.contains("::")', text,
+                      "DebugService 的列表段分派要按上游 contains(\"::\") 判")
+        self.assertNotIn('startsWith("发现::")', text,
+                         "别复刻 Python 的 key 字面量——那是拼装语法，不是分派判据")
 
 
 class TestWebViewBoundaryCodeParity(unittest.TestCase):
