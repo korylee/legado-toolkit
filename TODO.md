@@ -165,19 +165,6 @@
 指针：appservice/test/io/legado/app/service/ValidateService.kt，core/settings_store.py，
 AGENTS.md #5b，lessons §五十三
 
-### 条目：launch-simplify · 直起三件套收敛
-状态：todo
-依赖：无
-优先级：P2
-背景：`jvm_direct`（414 行）+ `jvm_env`（620 行）+ `jvm_runtime_snapshot`（112 行）+
-  `gradle_distribution`（161 行）≈ 1300 行只为「不起 Gradle 直起测试 JVM + 环境新鲜度」。
-  这是「跳过 Gradle 入场费」的账单；daemon 合一后若收敛为「daemon + Gradle 兜底 boot」，
-  这批可缩成一条。
-约束：砍掉的代价是失败回落从秒级直起变一次 Gradle 编译，且 `scripts/jvm_debug_direct.py`
-  开发入口退场——先实测两条路的耗时差再拍板。
-验收：启动层只剩一条 boot 路径 + 一条回落，readiness 语义不回退（lessons §六十五/§六十七）。
-指针：core/jvm_direct.py，core/jvm_env.py，core/jvm_runtime_snapshot.py，appservice/legado-test.init.gradle
-
 ### 条目：structured-provenance · structured 材料的请求来源记进侧车
 状态：todo
 依赖：无

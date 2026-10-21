@@ -174,9 +174,9 @@ def lane_snapshot_threadsafe(name: str) -> Dict[str, Any]:
 
 
 def _ensure_jvm_debug_lane_idle(st: Store) -> None:
-    # 批量校验允许调试越过；已有调试或快照刷新不可重入/中断。
+    # 批量校验允许调试越过；已有调试不可重入/中断。
     active_jobs = st.list_jobs(limit=10000, statuses=ACTIVE_JOB_STATUSES)
-    if any(job.get("kind") in {"jvm_debug", "jvm_refresh"} for job in active_jobs):
+    if any(job.get("kind") in {"jvm_debug"} for job in active_jobs):
         raise JvmLaneBusyError("校验引擎正忙，本次调试未排队，请稍后重试")
 
 
@@ -427,8 +427,6 @@ def cancel(job_id: str) -> bool:
     with Store() as st:
         job = st.get_job(job_id)
         if not job or job.get("status") in ("done", "failed", "cancelled"):
-            return False
-        if job.get("kind") == "jvm_refresh":
             return False
         st.update_job(job_id, status="cancel_requested", phase="cancel_requested")
     t.cancel()

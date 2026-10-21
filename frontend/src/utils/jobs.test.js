@@ -9,7 +9,6 @@ import assert from "node:assert/strict";
 import {
   executionModeLabel,
   isWorseHealth,
-  jobCanRefreshRuntimeSnapshot,
   jobAgoText,
   jobCanCancel,
   jobCancelHint,
@@ -38,11 +37,6 @@ test("在跑与终态互补，没有状态落在两者之外", () => {
     assert.notEqual(jobIsInFlight(status), jobIsTerminal(status),
                     status + " 只能属于一边");
   }
-});
-
-test("运行快照刷新任务不可取消以免遗留构建子进程", () => {
-  assert.equal(jobCanCancel("jvm_refresh"), false);
-  assert.equal(jobCanCancel("jvm_run"), true);
 });
 
 test("批量校验的取消说明是块级中止，不能写成「立刻停止」", () => {
@@ -105,25 +99,6 @@ test("变坏只看后端下发的档位名单，名单没到位时不标红", ()
   assert.equal(isWorseHealth("pending", needs), false);   // 没结论不算坏
   assert.equal(isWorseHealth("dead", []), false);          // meta 还没回来
   assert.equal(isWorseHealth("dead", undefined), false);
-});
-
-test("只对带 runtime_snapshot 标识的 JVM 校验失败提供刷新", () => {
-  assert.equal(jobCanRefreshRuntimeSnapshot({
-    kind: "jvm_run", status: "done",
-    error: "第 1/2 块失败：runtime_snapshot：源码版本已变化",
-  }), true);
-  assert.equal(jobCanRefreshRuntimeSnapshot({
-    kind: "jvm_run", status: "failed", error: "runtime_snapshot：源码版本已变化",
-  }), true);
-  assert.equal(jobCanRefreshRuntimeSnapshot({
-    kind: "jvm_run", status: "failed", error: "runtime_classpath：文件缺失",
-  }), false);
-  assert.equal(jobCanRefreshRuntimeSnapshot({
-    kind: "jvm_run", status: "running", error: "runtime_snapshot：源码已变化",
-  }), false);
-  assert.equal(jobCanRefreshRuntimeSnapshot({
-    kind: "jvm_debug", status: "failed", error: "runtime_snapshot：源码已变化",
-  }), false);
 });
 
 test("执行方式有中文词，未知值原样透出不伪装", () => {

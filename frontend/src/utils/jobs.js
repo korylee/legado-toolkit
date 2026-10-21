@@ -53,7 +53,6 @@ const STATUS_LABELS = {
 const KIND_LABELS = {
   check: "校验",
   jvm_run: "本机引擎校验",
-  jvm_refresh: "刷新运行快照",
   jvm_debug: "本机引擎调试",
   add: "添加书源",
   ping: "连通性检查",
@@ -138,7 +137,7 @@ export function jobIsInFlight(status) {
 }
 
 export function jobCanCancel(kind) {
-  return kind !== "jvm_refresh";
+  return kind !== "ping";
 }
 
 /** 取消的后果说明（**唯一一份**：任务中心的行内取消与明细弹窗共用）。
@@ -150,11 +149,6 @@ export function jobCancelHint(kind) {
   return kind === "jvm_run"
     ? "正在跑的这一块会跑完（Gradle 子进程不能中途打断），之后的块不再启动；已产出的结果保留。"
     : "取消后任务不会继续推进，已产生的结果会保留。";
-}
-
-export function jobCanRefreshRuntimeSnapshot(job) {
-  return job?.kind === "jvm_run" && jobIsTerminal(job.status)
-    && String(job.error || "").includes("runtime_snapshot");
 }
 
 export function jobKindLabel(kind) {

@@ -118,7 +118,7 @@ class ValidateDaemonProtocolTests(unittest.TestCase):
                  mock.patch.object(jvm_daemon, "_validate_request",
                                    side_effect=fake_request):
                 result = jvm_daemon.run_validate(
-                    {}, "args.properties", socket_timeout=90, owner=owner)
+                    "args.properties", socket_timeout=90, owner=owner)
             self.assertEqual(result["code"], 0)
             self.assertFalse(marker.exists())
 
@@ -265,11 +265,8 @@ class PrepareTests(unittest.TestCase):
     的唯一依据是 info 里的 pid 已不在（``_pid_alive``）。
     """
 
-    # 完整 dump：``ensure`` 入口有 validate_dump 闸（缺字段显式失败，lessons §六十五），
-    # prepare 的测试也共用它（它们 mock 掉 ensure，内容不参与判定）
-    _DUMP = {"workingDir": "C:/repo", "classpath": "C:/repo/classes",
-             "maxHeapSize": "3g", "environment": {}, "jvmArgs": ["-Xms64m"],
-             "systemProperties": {}, "javaLauncher": "C:/jdk"}
+    # dump 形状常量已随直起退场；lifecycle 测试不再需要完整 dump（ensure 无参）。
+    _DUMP = {"sig": "s"}
     _INFO = {"pid": 1, "port": 9999, "sig": "s", "started_at": 1.0}
 
     def setUp(self) -> None:
@@ -286,7 +283,7 @@ class PrepareTests(unittest.TestCase):
              mock.patch.object(jvm_daemon, "start") as start, \
              mock.patch.object(jvm_daemon, "_kill_proc") as kill, \
              mock.patch.object(jvm_daemon, "_stop_port") as stop:
-            got = jvm_daemon.prepare(self._DUMP)
+            got = jvm_daemon.prepare()
         self.assertEqual(got["outcome"], "ready")
         self.assertEqual(got["info"]["port"], 9999)
         ensure.assert_not_called()
@@ -304,7 +301,7 @@ class PrepareTests(unittest.TestCase):
              mock.patch.object(jvm_daemon, "ensure",
                                return_value={"pid": 2, "port": 2, "sig": "new"}) as ensure, \
              mock.patch.object(jvm_daemon, "start") as start:
-            got = jvm_daemon.prepare(self._DUMP)
+            got = jvm_daemon.prepare()
         self.assertEqual(got["outcome"], "started")
         self.assertEqual(got["info"]["sig"], "new")
         ensure.assert_called_once()
@@ -325,9 +322,9 @@ class PrepareTests(unittest.TestCase):
              mock.patch.object(jvm_daemon, "_stop_port",
                                side_effect=lambda port, pid=0: calls.append(("stop", port))), \
              mock.patch.object(jvm_daemon, "start",
-                               side_effect=lambda dump, **kw:
+                               side_effect=lambda **kw:
                                    calls.append(("start",)) or {"pid": 3, "port": 3}):
-            got = jvm_daemon.ensure(self._DUMP)
+            got = jvm_daemon.ensure()
         self.assertEqual(got, {"pid": 3, "port": 3})
         self.assertEqual(calls, [("stop", 9999), ("start",)])
 
@@ -341,7 +338,7 @@ class PrepareTests(unittest.TestCase):
              mock.patch.object(jvm_daemon, "start") as start, \
              mock.patch.object(jvm_daemon, "_kill_proc") as kill, \
              mock.patch.object(jvm_daemon, "_stop_port") as stop:
-            got = jvm_daemon.prepare(self._DUMP, busy_wait_sec=0)
+            got = jvm_daemon.prepare(busy_wait_sec=0)
         self.assertEqual(got["outcome"], "busy")
         self.assertIn("不杀", got["reason"])
         self.assertIn("pid=1", got["reason"])
@@ -363,7 +360,7 @@ class PrepareTests(unittest.TestCase):
                                    return_value=dict(self._INFO)), \
                  mock.patch.object(jvm_daemon, "ping", return_value=None), \
                  mock.patch.object(jvm_daemon, "_pid_alive", return_value=True):
-                got = jvm_daemon.prepare(self._DUMP, busy_wait_sec=0)
+                got = jvm_daemon.prepare(busy_wait_sec=0)
         self.assertEqual(got["outcome"], "busy")
         self.assertIn("job=job-8", got["reason"])
         self.assertIn("chunk=4/7", got["reason"])
@@ -379,7 +376,7 @@ class PrepareTests(unittest.TestCase):
              mock.patch.object(jvm_daemon, "_pid_alive", return_value=True), \
              mock.patch.object(jvm_daemon, "ensure") as ensure, \
              mock.patch.object(jvm_daemon, "_kill_proc") as kill:
-            got = jvm_daemon.prepare(self._DUMP, busy_wait_sec=5)
+            got = jvm_daemon.prepare(busy_wait_sec=5)
         self.assertEqual(got["outcome"], "ready")
         ensure.assert_not_called()
         kill.assert_not_called()
@@ -393,7 +390,7 @@ class PrepareTests(unittest.TestCase):
                                side_effect=[True, False]), \
              mock.patch.object(jvm_daemon, "ensure",
                                return_value={"pid": 2, "port": 2}) as ensure:
-            got = jvm_daemon.prepare(self._DUMP, busy_wait_sec=30)
+            got = jvm_daemon.prepare(busy_wait_sec=30)
         self.assertEqual(got["outcome"], "started")
         ensure.assert_called_once()
 
@@ -406,7 +403,7 @@ class PrepareTests(unittest.TestCase):
              mock.patch.object(jvm_daemon, "ping", return_value=None), \
              mock.patch.object(jvm_daemon, "_pid_alive", return_value=True), \
              mock.patch.object(jvm_daemon, "ensure") as ensure:
-            got = jvm_daemon.prepare(self._DUMP, busy_wait_sec=0.7,
+            got = jvm_daemon.prepare(busy_wait_sec=0.7,
                                               on_wait=seen.append)
         self.assertEqual(got["outcome"], "busy")
         self.assertTrue(seen, "等待期间必须上报进度")
@@ -424,7 +421,7 @@ class PrepareTests(unittest.TestCase):
              mock.patch.object(jvm_daemon, "ping", return_value=None), \
              mock.patch.object(jvm_daemon, "_pid_alive", return_value=True), \
              mock.patch.object(jvm_daemon, "ensure") as ensure:
-            got = jvm_daemon.prepare(self._DUMP, busy_wait_sec=0.4,
+            got = jvm_daemon.prepare(busy_wait_sec=0.4,
                                               on_wait=boom)
         self.assertEqual(got["outcome"], "busy")
         ensure.assert_not_called()
@@ -437,7 +434,7 @@ class PrepareTests(unittest.TestCase):
              mock.patch.object(jvm_daemon, "ensure") as ensure, \
              mock.patch.object(jvm_daemon, "_kill_proc") as kill:
             with self.assertRaises(jvm_daemon.DaemonError) as ctx:
-                jvm_daemon.resolve(self._DUMP, busy_wait_sec=0)
+                jvm_daemon.resolve(busy_wait_sec=0)
         self.assertIn("未空闲", str(ctx.exception))
         ensure.assert_not_called()
         kill.assert_not_called()
@@ -455,8 +452,7 @@ class PrepareTests(unittest.TestCase):
                  mock.patch.object(jvm_daemon, "_kill_proc") as kill, \
                  mock.patch.object(jvm_daemon, "request") as request:
                 with self.assertRaises(jvm_daemon.DaemonError):
-                    jvm_daemon.run_validate(
-                        {"workingDir": "C:/repo"}, str(path), busy_wait_sec=0)
+                    jvm_daemon.run_validate(str(path), busy_wait_sec=0)
         finally:
             path.unlink(missing_ok=True)
         ensure.assert_not_called()
@@ -469,7 +465,7 @@ class PrepareTests(unittest.TestCase):
         state = {"info": {}}
         started = []
 
-        def fake_start(dump, idle_sec=1800, boot_timeout=180):
+        def fake_start(idle_sec=1800, boot_timeout=180):
             time.sleep(0.2)          # 放大竞态窗口：没有锁时两个线程都会进来
             state["info"] = {"pid": 2, "port": 2, "sig": "s"}
             started.append(1)
@@ -484,7 +480,7 @@ class PrepareTests(unittest.TestCase):
              mock.patch.object(jvm_daemon, "start",
                                side_effect=fake_start):
             threads = [threading.Thread(
-                target=lambda: jvm_daemon.ensure(self._DUMP))
+                target=lambda: jvm_daemon.ensure())
                 for _ in range(2)]
             for t in threads:
                 t.start()
@@ -501,7 +497,7 @@ class PrepareTests(unittest.TestCase):
              mock.patch.object(jvm_daemon, "ping", return_value=None), \
              mock.patch.object(jvm_daemon, "ensure") as ensure, \
              mock.patch.object(jvm_daemon, "_kill_proc") as kill:
-            got = jvm_daemon.prepare(self._DUMP)
+            got = jvm_daemon.prepare()
         self.assertEqual(got["outcome"], "busy")
         self.assertIn("pid", got["reason"])
         ensure.assert_not_called()
@@ -516,7 +512,7 @@ class PrepareTests(unittest.TestCase):
              mock.patch.object(jvm_daemon, "ensure",
                                return_value={"pid": 2, "port": 2}) as ensure, \
              mock.patch.object(jvm_daemon, "_kill_proc") as kill:
-            got = jvm_daemon.prepare(self._DUMP)
+            got = jvm_daemon.prepare()
         self.assertEqual(got["outcome"], "started")
         ensure.assert_called_once()
         kill.assert_not_called()
@@ -527,7 +523,7 @@ class PrepareTests(unittest.TestCase):
              mock.patch.object(jvm_daemon, "ping") as ping, \
              mock.patch.object(jvm_daemon, "ensure",
                                return_value={"pid": 2, "port": 2}) as ensure:
-            got = jvm_daemon.prepare(self._DUMP)
+            got = jvm_daemon.prepare()
         self.assertEqual(got["outcome"], "started")
         ping.assert_not_called()
         ensure.assert_called_once()
@@ -538,7 +534,7 @@ class PrepareTests(unittest.TestCase):
              mock.patch.object(jvm_daemon, "ensure",
                                side_effect=jvm_daemon.DaemonError(
                                    "Validate daemon 180s 内没起来")):
-            got = jvm_daemon.prepare(self._DUMP)
+            got = jvm_daemon.prepare()
         self.assertEqual(got["outcome"], "failed")
         self.assertEqual(got["reason"], "Validate daemon 180s 内没起来")
 

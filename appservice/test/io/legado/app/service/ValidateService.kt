@@ -904,7 +904,6 @@ object ValidateService {
 
     @JvmStatic
     fun main(args: Array<String>) {
-        ServiceJson.writeRuntimeSnapshot("validate")
         var dir: String? = null
         var file: String? = null
         var keyword = "我"

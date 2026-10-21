@@ -28,7 +28,7 @@ import threading
 import unittest
 from unittest import mock
 
-from core import jvm_daemon
+from core import jvm_daemon, jvm_debug
 from core.jvm_daemon import DaemonError
 
 
@@ -159,8 +159,7 @@ class SigTests(_Base):
         app = self.tmp / "appservice"
         (app / "test").mkdir(parents=True)
         (app / "test" / "A.kt").write_text("class A", encoding="utf-8")
-        with mock.patch.object(jvm_daemon.jvm_direct, "AGSVC", app), \
-             mock.patch.object(jvm_daemon.jvm_direct, "dump_path", lambda: self.tmp / "dump.json"):
+        with mock.patch.object(jvm_debug, "AGSVC", app):
             first = jvm_daemon.source_sig()
             self.assertEqual(first, jvm_daemon.source_sig(), "同一份文件两次要一样")
             (app / "test" / "B.kt").write_text("class B", encoding="utf-8")
@@ -168,20 +167,6 @@ class SigTests(_Base):
             (app / "test" / "A.kt").write_text("class A2 extends Object", encoding="utf-8")
             self.assertNotEqual(first, jvm_daemon.source_sig(), "内容变了就得变")
 
-
-    def test_sig_ignores_dump_mtime_but_changes_dump_content(self) -> None:
-        app = self.tmp / "appservice"
-        (app / "test").mkdir(parents=True)
-        (app / "test" / "A.kt").write_text("class A", encoding="utf-8")
-        dump = self.tmp / "dump.json"
-        dump.write_text(json.dumps({"classpath": ["a.jar"]}), encoding="utf-8")
-        with mock.patch.object(jvm_daemon.jvm_direct, "AGSVC", app), \
-             mock.patch.object(jvm_daemon.jvm_direct, "dump_path", lambda: dump):
-            first = jvm_daemon.source_sig()
-            os.utime(dump, (dump.stat().st_atime + 10, dump.stat().st_mtime + 10))
-            self.assertEqual(first, jvm_daemon.source_sig())
-            dump.write_text(json.dumps({"classpath": ["b.jar"]}), encoding="utf-8")
-            self.assertNotEqual(first, jvm_daemon.source_sig())
 
     def test_stop_prefers_graceful_op(self) -> None:
         info = {"pid": self.fake.pid, "port": self.fake.port, "sig": "sig-a"}
@@ -227,13 +212,13 @@ class FallbackTests(_Base):
 
     def test_falls_back_and_notes_it(self) -> None:
         notes: list = []
-        direct_calls: list = []
+        gradle_calls: list = []
         with mock.patch.object(jvm_daemon, "ensure", side_effect=DaemonError("起不来")), \
-             mock.patch.object(jvm_daemon.jvm_direct, "direct_launcher",
-                               lambda dump, timeout=0: (lambda: (direct_calls.append(1), (0, 3.3, "", ""))[1])):
-            run = jvm_daemon.launcher_from_args({}, on_note=notes.append)
+             mock.patch.object(jvm_debug, "_run_launcher",
+                               lambda *a, **kw: (gradle_calls.append(1), (0, 3.3, "", ""))[1]):
+            run = jvm_daemon.launcher_from_args(on_note=notes.append)
             rc, cost, _so, _se = run()
-        self.assertEqual(direct_calls, [1], "daemon 挂了就必须回落直起")
+        self.assertEqual(gradle_calls, [1], "daemon 挂了就必须回落 Gradle")
         self.assertEqual(rc, 0)
         self.assertTrue(any("快速启动没走成" in n for n in notes),
                         "没走成快速通道必须说出来，不能静默：%s" % notes)
@@ -241,9 +226,9 @@ class FallbackTests(_Base):
     def test_uses_daemon_when_available(self) -> None:
         notes: list = []
         with mock.patch.object(jvm_daemon, "ensure", return_value={"port": self.fake.port}), \
-             mock.patch.object(jvm_daemon.jvm_direct, "direct_launcher",
-                               lambda *a, **kw: (lambda: (_ for _ in ()).throw(AssertionError("不该回落")))):
-            run = jvm_daemon.launcher_from_args({}, on_note=notes.append)
+             mock.patch.object(jvm_debug, "_run_launcher",
+                               lambda *a, **kw: (_ for _ in ()).throw(AssertionError("不该回落"))):
+            run = jvm_daemon.launcher_from_args(on_note=notes.append)
             rc, cost, _so, _se = run()
         self.assertEqual(rc, 0)
         self.assertEqual(notes, [])
@@ -254,9 +239,9 @@ class FallbackTests(_Base):
         notes: list = []
         with mock.patch.object(jvm_daemon, "ensure", return_value={"port": self.fake.port}), \
              mock.patch.object(jvm_daemon, "request", side_effect=DaemonError("应答缺 code")), \
-             mock.patch.object(jvm_daemon.jvm_direct, "direct_launcher",
-                               lambda dump, timeout=0: (lambda: (0, 1.0, "", ""))):
-            run = jvm_daemon.launcher_from_args({}, on_note=notes.append)
+             mock.patch.object(jvm_debug, "_run_launcher",
+                               lambda *a, **kw: (0, 1.0, "", "")):
+            run = jvm_daemon.launcher_from_args(on_note=notes.append)
             rc, _cost, _so, _se = run()
         self.assertEqual(rc, 0)
         self.assertTrue(notes)

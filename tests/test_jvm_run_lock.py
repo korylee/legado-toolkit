@@ -27,7 +27,7 @@ from unittest import mock
 
 from backend.api import jvm as jvm_api
 from backend.jobs import jvm_exec
-from core import jvm_debug, jvm_direct
+from core import jvm_debug
 
 
 class _FakeStore:
@@ -78,9 +78,6 @@ class _Base(unittest.TestCase):
             mock.patch.object(jvm_api, "Store", _FakeStore),
             mock.patch.object(jvm_exec, "Store", _FakeStore),
             mock.patch.object(jvm_api, "readiness", lambda repo, sdk="": {"ok": True, "checks": []}),
-            # 同 test_jvm_run_scope：机器上存在真实 snapshot 时不能走上真 daemon
-            mock.patch.object(jvm_direct, "dump_path",
-                              lambda: self.tmp / "data" / "app_probe" / "test_jvm_env.json"),
             mock.patch.object(jvm_api, "_export_sources_file", self._fake_export),
             mock.patch.object(jvm_exec, "_write_meta", lambda rows: "testbatch"),
             mock.patch.object(jvm_exec, "_run_gradle", self._fake_gradle),

@@ -30,7 +30,7 @@ from backend.api.check_summary import (ITEMS_LIMIT, check_items_from_checks,
 from backend.jobs import run_events, runner
 from backend.jobs.run_events import append_event as _append_event
 from core import settings_store
-from core.jvm_direct import execution_readiness
+from core.jvm_debug import RUN_LOCK
 from core.jvm_env import process_environment
 from core.loader import _normalize_url
 from core.paths import ARGS_PARTS, data_dir
@@ -79,7 +79,6 @@ def _build_jvm_manifest(*, run_dir: Path, source_file: Path, args_file: Path,
                         out_path: Path, single: bool, execution_plan: str,
                         allow_gradle_fallback: bool, runtime: Dict[str, Any],
                         readiness: Dict[str, Any],
-                        execution_readiness: Dict[str, Any],
                         readiness_fingerprint: str,
                         readiness_checked_at: str, source_count: int,
                         urls: List[str], params: Dict[str, Any],
@@ -93,7 +92,7 @@ def _build_jvm_manifest(*, run_dir: Path, source_file: Path, args_file: Path,
     ``chunks`` 是批量分块的大小序列（按 urls 顺序切分；单条=[1]），同样冻结。
     """
     manifest = {
-        "schema": 3,
+        "schema": 4,
         "run_dir": str(run_dir),
         "source_file": str(source_file),
         "args_file": str(args_file),
@@ -104,7 +103,6 @@ def _build_jvm_manifest(*, run_dir: Path, source_file: Path, args_file: Path,
         "allow_gradle_fallback": bool(allow_gradle_fallback),
         "runtime": dict(runtime or {}),
         "readiness": dict(readiness or {}),
-        "execution_readiness": dict(execution_readiness or {}),
         "readiness_fingerprint": str(readiness_fingerprint or ""),
         "readiness_checked_at": str(readiness_checked_at or ""),
         "urls": [str(u) for u in urls],
@@ -182,18 +180,16 @@ def _manifest_error(manifest: Any) -> str:
     required = {
         "schema", "run_dir", "source_file", "args_file", "out_path",
         "source_count", "single", "execution_plan", "allow_gradle_fallback",
-        "runtime", "readiness", "execution_readiness",
+        "runtime", "readiness",
         "readiness_fingerprint", "readiness_checked_at", "urls", "params",
         "chunks",
     }
     missing = sorted(required - set(manifest))
-    if missing or manifest.get("schema") != 3:
-        detail = "缺少字段：%s" % ", ".join(missing) if missing else "schema 不是 3"
+    if missing or manifest.get("schema") != 4:
+        detail = "缺少字段：%s" % ", ".join(missing) if missing else "schema 不是 4"
         return "JVM 任务 manifest 结构不受支持：%s" % detail
     if not isinstance(manifest.get("runtime"), dict) or not isinstance(manifest.get("readiness"), dict):
         return "JVM 任务 manifest 结构不受支持：runtime/readiness 不是对象"
-    if not isinstance(manifest.get("execution_readiness"), dict):
-        return "JVM 任务 manifest 结构不受支持：execution_readiness 不是对象"
     if not isinstance(manifest.get("urls"), list) or not isinstance(manifest.get("params"), dict):
         return "JVM 任务 manifest 结构不受支持：urls/params 形状不对"
     source_count = manifest.get("source_count")
@@ -348,46 +344,16 @@ def _run_gradle(timeout_min: int = 90, args_path: Optional[Path] = None,
     以前这里只返回整数。Gradle 在测试 JVM 启动前失败时，调用方只能知道结果文件
     不存在，真正的 wrapper/native-platform 错误被丢掉。
 
-    **顺手刷新 dump**：与 `core.jvm_debug._run_launcher` 同一条不变式（机制在
-    `core.jvm_direct.dump_is_stale` 与 `core.jvm_debug.default_launcher` 那两处，别在这抄）。
-
-    **相位跟着真观测走**：给了 `job_id` 就盯校验 JVM 自己写的那份报告
-    （`snapshot_actual`），落盘即把相位从「启动 Gradle」推到「执行校验」
-    （见 `_watch_validate_start`）。
+    **env 用提交时冻结的 runtime**（`process_environment({"ok": True, "runtime": ...})`）：
+    排队后用户改了设置或 SDK，这次 Gradle 仍按提交时的环境跑——一致性由构造保证。
+    （原先的 runtime snapshot 对拍与相位观察随直起一起退场：那个机制存在的理由是
+    校验「dump 引用的环境」与实际 JVM 是否漂移，dump 机制已删。）
     """
     exe = _launcher()
     if not runtime:
         raise ValueError("JVM runtime 快照缺失，拒绝使用后端进程环境启动")
     env = process_environment({"ok": True, "runtime": runtime})
-    snapshot_dump = data_dir() / "app_probe" / "test_jvm_env.json"
-    snapshot_actual = Path(str(snapshot_dump) + ".actual.gradle.validate.json")
-    snapshot_report = snapshot_actual.with_suffix(".comparison.json")
-    snapshot_dump.parent.mkdir(parents=True, exist_ok=True)
-    for stale in (snapshot_dump, snapshot_actual, snapshot_report):
-        try:
-            stale.unlink()
-        except FileNotFoundError:
-            pass
-        except OSError:
-            pass
-
-    # 相位观察：**校验 JVM 自己的那份报告**一落盘，就把这几十秒到两分钟的「启动 Gradle」
-    # 收掉（不是 dump——那份是编译期写的，早于 JVM 启动约 10 秒，见 _watch_validate_start）。
-    # 观察必须在这里起（跑前已把这三个文件删掉），否则上一批留下的文件会被当成信号。
-    # 停表在 finally 里，与停滞看门狗同一次收尾——Gradle 退出后不该再有相位写入。
-    phase_stop = threading.Event()
-    if job_id:
-        threading.Thread(target=_watch_validate_start, daemon=True,
-                         args=(job_id, snapshot_actual, phase_stop)).start()
-
-    def with_runtime_snapshot(result: Dict[str, Any]) -> Dict[str, Any]:
-        from core.jvm_runtime_snapshot import compare_runtime_snapshot
-        result["runtime_snapshot"] = compare_runtime_snapshot(
-            "gradle", "validate", path=snapshot_actual, runtime=runtime)
-        return result
     env.update({
-           "LEGADO_TEST_JVM_ENV_OUT": str(snapshot_dump),
-           "LEGADO_TEST_JVM_LAUNCH_MODE": "gradle",
            # **必须显式告诉它参数文件在哪**：不给就退回「挨着启动器找」，那里没有，
            # 于是启动器打印一句「跳过」之后什么都不跑（一次看不出来的空跑）
            "LEGADO_APPSERVICE_ARGS": str(args_path or _args_file())})
@@ -422,15 +388,14 @@ def _run_gradle(timeout_min: int = 90, args_path: Optional[Path] = None,
             timed_out = True
     finally:
         stop_watch.set()
-        phase_stop.set()
     _write_run_logs(args_path, stdout, stderr)
     if timed_out:
-        return with_runtime_snapshot({
+        return {
             "exit": None,
             "stdout": _tail_process_output(stdout),
             "stderr": _tail_process_output(stderr),
             "error": "Gradle 运行超过 %d 分钟" % timeout_min,
-        })
+        }
     result = {
         "exit": proc.returncode,
         "stdout": _tail_process_output(stdout),
@@ -438,7 +403,7 @@ def _run_gradle(timeout_min: int = 90, args_path: Optional[Path] = None,
     }
     if watch_hit["stalled"]:
         result["stalled"] = True
-    return with_runtime_snapshot(result)
+    return result
 
 
 def _normalize_gradle_result(raw: Any) -> Dict[str, Any]:
@@ -465,27 +430,6 @@ def _gradle_failure_reason(result: Dict[str, Any]) -> str:
             pieces.append("Gradle %s 尾部：\n%s" % (label, text))
     pieces.append("请先看上面的 Gradle 输出，再处理启动环境")
     return "\n".join(pieces)
-
-
-def _runtime_snapshot_failure_reason(result: Dict[str, Any]) -> str:
-    """环境就绪快照漂移时阻断入库，其他快照问题只保留为诊断。"""
-    snapshot = result.get("runtime_snapshot")
-    if not isinstance(snapshot, dict):
-        return ""
-    differences = snapshot.get("differences")
-    if not isinstance(differences, dict):
-        return ""
-    environment = differences.get("readinessEnvironment")
-    if not isinstance(environment, dict) or not environment:
-        return ""
-    details = []
-    for name, values in environment.items():
-        if isinstance(values, dict):
-            details.append("%s（提交时=%s，实际=%s）" %
-                           (name, values.get("declared"), values.get("actual")))
-        else:
-            details.append("%s（%s）" % (name, values))
-    return "JVM 实际启动环境与提交时的环境就绪快照不一致：" + "；".join(details)
 
 
 def _read_results(path: Path) -> List[Dict[str, Any]]:
@@ -542,9 +486,6 @@ _STALL_FACTOR = 3
 _STALL_CAP_SEC = 120
 #: 停滞采样间隔。文件大小是单调的，采样丢了中间态也没关系。
 _STALL_POLL_SEC = 5.0
-#: 相位观察的采样间隔：它等的是一次相位切换（编译结束），不是停滞判定——
-#: 0.5 秒足够快，也不给库添没必要的写。
-_VALIDATE_START_POLL_SEC = 0.5
 #: 隔离重跑（单源块）的 socket 等待 = 每源预算 + 这个余量。
 _REMEDIAL_WAIT_MARGIN_SEC = 30
 
@@ -581,30 +522,6 @@ def _watch_output_stall(watch_path: Path, stall_sec: float, stop: threading.Even
             if why is not None:
                 why["stalled"] = True
             abort()
-            return
-
-
-def _watch_validate_start(job_id: str, report_path: Path, stop: threading.Event,
-                          interval: Optional[float] = None) -> None:
-    """盯**校验 JVM 自己写的那份报告**：它一出现，说明测试 JVM 起来了、校验在跑。
-
-    传进来的必须是 `$dump.actual.gradle.validate.json`（`snapshot_actual`），不是 dump：
-    dump 由 init 脚本在测试任务的 `doFirst` 里写（`appservice/legado-test.init.gradle`），
-    落在**编译结束、测试 JVM 启动之前**；这份报告是 `ValidateService.main` 的**第一句**
-    `ServiceJson.writeRuntimeSnapshot("validate")` 写的，由干活的那个进程自己落盘。
-    2026-10-09 最后一块实测：块起 23:15:39 → dump 23:15:46（7 秒）→ 本文件 23:15:56
-    （17 秒）→ 块结束 23:17:06；用 dump 会把 JVM 启动那 10 秒也说成「执行校验」。
-
-    为什么要这一步：`starting_gradle` 是**启动**相位，而 `_run_gradle` 一次阻塞调用把
-    任务图、编译与全部校验都干完（实测 60～130 秒/块）——没人推进的话，进度在涨、头上
-    还写着「启动 Gradle」（2026-10-09 实测：snapshot 过期使 400 条批 16 块全走 Gradle，
-    进度 150/400 时相位仍是 `starting_gradle`）。判据是**文件出现**这个真观测，不是
-    拿计时器估「编译大概要多久」。
-    """
-    every = _VALIDATE_START_POLL_SEC if interval is None else interval
-    while not stop.wait(every):
-        if report_path.exists() and not stop.is_set():
-            runner.update_phase(job_id, "running_validate")
             return
 
 
@@ -723,7 +640,6 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
     single = bool(manifest.get("single"))
     allow_gradle_fallback = bool(manifest.get("allow_gradle_fallback", True))
     runtime = dict(manifest.get("runtime") or {})
-    execution_readiness_snapshot = manifest.get("execution_readiness")
     readiness_snapshot = manifest.get("readiness")
     source_file_value = str(manifest.get("source_file") or "").strip()
 
@@ -788,19 +704,15 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
         # results.jsonl 读回；准备态不完整时，daemon 失败不能偷偷再开 Gradle。
         if single and args_path is not None:
             try:
-                from core import jvm_daemon, jvm_direct
+                from core import jvm_daemon
 
                 job_runner.update_phase(job_id, "configuring")
-                dump = jvm_direct.load_dump(warn_stale=False)
-                if execution_readiness_snapshot:
-                    current_exec = execution_readiness(dump)
-                    if not current_exec.get("ok"):
-                        raise jvm_daemon.DaemonError(
-                            current_exec.get("reason") or "单条 JVM 执行态在排队期间失效")
+                # 排队后的执行态复检随直起一起退场：daemon 的 boot 经 Gradle 必编译，
+                # 永远跑当前源码，不存在「用旧字节码跑批」的失败模式。
                 job_runner.update_phase(job_id, "running_validate")
                 _engine_t0 = time.monotonic()
                 daemon_response = jvm_daemon.run_validate(
-                    dump, str(args_path),
+                    str(args_path),
                     owner={"job_id": job_id, "chunk": "single"})
                 _append_event(timeline_dir, "startup_stage", stage="daemon_request",
                                status="done", cost_sec=round(time.monotonic() - _engine_t0, 3),
@@ -833,7 +745,6 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
                         "execution_mode": "daemon",
                         "execution_note": "单条执行态失败，未使用 Gradle fallback",
                         "readiness": readiness_snapshot or {},
-                        "execution_readiness": execution_readiness_snapshot or {},
                     })
 
         if execution_mode != "daemon":
@@ -847,13 +758,7 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
         else:
             code = daemon_response.get("code")
 
-        snapshot_reason = _runtime_snapshot_failure_reason(gradle)
-        if snapshot_reason:
-            return dict(prep, **{"ok": False, "exit": code,
-                                "reason": snapshot_reason,
-                                "execution_mode": execution_mode,
-                                "execution_note": execution_note,
-                                "gradle": gradle})
+        snapshot_reason = ""
         if not out_path.exists():
             return dict(prep, **{"ok": False, "exit": code,
                                 "reason": (_gradle_failure_reason(gradle)
@@ -905,10 +810,6 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
             result["gradle"] = gradle
         if daemon_failure:
             result["daemon_fallback_reason"] = daemon_failure
-        snapshot = gradle.get("runtime_snapshot")
-        if (isinstance(snapshot, dict) and
-                (snapshot.get("error") or snapshot.get("differences"))):
-            result["runtime_snapshot"] = snapshot
         return result
 
     def _chunk_work(idx: int, total: int, chunk_dir: Optional[Path],
@@ -937,10 +838,9 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
             watch_why: Dict[str, bool] = {}
             if daemon_allowed and chunk_args is not None:
                 try:
-                    from core import jvm_daemon, jvm_direct
+                    from core import jvm_daemon
 
-                    dump = jvm_direct.load_dump(warn_stale=False)
-                    info = jvm_daemon.probe(dump)
+                    info = jvm_daemon.probe()
                     if info is None:
                         raise jvm_daemon.DaemonError(
                             "daemon 探测未通过（未启动/忙/版本不符）")
@@ -963,7 +863,7 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
                     watcher.start()
                     try:
                         daemon_response = jvm_daemon.run_validate(
-                            dump, str(chunk_args), socket_timeout=wait,
+                            str(chunk_args), socket_timeout=wait,
                             owner={"job_id": job_id,
                                    "chunk": "%d/%d" % (idx + 1, total),
                                    "source_count": len(chunk_rows),
@@ -1083,7 +983,6 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
         ``prepare()``，探活通过才继续。结论并回块的 results.jsonl（原有行保留），
         后续读结果/落库/DONE 照常走。仅 manifest 路径可用（需要 per-chunk 目录）。
         """
-        from core import jvm_direct
         from core import jvm_daemon
 
         params = manifest["params"]
@@ -1093,7 +992,7 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
         depth = str(params["depth"])
         try:
             jvm_daemon.stop()
-            prep = jvm_daemon.prepare(jvm_direct.load_dump(warn_stale=False))
+            prep = jvm_daemon.prepare()
             if prep.get("outcome") not in ("ready", "started"):
                 return {"ok": False,
                         "note": "引擎重启未就绪：%s" % (prep.get("reason")
@@ -1104,7 +1003,6 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
             return {"ok": False, "note": "引擎重启失败：%s" % exc}
         remaining = _remaining_sources(chunk_rows, chunk_out)
         done_before = len(chunk_rows) - len(remaining)
-        dump = jvm_direct.load_dump(warn_stale=False)
         good: List[Dict[str, Any]] = []
         dead: List[Dict[str, Any]] = []
         for i, src in enumerate(remaining):
@@ -1121,7 +1019,7 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
                         depth, args_path=iso_args)
             try:
                 resp = jvm_daemon.run_validate(
-                    dump, str(iso_args),
+                    str(iso_args),
                     socket_timeout=timeout + _REMEDIAL_WAIT_MARGIN_SEC,
                     owner={"job_id": job_id,
                            "chunk": "%s/isolate-%02d" % (chunk_dir.name, i + 1),
@@ -1162,10 +1060,8 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
     def _prepare_daemon() -> Dict[str, Any]:
         """批量开跑前准备 daemon；忙时有界等待（可见），失败则保留原因并停止本批。
 
-        **先过单条同一条闸门**（``execution_readiness``，含 ``dump_is_stale``）：少了它，
-        改了 Kotlin 源码又不刷新 snapshot 就会用**旧字节码**跑完整批——daemon 的 sig 只反映
-        源码 mtime，不等于类已经重编，结论看上去和真跑的一样。执行态不成立时**不重试**：
-        重试还是同一份旧快照，只是再拖一轮。
+        原先的执行态闸门（``execution_readiness``，拦「改了 Kotlin 不刷新 snapshot 就用
+        旧字节码跑批」）随直起一起退场：daemon 的 boot 经 Gradle 必编译，永远跑当前源码。
         """
 
         def _notice(elapsed_sec: float) -> None:
@@ -1173,15 +1069,10 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
             _append_event(timeline_dir, "waiting_engine", elapsed_sec=elapsed_sec)
 
         try:
-            from core import jvm_direct, jvm_daemon
+            from core import jvm_daemon
 
-            dump = jvm_direct.load_dump(warn_stale=False)
-            gate = execution_readiness(dump)
-            if not gate.get("ok"):
-                return {"outcome": "failed", "retryable": False,
-                        "reason": gate.get("reason") or "JVM 执行态未就绪"}
             return jvm_daemon.prepare(
-                dump, busy_wait_sec=_DAEMON_BUSY_WAIT_SEC, on_wait=_notice)
+                busy_wait_sec=_DAEMON_BUSY_WAIT_SEC, on_wait=_notice)
         except Exception as exc:
             return {"outcome": "failed", "retryable": False, "reason": str(exc)}
 

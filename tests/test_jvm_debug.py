@@ -26,7 +26,7 @@ from fastapi import HTTPException
 from backend.api.rules import jvm_debug as jvm_debug_endpoint
 from backend.jobs import runner as job_runner
 from backend.schemas import JvmDebugRequest
-from core import jvm_daemon, jvm_debug, jvm_direct
+from core import jvm_daemon, jvm_debug
 
 FIXTURE = pathlib.Path(__file__).parent / "fixtures" / "appservice_debug_52shuku.ndjson"
 
@@ -300,8 +300,7 @@ class RunJvmDebugTests(_RunCase):
         而真正的问题（daemon 起不来）永远没人发现。附注落在第一条 step 上——
         抽屉已经在渲染它（`.debug-notes`）。"""
         def fake_default(notes, **kwargs):
-            notes.append("快速启动没走成（DaemonError: 起不来），这次用了慢速方式；"
-                         "跑一次「刷新引擎快照」可恢复")
+            notes.append("快速启动没走成（DaemonError: 起不来），这次用了慢速方式")
             return self._fake_launcher(events=self._fixture_events(), meta={"code": 0})
 
         self._patch("default_launcher", fake_default)
@@ -341,53 +340,17 @@ class PageFromEngineErrorTests(unittest.TestCase):
 
 
 class DefaultLauncherTests(unittest.TestCase):
-    """默认拉起方式的选择（D2）：**dump 比 .kt 新**才敢用常驻/直起。"""
+    """默认拉起方式：daemon（Gradle boot）优先，失败回落 Gradle。
 
-    def test_stale_dump_falls_back_to_gradle(self) -> None:
-        """dump 比 .kt 旧 = 「这份类可能不是最新编译的」。常驻进程里跑的是**加载时那份
-        类**，用它就会表现成「规则改了没生效」——像源的问题，其实是我们在跑旧代码。
-
-        `load_dump` 一起打桩：**不打桩这条会假绿**——真实 dump 不在测试的工作目录里，
-        `load_dump` 抛异常后也走回 Gradle，于是「把陈旧判定删掉」这个变异根本抓不住
-        （实测：补上打桩才变红）。"""
-        with mock.patch.object(jvm_direct, "dump_is_stale", lambda: True), \
-             mock.patch.object(jvm_direct, "load_dump", lambda warn_stale=True: {"x": 1}):
-            got = jvm_debug.default_launcher([])
-        self.assertIs(got, jvm_debug._run_launcher, "类可能是旧的就必须走 Gradle（它会先编译）")
-
-    def test_fresh_dump_prefers_the_daemon(self) -> None:
-        notes: list = []
-        with mock.patch.object(jvm_direct, "dump_is_stale", lambda: False), \
-             mock.patch.object(jvm_direct, "load_dump", lambda warn_stale=True: {"x": 1}):
-            got = jvm_debug.default_launcher(notes)
-        self.assertIsNot(got, jvm_debug._run_launcher, "dump 新鲜就该走常驻")
-        self.assertEqual(notes, [])
-
-    def test_unreadable_dump_does_not_block_debugging(self) -> None:
-        notes: list = []
-        with mock.patch.object(jvm_direct, "dump_is_stale", lambda: False), \
-             mock.patch.object(jvm_direct, "load_dump",
-                               side_effect=OSError("dump 坏了")):
-            got = jvm_debug.default_launcher(notes)
-        self.assertIs(got, jvm_debug._run_launcher)
-        self.assertTrue(any("dump" in n for n in notes), notes)
-
-    def test_invalid_dump_reason_reaches_gradle_fallback(self) -> None:
-        notes: list = []
-        error = jvm_direct.DumpSchemaError(
-            "JVM dump 字段无效：缺少 environment；请运行一次 --refresh")
-        with mock.patch.object(jvm_direct, "dump_is_stale", lambda: False), \
-             mock.patch.object(jvm_direct, "load_dump", side_effect=error):
-            got = jvm_debug.default_launcher(notes)
-        self.assertIs(got, jvm_debug._run_launcher)
-        self.assertTrue(any("environment" in n for n in notes), notes)
-        self.assertTrue(any("--refresh" in n for n in notes), notes)
+    原先的「dump 比 .kt 旧就不用常驻」判定随直起一起退场：daemon 的 boot 经
+    Gradle 必编译，进程里跑的永远是当前源码——旧字节码的失败模式结构性消失。
+    """
 
     def test_daemon_failure_falls_back_to_gradle_not_direct(self) -> None:
         """常驻半路死了 → **回落 Gradle**（不是直起）。
 
-        直起同样依赖 dump 的新鲜度，而 Gradle 一定会先编译——这里要的是「无论如何都能
-        跑对」，速度是次要的。**这条是变异验证逼出来的**：把 `fallback=_run_launcher`
+        Gradle 一定会先编译——这里要的是「无论如何都能跑对」，速度是次要的。
+        **这条是变异验证逼出来的**：把 `fallback=_run_launcher`
         改成 `fallback=None`（退化成直起）原本一条测试都不红。
         """
         gradle_calls: list = []
@@ -397,9 +360,7 @@ class DefaultLauncherTests(unittest.TestCase):
             return 0, 11.0, "", ""
 
         notes: list = []
-        with mock.patch.object(jvm_direct, "dump_is_stale", lambda: False), \
-             mock.patch.object(jvm_direct, "load_dump", lambda warn_stale=True: {"x": 1}), \
-             mock.patch.object(jvm_daemon, "ensure",
+        with mock.patch.object(jvm_daemon, "ensure",
                                side_effect=jvm_daemon.DaemonError("起不来")), \
              mock.patch.object(jvm_daemon, "params_from_args",
                                lambda *a, **kw: {"file": "a", "key": "b", "out": "c",
@@ -409,140 +370,9 @@ class DefaultLauncherTests(unittest.TestCase):
             rc, _cost, _so, _se = run()
         self.assertEqual(gradle_calls, [1], "回落目标必须是 Gradle")
         self.assertEqual(rc, 0)
-        # 提示不区分回落叫什么（用户只需要知道「这次慢」与怎么恢复），
+        # 提示不区分回落叫什么（用户只需要知道「这次慢」），
         # 「落没落到 Gradle」由上面的 gradle_calls 断言守
         self.assertTrue(any("快速启动没走成" in n for n in notes), notes)
-
-
-class RuntimeDumpConsistencyTests(unittest.TestCase):
-    def test_runtime_path_drift_is_reported(self) -> None:
-        dump = {
-            "workingDir": "X:/app",
-            "javaHomeEnv": "X:/jdk",
-            "environment": {
-                "JAVA_HOME": "X:/jdk",
-                "ANDROID_HOME": "X:/sdk-old",
-                "GRADLE_USER_HOME": "X:/.gradle",
-            },
-        }
-        runtime = {
-            "LEGADO_REPO": "X:/app",
-            "JAVA_HOME": "X:/jdk",
-            "ANDROID_HOME": "X:/sdk",
-            "GRADLE_USER_HOME": "X:/.gradle",
-        }
-        self.assertIn("ANDROID_HOME", jvm_debug._runtime_dump_mismatch(dump, runtime))
-        dump["environment"]["ANDROID_HOME"] = "X:/sdk"
-        self.assertEqual(jvm_debug._runtime_dump_mismatch(dump, runtime), "")
-
-    @staticmethod
-    def _dump_with_workdir(working_dir: str) -> dict:
-        return {
-            "workingDir": working_dir,
-            "javaHomeEnv": "X:/jdk",
-            "environment": {
-                "JAVA_HOME": "X:/jdk",
-                "ANDROID_HOME": "X:/sdk",
-                "GRADLE_USER_HOME": "X:/.gradle",
-            },
-        }
-
-    def test_module_workingdir_matches_repo_root(self) -> None:
-        """**真实形态**：dump.workingDir 是 Gradle 测试 worker 的**模块目录**
-        （`<repo>/app`），`LEGADO_REPO` 是**仓库根**——同一仓库必须判一致。
-
-        2026-09-26 实测：旧判据按字符串比，四个字段里只有 workingDir 每次都不等，
-        同机四次调试全部打出「运行环境与当前自检不同：workingDir」回落 Gradle，
-        每次多付约 13 秒启动（常驻快路径一直是死的）。"""
-        dump = self._dump_with_workdir("D:/repo/legado-with-MD3/app")
-        runtime = {
-            "LEGADO_REPO": "D:/repo/legado-with-MD3",
-            "JAVA_HOME": "X:/jdk",
-            "ANDROID_HOME": "X:/sdk",
-            "GRADLE_USER_HOME": "X:/.gradle",
-        }
-        self.assertEqual(jvm_debug._runtime_dump_mismatch(dump, runtime), "")
-
-    def test_other_repo_still_mismatches(self) -> None:
-        """放宽成「子目录即一致」不能放过真漂移：dump 是**另一个仓库**的就必须回落。"""
-        dump = self._dump_with_workdir("E:/other/repo/app")
-        runtime = {
-            "LEGADO_REPO": "D:/repo/legado-with-MD3",
-            "JAVA_HOME": "X:/jdk",
-            "ANDROID_HOME": "X:/sdk",
-            "GRADLE_USER_HOME": "X:/.gradle",
-        }
-        self.assertIn("workingDir", jvm_debug._runtime_dump_mismatch(dump, runtime))
-        self.assertIn("不同仓库", jvm_debug._runtime_dump_mismatch(dump, runtime))
-
-    def test_prefix_trap_is_not_a_match(self) -> None:
-        """同仓库关系按 os.sep 切边界：`D:/foo` 不是 `D:/foobar` 的仓库。"""
-        dump = self._dump_with_workdir("D:/foobar/app")
-        runtime = {
-            "LEGADO_REPO": "D:/foo",
-            "JAVA_HOME": "X:/jdk",
-            "ANDROID_HOME": "X:/sdk",
-            "GRADLE_USER_HOME": "X:/.gradle",
-        }
-        self.assertIn("workingDir", jvm_debug._runtime_dump_mismatch(dump, runtime))
-
-    def test_missing_workingdir_still_mismatches(self) -> None:
-        runtime = {
-            "LEGADO_REPO": "D:/repo",
-            "JAVA_HOME": "X:/jdk",
-            "ANDROID_HOME": "X:/sdk",
-            "GRADLE_USER_HOME": "X:/.gradle",
-        }
-        self.assertIn("workingDir", jvm_debug._runtime_dump_mismatch(
-            self._dump_with_workdir(""), runtime))
-        self.assertIn("workingDir", jvm_debug._runtime_dump_mismatch(
-            self._dump_with_workdir("D:/repo/app"), {"JAVA_HOME": "X:/jdk"}))
-
-    def test_repo_root_env_keeps_the_daemon(self) -> None:
-        """验收（条目 jvm-dump-gate）：app_repo 填**仓库根**时不再回落——
-        `default_launcher` 拿到模块目录的 dump + 仓库根的自检，应直接给常驻、零附注。"""
-        dump = self._dump_with_workdir("D:/repo/legado-with-MD3/app")
-        env = {"LEGADO_REPO": "D:/repo/legado-with-MD3", "JAVA_HOME": "X:/jdk",
-               "ANDROID_HOME": "X:/sdk", "GRADLE_USER_HOME": "X:/.gradle"}
-        notes: list = []
-        with mock.patch.object(jvm_direct, "dump_is_stale", lambda: False), \
-             mock.patch.object(jvm_direct, "load_dump", lambda warn_stale=True: dump):
-            got = jvm_debug.default_launcher(notes, env_snapshot=env)
-        self.assertIsNot(got, jvm_debug._run_launcher, "同仓库就该走上常驻")
-        self.assertEqual(notes, [])
-
-    def test_foreign_repo_env_falls_back_with_reason(self) -> None:
-        dump = self._dump_with_workdir("E:/other/repo/app")
-        env = {"LEGADO_REPO": "D:/repo/legado-with-MD3", "JAVA_HOME": "X:/jdk",
-               "ANDROID_HOME": "X:/sdk", "GRADLE_USER_HOME": "X:/.gradle"}
-        notes: list = []
-        with mock.patch.object(jvm_direct, "dump_is_stale", lambda: False), \
-             mock.patch.object(jvm_direct, "load_dump", lambda warn_stale=True: dump):
-            jvm_debug.default_launcher(notes, env_snapshot=env)
-        self.assertTrue(any("不同仓库" in n for n in notes), notes)
-
-
-class GradleDumpRefreshTests(unittest.TestCase):
-    def test_gradle_run_refreshes_the_dump(self) -> None:
-        """**「dump 比 .kt 新」= 「这份类是新编译的」**——这条不变式是常驻链的判据，
-        而它靠的是「每次 Gradle 跑测都顺手 dump 一份」。少了它，改一次 Kotlin 就会让
-        常驻一直被挡在外面（除非有人记得手工 --refresh）。"""
-        seen: dict = {}
-
-        class _P:
-            returncode = 0
-            stdout = ""
-            stderr = ""
-
-        def fake_run(cmd, **kw):
-            seen.update(kw)
-            return _P()
-
-        with mock.patch.object(jvm_debug.subprocess, "run", fake_run):
-            jvm_debug._run_launcher()
-        env = seen.get("env") or {}
-        self.assertIn("LEGADO_TEST_JVM_ENV_OUT", env, "Gradle 那条没刷 dump")
-        self.assertTrue(str(env["LEGADO_TEST_JVM_ENV_OUT"]).endswith("test_jvm_env.json"))
 
 
 class EndpointTests(_RunCase):

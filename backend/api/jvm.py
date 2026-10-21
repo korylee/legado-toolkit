@@ -1,9 +1,8 @@
 # -*- coding: utf-8 -*-
 """JVM 校验的 HTTP 编排层（S2）。
 
-四个端点：
+三个端点：
   GET  /api/jvm/readiness  环境就绪检查（只读，不下载、不构建）
-  POST /api/jvm/refresh    后台刷新 runtime snapshot
   POST /api/jvm/run        提交批量校验（进入 JVM lane 后由任务体后台执行）
   GET  /api/jvm/results    最近一批结论（从 meta 读，供列表合并展示）
 
@@ -31,7 +30,6 @@ from backend.jobs.jvm_exec import (_build_jvm_manifest, _cleanup_run_dir,
                                    _export_sources_file, _write_args)
 from backend.schemas import JvmRunRequest
 from core import settings_store
-from core.jvm_direct import execution_readiness
 from core.jvm_env import readiness
 from core.jvm_health import static_rule_complete
 from core.loader import _normalize_url
@@ -229,13 +227,6 @@ def jvm_readiness():
     return readiness(conf.get("app_repo", ""), conf.get("android_sdk_dir", ""))
 
 
-@router.post("/refresh", status_code=202)
-async def jvm_refresh():
-    job_id = runner.submit("jvm_refresh", {}, lane="jvm", lane_kind="batch")
-    return {"job_id": job_id, "kind": "jvm_refresh",
-            "events": "/api/jobs/%s/stream" % job_id}
-
-
 def _pick_directory(title: str):
     """打开本机原生目录选择器；浏览器 file input 无法提供可用的本机路径。"""
     try:
@@ -333,30 +324,19 @@ async def jvm_run(body: Optional[JvmRunRequest] = None):
     chunk_size = settings_store.coerce("jvm", "chunk_size",
                                           eff["chunk_size"])
 
-    # 完整 readiness 是 Gradle/SDK 的准备态；单条请求可以只依赖已有的
-    # runtime snapshot + Validate daemon
+    # 完整 readiness 是 Gradle/SDK 的准备态：Gradle boot 必须它成立。原先「准备态
+    # 不完整但 runtime snapshot 可用」的单条降级路径随直起一起退场——dump 没了，
+    # 没有绕开完整准备态的引擎。
     st_conf = readiness(conf.get("app_repo", ""), conf.get("android_sdk_dir", ""))
     single = len(rows) == 1
-    exec_conf: Dict[str, Any] = {}
     preparation_ready = bool(st_conf.get("ok"))
     allow_gradle_fallback = preparation_ready
-    if single:
-        # 单条任务无论是否允许 Gradle fallback，都必须在提交时冻结一份
-        # runtime snapshot 的执行态检查；否则「准备态完整」会把已失效的
-        # classpath / Java / 源码快照带进 daemon，直到 daemon 自己失败才暴露。
-        exec_conf = execution_readiness()
-        if not preparation_ready and not exec_conf.get("ok"):
-            _cleanup_run_dir(run_dir)
-            return {
-                "started": False,
-                "reason": exec_conf.get("reason") or "单条 JVM 执行态未就绪",
-                "readiness": st_conf,
-                "execution_readiness": exec_conf,
-                "skipped_rule_incomplete": skipped_rule_incomplete,
-            }
-    elif not preparation_ready:
+    if not preparation_ready:
         _cleanup_run_dir(run_dir)
-        return {"started": False, "readiness": st_conf,
+        bad = next((c for c in (st_conf.get("checks") or []) if not c.get("ok")), {})
+        return {"started": False,
+                "reason": bad.get("hint") or "JVM 准备态未就绪",
+                "readiness": st_conf,
                 "skipped_rule_incomplete": skipped_rule_incomplete}
     # 绝对路径的理由同 _export_sources_file：这个路径是给**另一个进程**
     # （CWD = App 仓库根）用的，相对路径会落到 App 仓库里去
@@ -392,7 +372,6 @@ async def jvm_run(body: Optional[JvmRunRequest] = None):
         allow_gradle_fallback=(allow_gradle_fallback if single else False),
         runtime=dict(st_conf.get("runtime") or {}),
         readiness=st_conf,
-        execution_readiness=exec_conf,
         readiness_fingerprint=st_conf.get("fingerprint", ""),
         readiness_checked_at=st_conf.get("checked_at", ""),
         source_count=len(rows),
@@ -410,7 +389,6 @@ async def jvm_run(body: Optional[JvmRunRequest] = None):
           "out_path": str(out_path), "runtime": dict(st_conf.get("runtime") or {}),
           "single": single,
           "allow_gradle_fallback": allow_gradle_fallback,
-          "execution_readiness": exec_conf,
           "readiness": st_conf,
           "readiness_fingerprint": st_conf.get("fingerprint", ""),
           "readiness_checked_at": st_conf.get("checked_at", "")},

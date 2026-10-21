@@ -86,8 +86,8 @@ app.include_router(llm.router, prefix="/api/llm", tags=["llm"])
 app.include_router(settings.router, prefix="/api/settings", tags=["settings"])
 app.include_router(jvm.router, prefix="/api/jvm", tags=["jvm"])
 
-# 导入即注册 job handler：ops 生成验证、JVM 调试与 runtime snapshot 刷新。
-from backend.jobs import jvm_debug_job, jvm_refresh_job  # noqa: E402,F401  导入即注册
+# 导入即注册 job handler：ops 生成验证与 JVM 调试。
+from backend.jobs import jvm_debug_job  # noqa: E402,F401  导入即注册
 _ = ops
 
 

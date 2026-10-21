@@ -5,12 +5,21 @@
 贵一个量级，常驻把「起一次」摊到多次请求上。
 **实测数字别在这里抄**（会过期）：见 lessons §六十五 / §六十六 / §六十七。
 
+## boot 经 Gradle（2026-10-18 起唯一 boot 路径，方案甲）
+
+拉起 = `legado-gradle.bat :app:testAppDebugUnitTest --tests AppServiceDaemonLauncher
+--rerun`（测试阻塞 serve，Gradle 握着进程）。**Gradle boot 前必编译**，所以 daemon
+进程里跑的**永远是当前源码**——「dump 过期 → 跑旧类 → 规则改了没生效」这个失败模式
+随直起一起退场（原 `jvm_direct` 的 dump/argfile 机制不再存在）。
+实测（2026-10-18 本机）：Kotlin 未变时 boot 到 ping-ok 33.9s——它是每 daemon 生命周期
+一次、30 分钟 idle 共享的入场费。
+
 ## 与一次性那条**同形**（关键设计，别改成另一套）
 
 daemon 只换「怎么拉起」：请求走一行 JSON 过 socket（`op=debug` / `op=validate`，见
 `appservice` 的 `AppServiceDaemon`），产物（NDJSON + 侧车 / results.jsonl）**还是落到
 原来的路径**，于是 `core.jvm_debug.run_jvm_debug` 与批量那条链的解析一行不改——它靠
-`launcher=` 缝接进来。两条拉起方式（直起 / 常驻）的差别**只有拉起**。
+`launcher=` 缝接进来。
 
 ## 生命周期语义（2026-10-18 合并时取 validate 侧的强语义为准）
 
@@ -23,19 +32,18 @@ daemon 只换「怎么拉起」：请求走一行 JSON 过 socket（`op=debug` /
 - **stop_idle 保守停**：身份核验（ping + 进程实例身份）+ PID 复用防护 + 优雅退出
   确认，绝不强杀。
 - **降级路径（必须有）**：`launcher_from_args()` 的每一次调用都是「先试 daemon，
-  任何失败就回落」——用户看到的顶多是「这次慢一点」，而不是「调试坏了」。
+  任何失败就回落 Gradle」——用户看到的顶多是「这次慢一点」，而不是「调试坏了」。
 
 ## 版本键
 
-`source_sig()` = appservice 的 Kotlin 源码指纹 + runtime snapshot 内容指纹。
-**改了 Kotlin 或运行环境不重启进程，进程里跑的还是旧类/旧环境**，而那看起来像
-「规则改了没生效」——所以 sig 变了就换进程。daemon 自己不判版本（它不知道磁盘上
-现在是什么），只在 `op=ping` 时把起它时收到的 sig 原样回吐，由客户端比。
+`source_sig()` = appservice 的 Kotlin 源码指纹。**改了 Kotlin 不重启进程，进程里跑的
+还是旧类**，而那看起来像「规则改了没生效」——所以 sig 变了就换进程。daemon 自己不判
+版本（它不知道磁盘上现在是什么），只在 `op=ping` 时把起它时收到的 sig 原样回吐，
+由客户端比。Gradle boot 必编译，所以「sig 对不上」只发生在复用**起得更早**的进程时。
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import pathlib
@@ -47,17 +55,18 @@ import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from uuid import uuid4
 
-from core import jvm_direct
 from core.paths import data_path
 
 DAEMON_CLASS = "io.legado.app.service.AppServiceDaemonLauncher"
+BOOT_TASK = ":app:testAppDebugUnitTest"
 INFO_NAME = "jvm_daemon.json"
 LOG_NAME = "jvm_daemon.log"
 
 #: 默认空闲退出（秒）。**真正的计时在 daemon 里**，这里只是传给它；
 #: 改值要两边一起想（Kotlin 侧 `AppServiceDaemon.DEFAULT_IDLE_SEC`）。
 DEFAULT_IDLE_SEC = 1800
-#: 首次拉起要等 Robolectric + App 起来（首次编译/冷缓存会更久）
+#: 首次拉起要等 Gradle 配置 + 编译检查 + Robolectric + App 起来
+#: （实测 2026-10-18 本机：Kotlin 未变 33.9s；改了 Kotlin 要加上编译时间）
 DEFAULT_BOOT_TIMEOUT = 180
 
 #: 忙等待期间每隔这么久回调一次 ``on_wait``（让调用方把等待写进时间线）。
@@ -87,33 +96,18 @@ def current_operation_path() -> pathlib.Path:
     return pathlib.Path(data_path("app_probe", "daemon.current.json"))
 
 
-def _runtime_sig() -> str:
-    path = jvm_direct.dump_path()
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-        canonical = json.dumps(raw, ensure_ascii=False, sort_keys=True,
-                               separators=(",", ":"))
-    except (OSError, ValueError, TypeError):
-        try:
-            canonical = path.read_bytes().decode("utf-8", errors="replace")
-        except OSError:
-            canonical = ""
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+def source_sig() -> str:
+    """版本键：appservice 的 Kotlin 源码指纹（数量 + mtime + 总大小）。
 
-
-def source_sig(dump: Optional[Dict[str, Any]] = None) -> str:
-    """版本键：Kotlin 源码（数量+mtime+总大小）+ runtime snapshot 内容指纹。
-
-    **不是密码学哈希**，职责是「改了代码或执行环境别用旧进程」。snapshot 使用稳定内容
-    指纹而不是文件 mtime；Gradle 重写同一份环境描述不应无故让常驻 daemon 失效。
-    **刻意不缓存**：源码与 snapshot 每次重新读取，必须逐次反映真实执行环境；加缓存省下
-    的时间抵不上多出来的失效条件。"""
-    files = list((jvm_direct.AGSVC / "test").rglob("*.kt"))
+    **不是密码学哈希**，职责是「改了代码别用旧进程」。boot 经 Gradle 必编译，
+    所以「sig 对不上」只出现在**复用起得更早的 daemon**时——重用前比对，
+    对不上就换进程。**刻意不缓存**：源码每次重新读取，必须逐次反映真实状态；
+    加缓存省下的时间抵不上多出来的失效条件。"""
+    from core import jvm_debug          # 惰性：jvm_debug 在函数内 import 本模块
+    files = list((jvm_debug.AGSVC / "test").rglob("*.kt"))
     mt = max((f.stat().st_mtime for f in files), default=0.0)
     size = sum(f.stat().st_size for f in files)
-    runtime = _runtime_sig()
-
-    return "kt%d-%d-%d-runtime%s" % (len(files), int(mt), size, runtime)
+    return "kt%d-%d-%d" % (len(files), int(mt), size)
 
 
 # ---------------------------------------------------------------- 进程身份
@@ -503,31 +497,51 @@ def status() -> Dict[str, Any]:
     }
 
 
-def start(dump: Dict[str, Any], idle_sec: int = DEFAULT_IDLE_SEC,
+def start(idle_sec: int = DEFAULT_IDLE_SEC,
           boot_timeout: int = DEFAULT_BOOT_TIMEOUT) -> Dict[str, Any]:
     """拉起一个 daemon 并等它就绪。失败抛 `DaemonError`（**带日志尾巴**，别让人对着空手猜）。"""
     with _LOCK:
-        return _start_locked(dump, idle_sec=idle_sec, boot_timeout=boot_timeout)
+        return _start_locked(idle_sec=idle_sec, boot_timeout=boot_timeout)
 
 
-def _start_locked(dump: Dict[str, Any], idle_sec: int = DEFAULT_IDLE_SEC,
+def _start_locked(idle_sec: int = DEFAULT_IDLE_SEC,
                   boot_timeout: int = DEFAULT_BOOT_TIMEOUT) -> Dict[str, Any]:
+    """boot 经 Gradle（唯一 boot 路径，方案甲）：`legado-gradle.bat` 起测试 JVM，
+    测试阻塞 serve，Gradle 握着进程。**Gradle 必先编译**，所以 daemon 跑的永远是
+    当前源码；env 来自 readiness（与 Gradle 回落那条同一份，不读原始环境变量——
+    手工漏传 ANDROID_HOME 时启动器直接报错， lessons §六十五）。
+
+    **kill 必须整树**（`_kill_proc`）：cmd → gradlew → Gradle daemon → 测试 JVM 四层，
+    漏一层就留下「还占着 profile/端口」的孤儿（lessons §六十六）。
+    """
     global _PROC, _LOG
-    jvm_direct.validate_dump(dump)
+    from core import jvm_debug          # 惰性：jvm_debug 在函数内 import 本模块
+    from core import jvm_env, settings_store
+    conf = settings_store.load().get("jvm", {})
+    readiness = jvm_env.readiness(conf.get("app_repo", ""), conf.get("android_sdk_dir", ""))
+    if not readiness.get("ok"):
+        bad = next((c for c in (readiness.get("checks") or []) if not c.get("ok")), {})
+        raise DaemonError("本机引擎不可用：%s——%s"
+                          % (bad.get("name") or "环境就绪检查未通过",
+                             bad.get("hint") or "先完成 JVM 环境检查"))
+    try:
+        base_env = jvm_env.process_environment(readiness)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise DaemonError("环境自检结果不完整：%s" % exc) from exc
     port = pick_port()
-    sig = source_sig(dump)
-    cmd = jvm_direct.java_command(dump, DAEMON_CLASS)
-    env = {**jvm_direct.java_env(dump),
+    sig = source_sig()
+    cmd = ["cmd", "/c", str(jvm_debug.LAUNCHER), BOOT_TASK,
+           "--tests", DAEMON_CLASS, "--rerun"]
+    env = {**base_env,
            "LEGADO_DAEMON_PORT": str(port),
            "LEGADO_DAEMON_IDLE_SEC": str(int(idle_sec)),
-           "LEGADO_DAEMON_SIG": sig,
-           "LEGADO_TEST_JVM_ENV_OUT": str(jvm_direct.dump_path()),
-           "LEGADO_TEST_JVM_LAUNCH_MODE": "daemon"}
+           "LEGADO_DAEMON_SIG": sig}
     log_path().parent.mkdir(parents=True, exist_ok=True)
     _LOG = open(log_path(), "a", encoding="utf-8")
-    _LOG.write("\n==== %s 起 daemon：port=%s sig=%s\n" % (time.strftime("%F %T"), port, sig))
+    _LOG.write("\n==== %s 起 daemon（gradle boot）：port=%s sig=%s\n"
+               % (time.strftime("%F %T"), port, sig))
     _LOG.flush()
-    _PROC = subprocess.Popen(cmd, cwd=dump["workingDir"], env=env,
+    _PROC = subprocess.Popen(cmd, cwd=str(jvm_debug.AGSVC), env=env,
                              stdout=_LOG, stderr=subprocess.STDOUT)
     deadline = time.time() + max(5, boot_timeout)
     while time.time() < deadline:
@@ -538,34 +552,33 @@ def _start_locked(dump: Dict[str, Any], idle_sec: int = DEFAULT_IDLE_SEC,
             info = {"pid": _PROC.pid, "port": port, "sig": sig, "idle_sec": int(idle_sec),
                     "started_at": time.time()}
             _write_info(info)
-            from core.jvm_runtime_snapshot import compare_runtime_snapshot
-            compare_runtime_snapshot("daemon", "daemon")
             return info
         time.sleep(0.2)
     _kill_proc()
     raise DaemonError("daemon %.0fs 内没起来（看 %s）" % (boot_timeout, log_path()))
 
 
-def ensure(dump: Dict[str, Any], idle_sec: int = DEFAULT_IDLE_SEC,
+def ensure(idle_sec: int = DEFAULT_IDLE_SEC,
            boot_timeout: int = DEFAULT_BOOT_TIMEOUT) -> Dict[str, Any]:
     """拿到一个**可用**的 daemon：活着、身份对且版本对就复用，否则（重）起一个。
 
     身份从**端口问**（ping 回的 pid 与记录一致），不从进程外杀 pid——pid 会被复用。
+    Gradle boot 必编译：复用的进程若起得比最近一次源码改动早（sig 对不上），
+    显式收掉再起——进程里跑的是旧类。
     """
-    jvm_direct.validate_dump(dump)
     with _LOCK:
         info = _read_info()
         if info.get("port"):
             got = ping(int(info["port"]), timeout=1.0)
             if got and got.get("pid") == info.get("pid"):
-                if info.get("sig") == source_sig(dump):
+                if info.get("sig") == source_sig():
                     return info
                 # 版本对不上：进程里是旧类。**显式收掉**再起（不靠 pid kill 的运气）
                 _stop_port(int(info["port"]), int(info.get("pid") or 0))
-        return start(dump, idle_sec=idle_sec, boot_timeout=boot_timeout)
+        return start(idle_sec=idle_sec, boot_timeout=boot_timeout)
 
 
-def probe(dump: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def probe() -> Optional[Dict[str, Any]]:
     """只读探测：daemon 活着且版本匹配才返回 info；其余一律 None。
 
     与 ``ensure`` 的差别是**绝不杀进程、绝不重启**：ping 不通可能只是 daemon
@@ -579,7 +592,7 @@ def probe(dump: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if not port:
         return None
     got = ping(port, timeout=1.0)
-    if got and got.get("sig") == source_sig(dump):
+    if got and got.get("sig") == source_sig():
         return info
     return None
 
@@ -592,8 +605,7 @@ def _notify_wait(callback: Any, elapsed: float) -> None:
         print("警告：忙等待进度回调失败（不影响等待）：%s" % exc, flush=True)
 
 
-def prepare(dump: Dict[str, Any],
-            boot_timeout: int = DEFAULT_BOOT_TIMEOUT,
+def prepare(boot_timeout: int = DEFAULT_BOOT_TIMEOUT,
             busy_wait_sec: float = 2.0,
             on_wait: Optional[Any] = None) -> Dict[str, Any]:
     """批量开跑前的一次性 daemon 准备：能复用就复用，该重启才重启。
@@ -618,12 +630,12 @@ def prepare(dump: Dict[str, Any],
         if port:
             got = ping(port, timeout=1.0)
             if got:
-                if got.get("sig") == source_sig(dump):
+                if got.get("sig") == source_sig():
                     return {"outcome": "ready", "info": info}
                 # ping 通 = 此刻空闲且身份已确认（kind=="engine"），优雅停旧
                 # 起新；ensure 在这条路上走不到它的杀分支
                 return {"outcome": "started",
-                        "info": ensure(dump, boot_timeout=boot_timeout)}
+                        "info": ensure(boot_timeout=boot_timeout)}
             pid = int(info.get("pid") or 0)
             if pid > 0 and _pid_alive(pid):
                 wait = max(0.0, float(busy_wait_sec))
@@ -638,13 +650,13 @@ def prepare(dump: Dict[str, Any],
                             _notify_wait(on_wait, elapsed)
                     got = ping(port, timeout=0.25)
                     if got:
-                        if got.get("sig") == source_sig(dump):
+                        if got.get("sig") == source_sig():
                             return {"outcome": "ready", "info": info}
                         return {"outcome": "started",
-                                "info": ensure(dump, boot_timeout=boot_timeout)}
+                                "info": ensure(boot_timeout=boot_timeout)}
                     if not _pid_alive(pid):
                         return {"outcome": "started",
-                                "info": ensure(dump, boot_timeout=boot_timeout)}
+                                "info": ensure(boot_timeout=boot_timeout)}
                     time.sleep(0.1)
                 owner = _read_current_operation()
                 if owner:
@@ -666,12 +678,12 @@ def prepare(dump: Dict[str, Any],
                                    "本批不准备也不杀")}
         # info 缺失，或 pid 已死（info 是残骸）→ 此刻 ensure 的清理只碰得到死进程
         return {"outcome": "started",
-                "info": ensure(dump, boot_timeout=boot_timeout)}
+                "info": ensure(boot_timeout=boot_timeout)}
     except DaemonError as exc:
         return {"outcome": "failed", "reason": str(exc)}
 
 
-def resolve(dump: Dict[str, Any], boot_timeout: int = DEFAULT_BOOT_TIMEOUT,
+def resolve(boot_timeout: int = DEFAULT_BOOT_TIMEOUT,
             busy_wait_sec: float = 2.0,
             on_wait: Optional[Any] = None) -> Dict[str, Any]:
     """``prepare`` 的**抛异常版本**：取到可用 daemon 的 info，忙/失败则抛。
@@ -681,14 +693,14 @@ def resolve(dump: Dict[str, Any], boot_timeout: int = DEFAULT_BOOT_TIMEOUT,
     那次执行（对方那一块可能仍在运行）。这里改成等一小会儿，仍忙就把
     原因原样抛出去，由调用方按任务执行策略处理，进程一个都不动。
     """
-    got = prepare(dump, boot_timeout=boot_timeout, busy_wait_sec=busy_wait_sec,
+    got = prepare(boot_timeout=boot_timeout, busy_wait_sec=busy_wait_sec,
                   on_wait=on_wait)
     if got.get("outcome") in ("ready", "started"):
         return dict(got.get("info") or {})
     raise DaemonError(str(got.get("reason") or "daemon 未就绪"))
 
 
-def run_validate(dump: Dict[str, Any], args_file: str, timeout_slack: int = 30,
+def run_validate(args_file: str, timeout_slack: int = 30,
                  socket_timeout: Optional[int] = None,
                  busy_wait_sec: float = 2.0,
                  owner: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -702,7 +714,7 @@ def run_validate(dump: Dict[str, Any], args_file: str, timeout_slack: int = 30,
     ``busy_wait_sec`` 交给 ``resolve``：忙时等一小会儿，不杀进程（见 ``resolve``）。
     """
     cfg = validate_params_from_args(args_file)
-    info = resolve(dump, busy_wait_sec=busy_wait_sec)
+    info = resolve(busy_wait_sec=busy_wait_sec)
     operation_id = _begin_current_operation(owner)
     cfg.update({
         "owner_job_id": str((owner or {}).get("job_id") or ""),
@@ -757,13 +769,22 @@ def _stop_port(port: int, pid: int = 0) -> bool:
 
 
 def _kill_proc() -> bool:
+    """硬杀 boot 进程。**Gradle boot 的进程是四层树**（cmd → gradlew → Gradle daemon
+    → 测试 JVM）：`Popen.kill()` 只杀第一层，剩下的 Gradle daemon 与测试 JVM 变成
+    「还占着 profile/端口」的孤儿（lessons §六十六 的隔离判据）。Windows 走
+    `taskkill /F /T`（jvm_exec 的 Gradle 进程同款）；POSIX 走进程组信号。
+    """
     global _PROC, _LOG
     if _PROC is None:
         return False
     try:
         if _PROC.poll() is None:
-            _PROC.kill()
-            _PROC.wait(timeout=10)
+            if os.name == "nt":
+                subprocess.run(["taskkill", "/F", "/T", "/PID", str(_PROC.pid)],
+                               capture_output=True, timeout=15)
+            else:
+                os.killpg(os.getpgid(_PROC.pid), signal.SIGTERM)
+            _PROC.wait(timeout=15)
     except Exception:
         return False
     finally:
@@ -894,7 +915,7 @@ def reset_for_tests() -> None:
 
 # ---------------------------------------------------------------- 给 run_jvm_debug 的缝
 
-def launcher_from_args(dump: Dict[str, Any], idle_sec: int = DEFAULT_IDLE_SEC,
+def launcher_from_args(idle_sec: int = DEFAULT_IDLE_SEC,
                        boot_timeout: int = DEFAULT_BOOT_TIMEOUT,
                        slack_sec: int = 90,
                        on_note: Optional[Callable[[str], None]] = None,
@@ -906,27 +927,28 @@ def launcher_from_args(dump: Dict[str, Any], idle_sec: int = DEFAULT_IDLE_SEC,
     回落是**每次调用**判定的（不是启动时判一次）：daemon 半路死了、空闲退出了、版本被
     改了，下一次调用仍然能跑——用户看到的顶多是「这次慢一点」。
 
-    `fallback` 是回落目标：CLI/开发默认走**直起**（快、且 dump 新鲜时等价）；**产品那条
-    传 Gradle**（`core.jvm_debug.default_launcher`）——Gradle 一定会先编译，所以它是
-    「无论如何都能跑对」的那条。提示语不区分回落叫什么：用户只需要知道「这次慢」与
-    「怎么恢复快速」，不需要知道拉起方式的名字。
+    `fallback` 是回落目标，**产品那条传 Gradle**（`core.jvm_debug.default_launcher`）——
+    Gradle 一定会先编译，所以它是「无论如何都能跑对」的那条；不给就回落 Gradle 跑一次
+    调试（与产品同一条）。提示语不区分回落叫什么：用户只需要知道「这次慢」，
+    不需要知道拉起方式的名字。
     """
     def _run() -> Tuple[int, float, str, str]:
         t0 = time.time()
         cfg = params_from_args(args_file) if args_file else params_from_args()
         try:
-            info = ensure(dump, idle_sec=idle_sec, boot_timeout=boot_timeout)
+            info = ensure(idle_sec=idle_sec, boot_timeout=boot_timeout)
             r = request(cfg, int(info["port"]), timeout=int(cfg["timeout"]) + slack_sec)
             return int(r.get("code", -1)), time.time() - t0, "", ""
         except Exception as e:
             # **没走成快速启动要说出来**：静默会把「快速通道一直没生效」藏起来（用户只看到
-            # 「也没快多少」，下次还得再踩一遍）。措辞照界面的规矩：说结果与恢复办法，
-            # 别用内部黑话（「降级/回落/常驻进程/Gradle」这类词用户无从行动）。
+            # 「也没快多少」，下次还得再踩一遍）。措辞照界面的规矩：说结果，别用内部黑话
+            # （「降级/回落/常驻进程/Gradle」这类词用户无从行动）。
             if on_note is not None:
-                on_note("快速启动没走成（%s），这次用了慢速方式；"
-                        "跑一次「刷新引擎快照」可恢复" % e)
-            fn = fallback or jvm_direct.direct_launcher(
-                dump, timeout=int(cfg["timeout"]) + slack_sec + 60)
+                on_note("快速启动没走成（%s），这次用了慢速方式" % e)
+            from core import jvm_debug          # 惰性：jvm_debug 在函数内 import 本模块
+            fn = fallback or (lambda: jvm_debug._run_launcher(
+                timeout_min=max(5, (int(cfg["timeout"]) + slack_sec + 60) // 60),
+                args_path=pathlib.Path(args_file) if args_file else None))
             rc, _cost, so, se = fn()
             return rc, time.time() - t0, so, se
 

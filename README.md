@@ -36,7 +36,7 @@ core/        核心引擎——不依赖任何入口
 services/    应用编排层：串起多个 core 模块完成一件业务动作（加源 / 合并）
 frontend/    Vue 3 管理台（构建产物 dist 由后端托管）
 appservice/  App 侧：Robolectric 里跑「阅读」的真源码，校验与调试共用
-scripts/     手工脚本（jvm_debug_run / jvm_debug_direct / jvm_login…）
+scripts/     手工脚本（jvm_debug_run / jvm_login…）
 tests/       Python 测试；tools/ 开发与 agent 工具（**不是运行时依赖**）
 skills/      Agent / 开发技能文档；deploy/fnos/ 飞牛 NAS 部署示例
 data/        运行时数据（已 gitignore）
@@ -147,9 +147,8 @@ Gradle Wrapper 分发包需要先显式准备（校验与调试不会自动联�
    跟着动作走，**只作用于这一次、不写回设置**；默认值与取值范围仍由后端一份定义。
 
 **本机引擎调试**（与批量校验共用同一套 JVM 环境，但快得多）：调试抽屉里选「本机引擎」，
-JVM 常驻后台（也可 `python scripts/jvm_debug_direct.py --daemon-stop` 停掉）。改了
-`appservice/` 的 Kotlin 后，下一次会走 Gradle 重新编译、慢一次；走不成常驻时结果里
-会写明原因并回落 Gradle。
+JVM 常驻后台（设置页可停）。引擎常驻的启动走 Gradle——改了 `appservice/` 的 Kotlin
+后第一次启动会重新编译、慢一次，之后照常快；走不成常驻时结果里会写明原因并回落 Gradle。
 
 **校验走本机引擎**：所有校验入口都在 JVM 里跑「阅读」App 的真源码——**代价**是本机
 引擎环境从「可选」变成**校验的前提**，没配 App 源码目录就没有校验入口（调试同理）。
@@ -216,7 +215,6 @@ JVM 常驻后台（也可 `python scripts/jvm_debug_direct.py --daemon-stop` 停
 | POST /api/rules/jvm-debug | **本机引擎调试**（JVM 里跑 App 真源码，含 JS 规则）：提交即返回任务号，结果看任务明细 |
 | POST /api/rules/app-push | 推送会**改 App 数据**，所以必须显式触发（由预检三态决定要不要先推） |
 | POST /api/jvm/run | 批量校验建一条任务（`kind=jvm_run`，关页面不丢）；范围 `urls` / `filter`，本次参数走 `params`；规则不完整的源会跳过并报告数量 |
-| POST /api/jvm/refresh | 后台刷新本机 runtime snapshot，结果通过任务流查看 |
 | POST /api/rules/suggest-rule | AI 只提议：每条都过验证，验不了的单独标「只能连 App 试」 |
 | GET /api/settings | 全局设置，同时下发 `defaults` 与 `limits`（前端不硬编码上下界） |
 

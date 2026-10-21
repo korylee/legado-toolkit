@@ -184,7 +184,6 @@ class DebugSubmissionGateTests(unittest.TestCase):
     def test_debug_submit_is_rejected_when_jvm_lane_has_work(self):
         cases = [
             [{"kind": "jvm_debug", "status": "pending"}],
-            [{"kind": "jvm_refresh", "status": "running"}],
         ]
         for active_jobs in cases:
             with self.subTest(active_jobs=active_jobs):

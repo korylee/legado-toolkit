@@ -10,13 +10,11 @@ import { ref, computed, watch, onUnmounted } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { cancelJob as cancelJobApi, deleteJob as deleteJobApi, getJobDetail,
          retryJob as retryJobApi } from "../api/jobs";
-import { jvmRefresh } from "../api/jvm";
 import { healthLabel } from "../utils/health";
 import {
   isWorseHealth,
   jobAgoText,
   jobCanCancel,
-  jobCanRefreshRuntimeSnapshot,
   jobCancelHint,
   jobIsInFlight,
   jobIsTerminal,
@@ -77,11 +75,6 @@ const job = computed(() => {
 });
 const summary = computed(() => (detail.value || {}).summary || null);
 const inFlight = computed(() => jobIsInFlight(job.value.status));
-const snapshotRefreshedJobId = ref("");
-const canRefreshSnapshot = computed(() =>
-  snapshotRefreshedJobId.value !== jobId.value && jobCanRefreshRuntimeSnapshot(job.value));
-const refreshingSnapshot = ref(false);
-let stopRefreshWatch = null;
 //: 变坏的那几条排在最前：结果态真正的入口是「哪些源坏了」，不是「有几条变化」——
 //: 顺序本身就是权重。哪档算坏由后端下发，见 isWorseHealth。
 const changedItems = computed(() => {
@@ -170,42 +163,6 @@ async function cancelJob() {
     emit("changed");
   } catch (e) {
     if (e !== "cancel" && e !== "close") ElMessage.error("取消任务失败：" + e.message);
-  }
-}
-
-async function refreshRuntimeSnapshot() {
-  if (refreshingSnapshot.value) return;
-  const originalJobId = jobId.value;
-  refreshingSnapshot.value = true;
-  try {
-    const submitted = await jvmRefresh();
-    const refreshJobId = submitted && submitted.job_id;
-    if (!refreshJobId) throw new Error("没有拿到刷新任务号");
-    const unwatch = watchJob(refreshJobId, async (state) => {
-      if (stopRefreshWatch === unwatch) stopRefreshWatch = null;
-      unwatch();
-      refreshingSnapshot.value = false;
-      const refreshJob = (state && state.job) || {};
-      if (refreshJob.status === "done") {
-        try {
-          const result = await getJobDetail(refreshJobId);
-          if (result.result && result.result.ok === true) {
-            snapshotRefreshedJobId.value = originalJobId;
-            ElMessage.success("运行快照已刷新，请重试本次校验");
-            return;
-          }
-          ElMessage.error((result.result && result.result.error) || "运行快照刷新失败");
-        } catch (e) {
-          ElMessage.error("读取运行快照刷新结果失败：" + e.message);
-        }
-        return;
-      }
-      ElMessage.error(refreshJob.error || "运行快照刷新未完成，请在任务中心查看");
-    });
-    stopRefreshWatch = unwatch;
-  } catch (e) {
-    refreshingSnapshot.value = false;
-    ElMessage.error("提交运行快照刷新失败：" + (e?.message || e));
   }
 }
 
@@ -304,9 +261,6 @@ async function deleteJob() {
       </div>
       <div v-if="job.error" class="td-warn">
         {{ job.error }}
-        <el-button v-if="canRefreshSnapshot" link type="primary" size="small"
-                   :loading="refreshingSnapshot" :disabled="refreshingSnapshot"
-                   @click="refreshRuntimeSnapshot">刷新</el-button>
       </div>
       <!-- 回退原因不是「技术细节」：它说明这次为什么没走常驻引擎、为什么慢，
            有值就该露出来，不该等人去展开一个折叠块 -->

@@ -50,7 +50,7 @@ class JvmRunProgressTests(unittest.TestCase):
             run_dir=run_dir, source_file=source_file, args_file=args_file,
             out_path=out_path, single=single, execution_plan="daemon",
             allow_gradle_fallback=False, runtime={}, readiness={},
-            execution_readiness={}, readiness_fingerprint="",
+            readiness_fingerprint="",
             readiness_checked_at="", source_count=(1 if single else 2),
             urls=(["https://a.com"] if single else
                   ["https://a.com", "https://b.com"]),
@@ -82,16 +82,13 @@ class JvmRunProgressTests(unittest.TestCase):
             def gradle(args_path=None, runtime=None, **kwargs):
                 return {"exit": 0, "stdout": "", "stderr": ""}
         if daemon is None:
-            def daemon(dump, args_file):
+            def daemon(args_file):
                 return {"code": 0, "cost_ms": 1, "error": ""}
         # 进度测试走真实批量执行形状：daemon 成功时逐条写结果，Gradle 不应被调用。
         with mock.patch.object(jvm_exec, "_run_gradle", gradle), \
              mock.patch.object(jvm_exec, "_write_meta", lambda rows: "testbatch"), \
              mock.patch("core.jvm_health.store_checks", lambda *a, **kw: 0), \
              mock.patch.object(jvm_exec, "_PROGRESS_POLL_INTERVAL", 0.05), \
-             mock.patch.object(jvm_exec, "execution_readiness",
-                               lambda dump=None: {"ok": True}), \
-             mock.patch("core.jvm_direct.load_dump", return_value=dict(_DUMP)), \
              mock.patch("core.jvm_daemon.prepare",
                         return_value={"outcome": "ready", "reason": ""}), \
              mock.patch("core.jvm_daemon.probe", return_value={"sig": "s"}), \
@@ -116,7 +113,7 @@ class JvmRunProgressTests(unittest.TestCase):
                        ["https://a.com", "https://b.com"])
             return {"exit": 0, "stdout": "", "stderr": ""}
 
-        def fake_daemon(dump, args_path, socket_timeout=None, owner=None):
+        def fake_daemon(args_path, socket_timeout=None, owner=None):
             fake_gradle(args_path=args_path)
             return {"code": 0}
 
@@ -135,7 +132,7 @@ class JvmRunProgressTests(unittest.TestCase):
             self._rows(pathlib.Path(args_path).parent / "results.jsonl", ["https://a.com"])
             return {"exit": 0, "stdout": "", "stderr": ""}
 
-        def fake_daemon(dump, args_path, socket_timeout=None, owner=None):
+        def fake_daemon(args_path, socket_timeout=None, owner=None):
             fake_gradle(args_path=args_path)
             return {"code": 0}
 
@@ -147,7 +144,7 @@ class JvmRunProgressTests(unittest.TestCase):
         payload = self._payload()
         self._create_job(2)
 
-        def failing_daemon(dump, args_file, socket_timeout=None):
+        def failing_daemon(args_file, socket_timeout=None):
             raise RuntimeError("daemon unavailable")
 
         result = self._run(payload, daemon=failing_daemon)
@@ -160,7 +157,7 @@ class JvmRunProgressTests(unittest.TestCase):
         payload["allow_gradle_fallback"] = False
         self._create_job(1)
 
-        def broken_daemon(dump, args_file):
+        def broken_daemon(args_file):
             raise RuntimeError("端口不可用")
 
         result = self._run(payload, daemon=broken_daemon)
@@ -172,7 +169,7 @@ class JvmRunProgressTests(unittest.TestCase):
         self._create_job(2)
         seen = {"mid": 0}
 
-        def slow_daemon(dump, args_path, socket_timeout=None, owner=None):
+        def slow_daemon(args_path, socket_timeout=None, owner=None):
             out = pathlib.Path(args_path).parent / "results.jsonl"
             self._rows(out, ["https://a.com"])
             # 等轮询把 1 写进任务表（间隔 0.05s，给足余量）再写第二条；

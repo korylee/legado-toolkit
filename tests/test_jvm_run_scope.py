@@ -32,7 +32,6 @@ from backend.api import jvm as jvm_api
 from backend.jobs import jvm_exec
 from backend.jobs import runner as jobs_runner
 from backend.schemas import JvmRunRequest
-from core import jvm_direct
 from core.jvm_health import CACHE_VERSION
 from core.loader import _normalize_url
 from core.store import Store
@@ -65,15 +64,6 @@ class _Base(unittest.TestCase):
             mock.patch.object(jobs_runner, "data_dir", lambda: self.probe / "data"),
             mock.patch.object(jobs_runner, "Store", lambda *a, **kw: Store(self.db)),
             mock.patch.object(jvm_api, "readiness", lambda repo, sdk="": {"ok": True, "checks": [], "runtime": {"app_repo": "X:/repo", "java_home": "X:/jdk", "android_sdk": "X:/sdk", "gradle_user_home": "X:/.gradle"}}),
-            mock.patch.object(jvm_api, "execution_readiness", lambda dump=None: {"ok": True, "checks": [], "reason": "", "source_sig": "sig"}),
-            mock.patch.object(jvm_exec, "execution_readiness", lambda dump=None: {"ok": True, "checks": [], "reason": "", "source_sig": "sig"}),
-            # 隔离真机状态：机器上可能有真实 runtime snapshot（准备态的产物），
-            # 不隔离的话单条任务会走上真 daemon——这批测试原本依赖
-            # 「data/ 里没有 dump」这个巧合，snapshot 一存在就整批变红。
-            mock.patch.object(jvm_direct, "dump_path",
-                              lambda: self.probe / "data" / "app_probe" / "test_jvm_env.json"),
-            mock.patch.object(jvm_direct, "load_dump",
-                              lambda warn_stale=True: {"source": "test"}),
             mock.patch.object(jvm_exec, "_write_meta", lambda rows: "testbatch"),
             mock.patch.object(jvm_api.settings_store, "LIMITS", test_limits),
             mock.patch.object(jvm_exec, "_run_gradle", self._fake_gradle),
@@ -111,7 +101,7 @@ class _Base(unittest.TestCase):
                        encoding="utf-8")
         return self.gradle_result
 
-    def _fake_daemon(self, dump, args_path, socket_timeout=None, **kwargs) -> dict:
+    def _fake_daemon(self, args_path, socket_timeout=None, **kwargs) -> dict:
         self.daemon_calls += 1
         self.args_seen = pathlib.Path(args_path).read_text(encoding="utf-8")
         source_path = next(line.split("=", 1)[1] for line in self.args_seen.splitlines()
@@ -246,14 +236,14 @@ class ScopeTests(_Base):
             run_dir=run_dir, source_file=source_file, args_file=args_file,
             out_path=out_path, single=False, execution_plan="daemon",
             allow_gradle_fallback=False, runtime={"app_repo": "X:/repo"},
-            readiness={"ok": True}, execution_readiness={},
+            readiness={"ok": True},
             readiness_fingerprint="", readiness_checked_at="", source_count=2,
             urls=["https://a.com", "https://b.com"], params={"keyword": "我", "timeout": 25, "concurrency": 8, "depth": "search"}, chunks=[2])
         control = {"started": threading.Event(), "release": threading.Event()}
         payload = {"prep": {"started": True}, "manifest": manifest,
                    **control}
 
-        def blocking_daemon(_dump, args_path, socket_timeout=None, owner=None):
+        def blocking_daemon(args_path, socket_timeout=None, owner=None):
             control["started"].set()
             control["release"].wait(2)
             return {"code": 1, "error": "cancelled"}
@@ -285,7 +275,7 @@ class ScopeTests(_Base):
         result = asyncio.run(go())
         manifest = submitted["payload"]["manifest"]
         self.assertEqual(result["job_id"], "manifest-job")
-        self.assertEqual(manifest["schema"], 3)
+        self.assertEqual(manifest["schema"], 4)
         self.assertEqual(manifest["source_count"], 1)
         self.assertEqual(manifest["execution_plan"], "daemon")
         # 单条不分块，但大小序列同样冻结在 manifest 里
@@ -361,19 +351,6 @@ class ScopeTests(_Base):
         self.assertEqual(submitted["payload"]["runtime"], original)
         self.assertEqual(result["execution_mode"], "daemon")
         self.assertEqual(self.gradle_calls, 0)
-
-    def test_execution_readiness_drift_does_not_store_result(self) -> None:
-        reason = "实际启动环境 JAVA_HOME 与 readiness 不一致"
-        with mock.patch.object(jvm_exec, "execution_readiness",
-                               return_value={"ok": False, "reason": reason}), \
-             mock.patch("core.jvm_daemon.prepare") as prepare:
-            result = self._call()
-        self.assertFalse(result["ok"])
-        self.assertIn("JAVA_HOME", result["reason"])
-        prepare.assert_not_called()
-        self.assertEqual(self.gradle_calls, 0)
-        with Store(self.db) as st:
-            self.assertNotIn("https://a.com", st.checks_map())
 
     def test_daemon_only_result_has_no_gradle_snapshot_diagnostic(self) -> None:
         result = self._call(urls=["https://a.com"])
@@ -582,7 +559,7 @@ class ResultShapeTests(_Base):
         self.assertEqual(out["transitions"]["first_checked"], 0)
 
     def test_single_prefers_validate_daemon(self) -> None:
-        def fake_daemon(_dump, args_file, owner=None):
+        def fake_daemon(args_file, owner=None):
             args = pathlib.Path(args_file).read_text(encoding="utf-8")
             out = pathlib.Path(next(line.split("=", 1)[1] for line in args.splitlines()
                                     if line.startswith("out=")))
@@ -590,7 +567,7 @@ class ResultShapeTests(_Base):
                            encoding="utf-8")
             return {"code": 0, "cost_ms": 3, "error": ""}
 
-        with mock.patch("core.jvm_direct.load_dump", return_value={
+        with mock.patch("core.jvm_daemon.probe", return_value={
                 "workingDir": "C:/repo", "classpath": "x", "maxHeapSize": "3g",
                 "environment": {}, "jvmArgs": [], "systemProperties": {},
                 "javaHomeEnv": "C:/jdk"}), \
@@ -602,7 +579,7 @@ class ResultShapeTests(_Base):
         self.assertEqual(self.gradle_calls, 0)
 
     def test_single_daemon_failure_falls_back_with_reason(self) -> None:
-        with mock.patch("core.jvm_direct.load_dump", return_value={
+        with mock.patch("core.jvm_daemon.probe", return_value={
                 "workingDir": "C:/repo", "classpath": "x", "maxHeapSize": "3g",
                 "environment": {}, "jvmArgs": [], "systemProperties": {},
                 "javaHomeEnv": "C:/jdk"}), \
@@ -614,111 +591,6 @@ class ResultShapeTests(_Base):
         self.assertIn("Gradle", result["execution_note"])
         self.assertEqual(self.gradle_calls, 1)
 
-    def test_single_checks_execution_readiness_before_submit_and_daemon(self) -> None:
-        events = []
-        executable = {"ok": True, "checks": [], "reason": "", "source_sig": "sig"}
-
-        def check_execution(dump=None):
-            events.append(("execution_readiness", dump))
-            return executable
-
-        def fake_daemon(_dump, args_file, owner=None):
-            events.append(("daemon", None))
-            args = pathlib.Path(args_file).read_text(encoding="utf-8")
-            out = pathlib.Path(next(line.split("=", 1)[1] for line in args.splitlines()
-                                    if line.startswith("out=")))
-            out.write_text(json.dumps({"url": "https://a.com", "state": "ok"}),
-                           encoding="utf-8")
-            return {"code": 0, "cost_ms": 3, "error": ""}
-
-        check = mock.Mock(side_effect=check_execution)
-        with mock.patch.object(jvm_api, "execution_readiness", new=check), \
-             mock.patch.object(jvm_exec, "execution_readiness", new=check), \
-            mock.patch("core.jvm_direct.load_dump", return_value={
-                 "workingDir": "C:/repo", "classpath": "x", "maxHeapSize": "3g",
-                 "environment": {}, "jvmArgs": [], "systemProperties": {},
-                 "javaHomeEnv": "C:/jdk"}), \
-            mock.patch("core.jvm_daemon.run_validate", side_effect=fake_daemon) as daemon:
-            _request, result = self._run_single()
-
-        self.assertEqual(result["execution_mode"], "daemon")
-        self.assertEqual(check.call_count, 2)
-        # 提交点手里还没有 dump，免 dump 是有意的；daemon 前才带真实 dump 复查
-        self.assertIsNone(events[0][1])
-        self.assertEqual(events[1][1]["classpath"], "x")
-        self.assertEqual([event[0] for event in events],
-                         ["execution_readiness", "execution_readiness", "daemon"])
-        daemon.assert_called_once()
-        self.assertEqual(self.gradle_calls, 0)
-
-    def test_queued_snapshot_expiry_skips_daemon_and_falls_back(self) -> None:
-        executable = {"ok": True, "checks": [], "reason": "", "source_sig": "sig"}
-        expired = {"ok": False, "checks": [{"id": "runtime_classpath", "ok": False}],
-                   "reason": "runtime classpath 已失效", "source_sig": "sig"}
-
-        def check_execution(dump=None):
-            return executable if dump is None else expired
-
-        check = mock.Mock(side_effect=check_execution)
-        with mock.patch.object(jvm_api, "execution_readiness", new=check), \
-             mock.patch.object(jvm_exec, "execution_readiness", new=check), \
-            mock.patch("core.jvm_direct.load_dump", return_value={
-                 "workingDir": "C:/repo", "classpath": "x", "maxHeapSize": "3g",
-                 "environment": {}, "jvmArgs": [], "systemProperties": {},
-                 "javaHomeEnv": "C:/jdk"}), \
-            mock.patch("core.jvm_daemon.run_validate") as daemon:
-            _request, result = self._run_single()
-
-        self.assertEqual(result["execution_mode"], "gradle_fallback")
-        self.assertIn("runtime classpath 已失效", result["daemon_fallback_reason"])
-        daemon.assert_not_called()
-        self.assertEqual(self.gradle_calls, 1)
-
-    def test_single_uses_daemon_when_gradle_readiness_is_incomplete(self) -> None:
-        def fake_daemon(_dump, args_file, owner=None):
-            args = pathlib.Path(args_file).read_text(encoding="utf-8")
-            out = pathlib.Path(next(line.split("=", 1)[1] for line in args.splitlines()
-                                    if line.startswith("out=")))
-            out.write_text(json.dumps({"url": "https://a.com", "state": "ok"}),
-                           encoding="utf-8")
-            return {"code": 0, "cost_ms": 3, "error": ""}
-
-        incomplete = {"ok": False, "checks": [{"id": "android_sdk", "ok": False,
-                                                 "hint": "缺少 platforms;android-37"}]}
-        executable = {"ok": True, "checks": [], "reason": "", "source_sig": "sig"}
-        with mock.patch.object(jvm_api, "readiness", return_value=incomplete), \
-             mock.patch.object(jvm_api, "execution_readiness", return_value=executable), \
-             mock.patch.object(jvm_exec, "execution_readiness", return_value=executable), \
-            mock.patch("core.jvm_direct.load_dump", return_value={
-                 "workingDir": "C:/repo", "classpath": "x", "maxHeapSize": "3g",
-                 "environment": {}, "jvmArgs": [], "systemProperties": {},
-                 "javaHomeEnv": "C:/jdk"}), \
-            mock.patch("core.jvm_daemon.run_validate", side_effect=fake_daemon) as daemon:
-            _request, result = self._run_single()
-
-        self.assertEqual(result["execution_mode"], "daemon")
-        self.assertEqual(result["execution_plan"], "daemon")
-        self.assertEqual(self.gradle_calls, 0)
-        daemon.assert_called_once()
-
-    def test_single_does_not_fallback_when_preparation_is_incomplete(self) -> None:
-        incomplete = {"ok": False, "checks": [{"id": "android_sdk", "ok": False,
-                                                 "hint": "缺少 platforms;android-37"}]}
-        executable = {"ok": True, "checks": [], "reason": "", "source_sig": "sig"}
-        with mock.patch.object(jvm_api, "readiness", return_value=incomplete), \
-             mock.patch.object(jvm_api, "execution_readiness", return_value=executable), \
-             mock.patch.object(jvm_exec, "execution_readiness", return_value=executable), \
-            mock.patch("core.jvm_direct.load_dump", return_value={
-                 "workingDir": "C:/repo", "classpath": "x", "maxHeapSize": "3g",
-                 "environment": {}, "jvmArgs": [], "systemProperties": {},
-                 "javaHomeEnv": "C:/jdk"}), \
-            mock.patch("core.jvm_daemon.run_validate", side_effect=RuntimeError("端口不可用")):
-            _request, result = self._run_single()
-
-        self.assertFalse(result["ok"])
-        self.assertIn("不回退 Gradle", result["reason"])
-        self.assertEqual(result["execution_mode"], "daemon")
-        self.assertEqual(self.gradle_calls, 0)
 
     def test_batch_still_requires_complete_gradle_readiness(self) -> None:
         incomplete = {"ok": False, "checks": [{"id": "android_sdk", "ok": False,
@@ -857,11 +729,11 @@ class ChunkExecutionTests(_Base):
     def test_chunk_failure_aborts_remaining_chunks(self) -> None:
         calls = {"n": 0}
 
-        def flaky_daemon(dump, args_path, socket_timeout=None, owner=None):
+        def flaky_daemon(args_path, socket_timeout=None, owner=None):
             calls["n"] += 1
             if calls["n"] == 2:
                 return {"code": 1, "error": "boom"}
-            return self._fake_daemon(dump, args_path, socket_timeout=socket_timeout)
+            return self._fake_daemon(args_path, socket_timeout=socket_timeout)
 
         with mock.patch.object(jvm_api.settings_store, "load",
                                lambda: dict(self._CHUNK_SETTINGS)), \
@@ -883,11 +755,11 @@ class ChunkExecutionTests(_Base):
 
         calls = {"n": 0}
 
-        def flaky_daemon(dump, args_path, socket_timeout=None, owner=None):
+        def flaky_daemon(args_path, socket_timeout=None, owner=None):
             calls["n"] += 1
             if calls["n"] == 2:
                 return {"code": 1, "error": "boom"}
-            return self._fake_daemon(dump, args_path, socket_timeout=socket_timeout)
+            return self._fake_daemon(args_path, socket_timeout=socket_timeout)
 
         async def go():
             with mock.patch.object(jvm_api, "Store",
@@ -967,7 +839,7 @@ class BatchDaemonTests(_Base):
                         "chunk_size": 1}}
 
     def _fake_run_writing_results(self, calls: list):
-        def fake_run(_dump, args_file, socket_timeout=None, owner=None):
+        def fake_run(args_file, socket_timeout=None, owner=None):
             args = pathlib.Path(args_file).read_text(encoding="utf-8")
             out = pathlib.Path(next(line.split("=", 1)[1] for line in args.splitlines()
                                     if line.startswith("out=")))
@@ -996,7 +868,7 @@ class BatchDaemonTests(_Base):
                     prepare = mock.patch("core.jvm_daemon.prepare",
                                          return_value=outcome)
                     expected = outcome["reason"]
-                with mock.patch("core.jvm_direct.load_dump", return_value=self._DUMP), \
+                with mock.patch("core.jvm_daemon.probe", return_value=self._DUMP), \
                      prepare, \
                      mock.patch.object(jvm_exec, "_run_gradle") as gradle:
                     result = self._call()
@@ -1009,7 +881,7 @@ class BatchDaemonTests(_Base):
 
     def test_batch_uses_daemon(self) -> None:
         calls: dict = {}
-        with mock.patch("core.jvm_direct.load_dump", return_value=self._DUMP), \
+        with mock.patch("core.jvm_daemon.probe", return_value=self._DUMP), \
             mock.patch("core.jvm_daemon.prepare",
                         return_value={"outcome": "ready",
                                       "info": {"pid": 1, "port": 9999, "sig": "s"}}) as prepare, \
@@ -1035,7 +907,7 @@ class BatchDaemonTests(_Base):
 
     def test_batch_daemon_error_is_reported_without_gradle(self) -> None:
         calls: dict = {}
-        with mock.patch("core.jvm_direct.load_dump", return_value=self._DUMP), \
+        with mock.patch("core.jvm_daemon.probe", return_value=self._DUMP), \
              mock.patch("core.jvm_daemon.prepare",
                         return_value={"outcome": "ready",
                                       "info": {"pid": 1, "port": 9999, "sig": "s"}}), \
@@ -1060,7 +932,7 @@ class BatchDaemonTests(_Base):
         calls: dict = {}
         with mock.patch.object(jvm_api.settings_store, "load",
                                lambda: dict(self._CHUNKED)), \
-            mock.patch("core.jvm_direct.load_dump", return_value=self._DUMP), \
+            mock.patch("core.jvm_daemon.probe", return_value=self._DUMP), \
             mock.patch("core.jvm_daemon.prepare",
                         return_value={"outcome": "started",
                                       "info": {"pid": 7, "port": 7777, "sig": "s"}}) as prepare, \
@@ -1089,7 +961,7 @@ class BatchDaemonTests(_Base):
             submitted["payload"] = payload
             return "resume-job"
 
-        def fake_run(_dump, args_file, socket_timeout=None, owner=None):
+        def fake_run(args_file, socket_timeout=None, owner=None):
             state["daemon"] += 1
             args = pathlib.Path(args_file).read_text(encoding="utf-8")
             out = pathlib.Path(next(line.split("=", 1)[1] for line in args.splitlines()
@@ -1112,8 +984,6 @@ class BatchDaemonTests(_Base):
                     mock.patch.object(jvm_api.settings_store, "load",
                                       lambda: dict(self._CHUNKED)),
                    mock.patch("core.jvm_health.store_checks", lambda *a, **kw: 0),
-                  mock.patch("core.jvm_direct.load_dump",
-                               return_value=self._DUMP),
                    mock.patch("core.jvm_daemon.prepare", prepare_mock),
                    mock.patch("core.jvm_daemon.probe",
                                return_value={"pid": 7, "port": 7777, "sig": "s"}),
@@ -1285,13 +1155,13 @@ class EventTimelineTests(_Base):
         """等待引擎空闲要写进时间线，窗口用实测上界（2s 已证明必然白等）。"""
         seen = {}
 
-        def fake_prepare(dump, **kwargs):
+        def fake_prepare(**kwargs):
             seen["busy_wait_sec"] = kwargs.get("busy_wait_sec")
             if kwargs.get("on_wait"):
                 kwargs["on_wait"](10.0)
             return {"outcome": "busy", "reason": "daemon 忙"}
 
-        with mock.patch("core.jvm_direct.load_dump", return_value=self._DUMP), \
+        with mock.patch("core.jvm_daemon.probe", return_value=self._DUMP), \
             mock.patch("core.jvm_daemon.prepare",
                         side_effect=fake_prepare), \
             mock.patch("core.jvm_daemon.probe", return_value=None):
@@ -1314,7 +1184,7 @@ class EventTimelineTests(_Base):
 
         prepare_calls = {"n": 0}
 
-        def fake_prepare(dump, **kwargs):
+        def fake_prepare(**kwargs):
             prepare_calls["n"] += 1
             return {"outcome": "started", "info": {"pid": 1, "port": 1, "sig": "s"}}
 
@@ -1328,7 +1198,7 @@ class EventTimelineTests(_Base):
 
         run_calls = {"n": 0}
 
-        def fake_run(_dump, args_file, socket_timeout=None, owner=None):
+        def fake_run(args_file, socket_timeout=None, owner=None):
             run_calls["n"] += 1
             if run_calls["n"] == 1:
                 stalled.wait(1)
@@ -1345,7 +1215,7 @@ class EventTimelineTests(_Base):
                            encoding="utf-8")
             return {"code": 0, "cost_ms": 3}
 
-        with mock.patch("core.jvm_direct.load_dump", return_value=self._DUMP), \
+        with mock.patch("core.jvm_daemon.probe", return_value=self._DUMP), \
              mock.patch("core.jvm_daemon.prepare", side_effect=fake_prepare), \
              mock.patch("core.jvm_daemon.probe",
                         return_value={"pid": 1, "port": 1, "sig": "s"}), \
@@ -1361,20 +1231,6 @@ class EventTimelineTests(_Base):
         self.assertEqual([1, 1, 1],
                          [r.get("count") for r in result["chunk_reports"]])
         self.assertEqual("done", self._kinds(self._run_dir(payload))[-1])
-
-    def test_batch_stale_snapshot_fails_without_daemon_or_gradle(self) -> None:
-        gate = {"ok": False,
-                "reason": "snapshot 早于 appservice Kotlin 源码，请先刷新"}
-        with mock.patch.object(jvm_exec, "execution_readiness", lambda dump=None: gate), \
-             mock.patch("core.jvm_direct.load_dump", return_value=self._DUMP), \
-             mock.patch("core.jvm_daemon.prepare") as prepare, \
-             mock.patch.object(jvm_exec, "_run_gradle") as gradle:
-            _payload, result = self._run_batch(self._QUIET)
-        self.assertFalse(result["ok"], result)
-        prepare.assert_not_called()
-        gradle.assert_not_called()
-        self.assertIn("刷新", result["reason"])
-        self.assertEqual(result["gradle_chunks"], 0)
 
     def test_batch_without_manifest_is_rejected_with_reason(self) -> None:
         """无 manifest 的批量调用要给可读失败，而不是块线程里的 KeyError。"""
@@ -1399,7 +1255,7 @@ class EventTimelineTests(_Base):
     def test_busy_daemon_failure_events(self) -> None:
         """daemon busy：保留 prepare 原因，当前块失败并结束批次。"""
 
-        def fake_run(_dump, args_file, socket_timeout=None, owner=None):
+        def fake_run(args_file, socket_timeout=None, owner=None):
             args = pathlib.Path(args_file).read_text(encoding="utf-8")
             out = pathlib.Path(next(line.split("=", 1)[1] for line in args.splitlines()
                                     if line.startswith("out=")))
@@ -1407,7 +1263,7 @@ class EventTimelineTests(_Base):
                            encoding="utf-8")
             return {"code": 0, "cost_ms": 3, "error": ""}
 
-        with mock.patch("core.jvm_direct.load_dump", return_value=self._DUMP), \
+        with mock.patch("core.jvm_daemon.probe", return_value=self._DUMP), \
             mock.patch("core.jvm_daemon.prepare",
                         return_value={"outcome": "busy", "reason": "daemon 忙"}), \
             mock.patch("core.jvm_daemon.probe",
@@ -1426,7 +1282,7 @@ class EventTimelineTests(_Base):
 
         gradle_calls = {"n": 0}
 
-        def flaky_daemon(_dump, args_file, socket_timeout=None, owner=None):
+        def flaky_daemon(args_file, socket_timeout=None, owner=None):
             gradle_calls["n"] += 1
             if gradle_calls["n"] == 2:
                 return {"code": 1, "error": "boom"}

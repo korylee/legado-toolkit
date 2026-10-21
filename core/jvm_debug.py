@@ -132,16 +132,11 @@ def _run_launcher(timeout_min: int = 20, args_path: Optional[pathlib.Path] = Non
 
     单独一个函数是为了让测试能把它换成假的——**不跑 Gradle 也能测组装逻辑**。
 
-    **顺手刷新 dump**（S5-A 第二期 D2）：把 `LEGADO_TEST_JVM_ENV_OUT` 传给这次 Gradle，
-    `legado-test.init.gradle` 的 `doFirst` 就会把测试 JVM 的环境重新 dump 一份。
-    这条不变式是常驻那条链的前提——**「dump 比 .kt 新」等价于「这份类是新编译的」**：
-    Gradle 一定会先编译，所以它跑过之后 dump 就是可信的；少了这一步，改一次 Kotlin
-    就会让常驻一直被「类可能是旧的」挡在外面，直到有人手工 `--refresh`。
+    **env 用提交时冻结的那份**（`env_snapshot`，含 `LEGADO_REPO` 等四件）：排队后用户
+    改了设置或 PATH，这次 Gradle 仍按提交时的环境跑；没有冻结就沿用调用方环境。
     """
     t0 = time.time()
     env = {**(env_snapshot or os.environ),
-           "LEGADO_TEST_JVM_ENV_OUT": str(data_path("app_probe", "test_jvm_env.json")),
-           "LEGADO_TEST_JVM_LAUNCH_MODE": "gradle",
            # 参数文件在哪：**必须显式告诉它**（`AppserviceEnv.loadArgs` 的第 1 候选）。
            # 不给的话它退回「挨着启动器找」——那里现在没有这个文件，而表现是启动器
            # 打印一句「找不到 args.properties，跳过」之后**什么都不跑**
@@ -151,8 +146,6 @@ def _run_launcher(timeout_min: int = 20, args_path: Optional[pathlib.Path] = Non
          "--tests", LAUNCHER_CLASS, "--rerun"],
         cwd=str(AGSVC), env=env, capture_output=True, text=True, errors="replace",
         timeout=timeout_min * 60)
-    from core.jvm_runtime_snapshot import compare_runtime_snapshot
-    compare_runtime_snapshot("gradle", "debug")
     return p.returncode, time.time() - t0, (p.stdout or ""), (p.stderr or "")
 
 
@@ -180,78 +173,28 @@ def _env_error(readiness_result: Optional[Dict[str, Any]] = None) -> Tuple[str, 
     return "本机引擎不可用：%s —— %s" % (first.get("name") or "环境就绪检查未通过", hint), {}
 
 
-def _runtime_dump_mismatch(dump: Dict[str, Any], env_snapshot: Dict[str, str]) -> str:
-    """返回 dump 与当前预检路径的首个差异；不一致时不能复用直起/常驻环境。
-
-    workingDir 一项判的是**同仓库关系**而不是相等：dump 的工作目录是 Gradle 测试
-    worker 的**模块目录**（`<repo>\\app`），`LEGADO_REPO` 是**仓库根**——两级天然不等
-    （实测 2026-09-26：字符串比对每次都判差异，常驻永远被跳过，每次调试多付一次
-    Gradle 启动）。归一判据与对拍链共用 `jvm_runtime_snapshot` 那份，别各写一份。
-    """
-    from core.jvm_runtime_snapshot import dir_inside_repo, norm_path
-
-    for name, actual, expected in (
-        ("workingDir", dump.get("workingDir"), env_snapshot.get("LEGADO_REPO")),
-        ("JAVA_HOME", (dump.get("environment") or {}).get("JAVA_HOME")
-         or dump.get("javaHomeEnv"), env_snapshot.get("JAVA_HOME")),
-        ("ANDROID_HOME", (dump.get("environment") or {}).get("ANDROID_HOME"),
-         env_snapshot.get("ANDROID_HOME")),
-        ("GRADLE_USER_HOME", (dump.get("environment") or {}).get("GRADLE_USER_HOME"),
-         env_snapshot.get("GRADLE_USER_HOME")),
-    ):
-        if not actual or not expected:
-            return "%s（dump=%s；本次自检=%s）" % (name, actual or "缺失", expected or "缺失")
-        if name == "workingDir":
-            if not dir_inside_repo(actual, expected):
-                return "%s（dump=%s；本次自检=%s）不同仓库" % (name, actual, expected)
-        elif norm_path(actual) != norm_path(expected):
-            return "%s（dump=%s；本次自检=%s）" % (name, actual, expected)
-    return ""
-
-
 def default_launcher(notes: List[str], args_path: Optional[pathlib.Path] = None,
                      env_snapshot: Optional[Dict[str, str]] = None) -> Callable[[], Tuple[int, float, str, str]]:
-    """产品默认的拉起方式（S5-A 第二期 D2）：**优先常驻 daemon，不可用回落 Gradle**。
+    """产品默认的拉起方式：**优先常驻 daemon，不可用回落 Gradle**。
 
-    两条边界，都是实测教训：
-
-    1. **dump 比 .kt 旧（或没有 dump）就不用常驻**：那意味着「这份类可能不是最新编译的」。
-       常驻进程里跑的是**加载时那份类**，改了 `appservice/` 却用它，表现是「规则改了没生效」
-       ——看起来像源/规则的问题，其实是我们在跑旧代码。Gradle 那条一定会先编译，
-       所以这种情况下它才是权威路径（而且它跑完会顺手把 dump 刷新，见 `_run_launcher`）。
-    2. **回落目标是 Gradle，不是「直起」**：直起同样依赖 dump 的新鲜度，而这里要的是
-       「无论如何都能跑对」。`core/jvm_daemon` 内部自己的回落（daemon 半路死了）也走这一条。
+    daemon 的 boot 经 Gradle（必先编译，见 `core.jvm_daemon` 的模块注释），所以
+    **daemon 进程里跑的永远是当前源码**——原先「dump 比 .kt 旧就不用常驻」那道
+    判定随直起一起退场（旧字节码的失败模式结构性消失）。
 
     `notes` 是**回落的痕迹**：`run_jvm_debug` 会把它接到第一条 step 的附注上——
     静默降级会让「常驻一直没生效」永远没人发现（而用户只会觉得「也没快多少」）。
     """
-    from core import jvm_daemon, jvm_direct
+    from core import jvm_daemon
     target_args = args_path or ARGS
     if env_snapshot is None and target_args == ARGS:
         fallback = _run_launcher
     elif env_snapshot is None:
-        fallback = lambda: _run_launcher(args_path=target_args)
+        fallback = lambda: _run_launcher(args_path=target_args)  # noqa: E731
     else:
-        fallback = lambda: _run_launcher(args_path=target_args, env_snapshot=env_snapshot)
-
-    try:
-        if jvm_direct.dump_is_stale():
-            notes.append("这次引擎启动走了慢速通道，本次调试会慢一些；"
-                         "在任务中心跑一次「刷新引擎快照」可恢复快速启动")
-            return fallback
-        dump = jvm_direct.load_dump(warn_stale=False)
-        if env_snapshot is not None:
-            mismatch = _runtime_dump_mismatch(dump, env_snapshot)
-            if mismatch:
-                notes.append("运行环境与最近一次快照不同（%s），这次走了慢速启动；"
-                             "在任务中心跑一次「刷新引擎快照」可恢复快速启动"
-                             % mismatch)
-                return fallback
-    except Exception as e:                       # dump 读不了（权限/损坏）也别挡住调试
-        notes.append("引擎状态读不出来（%s），这次走了慢速启动" % e)
-        return fallback
+        fallback = lambda: _run_launcher(  # noqa: E731
+            args_path=target_args, env_snapshot=env_snapshot)
     return jvm_daemon.launcher_from_args(
-        dump, on_note=notes.append, fallback=fallback,
+        on_note=notes.append, fallback=fallback,
         args_file=str(target_args))
 
 
