@@ -65,6 +65,17 @@ class WriteArgsTests(_ArgsCase):
         jvm_debug._write_args("D:/x/src.json", "我", "D:/x/out.ndjson", 60, cookie="a=1; b=2")
         self.assertIn("cookie=a=1; b=2", self._text())
 
+    def test_free_text_values_are_properties_escaped(self) -> None:
+        """读参数文件的是 Java `Properties.load`：反斜杠是转义符——规则里的 `\\d`
+        不转义会被读成 `d`（静默改写，2026-10-20 审出）。"""
+        jvm_debug._write_args("D:/x/src.json", "我", "D:/x/out.ndjson", 60,
+                              extra=[("try_rule", "class.a@text##\\d+")])
+        t = self._text()
+        # 文件里必须是两个反斜杠（Java Properties 的转义写法）
+        self.assertIn("try_rule=class.a@text##\\\\d+", t)
+        self.assertNotIn("try_rule=class.a@text##\\d+", t,
+                         "单个反斜杠会被 Properties.load 当转义符吃掉")
+
 
 class WebviewUnsupportedShapeTests(unittest.TestCase):
     def test_keeps_valid_entries_including_empty_url(self) -> None:
@@ -188,13 +199,16 @@ class RunJvmDebugTests(_RunCase):
         """真 fixture 走一遍：形状必须与设备通道同形（前端零改动接得上）。"""
         self._patch("_run_launcher", self._fake_launcher(
             events=self._fixture_events(),
-            meta={"code": 0, "cookie_len": 11, "hint": "", "error": "",
+            meta={"code": 0, "cookie_len": 11, "cookie_note": "no_cookie_for_domain",
+                  "hint": "", "error": "",
                   "network_events": 3, "network_types": "Fetch=1,XHR=1",
                   "network_drops": "mime=1"}))
         r = self._run()
         self.assertEqual(r["source"], "jvm")
         self.assertEqual(r["code"], 0)
         self.assertEqual(r["cookie_len"], 11)
+        self.assertEqual(r["cookie_note"], "no_cookie_for_domain",
+                         "「没带登录态」要说得出为什么（sidecar 一直有 note）")
         self.assertEqual(r["network_events"], 3)
         self.assertEqual(r["network_types"], "Fetch=1,XHR=1")
         self.assertEqual(r["network_drops"], "mime=1")
@@ -433,17 +447,41 @@ class EndpointTests(_RunCase):
         self.assertEqual(ctx.exception.status_code, 400)
 
     def test_timeout_defaults_from_settings(self) -> None:
-        """不传 timeout → 吃设置里的 debug.timeout（AGENTS #8：默认值只有
-        settings_store 一份；前端曾写死 60，与桥的渲染上限同值互相掐死）。"""
+        """不传 timeout → 吃设置里的调试预算（AGENTS #8：默认值只有 settings_store
+        一份；前端曾写死 60，与桥的渲染上限同值互相掐死）。
+
+        这份桩里没有 `stage_timeout`，按段取就回落到 `chain_timeout`——
+        「按段取」本身由下面那条钉。"""
         from core import settings_store
         fake = {"network": {"proxy": ""},
                 "jvm": {"app_repo": "", "android_sdk_dir": ""},
-                "debug": {"timeout": 120}}
+                "debug": {"chain_timeout": 120}}
         with mock.patch.object(settings_store, "load", return_value=fake), \
                 mock.patch("core.jvm_env.readiness",
                            return_value={"ok": True, "checks": []}):
             self._call()
         self.assertEqual(self.seen["timeout"], 120)
+
+    def test_timeout_without_value_takes_the_stage_budget(self) -> None:
+        """不传 timeout：**指定了单步目标就按段取**（`debug.stage_timeout[那一段]`），
+        只有跑整链（target 空）才吃 `debug.chain_timeout`。
+
+        各段共享一根预算时，慢的搜索段会把正文段挤掉——调试是单源、有人盯着，
+        分段之后「前面慢」不再惩罚「后面能不能验」（`settings_store.debug_stage_timeout`）。"""
+        from core import settings_store
+        fake = {"network": {"proxy": ""},
+                "jvm": {"app_repo": "", "android_sdk_dir": "", "keyword": "我"},
+                "debug": {"chain_timeout": 120,
+                          "stage_timeout": {"search": 30, "explore": 30, "info": 31,
+                                            "toc": 60, "content": 90}}}
+        with mock.patch.object(settings_store, "load", return_value=fake), \
+                mock.patch("core.jvm_env.readiness",
+                           return_value={"ok": True, "checks": []}):
+            self._call(target="toc", query="++https://a.test/t")
+            self.assertEqual(self.seen["timeout"], 60, "单步目标吃那一段的预算")
+            self._call(key="https://x.example/b/1", target="")
+            self.assertEqual(self.seen["timeout"], 120,
+                             "整链（没有具体步骤）才吃 chain_timeout")
 
     def test_timeout_out_of_range_is_400_not_clamped(self) -> None:
         """显式传值越界要 400 说清区间——静默夹的话用户不知道设的数没生效。"""
@@ -456,7 +494,7 @@ class EndpointTests(_RunCase):
     def _settings(keyword: str) -> dict:
         return {"network": {"proxy": ""},
                 "jvm": {"app_repo": "", "android_sdk_dir": "", "keyword": keyword},
-                "debug": {"timeout": 120}}
+                "debug": {"chain_timeout": 120}}
 
     def test_target_and_query_build_the_key(self) -> None:
         """语义化入参 → `core.debug_keys` 拼装（App 的 key 语法只有后端一份）；

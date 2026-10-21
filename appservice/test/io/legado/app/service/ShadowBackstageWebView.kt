@@ -101,6 +101,19 @@ class ShadowBackstageWebView {
          *  写进侧车的 `network` 键；Python 侧只认形状（形状不对整块丢掉）。 */
         @Volatile
         var lastNetwork: List<Map<String, Any?>>? = null
+        /** L3 的材料：渲染完的页面上 `params` 的**形状**（类型/键名/计数，不采值）。
+         *  只有正文页（`runtimeProbe = true`）会采；null = 没采到（非正文页 / params
+         *  未就绪），与「采到但为空对象」分得开。Python 侧闸门在 `core.app_debug.runtime_map`。 */
+        @Volatile
+        var lastRuntimeShape: Map<String, Any?>? = null
+
+        /**
+         * L3 形状采集的**武装开关**：DebugService 在正文段的取数发起前 set(true)，
+         * shadow 在下一次渲染时取走（`getAndSet(false)`——一次武装只采一次）。
+         * 为什么不用 phase：`ShadowBackstageWebView.phase` 记的是 matched/structured
+         * 那些收尾段的归因，主链取数时它恒为 "debug"，分不出哪次是正文。
+         */
+        val runtimeProbeArmed = AtomicBoolean(false)
         /** 流过来的 `Network.*` 事件条数（0 = 域没启用 / 事件没到，与「页面没发接口」分得开）。 */
         @Volatile
         var lastNetworkEvents: Int = 0
@@ -129,6 +142,8 @@ class ShadowBackstageWebView {
             rendered.set(0); lastRenderMs.set(0L); lastReason.set("")
             ruleLocalRuns.set(0)
             lastNetwork = null; lastNetworkEvents = 0; lastNetworkTypes = ""; lastNetworkDrops = ""
+            lastRuntimeShape = null
+            runtimeProbeArmed.set(false)
             lastCookieLen.set(0); lastCookieNote.set("")
             webviewUnsupported.clear()
             phase.set("debug")
@@ -241,6 +256,10 @@ class ShadowBackstageWebView {
         // 都被覆盖。判据钉在 WebViewNavigationTest；桥侧「导航失败立刻报」是第二道防线。
         val tag = ReflectionHelpers.getField<String?>(real, "tag").orEmpty()
         val urlAbs = resolveAgainstTag(url, tag)
+        // L3 形状采集只在**正文段**（phase = debug 主链时无法区分段；用调用方给的 phase
+        // 不行——收集线程早已把 phase 设回 debug）。判据：这次取数是否来自正文管道由
+        // DebugService 在发请求前设置（见 [runtimeProbeArmed]）。
+        val probe = runtimeProbeArmed.getAndSet(false)
         val t0 = System.currentTimeMillis()
         val r = BrowserBridge.renderSerial(
             session, urlAbs, timeoutMs,
@@ -248,7 +267,8 @@ class ShadowBackstageWebView {
             jsRetryTimes = JS_RETRY_TIMES,
             jsRetryIntervalMs = JS_RETRY_INTERVAL_MS,
             sourceRegex = sourceRegex.takeIf { it.isNotBlank() },
-            overrideUrlRegex = overrideUrlRegex.takeIf { it.isNotBlank() })
+            overrideUrlRegex = overrideUrlRegex.takeIf { it.isNotBlank() },
+            runtimeProbe = probe)
         lastRenderMs.set(System.currentTimeMillis() - t0)
         if (!r.ok) {
             lastReason.set(r.reason.substringBefore(':'))
@@ -262,6 +282,7 @@ class ShadowBackstageWebView {
         lastNetworkEvents = r.networkEvents
         lastNetworkTypes = r.networkTypes
         lastNetworkDrops = r.networkDrops
+        if (probe) lastRuntimeShape = r.runtimeShape
         // A3：**渲染完顺手把这一页的 cookie 收进 `CookieStore`**——上游
         // `BackstageWebView.setCookie()` 就是这一步（`onPageFinished` → 取 WebView 的
         // cookie → `CookieStore.setCookie(tag, cookie)`），区别只是我们的来源是 CDP

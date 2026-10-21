@@ -56,7 +56,7 @@ STATE_LABEL = {
 
 #: 允许**本次覆盖**的参数（白名单）。`app_repo` 是环境配置，不该被一次批量校验改掉；
 #: 其余键走 `settings_store.coerce` 收敛（未知键丢弃、越界收到区间内）。
-JVM_RUN_PARAMS = ("keyword", "timeout", "concurrency", "depth")
+JVM_RUN_PARAMS = ("keyword", "check_timeout", "concurrency", "depth")
 
 
 def _classify_validate_operation(daemon: Dict[str, Any], active_jobs: list,
@@ -343,7 +343,7 @@ async def jvm_run(body: Optional[JvmRunRequest] = None):
     out_path = run_dir / "results.jsonl"
     args_path = run_dir / "args.properties"
     try:
-        _write_args(params["keyword"], params["timeout"],
+        _write_args(params["keyword"], params["check_timeout"],
                     params["concurrency"], out_path, src_file,
                     params["depth"], args_path=args_path)
     except Exception:
@@ -404,7 +404,7 @@ def jvm_results():
 
     取舍规则收在 ``Store.latest_jvm_conclusions``（深者胜、同深取新）——
     这里**不再自己实现一遍**：列表回填读的是同一张表，两处各写一次就会漂
-    （lessons §二十三 的「同一件事两个实现」已经栽过两次）。
+    （「同一件事两个实现」已经栽过两次）。
     """
     with Store() as st:
         latest = st.latest_jvm_conclusions()

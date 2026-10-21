@@ -389,7 +389,7 @@ def _normalize_group(source, allowed_user_tags):
 
     保留外部源的健康状态（可用/失效/需翻墙等）；用户标签只保留白名单里的
     （``Store.known_user_tags()``：默认 R18 / 正版 + 库里已有的用户标签），
-    其余直接清掉——决策见 lessons §三十二。
+    其余直接清掉。
     """
     source_type = int(source.get("bookSourceType", 0) or 0)
     type_tag = BOOK_SOURCE_TYPE_NAMES.get(source_type, "")

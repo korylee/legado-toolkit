@@ -74,7 +74,7 @@ class _Base(unittest.TestCase):
             mock.patch("core.jvm_daemon.run_validate", self._fake_daemon),
             mock.patch.object(jvm_api.settings_store, "load",
                               lambda: {"network": {"proxy": ""}, "jvm": {"app_repo": "X:/repo", "keyword": "我",
-                                               "timeout": 25, "concurrency": 8,
+                                               "check_timeout": 25, "concurrency": 8,
                                                "depth": "search", "chunk_size": 25}}),
         ):
             p.start()
@@ -238,7 +238,7 @@ class ScopeTests(_Base):
             allow_gradle_fallback=False, runtime={"app_repo": "X:/repo"},
             readiness={"ok": True},
             readiness_fingerprint="", readiness_checked_at="", source_count=2,
-            urls=["https://a.com", "https://b.com"], params={"keyword": "我", "timeout": 25, "concurrency": 8, "depth": "search"}, chunks=[2])
+            urls=["https://a.com", "https://b.com"], params={"keyword": "我", "check_timeout": 25, "concurrency": 8, "depth": "search"}, chunks=[2])
         control = {"started": threading.Event(), "release": threading.Event()}
         payload = {"prep": {"started": True}, "manifest": manifest,
                    **control}
@@ -633,7 +633,7 @@ class ExportTests(_Base):
 class RunDirRetentionTests(_Base):
     """运行目录的保留策略：失败保留现场（上限修剪），成功/取消清理。
 
-    manifest.json / runtime-snapshot.json / results.jsonl 是「重启或异常退出后
+    manifest.json / args.properties / results.jsonl 是「重启或异常退出后
     逐项对出这次用了什么、写到哪」的复查交付物；SQLite 仍是任务事实源。
     """
 
@@ -643,10 +643,7 @@ class RunDirRetentionTests(_Base):
         self.assertTrue(dirs, "没有运行目录")
         return dirs[-1]
 
-    def test_failed_run_keeps_manifest_snapshot_and_results(self) -> None:
-        dump_file = self.probe / "data" / "app_probe" / "test_jvm_env.json"
-        dump_file.parent.mkdir(parents=True, exist_ok=True)
-        dump_file.write_text(json.dumps({"workingDir": "X:/repo"}), encoding="utf-8")
+    def test_failed_run_keeps_manifest_and_args(self) -> None:
         self.no_output = True
         self.gradle_result = 1
         result = self._call()
@@ -666,7 +663,6 @@ class RunDirRetentionTests(_Base):
         self.assertEqual(hashlib.sha256(
             json.dumps(body, ensure_ascii=False, sort_keys=True,
                        separators=(",", ":")).encode("utf-8")).hexdigest(), expected)
-        self.assertTrue((run_dir / "runtime-snapshot.json").exists())
         # 这个失败场景是「Gradle 没产出结果文件」——参数文件必须在现场，
         # results.jsonl 反倒不该有
         self.assertTrue((run_dir / "args.properties").exists())
@@ -712,7 +708,7 @@ class ChunkExecutionTests(_Base):
     """批量分块：一块一次 JVM 占用，块间交还调度权，失败中止余下块，重试跳过已完成块。"""
 
     _CHUNK_SETTINGS = {"network": {"proxy": ""},
-                       "jvm": {"app_repo": "X:/repo", "keyword": "我", "timeout": 25,
+                       "jvm": {"app_repo": "X:/repo", "keyword": "我", "check_timeout": 25,
                                "concurrency": 8, "depth": "search",
                                "chunk_size": 1}}
 
@@ -834,7 +830,7 @@ class BatchDaemonTests(_Base):
              "javaHomeEnv": "C:/jdk"}
 
     _CHUNKED = {"network": {"proxy": ""},
-                "jvm": {"app_repo": "X:/repo", "keyword": "我", "timeout": 25,
+                "jvm": {"app_repo": "X:/repo", "keyword": "我", "check_timeout": 25,
                         "concurrency": 8, "depth": "search",
                         "chunk_size": 1}}
 
@@ -1060,12 +1056,12 @@ class EventTimelineTests(_Base):
     """
 
     _QUIET = {"network": {"proxy": ""},
-              "jvm": {"app_repo": "X:/repo", "keyword": "我", "timeout": 25,
+              "jvm": {"app_repo": "X:/repo", "keyword": "我", "check_timeout": 25,
                       "concurrency": 8, "depth": "search",
                       "chunk_size": 1}}
 
     _BUSY3 = {"network": {"proxy": ""},
-              "jvm": {"app_repo": "X:/repo", "keyword": "我", "timeout": 25,
+              "jvm": {"app_repo": "X:/repo", "keyword": "我", "check_timeout": 25,
                       "concurrency": 8, "depth": "search",
                       "chunk_size": 1}}
 

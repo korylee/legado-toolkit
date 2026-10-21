@@ -46,17 +46,32 @@ class SettingsStoreTests(unittest.TestCase):
         self.assertEqual(S.load()["network"], S.DEFAULTS["network"])
         self.assertEqual(S.load()["jvm"], S.DEFAULTS["jvm"])
 
-    def test_debug_timeout_default_and_clamp(self) -> None:
-        """调试预算（jvm-debug-budget）：默认值只在 DEFAULTS，越界 clamp 到区间。
+    def test_debug_chain_timeout_default_and_clamp(self) -> None:
+        """调试的**整链**预算（`debug.chain_timeout`）：默认值只在 DEFAULTS，越界 clamp。
 
         90 这个数的意义是**大于桥的渲染上限 60s**——同值时渲染永远先被整链
-        掐死，webView 段没有合法完成的空间。"""
-        self.assertEqual(S.load()["debug"]["timeout"], S.DEFAULTS["debug"]["timeout"])
-        self.assertEqual(S.DEFAULTS["debug"]["timeout"], 90)
-        self.assertGreater(S.DEFAULTS["debug"]["timeout"], 60)
-        self.assertEqual(S.coerce("debug", "timeout", 1000), S.LIMITS["debug_timeout"][1])
-        self.assertEqual(S.coerce("debug", "timeout", 1), S.LIMITS["debug_timeout"][0])
-        self.assertEqual(S.coerce("debug", "timeout", "abc"), S.DEFAULTS["debug"]["timeout"])
+        掐死，webView 段没有合法完成的空间（单步那根见 `debug.stage_timeout`）。"""
+        self.assertEqual(S.load()["debug"]["chain_timeout"],
+                         S.DEFAULTS["debug"]["chain_timeout"])
+        self.assertEqual(S.DEFAULTS["debug"]["chain_timeout"], 90)
+        self.assertGreater(S.DEFAULTS["debug"]["chain_timeout"], 60)
+        self.assertEqual(S.coerce("debug", "chain_timeout", 1000),
+                         S.LIMITS["debug_chain_timeout"][1])
+        self.assertEqual(S.coerce("debug", "chain_timeout", 1),
+                         S.LIMITS["debug_chain_timeout"][0])
+        self.assertEqual(S.coerce("debug", "chain_timeout", "abc"),
+                         S.DEFAULTS["debug"]["chain_timeout"])
+
+    def test_check_budget_default_is_below_the_app_call_timeout(self) -> None:
+        """批量校验的每源总预算 25s：**必须小于** App 的 okhttp callTimeout 60s。
+
+        25 < 60 时「我们的预算用尽」与「App 内部请求超时」不可能同时发生——归因只剩
+        一种，`timeout_kind` 也就不会说反。旧口径要求预算 > 60 是 75s 时代的顾虑
+        （要让两种超时都出现、再靠时长分辨），现在反过来：预算先到才分得清。"""
+        self.assertEqual(S.DEFAULTS["jvm"]["check_timeout"], 25)
+        self.assertLess(S.DEFAULTS["jvm"]["check_timeout"], 60)
+        self.assertEqual(S.load()["jvm"]["check_timeout"],
+                         S.DEFAULTS["jvm"]["check_timeout"])
 
     def test_broken_json_falls_back_to_defaults_without_raising(self) -> None:
         """设置坏了不该让功能起不来——降级方向只能是「用默认」。"""
@@ -74,7 +89,7 @@ class SettingsStoreTests(unittest.TestCase):
         self._write_raw('{"jvm": {"app_repo": "X:/repo"}}')
         got = S.load()["jvm"]
         self.assertEqual(got["app_repo"], "X:/repo")
-        self.assertEqual(got["timeout"], S.DEFAULTS["jvm"]["timeout"],
+        self.assertEqual(got["check_timeout"], S.DEFAULTS["jvm"]["check_timeout"],
                          "没写的那几个键要拿到默认值")
 
     def test_unknown_keys_are_hidden_on_read(self) -> None:
@@ -92,9 +107,22 @@ class SettingsStoreTests(unittest.TestCase):
     # ---------------------------------------------------------------- 收敛
 
     def test_int_is_clamped_to_limits(self) -> None:
-        lo, hi = S.LIMITS["jvm_timeout"]
-        self.assertEqual(S.coerce("jvm", "timeout", hi + 1000), hi)
-        self.assertEqual(S.coerce("jvm", "timeout", lo - 1000), lo)
+        lo, hi = S.LIMITS["jvm_check_timeout"]
+        self.assertEqual(S.coerce("jvm", "check_timeout", hi + 1000), hi)
+        self.assertEqual(S.coerce("jvm", "check_timeout", lo - 1000), lo)
+
+    def test_stage_timeout_coerce_keeps_unmentioned_stages(self) -> None:
+        """`debug.stage_timeout` **逐段**收敛，不是整段替换。
+
+        只改一段时，其余段必须保住默认值——整段替换会让没提到的段悄悄回默认值，
+        界面上看不出是哪一次改动把它抹掉的（AGENTS #17 那类静默漂移）。"""
+        got = S.coerce("debug", "stage_timeout", {"search": 999, "toc": "abc"})
+        self.assertEqual(got["search"], S.LIMITS["debug_stage_timeout"][1],
+                         "越界值收敛到区间上界")
+        self.assertEqual(got["toc"], S.DEFAULTS["debug"]["stage_timeout"]["toc"],
+                         "垃圾值回落默认")
+        self.assertEqual(got["content"], S.DEFAULTS["debug"]["stage_timeout"]["content"],
+                         "没提到的段保住默认值")
 
     def test_bool_is_not_accepted_as_int(self) -> None:
         """`True` 是 int 的子类——不挡的话 `concurrency=True` 会当成 1 悄悄生效。"""
@@ -104,8 +132,8 @@ class SettingsStoreTests(unittest.TestCase):
     def test_timeout_rejects_nan_and_inf(self) -> None:
         for bad in (float("nan"), float("inf"), float("-inf")):
             with self.subTest(bad=bad):
-                self.assertEqual(S.coerce("jvm", "timeout", bad),
-                                 S.DEFAULTS["jvm"]["timeout"])
+                self.assertEqual(S.coerce("jvm", "check_timeout", bad),
+                                 S.DEFAULTS["jvm"]["check_timeout"])
 
     def test_path_is_stripped(self) -> None:
         self.assertEqual(S.coerce("jvm", "app_repo", "  X:/repo  "), "X:/repo")
@@ -177,6 +205,17 @@ class SettingsStoreTests(unittest.TestCase):
         """老键 `check.proxy` 搬一次（十-3）：它原来只服务本地校验链。"""
         self._write_raw(json.dumps({"check": {"proxy": "http://old:1"}}))
         self.assertEqual(S.resolve_proxy(), "http://old:1")
+
+    def test_old_timeout_keys_are_migrated(self) -> None:
+        """老键 `jvm.timeout` / `debug.timeout` 搬一次（2026-10-21 改名）。
+
+        不搬的话 `load()` 会静默回落默认值：界面上「我设的那个数不见了」，而这次的
+        默认值恰好也是 25/90，看起来一切正常（AGENTS #17 的同一个坑）。"""
+        self._write_raw(json.dumps({"jvm": {"timeout": 42},
+                                    "debug": {"timeout": 111}}))
+        got = S.load()
+        self.assertEqual(got["jvm"]["check_timeout"], 42)
+        self.assertEqual(got["debug"]["chain_timeout"], 111)
 
 
 if __name__ == "__main__":

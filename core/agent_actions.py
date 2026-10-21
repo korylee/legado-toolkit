@@ -23,12 +23,16 @@ ACTIONS = (
     "suggest_api_rule",
     "ask_user",
     "stop_unsupported",
+    "rule_try",
+    "autofill_propose",
 )
 
 #: 每个动作的**预算类**——每轮 Agent 循环的计数维度
 #: （``agent-evidence-budget`` 的协议位：字段从第一天就在，实现以后接）。
 #: free 不计数；evidence 消耗取证次数（打真实引擎 / 读证据）；
 #: model_call 发模型请求（花钱的动作只能由用户显式触发，见 ``/suggest-rule``）。
+#: ``rule_try`` 是 free 但**限次**（RULE_TRY_PER_TURN）：daemon 路径不发网络、
+#: 不调模型，可 Agent 自查用；拿它刷页面等于变相取证，超限要转 evidence。
 ACTION_BUDGET = {
     "suggest_rule": "model_call",
     "edit_rule": "free",
@@ -38,7 +42,30 @@ ACTION_BUDGET = {
     "suggest_api_rule": "model_call",
     "ask_user": "free",
     "stop_unsupported": "free",
+    "rule_try": "free",
+    "autofill_propose": "free",
 }
+
+#: rule_try 每轮上限（**契约位**：契约测试钉着这个数字的语义——超限转 evidence，
+#: 不是拒绝执行）。5 = 一次提议（≤3 条候选）加复查的余量。
+RULE_TRY_PER_TURN = 5
+
+#: 每轮模型调用上限（agent-evidence-budget 的判据位：超限转用户动作）。
+#: **口径是「一族一次」**：提议按取样类型分族（text / media / link），一族一次调用，
+#: 所以 3 = 详情组三族各提一次。写死成 1 的后果是「点一次 AI 补全只有 text 那族被
+#: 提议」——用户看到的是「点了没反应」，而原因藏在族边界里。
+MODEL_CALLS_PER_TURN = 3
+
+def _steps() -> tuple:
+    """调试**步骤名**的白名单：派生自 `core.app_debug.SEGMENT_NAMES` 的取值
+    （= 前端 STEP_LABELS 的键），**不另抄一份**——两份清单一改一边不报错，
+    只会在某条提案上突然「step 不受支持」。
+    与 `core.debug_keys.TARGETS` 不是同一套词表：那边是「调试入口目标」
+    （有 info、没有 bookUrl）；惰性导入，agent_actions 本身是叶子模块。
+    """
+    from core.app_debug import SEGMENT_NAMES
+    return tuple(SEGMENT_NAMES.values())
+
 
 #: 路由动作 → 五格执行动作的对应：``agent_plan`` 的 fix/probe 与前端
 #: ``debugAction.ACTION_KINDS`` 是执行侧词表，靠这层映射与路由侧对齐
@@ -54,6 +81,8 @@ EXECUTION_ACTIONS = {
     "suggest_api_rule": ("apply_candidate",),
     "ask_user": (),
     "stop_unsupported": (),
+    "rule_try": ("try_rule",),
+    "autofill_propose": (),
 }
 REASON_CODES = (
     "candidate_available",
@@ -80,6 +109,8 @@ _ACTION_FIELDS = {
     "suggest_api_rule": {"field", "method", "path", "json_path", "rule", "strategy"},
     "ask_user": {"question", "options"},
     "stop_unsupported": set(),
+    "rule_try": {"step", "rule", "field"},
+    "autofill_propose": {"step"},
 }
 _STRATEGY_FIELDS = {"requires_webview", "runtime_field", "content_mode"}
 _FIELD_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,79}$")
@@ -113,6 +144,15 @@ def _field_name(value: Any, field: str = "field") -> str:
     if not _FIELD_RE.fullmatch(value):
         _fail("invalid_field", "%s 不是受控字段名" % field)
     return value
+
+
+def _validate_step(value: Any) -> str:
+    """调试步骤名的受控校验（白名单只有 :func:`_steps` 一份）。"""
+    step = _strict_text(value, "step", limit=20)
+    steps = _steps()
+    if step not in steps:
+        _fail("invalid_field", "step 不受支持（只能是 %s）" % " / ".join(steps))
+    return step
 
 
 def _validate_strategy(value: Any) -> dict[str, Any]:
@@ -186,6 +226,17 @@ def _validate_proposal(action: str, value: Any) -> dict[str, Any]:
             if len(options) > 8:
                 _fail("field_too_long", "options 最多包含 8 项")
             out["options"] = [_strict_text(option, "options[]", limit=80) for option in options]
+    if action == "rule_try":
+        if "step" not in value or "rule" not in value:
+            _fail("invalid_proposal", "rule_try 必须同时提供 step 和 rule")
+        out["step"] = _validate_step(value["step"])
+        out["rule"] = _strict_text(value["rule"], "rule", limit=500)
+        if "field" in value:
+            out["field"] = _field_name(value["field"])
+    if action == "autofill_propose":
+        if "step" not in value:
+            _fail("invalid_proposal", "autofill_propose 必须提供 step")
+        out["step"] = _validate_step(value["step"])
     if "strategy" in value:
         out["strategy"] = _validate_strategy(value["strategy"])
     return out

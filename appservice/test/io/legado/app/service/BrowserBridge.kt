@@ -56,7 +56,7 @@ object BrowserBridge {
      * `document.documentElement.outerHTML`；给了 `js` 参数时则是**那个 JS 的求值结果**
      * （S5-A2 起）。**原字段名是 `html`，改名是因为它不该被当 HTML 读**：名字说 html、
      * 里面装的却是 JS 返回值时，调用方会照着 HTML 去解析它（本仓库被这类误导性命名
-     * 坑过多次，见 lessons §十九）。
+     * 坑过多次）。
      */
     data class Result(val ok: Boolean, val body: String = "", val reason: String = "",
                       /** 落地地址（重定向后）。取不到时回退请求地址。 */
@@ -76,7 +76,15 @@ object BrowserBridge {
                        *  不是页面——上游 `SnifferWebClient` 命中时就是把那个 URL 当响应体返回。 */
                       val sniffed: Boolean = false,
                       /** 嗅探时因上界被丢掉的请求条数（>0 = 可能有命中被漏，不许静默）。 */
-                      val sniffDrops: Int = 0)
+                      val sniffDrops: Int = 0,
+                      /** 运行时形状采集（L3）：`runtimeProbe = true` 时在渲染完的页面上
+                       *  多 evaluate 一个只读表达式，采 `params` 的**形状**（类型/键名/计数），
+                       *  不采值——图片地址与密钥一律不进侧车。null = 没采（非正文页）；
+                       *  表达式失败 / params 未就绪时返回**带 `fails` 键的 map**——失败原因
+                       *  随侧车走到用户眼前（AGENTS #4），Python 侧 `runtime_map` 放行该键。
+                       *  必须是普通 Map：侧车编码器（`ServiceJson.element`）只递归 List / Map
+                       *  （同 [network] 的注释）。 */
+                      val runtimeShape: Map<String, Any?>? = null)
 
     fun findBrowser(): String? = CANDIDATES.firstOrNull { File(it).isFile }
 
@@ -279,7 +287,10 @@ object BrowserBridge {
                content: String? = null,
                /** 嗅探（S2）：命中就**返回那个地址本身**当响应体（上游 `SnifferWebClient`）。 */
                sourceRegex: String? = null,
-               overrideUrlRegex: String? = null): Result {
+               overrideUrlRegex: String? = null,
+               /** L3 运行时形状采集：true 时页面稳定后多 evaluate 一个只读表达式（见
+                *  [RUNTIME_SHAPE_EXPR]），结果进 [Result.runtimeShape]。只有正文页传 true。 */
+               runtimeProbe: Boolean = false): Result {
         // 正则**先编译**：无效正则要显式失败，不能静默跳过（AGENTS #4）
         val sourceRe = sourceRegex?.takeIf { it.isNotBlank() }?.let {
             runCatching { Regex(it) }.getOrElse { e ->
@@ -496,11 +507,25 @@ object BrowserBridge {
             return when {
                 !body.isNullOrEmpty() -> {
                     val capture = collectNetwork(ws, tapped.toList(), tapQueue, 5000)
+                    // L3 形状采集：只读表达式、页面上多一次求值（正常页几毫秒）。
+                    // 采不到时**原因进 fails 键**（AGENTS #4：失败原因要走到用户眼前，
+                    // Python 侧 runtime_map 随键带出）——「不是正文页」（空 map）、
+                    // 「params 未就绪」「表达式抛错」三件事在侧车上分得开。
+                    val shape: Map<String, Any?>? = if (runtimeProbe) {
+                        try {
+                            runtimeShapeOf(eval(ws, 910, RUNTIME_SHAPE_EXPR, tapQueue, 5000))
+                                ?: mapOf("fails" to listOf("形状解析不了：params 未就绪或不是对象"))
+                        } catch (e: Throwable) {
+                            mapOf("fails" to
+                                listOf("形状表达式没跑成（${e::class.simpleName}: ${e.message?.take(80)}）"))
+                        }
+                    } else null
                     Result(true, body = body, url = finalUrl,
                         network = capture.entries,
                         networkEvents = networkEventCount(tapped.toList()),
                         networkTypes = networkTypeCount(tapped.toList()),
-                        networkDrops = capture.drops)
+                        networkDrops = capture.drops,
+                        runtimeShape = shape)
                 }
                 jsRetryTimes > 0 -> Result(false, reason = "js_empty: 求值 $tries 次仍为空",
                                            url = finalUrl)
@@ -528,6 +553,63 @@ object BrowserBridge {
      * 表达式由契约测试钉住（`tests/test_jvm_debug_contract.py::TestChallengeMarkerParity`）。
      */
     private const val CF_CHALLENGE_PROBE = "!!window._cf_chl_opt"
+
+    /**
+     * L3 运行时形状采集的**只读表达式**：采 `params`（App 注入进 WebView 的运行时对象）
+     * 的形状——类型、键名、`chapter_images` 的类型与 http/blob 计数、首条地址的 origin。
+     *
+     * **只采形状不采值**：图片地址本身、解密密钥、完整 URL 一律不进侧车——签名会过期、
+     * 密钥不属界面，采了只会诱导人把它们硬编码进书源（AGENTS #11 那一类「把一次性观测
+     * 写死」）。键名 40 上限、类型字符串、计数都是界面上答「下一步做什么」需要的最小集。
+     * 字段名与 Python 闸门（`core.app_debug.runtime_map`）逐词比对钉在
+     * `tests/test_jvm_debug_contract.py::TestRuntimeParity`。
+     */
+    internal val RUNTIME_SHAPE_EXPR = """
+        JSON.stringify((function() {
+          var t = Object.prototype.toString.call(params);
+          if (t !== '[object Object]' && t !== '[object Array]') return {params_type: t};
+          var out = {params_type: t, keys: Object.keys(params).slice(0, 40)};
+          var imgs = params.chapter_images;
+          if (imgs === undefined || imgs === null) return out;
+          var it = Object.prototype.toString.call(imgs);
+          var arr = (it === '[object Array]') ? imgs : [String(imgs)];
+          var http = 0, blob = 0, host = '';
+          for (var i = 0; i < arr.length; i++) {
+            var s = String(arr[i] || '');
+            if (s.indexOf('blob:') === 0) { blob++; continue; }
+            if (s.indexOf('http') === 0) {
+              http++;
+              if (!host) { try { host = new URL(s).origin; } catch (e) {} }
+            }
+          }
+          out.chapter_images = {type: it, count: arr.length, http: http, blob: blob, sample_host: host};
+          return out;
+        })())
+    """.trimIndent()
+
+    /** 把 [RUNTIME_SHAPE_EXPR] 的应答解析成侧车可编码的普通 Map；解析不了返回 null。 */
+    internal fun runtimeShapeOf(raw: String?): Map<String, Any?>? {
+        if (raw.isNullOrBlank()) return null
+        val o = runCatching { JSONObject(raw) }.getOrNull() ?: return null
+        val out = LinkedHashMap<String, Any?>()
+        out["params_type"] = o.optString("params_type")
+        o.optJSONArray("keys")?.let { arr ->
+            val keys = (0 until arr.length()).mapNotNull { i ->
+                arr.optString(i).takeIf { it.isNotEmpty() }
+            }
+            if (keys.isNotEmpty()) out["keys"] = keys
+        }
+        o.optJSONObject("chapter_images")?.let { ci ->
+            out["chapter_images"] = linkedMapOf(
+                "type" to ci.optString("type"),
+                "count" to ci.optInt("count"),
+                "http" to ci.optInt("http"),
+                "blob" to ci.optInt("blob"),
+                "sample_host" to ci.optString("sample_host"),
+            )
+        }
+        return if (out.isEmpty()) null else out
+    }
 
     /**
      * 浏览器走不走代理：`--proxy-server=<值>`（空 = 不加这个参数，行为与以前一字不差）。
@@ -749,10 +831,12 @@ object BrowserBridge {
                      jsRetryIntervalMs: Long = 1000,
                      content: String? = null,
                      sourceRegex: String? = null,
-                     overrideUrlRegex: String? = null): Result =
+                     overrideUrlRegex: String? = null,
+                     runtimeProbe: Boolean = false): Result =
         synchronized(renderLock) {
             render(session, url, timeoutMs, waitAfterLoadMs, js, jsRetryTimes, jsRetryIntervalMs,
-                   content = content, sourceRegex = sourceRegex, overrideUrlRegex = overrideUrlRegex)
+                   content = content, sourceRegex = sourceRegex, overrideUrlRegex = overrideUrlRegex,
+                   runtimeProbe = runtimeProbe)
         }
 
     /**
@@ -764,10 +848,12 @@ object BrowserBridge {
                       js: String? = null, jsRetryTimes: Int = 0,
                       jsRetryIntervalMs: Long = 1000,
                       sourceRegex: String? = null,
-                      overrideUrlRegex: String? = null): Result =
+                      overrideUrlRegex: String? = null,
+                      runtimeProbe: Boolean = false): Result =
         renderSerial(session, baseUrl?.trim().orEmpty(), timeoutMs, waitAfterLoadMs, js,
                      jsRetryTimes, jsRetryIntervalMs, content = html,
-                     sourceRegex = sourceRegex, overrideUrlRegex = overrideUrlRegex)
+                     sourceRegex = sourceRegex, overrideUrlRegex = overrideUrlRegex,
+                     runtimeProbe = runtimeProbe)
 
     /**
      * 读浏览器 profile 里**这个 URL 适用的 cookie**（CDP `Network.getCookies`）。

@@ -1341,12 +1341,16 @@ class Store:
 
     def list_jobs(self, limit: int = 200,
                   statuses: Optional[Sequence[str]] = None,
-                  kind: str = "", recent_since: str = "",
+                  kind: str = "", kinds: Optional[Sequence[str]] = None,
+                  recent_since: str = "",
                   exclude_kind: str = "") -> List[Dict[str, Any]]:
         """按筛选条件取任务行（新的在前），最多 ``limit`` 条。
 
         筛选条件全部由调用方给（见 ``backend/api/jobs.py``）：这里不做口径判断——
         「最近几天算历史」这类窗口只在那一个地方定义，否则同一个数会长出两份。
+
+        ``kinds`` 是**一类多个 kind** 的过滤（任务中心的类目页签：校验 = jvm_run + check）：
+        单个 ``kind`` 参数盖不住，前端按页拆行过滤会把别的行悄悄藏掉。
 
         ``recent_since`` 是**终态行的窗口**：在跑的任务不受它限制。对整表一刀切
         ``created_at >=`` 会让一条建得早、还在跑的任务从列表里消失——而它正是这个
@@ -1363,6 +1367,10 @@ class Store:
         if kind:
             where.append("kind = ?")
             args.append(str(kind))
+        if kinds:
+            marks = ",".join("?" * len(kinds))
+            where.append("kind IN (%s)" % marks)
+            args.extend(str(k) for k in kinds)
         if exclude_kind:
             # 任务中心按**排除**过滤（默认不看调试运行）：白名单会让新增的 kind
             # 悄悄从列表里消失，而"哪一类不该出现在这里"是明确的

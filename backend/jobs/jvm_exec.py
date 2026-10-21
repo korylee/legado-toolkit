@@ -14,7 +14,6 @@ import asyncio
 import hashlib
 import json
 import os
-import shutil
 import subprocess
 import threading
 import time
@@ -145,18 +144,6 @@ def _write_run_manifest(run_dir: Path, manifest: Dict[str, Any], job_id: str,
         (run_dir / "manifest.json").write_text(
             json.dumps(envelope, ensure_ascii=False, indent=1),
             encoding="utf-8", newline="\n")
-    except OSError:
-        pass
-
-
-def _persist_runtime_snapshot(run_dir: Path) -> None:
-    """把本次执行依赖的 runtime dump 复制一份进运行目录。
-
-    缺失不拦：执行态检查会对「没有 dump」给出明确原因，这里只负责留存证据。
-    """
-    src = data_dir() / "app_probe" / "test_jvm_env.json"
-    try:
-        shutil.copyfile(src, run_dir / "runtime-snapshot.json")
     except OSError:
         pass
 
@@ -669,12 +656,11 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
             daemon=True)
         try:
             tail.start()
-            # 任务信封 + runtime 快照：执行一开始就落盘。inputs 是提交时冻结的
-            # manifest（带 sha256），信封上的 job/owner/chunk 是执行身份——崩溃后
-            # 凭这个目录就能逐项对出「这次用了什么输入、依赖哪份快照、写到哪」。
+            # 任务信封：执行一开始就落盘。inputs 是提交时冻结的 manifest（带 sha256），
+            # 信封上的 job/owner/chunk 是执行身份——崩溃后凭这个目录就能逐项对出
+            # 「这次用了什么输入、写到哪」。
             if run_dir is not None:
                 _write_run_manifest(run_dir, manifest, job_id)
-                _persist_runtime_snapshot(run_dir)
             _append_event(timeline_dir, "single_started")
             if queue_wait_sec is not None and queue_wait_sec >= _QUEUE_NOTICE_MIN_SEC:
                 _append_event(timeline_dir, "startup_stage", stage="queue_wait",
@@ -1090,7 +1076,6 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
 
         if run_dir is not None:
             _write_run_manifest(run_dir, manifest, job_id)
-            _persist_runtime_snapshot(run_dir)
         batch_t0 = time.monotonic()
         _append_event(timeline_dir, "batch_started", chunks=len(chunks),
                       sources=len(rows_all))

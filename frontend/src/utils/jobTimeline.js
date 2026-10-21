@@ -2,6 +2,10 @@
 //
 // 后端给的是骨架事件（ts + kind + 字段），这里负责说成人话：主行只展示必要的执行方式
 // 与失败原因，不编造后端没给的数字（比如预计剩余时间）。tone: info | warn | error，前端据此上色。
+//
+// `ai_*` 不在这里取词：那一轮的字段名与四态是 AI 补全弹窗的读者，取词在
+// `utils/agentRun`（唯一一份），这里只分派。
+import { agentEventLine } from "./agentRun.js";
 
 // 「这一块走的是哪条引擎」的取词（**唯一一份**）：块开始/结束/失败三处都说它。
 // 各写一遍时，分歧正好落在不报错的地方——同一块开头说 Gradle、结尾说常驻引擎。
@@ -12,8 +16,18 @@ function modeLabel(mode) {
   return "";
 }
 
+/** AI 补全这一轮的事件取词在 `utils/agentRun`（**唯一一份**，弹窗与这里共用）。
+ *
+ * 这里只做分派：`ai_*` 落 default 时任务中心会把 `ai_try` / `ai_family` 这些码
+ * 原样打到界面上——那不是「技术细节」，是读者看不懂的四行字。 */
+function aiLine(ev) {
+  return agentEventLine(ev);
+}
+
 export function formatTimelineEvent(ev) {
   if (!ev || !ev.kind) return { text: "", tone: "info" };
+  // AI 补全那一轮（agent_loop）：字段名与原因在 agentRun 取词，这里不落 default
+  if (String(ev.kind).startsWith("ai_")) return aiLine(ev);
   const n = ev.index != null ? Number(ev.index) + 1 : null;
   const at = (suffix) => (n != null ? `第 ${n} 块` + suffix : suffix);
   const sec = (v) => (v != null ? `${v} 秒` : "");

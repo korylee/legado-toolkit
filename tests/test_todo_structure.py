@@ -279,7 +279,7 @@ def _entry(eid="A1", title="样例", section="## 1 · 排队", **fields):
     """拼一个最小条目文本（默认落在排队区、全字段齐全）。"""
     rows = [section, "", "### 条目：%s · %s" % (eid, title)]
     body = {"状态": "todo", "依赖": "无", "优先级": "P1",
-            "背景": "背景", "约束": "约束", "验收": "验收", "指针": "lessons §一"}
+            "背景": "背景", "约束": "约束", "验收": "验收", "指针": "core/store.py"}
     body.update(fields)
     for name in _FIELD_ORDER:
         if name in body and body[name] is not None:

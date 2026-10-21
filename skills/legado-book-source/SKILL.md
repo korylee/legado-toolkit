@@ -180,7 +180,7 @@
 | JS 执行超时 | 轮询 DOM 或页面脚本阻塞 | **没有 `sleep` 可等**：直接读数据源头，或用 `java.webView` 自己在 `js` 里控制时机 |
 | `webJs` 报语法错误 | 用了 ES6+ 语法 | 改写成 ES5（见 §五） |
 
-→ 按现象索引；调试时「key 的形态决定走哪条链路」是 App 自己的分派规则（`Debug.kt` 的 when，落点见 `core/app_debug.py` 与 lessons §十四）——工具里的「调试目标」只是前缀构造器，改不了它。
+→ 按现象索引；调试时「key 的形态决定走哪条链路」是 App 自己的分派规则（`Debug.kt` 的 when，落点见 `core/app_debug.py`）——工具里的「调试目标」只是前缀构造器，改不了它。
 
 ## 四、加密与特殊场景
 
@@ -264,7 +264,7 @@ Legado 的 JS 引擎是 **Rhino**，只支持 ES5，不支持以下语法：
 要记的只有这几个：`java.ajax(url[, timeout])`（第二参数是**超时毫秒**，不是请求头）、
 `java.get(url, headers[, timeout])` / `java.post(url, body, headers)`（`headers` 是**必填**的
 Map）、`java.connect(url, header)`、`java.log` / `java.toast`、`baseUrl`、`result`
-（`webJs` 的返回值）。**完整清单以 `help/JsExtensions.kt` 为准**，别在这里维护第二份。
+（`webJs` 的返回值）。**完整清单以 `上游:help/JsExtensions.kt` 为准**，别在这里维护第二份。
 
 ### 独立浏览器环境（`webView`）
 
@@ -280,7 +280,7 @@ Map）、`java.connect(url, header)`、`java.log` / `java.toast`、`baseUrl`、`
 - **`srcset`**：取第一段 —— `srcset.split(',')[0].trim().split(' ')[0]`
 - **要滚动才加载**：`window.scrollTo(0, document.body.scrollHeight)` 之后再取
 
-→ 要用哪个 `java.*` 先查 `help/JsExtensions.kt`；**没有 `sleep`、没有 `browser`** 这两条
+→ 要用哪个 `java.*` 先查 `上游:help/JsExtensions.kt`；**没有 `sleep`、没有 `browser`** 这两条
 最容易写错（写了不报错、只是拿不到东西）。
 
 ## 七、书源元数据与配置

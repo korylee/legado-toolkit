@@ -97,6 +97,9 @@ class StructuredResultTest {
         val toc = steps["toc"] as Map<*, *>
         // chapterList 是列表规则（AGENTS #21）：按条目取，名称用 chapterName（兜底 text）
         assertEquals(listOf("第1页", "第2页"), toc["chapter_list"])
+        // 计数与列表段同语义：短列表不标截断
+        assertEquals(2, toc["total"])
+        assertEquals(false, toc["truncated"])
     }
 
     @Test

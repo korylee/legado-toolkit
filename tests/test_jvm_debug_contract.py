@@ -234,18 +234,42 @@ class TestMatchedStepNameParity(unittest.TestCase):
         self.assertTrue(names, "MATCHED_STEP_NAMES 不该是空的")
         unknown = [n for n in names if n not in set(SEGMENT_NAMES.values())]
         self.assertEqual(unknown, [], "这些段名 Python 永远不会取：%s" % unknown)
-        # 三条列表/正文段一个都不能少：少一个就是「那条规则命中的 DOM 交不回来」
-        self.assertLessEqual({"search", "explore", "toc", "content"}, set(names))
+        # 四条段一个都不能少：少一个就是「那条规则命中的 DOM 交不回来」
+        # （bookUrl 是字段子键，见 test_bookinfo_field_suffixes_match_python）
+        self.assertLessEqual(
+            {"search", "explore", "bookUrl", "toc", "content"}, set(names))
 
     def test_every_name_has_a_rule_branch(self):
-        """**记了名字就得有规则**：没有分支的段名恒不命中，而它看起来像「规则没选中」。"""
+        """**记了名字就得有规则**：没有分支的段名恒不命中，而它看起来像「规则没选中」。
+
+        `bookUrl` 走字段表（`matchedInfoRuleOf`），单规则分支的解析会把它拦下——
+        对它另行核对 `MATCHED_INFO_FIELDS`（下一条）。
+        """
         names, text = self._names_and_text()
         block = text.split("private fun matchedRuleOf(", 1)
         self.assertEqual(len(block), 2, "DebugService.kt 里找不到 matchedRuleOf")
         body = block[1].split('else -> ""', 1)[0]
         branches = set(re.findall(r'"([a-zA-Z]+)"', body))
-        self.assertEqual(set(names) - branches, set(),
+        self.assertEqual(set(names) - {"bookUrl"} - branches, set(),
                          "这些段名在 matchedRuleOf 里没有分支，永远记不出东西来")
+        self.assertIn("bookUrl", text.split("internal fun matchedInfoRuleOf(", 1)[-1],
+                      "bookUrl 段按字段记，matchedInfoRuleOf 必须存在")
+
+    def test_bookinfo_field_suffixes_match_python(self):
+        """详情段字段子键两侧逐词比对：字段名与顺序都要一致。
+
+        Kotlin 写 `bookUrl.<字段>` 子键，Python 按 `core.app_debug.BOOKINFO_FIELD_LABELS`
+        展开——两边各改一边的后果不是报错，是那个字段的命中 DOM 永远不显示
+        （AGENTS #22⑤）。字段名单独从 Kotlin 源码字面量里读。
+        """
+        from core.app_debug import BOOKINFO_FIELD_LABELS
+        text = self.KOTLIN.read_text(encoding="utf-8")
+        block = text.split("internal val MATCHED_INFO_FIELDS = listOf(", 1)
+        self.assertEqual(len(block), 2, "DebugService.kt 里找不到 MATCHED_INFO_FIELDS")
+        body = block[1].split(")", 1)[0]
+        kotlin_fields = re.findall(r'"([^"]*)"', body)
+        self.assertEqual(kotlin_fields, [f for f, _ in BOOKINFO_FIELD_LABELS],
+                         "详情段的字段子键两侧漂了：改一边就得改另一边")
 
     def test_node_limit_matches_the_python_side(self):
         """每段记几个节点：本地投影那份在 `core/quality.py`（两侧的 DOM 要能对着看）。"""
@@ -485,6 +509,128 @@ class TestBrowserProfileParity(unittest.TestCase):
         kotlin_paths = re.findall(r'"([^"]*)"', "\n".join(body_lines))
         self.assertEqual(kotlin_paths, list(BROWSER_CANDIDATES),
                          "两侧的浏览器候选漂了：换一个就落不到同一个 profile 上")
+
+
+class TestRuntimeParity(unittest.TestCase):
+    """L3 运行时形状采集：**表达式字段、侧车键、闸门消费键**两侧必须一致。
+
+    为什么要有这条：形状是 Kotlin 在页面上 evaluate 出来、写进侧车 `runtime` 键、
+    Python 按 `core.app_debug.runtime_map` 消费的。跨语言没法共享常量，两边各改一边的
+    后果不是报错，是**那个字段永远空着**——「params 是不是对象 / 图片有几张」在界面上
+    没人答得出来，而看起来像「这个源没有运行时数据」（AGENTS #4 / #22⑤ 那一类）。
+
+    对照的是**源码字面量**（不跑 Kotlin），与 `TestMatchedStepNameParity` 同一个套路。
+    """
+
+    BRIDGE = (pathlib.Path(__file__).parent.parent /
+              "appservice/test/io/legado/app/service/BrowserBridge.kt")
+    DEBUG = (pathlib.Path(__file__).parent.parent /
+             "appservice/test/io/legado/app/service/DebugService.kt")
+
+    def test_the_shape_expression_produces_the_fields_python_consumes(self):
+        """表达式里的字段名 ⊇ 闸门认的字段名（params_type/keys + chapter_images 五键）。"""
+        from core.app_debug import RUNTIME_KEYS_MAX
+        expr = self.BRIDGE.read_text(encoding="utf-8")
+        block = expr.split("internal val RUNTIME_SHAPE_EXPR", 1)
+        self.assertEqual(len(block), 2, "BrowserBridge.kt 里找不到 RUNTIME_SHAPE_EXPR")
+        body = block[1].split('"""', 1)[1].split('"""', 1)[0]
+        for field in ("params_type", "keys", "chapter_images",
+                      "type", "count", "http", "blob", "sample_host"):
+            self.assertIn(field, body,
+                          "形状表达式里没有 %s：Python 闸门认这个字段" % field)
+        # 只采形状不采值：表达式里不许出现把地址原样塞进结果的写法
+        self.assertNotIn("chapter_images[i]", body,
+                         "表达式在采地址值而不是形状（只许类型/计数/origin）")
+        # 键名上限两侧一致
+        self.assertIn("slice(0, %d)" % RUNTIME_KEYS_MAX, body,
+                      "Kotlin 的键名上限与 core.app_debug.RUNTIME_KEYS_MAX 漂了")
+
+    def test_the_sidecar_key_and_gate_are_wired(self):
+        """侧车写 `runtime`、jvm_debug 读 `runtime`——键名两边一样（同 TestEngineHtmlKeyParity）。"""
+        kt = self.DEBUG.read_text(encoding="utf-8")
+        self.assertIn('"runtime" to', kt, "DebugService 侧车里没有 runtime 这个键")
+        py = (pathlib.Path(__file__).parent.parent / "core/jvm_debug.py").read_text(encoding="utf-8")
+        self.assertIn('runtime_map(meta.get("runtime"))', py,
+                      "core/jvm_debug 没在读 runtime（键名两边要一样）")
+
+    def test_content_start_mark_matches_upstream(self):
+        """武装锚事件与上游 `Debug.kt` 逐词一致：上游改措辞采集会静默失效。
+
+        上游不在场（部署机没有那份检出）就跳过——本地开发机的检出路径见 AGENTS.md。
+        """
+        upstream = (pathlib.Path("D:/Documents/GitHub/legado-with-MD3") /
+                    "app/src/main/java/io/legado/app/model/Debug.kt")
+        if not upstream.exists():
+            self.skipTest("上游 App 源码不在场")
+        kt = self.DEBUG.read_text(encoding="utf-8")
+        block = kt.split('internal const val CONTENT_START_MARK = "', 1)
+        self.assertEqual(len(block), 2, "DebugService.kt 里找不到 CONTENT_START_MARK")
+        mark = block[1].split('"', 1)[0]
+        self.assertTrue(mark, "CONTENT_START_MARK 不该是空的")
+        self.assertIn('log(debugSource, "%s")' % mark,
+                      upstream.read_text(encoding="utf-8"),
+                      "上游 Debug.kt 里没有这个锚事件（改措辞了？两侧要一起改）")
+
+
+class TestAutofillFieldMapParity(unittest.TestCase):
+    """前端「字段 → structured 键」映射与前端的填充字段集必须一致。
+
+    `frontend/src/utils/steps.js` 的 `FIELD_TO_STRUCTURED` 把规则字段（驼峰）映射到
+    structured 的蛇形键；哪些字段有建议由后端 `core.autofill.FILL_SPECS` 决定。
+    两边各改一边的后果不是报错，是**那个字段恒显示「未取到」**（AGENTS #4/#22⑤）。
+    2026-10-20 这两张表从 DebugWorkbench.vue 搬到这里：AI 补全弹窗要独立读同一份
+    字段名与写入落点——留在组件里就只能再抄一份，抄出来的必然漂。
+    """
+
+    STEPS = (pathlib.Path(__file__).parent.parent /
+             "frontend/src/utils/steps.js")
+
+    def test_bookinfo_fields_are_the_spec_fields(self):
+        from core.autofill import FILL_SPECS
+
+        text = self.STEPS.read_text(encoding="utf-8")
+        block = text.split("const FIELD_TO_STRUCTURED = {", 1)
+        self.assertEqual(len(block), 2, "steps.js 里找不到 FIELD_TO_STRUCTURED")
+        body = block[1].split("};", 1)[0]
+        pairs = dict(re.findall(r'"(ruleBookInfo\.\w+)":\s*"([a-z_]+)"', body))
+        self.assertTrue(pairs, "没解析出任何 ruleBookInfo 字段映射")
+        expected = set(FILL_SPECS["bookUrl"])
+        got = set(pairs.values())
+        self.assertEqual(got, expected,
+                         "前端映射与 FILL_SPECS.bookUrl 漂了：多了 %s，缺了 %s"
+                         % (sorted(got - expected), sorted(expected - got)))
+
+    def test_autofill_write_path_covers_every_spec_field(self):
+        """写入落点必须覆盖 FILL_SPECS 的每个字段：bookUrl 部分**派生自**
+        FIELD_TO_STRUCTURED（同一组映射不维护两份），搜索步手写（同名不同组）。
+
+        为什么要有这条：autofill 行的 field 是 FILL_SPECS 的**蛇形键**，草稿里
+        的规则字段是**驼峰**（ruleBookInfo.wordCount 等）。写错的后果不是报错，
+        是规则写进一个不存在的键、界面却说「已写入」
+        （2026-10-20 审查实测：8 个字段里 4 个写错）。
+        """
+        from core.autofill import FILL_SPECS
+
+        text = self.STEPS.read_text(encoding="utf-8")
+        # bookUrl 的落点是 FIELD_TO_STRUCTURED 的逆表——它的覆盖性由上面那条
+        # （值集 == FILL_SPECS.bookUrl 键集）保证；这里只钉「没有另抄一份」
+        self.assertIn("bookUrl: BOOKINFO_STRUCTURED_TO_RULE", text,
+                      "bookUrl 的写入落点应派生自 FIELD_TO_STRUCTURED，不另抄一份")
+        block = text.split("const AUTOFILL_RULE_FIELDS = {", 1)
+        self.assertEqual(len(block), 2, "steps.js 里找不到 AUTOFILL_RULE_FIELDS")
+        body = block[1].split("\n};", 1)[0]
+        for step in FILL_SPECS:
+            self.assertIn("%s:" % step, body, "AUTOFILL_RULE_FIELDS 缺 %s 步" % step)
+        # 搜索步的落点手写在这里：逐词比对 + 组不能串（搜索是条目级规则）
+        search_block = re.search(r"search:\s*\{([^}]*)\}", body)
+        self.assertIsNotNone(search_block, "AUTOFILL_RULE_FIELDS 缺 search 段")
+        search_map = dict(re.findall(r"(\w+):\s*\"([^\"]+)\"", search_block.group(1)))
+        self.assertEqual(set(search_map), set(FILL_SPECS["search"]),
+                         "search 步的写入落点与 FILL_SPECS 漂了")
+        for field, rule_field in search_map.items():
+            self.assertTrue(rule_field.startswith("ruleSearch."),
+                            "search 步的 %s 落在 %s——组不能串（搜索是条目级规则）"
+                            % (field, rule_field))
 
 
 if __name__ == "__main__":

@@ -121,6 +121,16 @@ class HealthTests(unittest.TestCase):
         self.assertIn("人工", note)
         self.assertIn("本机过不去", note)
 
+    def test_ok_row_reason_surfaces_the_exemption_note(self) -> None:
+        """ok 行的 reason 放行：豁免这类「通过但要说清怎么来的」的说明写在 ok 行
+        reason 里，压掉它「豁免不是验证」就到不了用户眼前（AGENTS #4：原因被上层压掉）。"""
+        health, note = H.health_for({
+            "state": "ok",
+            "reason": "正文规则为空；Legado 回退为使用章节链接本身，未验证取值",
+        })
+        self.assertEqual(health, Health.OK)
+        self.assertIn("未验证取值", note)
+
     def test_transport_causes_follow_the_local_table(self) -> None:
         self.assertEqual(self._h(state="error", reason="SocketException: Connection reset"),
                          Health.GFW)

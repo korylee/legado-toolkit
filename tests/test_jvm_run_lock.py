@@ -81,9 +81,14 @@ class _Base(unittest.TestCase):
             mock.patch.object(jvm_api, "_export_sources_file", self._fake_export),
             mock.patch.object(jvm_exec, "_write_meta", lambda rows: "testbatch"),
             mock.patch.object(jvm_exec, "_run_gradle", self._fake_gradle),
+            # 机器上**热着一个引擎**时，批量链会改走 daemon（真发请求、真跑 App 引擎），
+            # 而这些用例要钉的是 **Gradle 那条链的接线**——批前准备只报 started（不是
+            # 「ready」，见 jvm_exec 的 daemon_allowed），让它与「此刻有没有热引擎」无关。
+            mock.patch("core.jvm_daemon.prepare",
+                       return_value={"outcome": "started", "info": {}}),
             mock.patch.object(jvm_api.settings_store, "load",
                               lambda: {"network": {"proxy": ""}, "jvm": {"app_repo": "X:/repo", "keyword": "我",
-                                               "timeout": 25, "concurrency": 8,
+                                               "check_timeout": 25, "concurrency": 8,
                                                "depth": "search", "chunk_size": 25}}),
         ):
             p.start()

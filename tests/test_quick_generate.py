@@ -3,7 +3,7 @@
 
 为什么现在才补：这条链（URL → 抓页 → 分析 → 生成 → 落盘）此前**一条测试都没有**，
 于是它能长期坏着——书名写成 `[分类]绍宋` 的站点必然失配，而界面上只看到四个字
-「生成失败」（lessons §七十七）。这里钉住两件事：
+「生成失败」。这里钉住两件事：
 
   1. **认得出**：书名带 `[分类]` 前缀时仍能推断出规则，且**判据写进 note**；
   2. **失败必带原因**：`rc != 0` 时 `AddResult.error` 非空——原因不许在中途被压掉。
@@ -238,7 +238,7 @@ class RunAddTests(unittest.TestCase):
         """把所有会发请求的入口一起钉住（**两处 fetch 绑定**：services 与 analyzer 各一份；
         后者是正文推断那一步用的），外加主库去重那一步——它会去扫真 `data/*.json`
         （几千条），而这条测试要钉的不是重库那件事。
-        被测函数自己开的依赖要在测试里连它一起钉住（lessons §七十四）。"""
+        被测函数自己开的依赖要在测试里连它一起钉住。"""
         stack = contextlib.ExitStack()
         stack.enter_context(mock.patch("services.add_source.fetch", side_effect=side_effect))
         stack.enter_context(mock.patch("core.analyzer.fetch", side_effect=side_effect))
@@ -314,7 +314,7 @@ class RunAddTests(unittest.TestCase):
 
         实测（2026-09-22）：`18read.net` 回的是 2 字节的 `CN`，而拦截页判据要 28KB 那份
         材料才判得出——于是这条路**没走到引擎**就降级成「仅发现」，落一条 rc=0 的空源，
-        原因一路被压掉（lessons §八十九）。这条测试钉住：小得不像页面时**去问引擎**，
+        原因一路被压掉。这条测试钉住：小得不像页面时**去问引擎**，
         引擎说还是拦截页就**带原因失败**，不许静默降级。
         """
         with mock.patch("core.jvm_debug.page_from_engine",
@@ -353,7 +353,7 @@ class RunAddJobReasonTests(unittest.TestCase):
     """job 那一层：`AddResult.error` 要**原样**进 result_json。
 
     这一层原来把它压成固定文案「生成失败」——于是「工具认不出这个页面」在界面上与
-    「源坏了」一模一样（lessons §七十七）。**这条测试就是为那句压掉而写的。**
+    「源坏了」一模一样。**这条测试就是为那句压掉而写的。**
     """
 
     def test_reason_from_run_add_reaches_the_job_result(self):

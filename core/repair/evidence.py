@@ -8,6 +8,9 @@ import re
 from typing import Any, List
 
 MAX_OUTLINE_LINES = 90
+#: 端给人看的行数（界面里的「大纲」视图）：比提示词的 90 行宽——模型只需要
+#: 一眼看准取景区，人写规则时会往下追几层。超了由调用方**自报不全**。
+DISPLAY_OUTLINE_LINES = 400
 MAX_DEPTH = 6
 SKIP_TAGS = ("script", "style", "noscript", "svg", "iframe", "head", "link", "meta")
 

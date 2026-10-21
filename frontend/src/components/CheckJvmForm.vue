@@ -11,7 +11,7 @@
     <el-form v-if="conf" label-width="96px" size="small" style="margin: 8px 0">
       <el-form-item label="测试关键词"><el-input v-model="run.keyword" style="width: 160px" /></el-form-item>
       <el-form-item label="超时 / 并发">
-        <el-input-number v-model="run.timeout" :min="limits.jvm_timeout?.[0]" :max="limits.jvm_timeout?.[1]" :step="5" />
+        <el-input-number v-model="run.check_timeout" :min="limits.jvm_check_timeout?.[0]" :max="limits.jvm_check_timeout?.[1]" :step="5" />
         <span class="muted" style="margin: 0 6px">秒 /</span>
         <el-input-number v-model="run.concurrency" :min="limits.jvm_concurrency?.[0]" :max="limits.jvm_concurrency?.[1]" />
       </el-form-item>
@@ -33,7 +33,7 @@ const depthOpts = computed(() => depthOptions(limits.value));
 // 关键词等默认值只在后端 settings_store（AGENTS #8）：关键词初始为空，
 // 空值交上去由后端 coerce 落回默认——前端不再抄一份「我」。数字种子只是
 // 首帧占位，load() 会用接口下发的值覆盖，不许在这里另立一份默认。
-const run = ref({ keyword: "", timeout: null, concurrency: null, depth: "" });
+const run = ref({ keyword: "", check_timeout: null, concurrency: null, depth: "" });
 const readiness = ref(null);
 const checking = ref(false);
 
@@ -52,7 +52,7 @@ async function load() {
     const defaults = s.defaults?.jvm || {};
     run.value = {
       keyword: conf.value.keyword ?? defaults.keyword ?? "",
-      timeout: conf.value.timeout ?? defaults.timeout ?? null,
+      check_timeout: conf.value.check_timeout ?? defaults.check_timeout ?? null,
       concurrency: conf.value.concurrency ?? defaults.concurrency ?? null,
       depth: conf.value.depth ?? defaults.depth ?? "",
     };

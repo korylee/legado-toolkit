@@ -56,14 +56,16 @@ class ContentSourceTypeTests(unittest.TestCase):
         self.assertEqual(j.verdict, Q.VERDICT_FAIL)
         self.assertIn("章节链接", j.reason)
 
-    def test_audio_source_empty_rule_is_pass(self):
+    def test_audio_source_empty_rule_is_unknown(self):
+        """音频源回退用章节链接是正常配置，但**没有验证取值** → unknown
+        （与引擎的 content_ok=null 同一口径）。"""
         j = content_judge(1, [], rule="")
-        self.assertEqual(j.verdict, Q.VERDICT_PASS)
+        self.assertEqual(j.verdict, Q.VERDICT_UNKNOWN)
         self.assertIn("章节链接", j.reason)
 
-    def test_image_source_empty_rule_is_pass(self):
+    def test_image_source_empty_rule_is_unknown(self):
         j = content_judge(2, [], rule="")
-        self.assertEqual(j.verdict, Q.VERDICT_PASS)
+        self.assertEqual(j.verdict, Q.VERDICT_UNKNOWN)
 
     def test_unknown_type_empty_rule_is_unknown(self):
         j = content_judge(4, [], rule="")
@@ -100,10 +102,16 @@ class PinnedOrderTests(unittest.TestCase):
         self.assertEqual(j.verdict, Q.VERDICT_FAIL)
         self.assertIn("章节链接", j.reason)
 
-    def test_empty_rule_audio_source_is_pass_not_unknown(self):
-        """rule="" 且 rule_error="空规则"：音频源要 pass（回退用章节链接是正常配置）。"""
+    def test_empty_rule_audio_source_is_unknown_not_pass(self):
+        """rule="" 且 rule_error="空规则"：音频源回退用章节链接**不是验证** → unknown。
+
+        与引擎那条链同一口径（ValidateService.runContentStage 记 content_ok=null）：
+        回退是 Legado 的正常行为，但这次一个取值都没验过，不能报「通过」
+        （AGENTS #10：同一条事实只判一版）。
+        """
         j = content_judge(1, [], rule="", rule_error="空规则")
-        self.assertEqual(j.verdict, Q.VERDICT_PASS)
+        self.assertEqual(j.verdict, Q.VERDICT_UNKNOWN)
+        self.assertIn("未验证", j.reason)
 
     def test_rule_error_with_empty_values_is_unknown_not_fail(self):
         """关键用例：rule_error 非空 + values 为空 → unknown。

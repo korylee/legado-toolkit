@@ -79,18 +79,19 @@ class PatchSemanticsTests(SettingsApiTestCase):
             self.assertIn(key, got)
         self.assertIn("jvm", got["values"])
 
-    def test_debug_timeout_is_exposed_and_patchable(self):
-        """调试预算下发给界面（GET values/defaults/limits），PATCH 走同一把 clamp
-        （AGENTS #8：默认值与区间只有 settings_store 一份）。"""
+    def test_debug_timeouts_are_exposed_and_patchable(self):
+        """调试的两根预算都下发给界面（GET values/defaults/limits），PATCH 走同一把
+        clamp（AGENTS #8：默认值与区间只有 settings_store 一份）。"""
         got = _payload(S.load())
         self.assertIn("debug", got["values"])
-        self.assertIn("debug_timeout", got["limits"])
-        patch_settings(SettingsPatch(debug={"timeout": 1000}))
-        self.assertEqual(_payload(S.load())["values"]["debug"]["timeout"],
-                         S.LIMITS["debug_timeout"][1])
+        self.assertIn("debug_chain_timeout", got["limits"])
+        self.assertIn("debug_stage_timeout", got["limits"])
+        patch_settings(SettingsPatch(debug={"chain_timeout": 1000}))
+        self.assertEqual(_payload(S.load())["values"]["debug"]["chain_timeout"],
+                         S.LIMITS["debug_chain_timeout"][1])
 
     def test_run_params_are_not_patchable(self):
-        """批量校验参数（keyword / timeout / concurrency / depth / limit）**不是设置**：
+        """批量校验参数（keyword / check_timeout / concurrency / depth / limit）**不是设置**：
         没有「改永久默认值」这个动作，它们的唯一作用面是批量校验弹框里的本次参数。
 
         所以 PATCH 里没有这几个字段——pydantic 忽略未声明的键，提交了也一个字都不落盘。
@@ -98,11 +99,11 @@ class PatchSemanticsTests(SettingsApiTestCase):
         这里会变红，得先回答「改永久默认值」这个动作到底要不要存在。
         """
         before = S.load()["jvm"]
-        patch_settings(SettingsPatch(**{"jvm": {"keyword": "斗破", "timeout": 99,
+        patch_settings(SettingsPatch(**{"jvm": {"keyword": "斗破", "check_timeout": 99,
                                                 "concurrency": 3, "depth": "content"}}))
         got = S.load()["jvm"]
         self.assertEqual(got["keyword"], before["keyword"])
-        self.assertEqual(got["timeout"], before["timeout"])
+        self.assertEqual(got["check_timeout"], before["check_timeout"])
         self.assertEqual(got["concurrency"], before["concurrency"])
         self.assertEqual(got["depth"], before["depth"])
 

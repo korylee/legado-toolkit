@@ -39,7 +39,7 @@
         </el-button>
         <el-button v-if="daemonStatus?.stop_allowed" size="small" type="warning"
                    :loading="daemonStopping" @click="stopIdleDaemon">
-          {{ daemonStatus.process_alive ? "停止空闲引擎" : "清理已退出记录" }}
+          停止空闲引擎
         </el-button>
       </div>
     </section>

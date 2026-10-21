@@ -7,11 +7,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  categoryKinds,
   executionModeLabel,
   isWorseHealth,
   jobAgoText,
   jobCanCancel,
   jobCancelHint,
+  jobCategoryOf,
   jobIsInFlight,
   jobIsTerminal,
   jobKindLabel,
@@ -20,6 +22,16 @@ import {
   jobStatusLabel,
   jobStatusType,
 } from "./jobs.js";
+
+test("类目映射：登记的 kind 归类，没登记的落「其他」而不是被藏掉", () => {
+  assert.equal(jobCategoryOf("jvm_debug"), "debug");
+  assert.equal(jobCategoryOf("agent_loop"), "ai");
+  assert.equal(jobCategoryOf("jvm_run"), "check");
+  assert.equal(jobCategoryOf("add"), null, "没登记的 kind 落「其他」，页签才推得出来");
+  assert.equal(categoryKinds("check"), "jvm_run,check");
+  assert.equal(categoryKinds("debug"), "jvm_debug");
+  assert.equal(categoryKinds("不存在的类目"), "", "未知类目不过滤");
+});
 
 test("终态包含 unknown，否则那条任务在界面上永远清不掉", () => {
   for (const status of ["done", "failed", "cancelled", "unknown"]) {

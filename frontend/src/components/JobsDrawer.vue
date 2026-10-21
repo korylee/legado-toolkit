@@ -6,8 +6,10 @@
 // 挤在一个抽屉里时两边都难受——列表里在跑的任务进度是冻结的（只有被选中的那条会被
 // 轮询），而详情面板大半屏被 job_id / 执行方式这类八股字段占着。
 //
-// 现在：抽屉只做近期任务列表（在跑任务 + 最近保留期），过期任务由后端清理；点行开
-// `TaskDetailDialog`——那个弹窗在跑时是进度条、结束后是结果明细，自带轮询。
+// 现在：抽屉只做近期任务列表（在跑任务 + 最近保留期），过期任务由后端清理；点行按
+// **kind 分派**到两个明细弹窗之一（`utils/jobDetail`）：校验 / 调试走
+// `TaskDetailDialog`（在跑时是进度条、结束后是结果明细），AI 补全走
+// `AgentRunDialog`（逐字段四态 + 模型调用账）——后者塞进前者只会显示「没有可展示的结果」。
 //
 // 列表的**结论摘要**（通过 / 未通过 / 相对上次变化）由后端投影给（见
 // `backend/api/jobs.py` 的 `_job_row`）：结果里有 items[:500]，不能进列表响应。
@@ -15,6 +17,9 @@ import { ref, computed, watch, onMounted, onUnmounted } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { cancelJob as cancelJobApi, deleteJob as deleteJobApi, listJobs } from "../api/jobs";
 import {
+  categoryKinds,
+  JOB_CATEGORIES,
+  jobCategoryOf,
   jobCancelHint,
   jobCanCancel,
   jobIsInFlight,
@@ -26,7 +31,9 @@ import {
 } from "../utils/jobs";
 import { useJobs } from "../composables/useJobs";
 import { useMobile } from "../composables/useMobile";
+import { openJobDetail } from "../utils/jobDetail";
 import TaskDetailDialog from "./TaskDetailDialog.vue";
+import AgentRunDialog from "./AgentRunDialog.vue";
 
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
@@ -46,8 +53,45 @@ const jobs = ref([]);
 const listLimit = ref(0);
 const isMobile = useMobile();
 const detailRef = ref(null);
+//: AI 补全的明细弹窗（按 kind 分派，见 openDetail / utils/jobDetail）
+const agentRef = ref(null);
 
 const STATUS_TYPES = ["running", "cancel_requested", "pending"];
+
+// ---------------------------------------------------------------- 类目页签
+//
+// 调试也进任务中心（分类页签把流水账分走）：徽标本来就不排除调试（数得到），
+// 列表却排除了（翻不到）——那正是口径分裂，一处显示 N、另一处显示 0。
+// 上次看的页签记下来：打开抽屉落回它，不每次都落「全部」。
+const JOBS_TAB_KEY = "legado.jobsTab";
+const TABS = [
+  { key: "all", label: "全部" },
+  ...JOB_CATEGORIES.map((c) => ({ key: c.key, label: c.label })),
+];
+const jobsTab = ref(readTab());
+
+function readTab() {
+  try {
+    const v = localStorage.getItem(JOBS_TAB_KEY) || "";
+    return TABS.some((t) => t.key === v) ? v : "all";
+  } catch (e) {
+    return "all";
+  }
+}
+watch(jobsTab, (v) => {
+  try {
+    localStorage.setItem(JOBS_TAB_KEY, v);
+  } catch (e) {
+    /* 同上 */
+  }
+});
+//: 没登记进任何类目的 kind 落「其他」：页签是排除式过滤，藏起来就找不到了。
+//: 过滤在**这一份**做（页面按类目筛），「其他」桶才推得出来——所以 load 不按 kind
+//: 过滤，后端只给近期窗口。
+const hasOtherTab = computed(() =>
+  jobs.value.some((row) => jobCategoryOf(row.kind) === null));
+const tabList = computed(() =>
+  hasOtherTab.value ? [...TABS, { key: "other", label: "其他" }] : TABS);
 
 //: 在跑的行要有实时进度：列表拿回来的是快照，而进度是提交页的 SSE 在推。
 //: 读同一份共享状态（useJobs）而不是自己再轮询一遍——否则同一件事两处各拉一次。
@@ -56,9 +100,17 @@ function rowOf(row) {
   return live ? { ...row, ...live } : row;
 }
 
-const rows = computed(() => jobs.value.map(rowOf));
+const rows = computed(() => {
+  const all = jobs.value.map(rowOf);
+  if (jobsTab.value === "all") return all;
+  if (jobsTab.value === "other") {
+    return all.filter((r) => jobCategoryOf(r.kind) === null);
+  }
+  const kinds = categoryKinds(jobsTab.value).split(",").filter(Boolean);
+  return all.filter((r) => kinds.includes(String(r.kind)));
+});
 const inFlightCount = computed(
-  () => rows.value.filter((r) => jobIsInFlight(r.status)).length);
+  () => jobs.value.filter((r) => jobIsInFlight(r.status)).length);
 
 function pct(row) {
   const total = Number(row.total || 0);
@@ -76,9 +128,9 @@ function summaryText(row) {
 async function load() {
   loading.value = true;
   try {
-    // 调试运行不进这份列表：它由调试页自己观测（一进 jobs 表，点一次调试就多一条，
-    // 任务中心会被刷成流水账）。要回看某次调试的运行，从调试页那条运行条进
-    const page = await listJobs({ scope: "recent", exclude_kind: "jvm_debug" });
+    // 调试也进这份列表（分类页签把流水账分走）：徽标本来就不排除调试，列表再排除
+    // 就是「徽标数得到、抽屉里翻不到」。不按 kind 过滤——类目在客户端筛，其他桶才推得出来
+    const page = await listJobs({ scope: "recent" });
     jobs.value = Array.isArray(page?.items) ? page.items : [];
     //: 上限由后端下发（不在这里写 200）：界面要说明「只显示最近 N 条」
     listLimit.value = Number(page?.limit || 0);
@@ -122,7 +174,8 @@ async function deleteJobRow(row) {
 }
 
 function openDetail(row) {
-  detailRef.value?.open(row.id);
+  // 按 kind 分派：AI 补全有自己的明细弹窗（判据与两个 ref 在 utils/jobDetail）
+  openJobDetail(row && row.kind, row && row.id, { detailRef, agentRef });
 }
 
 // 有在跑任务时把列表刷一遍：进度靠共享状态是活的，但**新出现的任务**（别处提交的）
@@ -174,6 +227,16 @@ defineExpose({ refresh: load });
       <span class="grow" />
       <el-button size="small" :loading="loading" @click="load">刷新</el-button>
     </div>
+
+    <!-- 类目页签：全部 / 校验 / 调试 / AI（未登记的 kind 落「其他」，不藏）。
+         上次看的页签记下来，打开抽屉落回它 -->
+    <el-radio-group v-model="jobsTab" size="small" class="jobs-tabs">
+      <el-radio-button
+        v-for="t in tabList"
+        :key="t.key"
+        :value="t.key"
+      >{{ t.label }}</el-radio-button>
+    </el-radio-group>
 
     <div v-if="isMobile" class="job-cards" v-loading="loading">
       <div v-for="row in rows" :key="row.id" class="job-card" @click="openDetail(row)">
@@ -258,6 +321,7 @@ defineExpose({ refresh: load });
     </p>
 
     <TaskDetailDialog ref="detailRef" @changed="load" />
+    <AgentRunDialog ref="agentRef" />
   </el-drawer>
 </template>
 
@@ -268,12 +332,14 @@ defineExpose({ refresh: load });
   gap: 10px;
   flex-wrap: wrap;
   margin-bottom: 12px;
+  flex: 0 0 auto;
 }
 .jobs-toolbar .grow { flex: 1 1 auto; }
 /* 统计胶囊用全局 `.chip` 的骨架视觉（任务明细、执行方式、统计条筛选共用）：
    原来这里另写一份，padding 与那边漂成 3px 8px / 3px 10px，
    还挂着一个没定义的 active class */
-.jobs-table { height: calc(100% - 52px); }
+.jobs-tabs { margin-bottom: 10px; flex: 0 0 auto; }
+.jobs-table { flex: 1 1 auto; min-height: 0; }
 .jobs-table :deep(.el-table__body tr) { cursor: pointer; }
 .jobs-table :deep(.el-button) { padding: 2px 3px; }
 .jobs-table :deep(.el-tag) { border-radius: 999px; }
@@ -287,7 +353,7 @@ defineExpose({ refresh: load });
 }
 .jobs-cap { margin: 8px 2px 0; font-size: 12px; }
 
-.job-cards { height: calc(100% - 52px); overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
+.job-cards { flex: 1 1 auto; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
 .job-card {
   border: 1px solid var(--el-border-color-lighter);
   border-radius: 8px;
@@ -308,6 +374,13 @@ defineExpose({ refresh: load });
 </style>
 
 <style>
-/* el-drawer 会 teleport 到 body，抽屉本身不承担滚动；滚动交给表格。 */
-.jobs-drawer .el-drawer__body { overflow: hidden; }
+/* el-drawer 会 teleport 到 body，抽屉本身不承担滚动；滚动交给表格（桌面）与
+   卡片列表（移动）。抽屉体是 **flex 列**：头部行（工具条/类目页签）固定，
+   列表用 flex 撑满剩余高度——写死 calc(100% - N) 的话，头部每加一行就要
+   改一次数字，漏改的表现正是「列表底部被裁掉、滚不到」（移动端真踩过） */
+.jobs-drawer .el-drawer__body {
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
 </style>

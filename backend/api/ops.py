@@ -58,7 +58,7 @@ async def run_add_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
         rc = out.rc
         if rc not in (0, 2):
             # **原因原样带出去**（`AddResult.error`）：压成「生成失败」等于把
-            # 「工具认不出这个页面」说成「源坏了」（lessons §七十七、AGENTS #4）
+            # 「工具认不出这个页面」说成「源坏了」（AGENTS #4）
             return {"ok": False, "return_code": rc, "error": out.error}
         sources = load_sources(out_path)
         if not sources:
@@ -72,7 +72,7 @@ async def run_add_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
         if verify:
             # **跑一次本机引擎**（十-5）。原来这里跑的是 `verify_chain`（本地回放器）：
             # 它跑不了 JS、没有登录态，对 L2–L4 的页面看的是**另一份材料**——给出的
-            # 「通过」与 App 的实际行为无关（正是 lessons §七十七 那一类）。引擎是同一段
+            # 「通过」与 App 的实际行为无关（正是那一类）。引擎是同一段
             # App 代码 + 同一套环境，结论与「手动调一次」逐段一致。
             #
             # 结果体与设备/引擎调试**同形状**（steps / pages / all_ok），所以前端那套

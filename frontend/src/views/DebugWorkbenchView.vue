@@ -6,7 +6,6 @@ import {
   ref,
   computed,
   watch,
-  nextTick,
   onMounted,
   onUnmounted,
   inject,
@@ -37,9 +36,6 @@ const {
   query,
   cacheMode,
   host,
-  env,
-  envLoading,
-  envTitle,
   preflightState,
   running,
   startRun,
@@ -150,8 +146,8 @@ function rerunFromStep(stepName) {
     ((result.value || {}).steps || []).find((s) => s.name === stepName) || {};
   if (stepName === "search") return debugRun(); // 搜索段重跑 = 整链入口
   if (!String(step.url || "").trim()) {
-    // 返回**标准结果体**而不是只弹提示：调用方（apply_and_rerun 的结果合同）
-    // 要能从返回值读出「这次没跑成」，error 形状与 startRun 的失败体同构
+    // 返回**标准结果体**而不是只弹提示：与 startRun 的失败体同构，
+    // 调用方要能从返回值读出「这次没跑成」
     ElMessage.warning(
       "上一轮结果里没有这一步的链接。先跑一次完整调试，再重试这一步",
     );
@@ -168,7 +164,7 @@ function rerunFromStep(stepName) {
   });
 }
 
-//: 规则字段的唯一写入口（内联编辑、候选「用这条」共用）：整对象替换，
+//: 规则字段的唯一写入口（内联编辑、一键填充写入共用）：整对象替换，
 //: 源里缺规则组时顺手补上。词表见 utils/steps 的 RULE_FIELD_DEFS
 function setRuleField(group, key, value) {
   if (!source.value || !group || !key) return;
@@ -182,31 +178,6 @@ function onApplyRule({ field, rule }) {
   const [group, key] = String(field || "").split(".");
   if (!group || !key) return;
   setRuleField(group, key, rule);
-}
-
-//: 「去补规则 / 改选择器」的落点：工作台里当前步骤的规则框就在决策卡下方，
-//: 滚过去并聚焦即可（data-rule-field 与 utils/steps 的 field 同一词表）。
-//: basic（去改类型这类元数据动作）→ 顶栏切「编辑」；草稿在 workspace 里，
-//: 切回来不丢。requestAnimationFrame 等渲染与过渡起步——单 nextTick 偶发
-//: 抢在 DOM 落位之前
-function focusRuleField(v) {
-  const field =
-    v && typeof v === "object" && v.tab === "rules"
-      ? String(v.field || "")
-      : "";
-  if (!field) {
-    workspace.setMode("edit");
-    return;
-  }
-  nextTick(() => {
-    requestAnimationFrame(() => {
-      const el = document.querySelector('[data-rule-field="' + field + '"]');
-      if (!el) return;
-      el.scrollIntoView({ block: "center", behavior: "smooth" });
-      const input = el.querySelector("textarea, input");
-      if (input) input.focus({ preventScroll: true });
-    });
-  });
 }
 
 function onBeforeUnload(e) {
@@ -231,20 +202,8 @@ onUnmounted(() => {
 <template>
   <div class="workbench-page">
     <section class="wb-entry wb-panel">
-      <div class="wb-panel-title">
-        <div>
-          <b>调试</b
-          ><span class="muted wb-panel-subtitle">选择入口并查看调试结果</span>
-        </div>
-        <div class="wb-title-side">
-          <el-tag
-            v-if="env"
-            size="small"
-            :type="env.ok ? 'success' : 'warning'"
-            >{{ envLoading ? "正在检查环境…" : envTitle }}</el-tag
-          >
-        </div>
-      </div>
+      <!-- 一行工具条：目标/关键词/调试 + 引擎状态。标题与副标题不再重复——
+           页签上已经写着「调试」，那句话是复述界面能读出的东西 -->
       <div class="wb-primary-row">
         <el-select v-model="target" class="wb-target" aria-label="调试目标"
           ><el-option
@@ -309,26 +268,29 @@ onUnmounted(() => {
     <el-alert v-if="resultStale" type="warning" show-icon :closable="false"
               title="规则已修改，本次调试结果不是当前草稿的验证结果，请重新调试。" />
 
-    <!-- 规则四段与源类型由工作台从 source 自己派生，这里只传 source 一份；
-         enabledCookieJar 从源自己声明推导（AGENTS #13：能算的不传） -->
+    <!-- 规则四段与源类型由工作台从 source 自己派生，这里只传 source 一份（AGENTS #13）；
+         「从此步重跑」经 rerunFrom 事件回宿主（返回 Promise 由调用方自行等待） -->
     <DebugWorkbench
       class="wb-body"
       :initial-step="initialStep"
       :source="source || {}"
-      :enabled-cookie-jar="!!((source || {}).enabledCookieJar)"
       :draft-revision="workspace.state.draftRevision"
-      :on-rerun="rerunFromStep"
       @apply-rule="onApplyRule"
       @rerun-from="rerunFromStep"
-      @goto="focusRuleField"
     />
   </div>
 </template>
 
 <style scoped>
+/* 页内定高（IDE 式）：本页不滚，剩余高度全交给工作台——主列与材料栏各自整列滚动。
+   外层 `.app-main` 的滚动在这页永远用不上（内容正好 100%，不出滚动条）；
+   窄容器回落成单页滚动（容器查询在 DebugWorkbench 的样式里） */
 .workbench-page {
-  min-height: 100%;
-  padding: 14px clamp(14px, 3vw, 36px) 36px;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 14px clamp(14px, 3vw, 36px) 14px;
   background: var(--app-bg);
 }
 .wb-panel {
@@ -340,28 +302,15 @@ onUnmounted(() => {
 /* 调试页的两层结构靠「阴影 + 底色」区分：入口层是一张卡，工作区的步骤卡片最强。
    源身份与保存动作在壳顶栏，这里不再重复一条头部 */
 .wb-entry {
+  flex: 0 0 auto;
   padding: 14px 16px;
 }
-.wb-panel-title,
 .wb-primary-row,
 .wb-secondary-row {
   display: flex;
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
-}
-.wb-panel-title {
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 12px;
-}
-.wb-title-side {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.wb-panel-subtitle {
-  margin-left: 8px;
 }
 /* 调试入口主行：输入框与选择框的高度来自两处不同声明——`.el-input` 靠 `--el-input-height`
    同时决定行高与内层高度，`.el-select` 只由 wrapper 的 min-height 决定。两边都得钉住同一个量，
@@ -419,8 +368,15 @@ onUnmounted(() => {
 .wb-preflight {
   margin: 8px 0 0;
 }
+/* 工作台吃满剩余高度；shrink=0 不许缩——它自己内部分主列与材料两块各自滚 */
 .wb-body {
-  margin-top: 14px;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+/* 提示条也固定不缩（定高页面里被压扁等于裁掉内容） */
+.workbench-page > .el-alert {
+  flex: 0 0 auto;
 }
 @media (max-width: 720px) {
   .workbench-page {

@@ -10,7 +10,7 @@
 实例照样双开——事故现场一点没变。同 test_job_recovery 的理由，用
 `lifespan_context` 手动进出守一遍。
 
-测试全程不碰真实 `data/`（lessons §七十四）：锁路径显式传临时目录，lifespan
+测试全程不碰真实 `data/`：锁路径显式传临时目录，lifespan
 那组用 `LEGADO_DATA_DIR` 重定向。
 """
 

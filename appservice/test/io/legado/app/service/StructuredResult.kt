@@ -74,7 +74,9 @@ internal object StructuredResult {
         else linkedMapOf("steps" to out, "v" to SCHEMA_VERSION, "fails" to fails)
     }
 
-    const val SCHEMA_VERSION = 1
+    // 2：toc 段从 {chapter_list} 扩成 +total/truncated（2026-10-19）——字段集变化，
+    // 旧侧车里没有这两键，版本轴分得出口径（AGENTS #5b）。
+    const val SCHEMA_VERSION = 2
 
     /** 段名 → 字段值 map。空 map = 该段没有可记的字段（规则为空或页面为空）。 */
     private suspend fun stepResult(
@@ -86,8 +88,8 @@ internal object StructuredResult {
     ): Map<String, Any> = when (step) {
         "search", "explore" -> listResult(source, body, baseUrl, step, searchKey)
         "bookUrl" -> infoResult(source, body, baseUrl)
-        "toc" -> mapOf("chapter_list" to stringList(source, body, baseUrl,
-            source.getTocRule().chapterList.orEmpty()))
+        "toc" -> stringListCounted(source, body, baseUrl,
+            source.getTocRule().chapterList.orEmpty())
         else -> mapOf("content" to stringValue(source, body, baseUrl,
             source.getContentRule().content.orEmpty()))
     }
@@ -158,14 +160,19 @@ internal object StructuredResult {
         )
     }
 
-    /** 目录/正文段：单条取值规则，走 App 的取值路径（AGENTS #21 的语义）。 */
-    private suspend fun stringList(
+    /** 目录段：`chapter_list` + 计数（`total`/`truncated` 与列表段同语义）——
+     *  超过 [LIST_LIMIT] 的目录不加标记的话，「完整列表（20 条）」会把截断样本
+     *  说成全部（AGENTS #4：截断要写明，不静默）。 */
+    private suspend fun stringListCounted(
         source: BookSource,
         body: String,
         baseUrl: String,
         rule: String,
-    ): List<String> {
-        if (rule.isBlank()) return emptyList()
+    ): Map<String, Any> {
+        if (rule.isBlank()) {
+            return linkedMapOf("chapter_list" to emptyList<String>(),
+                "total" to 0, "truncated" to false)
+        }
         val analyzer = AnalyzeRule(RuleData(), source).setContent(body, baseUrl)
         analyzer.setCoroutineContext(coroutineContext)
         // `chapterList` 是**列表规则**（每条是一个条目选择器，不是取值规则）：
@@ -173,13 +180,18 @@ internal object StructuredResult {
         // 正确口径与 App 一致：先 getElements 取条目，再在条目上取名称。
         val elements = analyzer.getElements(rule)
         if (elements.isNotEmpty()) {
-            return elements.take(LIST_LIMIT).map { el ->
+            // total 是**条目数**，只对前 [LIST_LIMIT] 条跑取值——几千章的目录
+            // 按「计数」付全量解析（每条一个 AnalyzeRule）是白付的钱
+            val shown = elements.take(LIST_LIMIT).map { el ->
                 val item = AnalyzeRule(RuleData(), source).setContent(el)
                 item.getString(tableNameRule(source)).take(VALUE_MAX)
             }
+            return linkedMapOf("chapter_list" to shown,
+                "total" to elements.size, "truncated" to (elements.size > shown.size))
         }
-        return analyzer.getStringList(rule).orEmpty()
-            .take(LIST_LIMIT).map { it.take(VALUE_MAX) }
+        val all = analyzer.getStringList(rule).orEmpty()
+        return linkedMapOf("chapter_list" to all.take(LIST_LIMIT).map { it.take(VALUE_MAX) },
+            "total" to all.size, "truncated" to (all.size > all.take(LIST_LIMIT).size))
     }
 
     /** 目录条目取名称用的规则：`ruleToc.chapterName`，没配就退回条目文本（同 App 的兜底）。 */

@@ -41,6 +41,42 @@ function observedCount(step, values) {
   return null;
 }
 
+//: 分页总页数：正文取数收尾时上游打的两行之一（单条链接→串行跟随 / 多条→并发抓取）
+const PAGES_RE = /^(?:◇本章总页数|◇并发解析正文,总页数)[:：](\d+)$/;
+
+/**
+ * 正文的事实（只有 content 步有）：几个字、几页、首段长什么样、分页链接有几条。
+ *
+ * **以事件流为准**：上游 `contentDebug` 走 `needSave=false`，正文全文就打在
+ * `┌获取正文内容` 的下一行；`structured.content` 是引擎另算的一份样本（Kotlin 侧
+ * 有上限）。两份不一致时以事件为准，并把「样本只到 N 字符」带出来——样本不许被
+ * 读成全文（同上一条注释的纪律：截断要自报）。
+ */
+function contentFacts(values, structured) {
+  const observed = observedField(values, "正文内容");
+  const sample = text(structured && structured.content);
+  const fullText = observed !== null && observed ? observed : sample;
+  let pages = null;
+  for (const line of values) {
+    const hit = text(line).match(PAGES_RE);
+    if (hit) {
+      pages = Number(hit[1]);
+      break;
+    }
+  }
+  const links = text(observedField(values, "正文下一页链接"));
+  return {
+    hasText: !!fullText,
+    chars: fullText.length,
+    pages,
+    firstLine: (fullText.split("\n").map((line) => line.trim()).find(Boolean) || "")
+      .slice(0, 120),
+    fullText,
+    sampleChars: sample.length,
+    nextLinks: links ? links.split(/[，,\s]+/).filter(Boolean) : [],
+  };
+}
+
 // 字段表：event 是上游 `┌获取X` 的 X，url 为真时渲染成链接（值按 step.url 绝对化）。
 const FIELDS = {
   search: [
@@ -133,6 +169,57 @@ function structuredFields(name, structured) {
   }).filter(Boolean);
 }
 
+// 完整列表材料：structured.items（搜索/发现）与 chapter_list（目录）是引擎同一解析器
+// 算出的完整条目（Kotlin LIST_LIMIT 上限 20），摘要字段只显示首条——全量在这里给，
+// 手工编辑与「第二样本复核」看的是它。字段集同 STRUCTURED_FIELDS 的消费口径。
+const LIST_COLUMNS = {
+  search: [
+    { key: "name", label: "书名" },
+    { key: "author", label: "作者" },
+    { key: "kind", label: "分类" },
+    { key: "latest_chapter", label: "最新章节" },
+    { key: "book_url", label: "详情页", url: true },
+  ],
+  explore: [
+    { key: "name", label: "书名" },
+    { key: "author", label: "作者" },
+    { key: "kind", label: "分类" },
+    { key: "book_url", label: "详情页", url: true },
+  ],
+};
+
+/**
+ * structured 里的完整列表 → `{columns, rows, total, truncated}`，没有可显示的列表
+ * 返回 null（正文样本、详情字段已进摘要，不重复）。truncated = 引擎侧条数超过
+ * 20 上限（total 是解析出的完整数，与摘要共用一个来源）。
+ */
+export function structuredList(step = {}) {
+  const name = text(step.name);
+  const structured = step.structured && typeof step.structured === "object"
+    ? step.structured : null;
+  if (!structured) return null;
+  if (name === "toc" && Array.isArray(structured.chapter_list)
+      && structured.chapter_list.length) {
+    return {
+      columns: [{ key: "name", label: "章节" }],
+      rows: structured.chapter_list.map((item) => ({ name: text(item) })),
+      total: Number.isFinite(structured.total) ? structured.total : null,
+      truncated: structured.truncated === true,
+    };
+  }
+  const columns = LIST_COLUMNS[name];
+  if (!columns || !Array.isArray(structured.items) || !structured.items.length) {
+    return null;
+  }
+  return {
+    columns,
+    rows: structured.items.map((item) =>
+      Object.fromEntries(columns.map(({ key }) => [key, text(item[key])]))),
+    total: Number.isFinite(structured.total) ? structured.total : null,
+    truncated: structured.truncated === true,
+  };
+}
+
 export function stepResult(step = {}) {
   const name = text(step.name);
   const values = Array.isArray(step.values) ? step.values : [];
@@ -154,6 +241,8 @@ export function stepResult(step = {}) {
     total,
     totalLabel: name === "toc" ? "目录总数" : "书籍总数",
     fields,
+    // 正文的产出是**一次提取的结果**（几个字、几页、首段），字段值只是输入面那一侧
+    content: name === "content" ? contentFacts(values, structured) : null,
     reason: text(step.reason || (step.verdict === "fail" ? step.detail : "")),
     verdict: text(step.verdict) || "unknown",
   };

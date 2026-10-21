@@ -5,16 +5,20 @@ import asyncio
 
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
+from backend.deps import get_store
 from backend.jobs import runner
 from backend.schemas import (
     AgentPlanRequest,
     AppDebugRequest,
+    AutofillRunRequest,
     AppHostRequest,
     CandidatesRequest,
     CandidateVerifyRequest,
     JvmDebugRequest,
+    OutlineRequest,
+    RuleTryRequest,
     SuggestRuleRequest,
 )
 
@@ -36,14 +40,17 @@ def _debug_cache_or_400(cache: Any) -> str:
     return cache
 
 
-def _debug_timeout_or_400(timeout: Optional[int]) -> int:
-    """调试预算：**不传就吃设置里的 debug.timeout**（AGENTS #8：默认值只在
-    settings_store 一处；写死 60 曾与桥的渲染上限同值、互相掐死）。显式传值
-    越界直接 400，不静默夹——夹了用户就不知道自己设的数没生效。"""
+def _debug_timeout_or_400(timeout: Optional[int], stage: str = "") -> int:
+    """这次调试的墙钟预算：**不传就按段取**（`debug.stage_timeout[stage]`），
+    跑整链（没有具体步骤）才吃 `debug.chain_timeout`。默认值只在 settings_store
+    一处（AGENTS #8；写死 60 曾与桥的渲染上限同值、互相掐死）。显式传值越界
+    直接 400、不静默夹——夹了用户就不知道自己设的数没生效。"""
     from core import settings_store
 
-    timeout = timeout if timeout is not None else settings_store.debug_timeout()
-    lo, hi = settings_store.LIMITS["debug_timeout"]
+    if timeout is None:
+        timeout = (settings_store.debug_stage_timeout(stage) if stage
+                   else settings_store.debug_chain_timeout())
+    lo, hi = settings_store.LIMITS["debug_stage_timeout"]
     if not lo <= int(timeout) <= hi:
         raise HTTPException(400, "调试预算须在 %d～%d 秒（收到 %s）" % (lo, hi, timeout))
     return int(timeout)
@@ -109,7 +116,7 @@ async def jvm_debug(body: JvmDebugRequest):
     cache = _debug_cache_or_400(body.cache)
     if int(body.timeout or 0) <= 0 and body.timeout is not None:
         raise HTTPException(400, "timeout 必须是正数")
-    timeout = _debug_timeout_or_400(body.timeout)
+    timeout = _debug_timeout_or_400(body.timeout, str(body.target or ""))
     # 代理：走**全局设置**（`network.proxy`）——它同时用于这次调试与我们的补抓。
     # 界面上配了代理却只走一半（我们走、App 不走）是查不出来的不一致：两边都「正常」，
     # 只有用户能看出网络出口不一样（十-3）
@@ -172,11 +179,11 @@ async def app_debug(body: AppDebugRequest):
         # run_app_debug 是同步阻塞的（标准库 socket 收发），必须让出事件循环。
         # 连不上/超时它自己会返回带 error 的结果体（不抛），
         # 这里兜的是脏端口之类的入参异常——同样给 400，不给 500。
-        # 预算与本机引擎同源（settings_store.debug_timeout）：两条通道的
+        # 预算与本机引擎同源（settings_store.debug_chain_timeout）：两条通道的
         # 「等多久」不一样而没人知道，是查不出来的不一致（AGENTS #8）
         return await asyncio.to_thread(
             run_app_debug, host, tag, key,
-            body.port or None, settings_store.debug_timeout(), source, cache=cache,
+            body.port or None, settings_store.debug_chain_timeout(), source, cache=cache,
         )
     except Exception as e:
         raise HTTPException(400, "连 App 调试失败: %s: %s" % (type(e).__name__, e))
@@ -232,7 +239,7 @@ async def verify_candidate_rule(body: CandidateVerifyRequest):
     from core.jvm_env import readiness
     from core.repair.suggest import verify_candidate
 
-    timeout = _debug_timeout_or_400(body.timeout)
+    timeout = _debug_timeout_or_400(body.timeout, str(body.target or ""))
     cache = _debug_cache_or_400(body.cache)
 
     source = dict(body.source or {})
@@ -324,3 +331,96 @@ async def agent_plan(body: AgentPlanRequest):
 
     context = build_agent_context(body.model_dump())
     return build_plan(context, model_available=body.model_available)
+
+
+def _job_source(job) -> Dict[str, Any]:
+    """任务行里的源 JSON（rule_try 的求值要用完整 BookSource）。
+
+    判据搬到 ``backend/jobs/debug_materials``（AI 补全任务体也要取同一份材料，
+    这里只留一行指针）。
+    """
+    from backend.jobs.debug_materials import job_source
+    return job_source(job)
+
+
+def _debug_step_material(job, job_id: str, step_name: str):
+    """从任务行取一步的材料（html / base_url）。判据同上，在 ``debug_materials``。"""
+    from backend.jobs.debug_materials import debug_step_material
+    return debug_step_material(job, job_id, step_name)
+
+
+@router.post("/outline")
+async def rule_outline(body: OutlineRequest, st=Depends(get_store)):
+    """这一步页面的 **DOM 大纲**（缩进树）：人写选择器要看的是标签 / class / 层级，
+    不是 30 万字符的原文。
+
+    判据一份在 `core.repair.evidence.dom_outline`（AI 提示词用的同一份实现），
+    这里只是把它端到人眼前，**不新增第二套解析**。行数是显示的预算（比提示词宽），
+    超了**自报不全**（AGENTS #4：不能把「前 N 行」说成全部）。
+    """
+    from core.repair.evidence import DISPLAY_OUTLINE_LINES, dom_outline
+
+    job = st.get_job(body.job_id)
+    # 材料的取法与自报原因（没有任务 / 没有这一步 / 没有页面）都在共用件里
+    html, _base_url, _result = _debug_step_material(job, body.job_id, body.step)
+    # 多取一行用来判截断：够了就说明后面还有（与 dom_outline 的预算语义共用一份实现）
+    text = await asyncio.to_thread(dom_outline, html, DISPLAY_OUTLINE_LINES + 1)
+    lines = text.split("\n")
+    truncated = len(lines) > DISPLAY_OUTLINE_LINES
+    return {
+        "text": "\n".join(lines[:DISPLAY_OUTLINE_LINES]) if truncated else text,
+        "truncated": truncated,
+        "max_lines": DISPLAY_OUTLINE_LINES,
+    }
+
+
+@router.post("/rule-try")
+async def rule_try(body: RuleTryRequest, st=Depends(get_store)):
+    """轻量验证：拿这一步的整页 HTML 直跑一条规则（不跑调试链），秒级返回。
+
+    编排判据一份在 `core.rule_try`（daemon 优先、Gradle 回落，形状闸门在后端）；
+    它只回答「这条规则选不选得中」，**不替代整步验收**（AGENTS #3）——
+    写入草稿后仍要点「重调本步验证」。
+    """
+    from core.rule_try import rule_try as run_rule_try
+
+    job = st.get_job(body.job_id)
+    source = _job_source(job)
+    html, base_url, _ = _debug_step_material(job, body.job_id, body.step)
+    if not (body.rule or "").strip():
+        raise HTTPException(400, "规则为空：先填一条再试")
+    return await asyncio.to_thread(
+        run_rule_try, source, body.step, html, base_url, body.rule)
+
+
+@router.post("/agent-loop")
+async def agent_loop(body: AutofillRunRequest, st=Depends(get_store)):
+    """免费段同步返回，AI 段**提交成任务**（``kind="agent_loop"``，返回 ``job_id``）。
+
+    免费段（:func:`core.autofill.autofill_detail`）不发模型请求、不动引擎，秒级返回；
+    AI 段（:func:`core.agent_loop.run_loop`）花模型调用，**只能由用户显式点**
+    （同 `/suggest-rule` 的边界）。两条路都从任务行取材料，前端只报引用。
+
+    验收仍是「重调本步验证」（AGENTS #3）：rule_try 只回答「选不选得中」。
+    """
+    job = st.get_job(body.job_id)
+    html, base_url, result = _debug_step_material(job, body.job_id, body.step)
+    steps = result.get("steps") if isinstance(result, dict) else None
+    step_row = next((s for s in (steps or [])
+                     if isinstance(s, dict) and s.get("name") == body.step), {})
+    structured = step_row.get("structured") if isinstance(step_row.get("structured"), dict) else {}
+    if not body.use_ai:
+        # 免费段是纯计算（不发请求、不调模型），秒级返回，不值得起一个任务
+        from core.autofill import autofill_detail
+        return await asyncio.to_thread(autofill_detail, html, structured,
+                                       step=body.step)
+    # AI 段是**一次任务**（``kind="agent_loop"``）：一轮补全 = 若干次模型调用 +
+    # 若干次 rule_try，几十秒到几分钟。同步请求的等待期界面上没有任何产物（进度是
+    # 假的：响应回来才更新），刷新一次就丢；进 jobs 表之后逐字段事件写进事件账本、
+    # 模型调用原文落 ``llm.jsonl``，取消/重挂/TTL 全部沿用既有那套。
+    # 材料在 debug 任务行里，任务体自己按 job_id 取（payload 里不放几十万字符的页面）。
+    return {"job_id": runner.submit(
+        "agent_loop",
+        {"debug_job_id": body.job_id, "step": body.step,
+         "fields": list(body.fields or [])},
+        lane_kind="debug")}

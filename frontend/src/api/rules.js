@@ -53,8 +53,8 @@ export const appDebug = ({
 // target + query 语义化入参，与上面 appDebug 同一约定：key 由后端
 // `core/debug_keys` 拼装，前端不拼。
 //
-// timeout **不传**（null）就吃设置里的 debug.timeout——默认值只有后端一份
-// （AGENTS #8）；前端曾经写死 60，与桥的渲染上限同值、互相掐死。
+// timeout **不传**（null）就由后端按段取（`debug.stage_timeout` / `debug.chain_timeout`）
+// ——默认值只有后端一份（AGENTS #8）；前端曾经写死 60，与桥的渲染上限同值、互相掐死。
 export const jvmDebug = ({
   source,
   target,
@@ -83,3 +83,29 @@ export const appPush = (source, host, port) =>
 // 规则域的结构事实（规则组 → 求值步骤）。判据的唯一一份在 core/verify.py，
 // 前端抄一份的话后端改了求值位置就静默判错新鲜度。
 export const rulesMeta = () => api.get("/rules/meta");
+
+// 轻量验证（rule_try）：拿这一步的整页 HTML 直跑一条建议规则（不跑调试链，
+// 秒级），返回 {ok, values, count, error, via}。只回答「选不选得中」，
+// 不替代整步验收（AGENTS #3）。只报引用 {job_id, step, rule}，材料在后端。
+export const ruleTry = (body) =>
+  api.post("/rules/rule-try", body);
+
+// 这一步页面的 DOM 大纲（缩进树）：人写选择器要看标签/class/层级，而不是 30 万
+// 字符原文。判据在后端 `core.repair.evidence.dom_outline`（AI 提示词同一份实现），
+// 前端不解析 HTML 造第二份。返回 {text, truncated, max_lines}。
+export const ruleOutline = (body) =>
+  api.post("/rules/outline", body);
+
+// Agent 循环（一轮）：**AI 段是一次任务**——提交后返回 {job_id}，过程从那条观测流
+// 看（events 里有 ai_family / ai_try / ai_accepted / ai_failed），模型调用的输入输出
+// 落该任务的 llm.jsonl（`/api/jobs/{id}/llm-calls`）。跑完的结果体走 getJobDetail。
+// use_ai=false 时仍是免费段的同步返回（纯计算，秒级）。花钱动作，用户显式点击触发。
+export const agentLoop = (body) =>
+  api.post("/rules/agent-loop", body);
+
+// 这次 AI 补全用过的模型调用（摘要列表；全文按 seq 单取 `/llm-calls/{seq}`）。
+export const jobLlmCalls = (jobId, after = 0) =>
+  api.get(`/jobs/${jobId}/llm-calls?after=${after}`);
+
+export const jobLlmCallDetail = (jobId, seq) =>
+  api.get(`/jobs/${jobId}/llm-calls/${seq}`);

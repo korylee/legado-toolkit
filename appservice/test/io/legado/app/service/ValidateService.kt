@@ -492,6 +492,10 @@ object ValidateService {
                                     if (c["content_ok"] == false) {
                                         row["state"] = "no_result"
                                         row["reason"] = c["reason"]
+                                    } else if (c["content_ok"] == null && c["reason"] != null) {
+                                        // 未验证（豁免/文件类）：state 照旧 ok（源本身没问题），
+                                        // 但 reason 要带上——「为什么没验证」要走到用户眼前（AGENTS #4）
+                                        row["reason"] = c["reason"]
                                     }
                                 } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
                                     val spent = System.currentTimeMillis() - startedAt
@@ -819,7 +823,8 @@ object ValidateService {
      * 第二实现——跨语言没法共享代码，只能对齐语义）：
      *  1. 下载源（type 3）不解析正文 → 无结论（App 用 `book.isWebFile` 跳过）
      *  2. 正文规则为空 → 小说判失败（Legado 把章节链接当正文返回，无法阅读）；
-     *     音频/图片源是正常配置 → 通过（`WebBook.kt:400-403`）
+     *     音频/图片源 → `content_ok = null`（App 回退用章节链接是正常行为，
+     *     `WebBook.kt:400-403`，但**没有验证任何取值**——豁免不是验证）
      *  3. 提取为空 → 失败（对应 App 的 `ContentEmptyException`）
      *  4. **非空即通过**——不加「≥N 字」这类自造阈值：口径的权威只有一份，
      *     这里多一条本地发明就会与那边漂移。字数照记（`content_len`），
@@ -840,12 +845,21 @@ object ValidateService {
             )
         }
         if (rule.isBlank()) {
-            val ok = type == 1 || type == 2      // 音频/图片源回退用章节链接，是正常配置
-            return linkedMapOf(
-                "content_ok" to ok,
+            // 空规则按类型分流（与 Python 权威 judge_content 逐字同句）：
+            // 小说源是真配置错误——Legado 把章节链接当正文返回，无法阅读 → false；
+            // 图片/音频源回退用章节链接是 Legado 的正常行为（WebBook.kt:400-403），
+            // 但这次**没有验证任何取值**——content_ok 记 null，不该记 true 冒充
+            // 「验证通过」。原因照说清免得像「忘了验」：health_for 对 ok 行放行
+            // reason，这句要能走到用户眼前（AGENTS #4）。口径变化见 CACHE_VERSION
+            // 的 bump（2026-10-19）。
+            return if (type == 0) linkedMapOf(
+                "content_ok" to false,
                 "content_len" to 0,
-                "reason" to if (ok) "正文规则为空；音频/图片源回退用章节链接（正常）"
-                else "正文规则为空；Legado 会把章节链接当作正文，无法阅读",
+                "reason" to "正文规则为空；Legado 会把章节链接当作正文，无法阅读",
+            ) else linkedMapOf(
+                "content_ok" to null,
+                "content_len" to 0,
+                "reason" to "正文规则为空；Legado 回退为使用章节链接本身，未验证取值",
             )
         }
         val first = chapters.first()

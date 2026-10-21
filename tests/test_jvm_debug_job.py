@@ -120,7 +120,7 @@ class DebugSubmitTests(unittest.TestCase):
             source={"bookSourceUrl": "https://a.com", "bookSourceName": "甲"},
             target="search", query="我")
         with mock.patch.object(rules.runner, "submit", side_effect=capture), \
-             mock.patch.object(rules, "_debug_timeout_or_400", lambda t: 60), \
+             mock.patch.object(rules, "_debug_timeout_or_400", lambda t, stage="": 60), \
              mock.patch("core.jvm_env.readiness", return_value={"ok": True}), \
              mock.patch("core.settings_store.load", return_value={"jvm": {}}), \
              mock.patch("core.settings_store.resolve_proxy", return_value=""):

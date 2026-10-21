@@ -193,9 +193,8 @@ const checkTipText = computed(() => {
   if (c.saveFailures)
     bits.push(c.saveFailures + " 条结果没能写入管理库，列表状态不会更新");
   if (c.hitDowngrades) {
-    bits.push(
-      c.hitDowngrades + " 个源命中判定降级（规则无法回放，已按「命中」处理）",
-    );
+    // 与 `backend/api/jobs.py` 的同一事实同词（AGENTS #10）：一处写，别处只留指针
+    bits.push(c.hitDowngrades + " 个源无法核对命中状态，暂按「命中」计");
   }
   if (c.executionNote) bits.push(c.executionNote);
   return bits.join(" · ");
@@ -1431,6 +1430,8 @@ onUnmounted(() => {
                         : "未验证"
                   }}
                 </div>
+                <!-- 正文三态与列表列同一口径：1=可用 0=不可用 null=未验证。
+                     豁免（图片/音频源规则为空）由引擎记 null，不冒充通过 -->
                 <div>
                   正文：{{
                     row.content_ok === 1

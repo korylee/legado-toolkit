@@ -5,11 +5,20 @@
 // 出现「进度弹窗说 100%、明细弹窗说还在跑」这类矛盾；而且两个组件要各写一份轮询。
 // 打开时先拉一次详情，在跑时按固定间隔拉任务状态（终态即停）。
 //
+// **只服务校验 / 调试**：AI 补全（`agent_loop`）有自己的弹窗（`AgentRunDialog`）——
+// 这一副骨架是「通过 / 未通过 + 变化清单 + 执行时间线」，而 AI 那一轮的结果体是
+// `{step, fields, budget}`，在这里既没有摘要、真正的 AI 事实（逐字段四态、模型调用账）
+// 又只能折起来放。按 kind 分派在调用方（`openJobDetail`）。
+//
 // 进度只报后端给的真实数（不做估算/ETA）；「正在校验某源」这类瞬时状态引擎没上报，不编。
 import { ref, computed, watch, onUnmounted } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { cancelJob as cancelJobApi, deleteJob as deleteJobApi, getJobDetail,
-         retryJob as retryJobApi } from "../api/jobs";
+import {
+  cancelJob as cancelJobApi,
+  deleteJob as deleteJobApi,
+  getJobDetail,
+  retryJob as retryJobApi,
+} from "../api/jobs";
 import { healthLabel } from "../utils/health";
 import {
   isWorseHealth,
@@ -79,15 +88,21 @@ const inFlight = computed(() => jobIsInFlight(job.value.status));
 //: 顺序本身就是权重。哪档算坏由后端下发，见 isWorseHealth。
 const changedItems = computed(() => {
   const items = (summary.value && summary.value.changed_items) || [];
-  return [...items].sort((a, b) =>
-    Number(isWorseHealth(b.to, healthNeedsAction.value))
-    - Number(isWorseHealth(a.to, healthNeedsAction.value)));
+  return [...items].sort(
+    (a, b) =>
+      Number(isWorseHealth(b.to, healthNeedsAction.value)) -
+      Number(isWorseHealth(a.to, healthNeedsAction.value)),
+  );
 });
 //: 耗时与「多久没更新」都是相对**此刻**的数，不是 detail 里的静态字段：每 2 秒的
 //: 轮询把 nowMs 顶一次，computed 才会跟着涨（Date.now() 自己不是响应式的）。
-const spentText = computed(() => jobSpentText(
-  job.value.created_at, nowMs.value, inFlight.value ? "" : job.value.updated_at,
-));
+const spentText = computed(() =>
+  jobSpentText(
+    job.value.created_at,
+    nowMs.value,
+    inFlight.value ? "" : job.value.updated_at,
+  ),
+);
 const agoText = computed(() => jobAgoText(job.value.updated_at, nowMs.value));
 const pct = computed(() => {
   const total = Number(job.value.total || 0);
@@ -125,27 +140,40 @@ async function loadDetail() {
   }
 }
 
-watch(() => [visible.value, jobId.value], ([isOpen, id]) => {
-  stopClock();
-  if (stopWatch) { stopWatch(); stopWatch = null; }
-  detail.value = null;
-  rawOpen.value = false;
-  if (!isOpen || !id) return;
-  nowMs.value = Date.now();
-  // 状态走那一条流（每个任务一条，与时间线共用）；本地时钟只负责让「已跑多久 /
-  // 多久没更新」这两个数自己涨——时间在走，即使状态没变。
-  stopWatch = watchJob(id, async () => {
-    await loadDetail();     // 终态：结果这一次才写得全
-  });
-  void loadDetail();
-}, { immediate: true });
+watch(
+  () => [visible.value, jobId.value],
+  ([isOpen, id]) => {
+    stopClock();
+    if (stopWatch) {
+      stopWatch();
+      stopWatch = null;
+    }
+    detail.value = null;
+    rawOpen.value = false;
+    if (!isOpen || !id) return;
+    nowMs.value = Date.now();
+    // 状态走那一条流（每个任务一条，与时间线共用）；本地时钟只负责让「已跑多久 /
+    // 多久没更新」这两个数自己涨——时间在走，即使状态没变。
+    stopWatch = watchJob(id, async () => {
+      await loadDetail(); // 终态：结果这一次才写得全
+    });
+    void loadDetail();
+  },
+  { immediate: true },
+);
 
-watch([visible, inFlight], ([open, running]) => {
-  stopClock();
-  nowMs.value = Date.now();
-  if (!open || !running) return;
-  clockTimer = window.setInterval(() => { nowMs.value = Date.now(); }, 1000);
-}, { immediate: true });
+watch(
+  [visible, inFlight],
+  ([open, running]) => {
+    stopClock();
+    nowMs.value = Date.now();
+    if (!open || !running) return;
+    clockTimer = window.setInterval(() => {
+      nowMs.value = Date.now();
+    }, 1000);
+  },
+  { immediate: true },
+);
 
 onUnmounted(() => {
   stopClock();
@@ -156,13 +184,16 @@ onUnmounted(() => {
 async function cancelJob() {
   try {
     await ElMessageBox.confirm(jobCancelHint(job.value.kind), "取消任务", {
-      type: "warning", confirmButtonText: "取消任务", cancelButtonText: "返回",
+      type: "warning",
+      confirmButtonText: "取消任务",
+      cancelButtonText: "返回",
     });
     await cancelJobApi(jobId.value);
     ElMessage.success("已请求取消任务");
     emit("changed");
   } catch (e) {
-    if (e !== "cancel" && e !== "close") ElMessage.error("取消任务失败：" + e.message);
+    if (e !== "cancel" && e !== "close")
+      ElMessage.error("取消任务失败：" + e.message);
   }
 }
 
@@ -170,38 +201,59 @@ async function retryJob() {
   const again = job.value.status === "done";
   try {
     await ElMessageBox.confirm(
-      again ? "将使用相同参数再运行一次，原任务会保留。" : "将使用相同参数重新提交，原任务会保留。",
+      again
+        ? "将使用相同参数再运行一次，原任务会保留。"
+        : "将使用相同参数重新提交，原任务会保留。",
       again ? "再次运行" : "重试任务",
-      { type: "warning", confirmButtonText: again ? "再次运行" : "重试", cancelButtonText: "返回" },
+      {
+        type: "warning",
+        confirmButtonText: again ? "再次运行" : "重试",
+        cancelButtonText: "返回",
+      },
     );
     const created = await retryJobApi(jobId.value);
     ElMessage.success("已创建新任务");
     close();
     emit("changed", created.job_id || "");
   } catch (e) {
-    if (e !== "cancel" && e !== "close") ElMessage.error("提交重试失败：" + e.message);
+    if (e !== "cancel" && e !== "close")
+      ElMessage.error("提交重试失败：" + e.message);
   }
 }
 
 async function deleteJob() {
   try {
-    await ElMessageBox.confirm("删除后将移除任务记录和结果，不能恢复。", "删除任务", {
-      type: "warning", confirmButtonText: "删除", cancelButtonText: "返回",
-    });
+    await ElMessageBox.confirm(
+      "删除后将移除任务记录和结果，不能恢复。",
+      "删除任务",
+      {
+        type: "warning",
+        confirmButtonText: "删除",
+        cancelButtonText: "返回",
+      },
+    );
     await deleteJobApi(jobId.value);
     ElMessage.success("任务已删除");
     close();
     emit("changed", "");
   } catch (e) {
-    if (e !== "cancel" && e !== "close") ElMessage.error("删除任务失败：" + e.message);
+    if (e !== "cancel" && e !== "close")
+      ElMessage.error("删除任务失败：" + e.message);
   }
 }
 </script>
 
 <template>
-  <el-dialog v-model="visible" :title="title" width="min(880px, 92vw)" top="6vh"
-             append-to-body class="task-detail-dialog" modal-class="task-detail-overlay"
-             :close-on-click-modal="false">
+  <el-dialog
+    v-model="visible"
+    :title="title"
+    width="min(880px, 92vw)"
+    top="6vh"
+    append-to-body
+    class="task-detail-dialog"
+    modal-class="task-detail-overlay"
+    :close-on-click-modal="false"
+  >
     <div v-loading="detailLoading" class="td-body">
       <div class="td-head">
         <el-tag size="small" :type="jobStatusType(job.status)">
@@ -210,11 +262,21 @@ async function deleteJob() {
         <!-- 在跑时给阶段配一个呼吸点：文字说「编译中」，可一屏灰看不出它还活着 -->
         <span v-if="inFlight" class="td-pulse" />
         <span class="muted">{{ jobPhaseLabel(job.phase) }}</span>
-        <span v-if="job.retry_of" class="muted">· 由 {{ job.retry_of }} 重试而来</span>
+        <span v-if="job.retry_of" class="muted"
+          >· 由 {{ job.retry_of }} 重试而来</span
+        >
         <span class="grow" />
         <!-- 任务号是标识、不是技术细节：报障时要把它交出去，放在头上一行里 -->
-        <span v-if="jobId" class="muted td-jid" :title="jobId">{{ jobId }}</span>
-        <el-button v-if="inFlight && jobCanCancel(job.kind)" size="small" type="warning" plain @click="cancelJob">
+        <span v-if="jobId" class="muted td-jid" :title="jobId">{{
+          jobId
+        }}</span>
+        <el-button
+          v-if="inFlight && jobCanCancel(job.kind)"
+          size="small"
+          type="warning"
+          plain
+          @click="cancelJob"
+        >
           取消任务
         </el-button>
       </div>
@@ -223,32 +285,62 @@ async function deleteJob() {
       <div class="td-progress">
         <!-- 数字在前、百分比让位：12 / 40 才是信息，百分比只是它的换算 -->
         <div class="td-progress-top">
-          <span v-if="progressText" class="td-progress-num">{{ progressText }}</span>
-          <span v-if="spentText" class="muted td-progress-spent">已跑 {{ spentText }}</span>
+          <span v-if="progressText" class="td-progress-num">{{
+            progressText
+          }}</span>
+          <span v-if="spentText" class="muted td-progress-spent"
+            >已跑 {{ spentText }}</span
+          >
         </div>
-        <el-progress :percentage="pct" :stroke-width="10" :show-text="false"
-                     :status="jobProgressStatus(job.status)" />
+        <el-progress
+          :percentage="pct"
+          :stroke-width="10"
+          :show-text="false"
+          :status="jobProgressStatus(job.status)"
+        />
         <!-- 绝对时间对分钟级批量校验没用（还得自己减时钟）；这个数停住不动就是「卡住了」 -->
-        <p v-if="inFlight && agoText" class="muted td-progress-text">{{ agoText }}更新</p>
+        <p v-if="inFlight && agoText" class="muted td-progress-text">
+          {{ agoText }}更新
+        </p>
       </div>
 
       <template v-if="summary">
         <div class="td-summary">
-          <span class="chip">通过 <b>{{ summary.ok }}</b></span>
-          <span class="chip">未通过 <b :class="{ bad: summary.fail > 0 }">{{ summary.fail }}</b></span>
+          <span class="chip"
+            >通过 <b>{{ summary.ok }}</b></span
+          >
+          <span class="chip"
+            >未通过
+            <b :class="{ bad: summary.fail > 0 }">{{ summary.fail }}</b></span
+          >
           <span v-if="summary.changed_total" class="chip">
             相对上次变化 <b>{{ summary.changed_total }}</b> 条
           </span>
           <span v-else class="muted">相对上次无变化</span>
         </div>
-        <div v-for="(w, i) in summary.warnings" :key="'warn' + i" class="td-warn">{{ w }}</div>
+        <div
+          v-for="(w, i) in summary.warnings"
+          :key="'warn' + i"
+          class="td-warn"
+        >
+          {{ w }}
+        </div>
         <div v-if="changedItems.length" class="td-changes">
           <div class="muted td-section-title">
-            状态变化（{{ summary.changed_items.length }} / {{ summary.changed_total }} 条）
+            状态变化（{{ summary.changed_items.length }} /
+            {{ summary.changed_total }} 条）
           </div>
-          <div v-for="(c, i) in changedItems" :key="'item' + i" class="td-change"
-               :class="{ 'is-worse': isWorseHealth(c.to, healthNeedsAction.value) }">
-            <span class="td-name" :title="c.name">{{ c.name || "（无名）" }}</span>
+          <div
+            v-for="(c, i) in changedItems"
+            :key="'item' + i"
+            class="td-change"
+            :class="{
+              'is-worse': isWorseHealth(c.to, healthNeedsAction.value),
+            }"
+          >
+            <span class="td-name" :title="c.name">{{
+              c.name || "（无名）"
+            }}</span>
             <span class="muted td-url" :title="c.url">{{ c.url }}</span>
             <span class="muted">{{ healthLabel(c.from) }} → </span>
             <span :class="'to-' + c.to">{{ healthLabel(c.to) }}</span>
@@ -256,8 +348,9 @@ async function deleteJob() {
         </div>
       </template>
 
-      <div v-if="detail && detail.skipped_rule_incomplete" class="td-warn">
-        已跳过 {{ detail.skipped_rule_incomplete }} 条规则不完整的源，未执行校验。
+      <div v-if="detail?.skipped_rule_incomplete" class="td-warn">
+        已跳过
+        {{ detail.skipped_rule_incomplete }} 条规则不完整的源，未执行校验。
       </div>
       <div v-if="job.error" class="td-warn">
         {{ job.error }}
@@ -268,12 +361,18 @@ async function deleteJob() {
         {{ detail.daemon_fallback_reason }}
       </div>
 
-      <!-- 只有 JVM 校验有执行时间线：其余 kind 后端没有事件源（见 job_timeline.py）。
-           执行方式交给时间线头部：它决定这次会不会慢，与逐块明细是同一件事 -->
-      <JobTimeline v-if="job.kind === 'jvm_run'" :job-id="jobId" :status="job.status"
-                   :execution-mode="(detail && detail.execution_mode) || ''"
-                   :execution-note="(detail && detail.execution_note) || ''"
-                   :chunk-reports="(detail && detail.chunk_reports) || []" />
+      <!-- 有事件账本的 kind 都挂时间线（jvm_run / jvm_debug）：
+           `/api/jobs/{id}/timeline` 同一帧。执行方式交给时间线头部：
+           它决定这次会不会慢，与逐块明细是同一件事。
+           AI 补全的逐字段过程与模型调用账在 `AgentRunDialog`，不在这里 -->
+      <JobTimeline
+        v-if="['jvm_run', 'jvm_debug'].includes(job.kind)"
+        :job-id="jobId"
+        :status="job.status"
+        :execution-mode="detail?.execution_mode || ''"
+        :execution-note="detail?.execution_note || ''"
+        :chunk-reports="detail?.chunk_reports || []"
+      />
 
       <div v-if="!summary && !job.error && !inFlight" class="muted td-empty">
         这次任务没有可展示的结果。
@@ -281,16 +380,29 @@ async function deleteJob() {
 
       <!-- 原始结果：生成/导入类任务要核对返回值时才有用，默认收起 -->
       <div v-if="detail && detail.result != null" class="td-fold">
-        <button type="button" class="td-fold-toggle" :aria-expanded="rawOpen"
-                @click="rawOpen = !rawOpen">
-          原始结果<span class="td-fold-chevron" :class="{ 'is-open': rawOpen }">▸</span>
+        <button
+          type="button"
+          class="td-fold-toggle"
+          :aria-expanded="rawOpen"
+          @click="rawOpen = !rawOpen"
+        >
+          原始结果<span class="td-fold-chevron" :class="{ 'is-open': rawOpen }"
+            >▸</span
+          >
         </button>
-        <pre v-if="rawOpen" class="td-raw">{{ JSON.stringify(detail.result, null, 2) }}</pre>
+        <pre v-if="rawOpen" class="td-raw">{{
+          JSON.stringify(detail.result, null, 2)
+        }}</pre>
       </div>
     </div>
 
     <template #footer>
-      <el-button v-if="jobIsTerminal(job.status)" type="danger" plain @click="deleteJob">
+      <el-button
+        v-if="jobIsTerminal(job.status)"
+        type="danger"
+        plain
+        @click="deleteJob"
+      >
         删除
       </el-button>
       <el-button v-if="jobIsTerminal(job.status)" @click="retryJob">
@@ -306,105 +418,202 @@ async function deleteJob() {
    容器，才能把剩余高度交给时间线。`flex: 1 0 auto` 的 shrink=0 是刻意的——
    结果态内容超长时不许缩，让它撑出外层的滚动条；有富余时才撑满（进行中态）。 */
 .td-body {
-  flex: 1 0 auto; min-height: 80px;
-  display: flex; flex-direction: column;
+  flex: 1 0 auto;
+  min-height: 80px;
+  display: flex;
+  flex-direction: column;
 }
 /* 除时间线外都不参与伸缩：flex 的默认 shrink=1，漏了这条会把结果态的结论
    胶囊与变化清单一起压扁——不报错，只是看着不对。 */
-.td-head, .td-progress, .td-summary, .td-warn, .td-changes, .td-empty, .td-fold {
+.td-head,
+.td-progress,
+.td-summary,
+.td-warn,
+.td-changes,
+.td-empty,
+.td-fold {
   flex: 0 0 auto;
 }
-.td-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.td-head .grow { flex: 1 1 auto; }
+.td-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.td-head .grow {
+  flex: 1 1 auto;
+}
 /* 任务号：等宽、可整体选中（报障时要复制它）；窄屏靠省略号让位 */
 .td-jid {
-  font-family: Consolas, Monaco, monospace; font-size: 12px;
-  max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: Consolas, Monaco, monospace;
+  font-size: 12px;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   user-select: all;
 }
 /* 一屏灰的进度里唯一的动静：它在动，就说明引擎还活着 */
 .td-pulse {
-  width: 6px; height: 6px; border-radius: 50%;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
   background: var(--el-color-primary);
   animation: td-pulse 1.4s ease-in-out infinite;
 }
 @keyframes td-pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: .25; }
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.25;
+  }
 }
 .td-progress {
-  margin-top: var(--app-space-3); padding: 10px 12px;
+  margin-top: var(--app-space-3);
+  padding: 10px 12px;
   background: var(--el-fill-color-lighter);
   border: 1px solid var(--el-border-color-extra-light);
   border-radius: var(--app-radius-md);
 }
 .td-progress-top {
-  display: flex; align-items: baseline; gap: 8px;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
   margin-bottom: 8px;
 }
 .td-progress-num {
-  font-size: 20px; font-weight: 600; line-height: 1.2;
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 1.2;
   /* 等宽数字：每 2 秒重算一次，不等宽整行会左右抖 */
   font-variant-numeric: tabular-nums;
 }
-.td-progress-spent { margin-left: auto; white-space: nowrap; }
-.td-progress-text { margin: 6px 0 0; font-size: 12px; }
+.td-progress-spent {
+  margin-left: auto;
+  white-space: nowrap;
+}
+.td-progress-text {
+  margin: 6px 0 0;
+  font-size: 12px;
+}
 /* 结论统计是全局 `.chip` 胶囊（任务抽屉、执行方式、统计条筛选都用同一个） */
 .td-summary {
-  display: flex; gap: var(--app-space-2); flex-wrap: wrap;
+  display: flex;
+  gap: var(--app-space-2);
+  flex-wrap: wrap;
   margin-top: var(--app-space-3);
 }
 /* 错误与告警从裸红字升级成警示容器：读得出来「这是一条消息」而不是普通文本 */
 .td-warn {
-  margin-top: 10px; padding: 8px 12px; line-height: 1.6; font-size: 13px;
-  color: var(--el-color-danger); word-break: break-all;
+  margin-top: 10px;
+  padding: 8px 12px;
+  line-height: 1.6;
+  font-size: 13px;
+  color: var(--el-color-danger);
+  word-break: break-all;
   background: var(--el-color-danger-light-9, #fef0f0);
   border: 1px solid var(--el-color-danger-light-7, #fde2e2);
   border-radius: var(--app-radius-md);
 }
-.td-section-title { margin: 14px 0 6px; font-size: 12px; }
-.td-changes { max-height: 40vh; overflow-y: auto; margin-top: 4px; }
-.td-change {
-  display: flex; gap: 7px; align-items: baseline;
-  line-height: 1.8; font-size: 12px;
-  /* 透明边占位：恶化行加红边时整行不会右移 */
-  padding-left: 8px; border-left: 2px solid transparent;
+.td-section-title {
+  margin: 14px 0 6px;
+  font-size: 12px;
 }
-.td-change + .td-change { border-top: 1px solid var(--el-border-color-extra-light); }
+.td-changes {
+  max-height: 40vh;
+  overflow-y: auto;
+  margin-top: 4px;
+}
+.td-change {
+  display: flex;
+  gap: 7px;
+  align-items: baseline;
+  line-height: 1.8;
+  font-size: 12px;
+  /* 透明边占位：恶化行加红边时整行不会右移 */
+  padding-left: 8px;
+  border-left: 2px solid transparent;
+}
+.td-change + .td-change {
+  border-top: 1px solid var(--el-border-color-extra-light);
+}
 /* 变坏的先看：结果态真正的入口是「哪些源坏了」，不是「有几条变化」 */
 .td-change.is-worse {
   border-left-color: var(--el-color-danger);
   background: var(--el-color-danger-light-9, #fef0f0);
 }
 .td-name {
-  flex: 0 1 auto; max-width: 150px;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  flex: 0 1 auto;
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .td-url {
-  flex: 1 1 auto; min-width: 0;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 /* 配色与列表页的健康色同口径：同一个状态在两处该长一样 */
-.td-change .to-ok { color: var(--el-color-success); }
-.td-change .to-dead { color: var(--el-color-danger); }
-.td-change .to-auth, .td-change .to-cert { color: var(--el-color-warning); }
-.td-change .to-gfw, .td-change .to-pending { color: var(--el-color-info); }
-.td-empty { padding: 20px 0; text-align: center; font-size: 13px; }
-.td-fold { margin-top: 14px; font-size: 12px; }
+.td-change .to-ok {
+  color: var(--el-color-success);
+}
+.td-change .to-dead {
+  color: var(--el-color-danger);
+}
+.td-change .to-auth,
+.td-change .to-cert {
+  color: var(--el-color-warning);
+}
+.td-change .to-gfw,
+.td-change .to-pending {
+  color: var(--el-color-info);
+}
+.td-empty {
+  padding: 20px 0;
+  text-align: center;
+  font-size: 13px;
+}
+.td-fold {
+  margin-top: 14px;
+  font-size: 12px;
+}
 /* 折叠入口是按钮：键盘可达、有焦点环；原来是 span，只有鼠标能点 */
 .td-fold-toggle {
-  display: inline-flex; align-items: center; gap: 4px;
-  padding: 2px 6px; margin-left: -6px;
-  border: none; border-radius: 4px; background: none;
-  color: var(--el-color-primary); font: inherit; cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  margin-left: -6px;
+  border: none;
+  border-radius: 4px;
+  background: none;
+  color: var(--el-color-primary);
+  font: inherit;
+  cursor: pointer;
 }
-.td-fold-toggle:hover { background: var(--el-fill-color-light); }
-.td-fold-chevron { transition: transform .15s; }
-.td-fold-chevron.is-open { transform: rotate(90deg); }
+.td-fold-toggle:hover {
+  background: var(--el-fill-color-light);
+}
+.td-fold-chevron {
+  transition: transform 0.15s;
+}
+.td-fold-chevron.is-open {
+  transform: rotate(90deg);
+}
 .td-raw {
-  max-height: 300px; overflow: auto; margin-top: 8px; padding: 10px;
-  background: var(--el-fill-color-light); border-radius: 4px;
-  white-space: pre-wrap; font-size: 12px;
+  max-height: 300px;
+  overflow: auto;
+  margin-top: 8px;
+  padding: 10px;
+  background: var(--el-fill-color-light);
+  border-radius: 4px;
+  white-space: pre-wrap;
+  font-size: 12px;
 }
 </style>
 
@@ -415,23 +624,37 @@ async function deleteJob() {
    常驻，只有内容区滚。modal-class 挂在 overlay 根上，用它限定作用范围。
    **高度只有这一条链决定**：body → `.td-body` → `.job-timeline` → 时间线列表，
    每一层都要 flex + min-height: 0；中间任何一层自己按视口定高，就会出现第二根滚动条。 */
-.task-detail-overlay .el-overlay-dialog { overflow: hidden; }
+.task-detail-overlay .el-overlay-dialog {
+  overflow: hidden;
+}
 .task-detail-overlay .task-detail-dialog {
   max-height: 88vh;
   margin-bottom: 0;
-  display: flex; flex-direction: column;
+  display: flex;
+  flex-direction: column;
 }
-.task-detail-overlay .task-detail-dialog .el-dialog__header { flex: 0 0 auto; }
+.task-detail-overlay .task-detail-dialog .el-dialog__header {
+  flex: 0 0 auto;
+}
 .task-detail-overlay .task-detail-dialog .el-dialog__body {
-  flex: 1 1 auto; min-height: 0; overflow-y: auto;
-  display: flex; flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
   /* 批量校验中每 2 秒来一行：没有它，内容刚越过高度的那一刻会冒出滚动条，
      整块文字跟着横跳一下 */
   scrollbar-gutter: stable;
 }
-.task-detail-overlay .task-detail-dialog .el-dialog__footer { flex: 0 0 auto; }
+.task-detail-overlay .task-detail-dialog .el-dialog__footer {
+  flex: 0 0 auto;
+}
 @media (max-width: 760px) {
-  .task-detail-dialog { width: 94vw !important; }
-  .task-detail-overlay .task-detail-dialog { max-height: 92vh; }
+  .task-detail-dialog {
+    width: 94vw !important;
+  }
+  .task-detail-overlay .task-detail-dialog {
+    max-height: 92vh;
+  }
 }
 </style>

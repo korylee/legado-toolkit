@@ -49,6 +49,33 @@ class TailProgressCapTests(unittest.TestCase):
         self.assertTrue(seen)
         self.assertEqual(max(seen), 35)
 
+    def test_phase_flips_only_on_rows_written_after_start(self):
+        """回归：单条校验回退 Gradle 时相位停在「启动 Gradle」（2026-10-09 实测）。
+
+        判据只能是**启动后新增的行**：重试复用 run 目录，启动前就有旧结果文件，
+        拿「文件存在」当判据会在任务还没跑时就把相位推成「执行校验」。
+        """
+        phases = []
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "results.jsonl"
+            out.write_text("\n" * 3, encoding="utf-8")      # 重试遗留的旧行
+            stop = threading.Event()
+            with mock.patch("backend.jobs.runner.update_progress",
+                            side_effect=lambda *a: None), \
+                 mock.patch("backend.jobs.runner.update_phase",
+                            side_effect=lambda jid, phase: phases.append(phase)):
+                t = threading.Thread(target=jvm_exec._tail_progress,
+                                     args=("job", out, stop, 0.01), daemon=True)
+                t.start()
+                time.sleep(0.05)
+                self.assertEqual(phases, [], "启动前的旧行不许推进相位")
+                with open(out, "a", encoding="utf-8") as fh:
+                    fh.write("\n")
+                time.sleep(0.1)
+                stop.set()
+                t.join(5)
+        self.assertEqual(phases, ["running_validate"])
+
 
 if __name__ == "__main__":
     unittest.main()

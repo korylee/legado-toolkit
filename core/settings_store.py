@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 from core.paths import data_path
 
@@ -80,9 +80,9 @@ DEFAULTS: Dict[str, Dict[str, Any]] = {
         #: 一个值两处用，就按两处都能用的那个来（socks 值在这儿等于给 App 用、给我们炸）。
         "proxy": "",
     },
-    #: **批量校验与调试的默认参数**，不是用户设置：没有 PATCH 入口（
-    #: `JvmSettingsPatch` 只收下面两个环境键），设置页也没有控件——它们存在的意义是
-    #: 「本次这一次跑什么」的种子与兜底。想改这一次就在批量校验弹框里改
+    #: **批量校验与调试的默认参数**，不是用户设置：`JvmSettingsPatch` 只收环境键
+    #: （app_repo / android_sdk_dir / daemon_port），下面这些设置页没有控件——它们存在的
+    #: 意义是「本次这一次跑什么」的种子与兜底。想改这一次就在批量校验弹框里改
     #: （`frontend/src/components/CheckJvmForm.vue`），那才是它们唯一的作用面；
     #: 改这里的值等于改代码常量。
     #: 默认值与区间仍然只有这一份（AGENTS #8）：`JVM_RUN_PARAMS` 的本次覆盖走
@@ -91,11 +91,12 @@ DEFAULTS: Dict[str, Dict[str, Any]] = {
         "app_repo": "",
         "android_sdk_dir": "",
         "keyword": "我",
-        #: 75 不是随手给的：App 的 okhttp callTimeout 是 60s（HttpHelper 硬顶），
-        #: 每源总预算必须 >60s 才分得清「预算用尽」与「App 内部请求超时」——
-        #: ValidateService 的超时归因就按这个差值写（Kotlin 侧注释同源）。
-        #: 再大只拖慢整批，上界仍压在 LIMITS.jvm_timeout。
-        "timeout": 75,
+        #: **批量校验**的每源总预算（各段共享）。25 = 吞吐优先：一段慢就把整源判成
+        #: 「这一轮没验成」，而不是无限等它。**不再要「>60s 才分得清两种超时」**：
+        #: 25 < App 的 okhttp callTimeout 60s，两种超时不可能混淆（归因只有「我们的
+        #: 预算用尽」一种）；要分辨就给到 60s 以上，但那是调试那条路的事
+        #: （`debug.chain_timeout` / `debug.stage_timeout`）。上界压在 LIMITS.jvm_check_timeout。
+        "check_timeout": 25,
         "concurrency": 8,
         #: 默认停在**搜索**档：S1/S2 的历史结论就是这一档，深一档（目录+正文）
         #: 会让全量耗时成倍增长（搜索档实测 17 分钟 / 3774 条）。**默认值不许
@@ -104,23 +105,39 @@ DEFAULTS: Dict[str, Dict[str, Any]] = {
         #: 批量分块大小：每块一次 JVM 占用，块间交还 lane（调试可插队）、
         #: 块完成即入库（取消/崩溃后可恢复）。默认 25 实测可调。
         "chunk_size": 25,
+        #: daemon 端口窗口的起点（0 = 按 data 目录推导，见
+        #: `core.jvm_daemon._daemon_base_port`）。**不是「这次怎么跑」**：改它等于改这台机器上
+        #: 引擎的落点，所以放全局；也不进表单（界面上用不着，冲突时错误文案会给出动作）。
+        "daemon_port": 0,
     },
     "debug": {
-        #: 单次调试的整链墙钟预算（秒）。**必须大于桥的渲染预算**：App 的
-        #: BackstageWebView 渲染上限固定 60s（App 侧的值，我们不改），整链预算同值时
-        #: 渲染永远先被整链掐死，webView 段就没有合法完成的空间（jvm-debug-budget）。
-        #: 90 = 渲染吃满 60s 后仍留得出排队与收尾；上界压着「白等」的代价。
-        "timeout": 90,
+        #: 调试的两根预算，按「跑整链」还是「跑单步」分：
+        #: - `chain_timeout`：整链墙钟上限（没指定具体步骤时用）。**必须大于桥的渲染
+        #:   预算**：App 的 BackstageWebView 渲染上限固定 60s（App 侧的值，我们不改），
+        #:   同值时渲染永远先被整链掐死。90 = 渲染吃满 60s 后仍留得出排队与收尾。
+        #: - `stage_timeout`：单步调试按**段**取的那一份（跑哪一步就吃哪一段的预算）。
+        #:   各段共享一根的话，慢的搜索段会把正文段挤掉——调试是单源、有人盯着，
+        #:   宁可多等，也不该让「前面慢」惩罚「后面能不能验」。
+        #:   依据 2026-10-21 本机实测（搜索 0.18–0.86s、正文 4.1/9.6s、渲染上限 60s）；
+        #:   content 那一段不能低于 60s（App 的渲染上限），其余给观测值的若干倍。
+        "chain_timeout": 90,
+        "stage_timeout": {"search": 30, "explore": 30, "info": 30, "toc": 60, "content": 90},
     },
 }
 
 #: 各键的合法区间。**「clamp 到多少」的唯一定义处**——前端表单的上下界由
 #: ``GET /api/settings`` 下发（AGENTS #8：默认值与区间不许在调用点再写一遍）。
 LIMITS: Dict[str, tuple] = {
-    "jvm_timeout": (5, 120),
+    "jvm_check_timeout": (5, 120),
     "jvm_concurrency": (1, 32),
     "jvm_chunk_size": (5, 200),
-    "debug_timeout": (30, 300),
+    # 0 = 自动（按 data 目录落到独占槽位）；显式值直接当窗口起点用
+    "jvm_daemon_port": (1024, 65535),
+    "debug_chain_timeout": (30, 300),
+    #: 单步调试的预算范围：既管 `debug.stage_timeout` 的每个段，也管请求里显式给的
+    #: timeout（一个请求就是一段）。与整链那根分开——整链 30s 起才有意义，单步 30s
+    #: 也是同一把尺子，不必再来一个数字。
+    "debug_stage_timeout": (30, 300),
     # 枚举型（与 probe_depth 同形）：前端据此渲染下拉，不在 JS 里再写一份
     "jvm_depth": JVM_DEPTHS,
 }
@@ -210,6 +227,40 @@ def _to_probe_depth(value: Any) -> int:
     return n if n in PROBE_DEPTHS else DEPTH_HOME
 
 
+def _to_daemon_port(value: Any) -> int:
+    """daemon 端口窗口的起点：**0 = 自动**（按 data 目录落到独占槽位）。
+
+    越界/垃圾输入回落 0（自动）而不是 clamp 到区间边上：自动落点一定在 Windows 动态端口
+    范围（49152–65535）下面，而 clamp 出来的值可能正好落进去——症状会是「引擎时不时起不来」，
+    不是报错。显式值在 ``LIMITS["jvm_daemon_port"]`` 里的原样接受（那是用户的选择）。
+    """
+    if isinstance(value, bool):
+        return 0
+    try:
+        n = int(float(value))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+    lo, hi = LIMITS["jvm_daemon_port"]
+    return n if lo <= n <= hi else 0
+
+
+def _to_stage_timeouts(value: Any) -> Dict[str, int]:
+    """调试的按段预算：**键集合就是 DEFAULTS 里那五个段**（同 `core.debug_keys.TARGETS`）。
+
+    未知键丢掉、缺的键补默认值、越界按 ``LIMITS["debug_stage_timeout"]`` 收敛。
+    **不做整段替换**：前端只改其中一段时，其余段要保住原值——整段替换会让没提到的段
+    悄悄回默认值（AGENTS #17 那类静默漂移）。
+    """
+    base = dict(DEFAULTS["debug"]["stage_timeout"])
+    if not isinstance(value, dict):
+        return base
+    lo, hi = LIMITS["debug_stage_timeout"]
+    for key in base:
+        if key in value:
+            base[key] = _to_int(value[key], base[key], lo, hi)
+    return base
+
+
 def _migrate_legacy(data: Dict[str, Any]) -> None:
     """旧形状的搬运（就地改 ``data``，在逐键回落之前跑）。
 
@@ -225,6 +276,16 @@ def _migrate_legacy(data: Dict[str, Any]) -> None:
     old_proxy = check.get("proxy") if isinstance(check, dict) else ""
     if not str(net.get("proxy") or "").strip() and str(old_proxy or "").strip():
         net["proxy"] = old_proxy
+    # 键改名（2026-10-21）：`jvm.timeout` → `jvm.check_timeout`、`debug.timeout` →
+    # `debug.chain_timeout`。存量文件里写的是旧键名——不搬的话 `load()` 会静默回落
+    # 默认值：界面上「我设的那个数不见了」，而这次的默认值恰好也是 25/90，看起来
+    # 一切正常（AGENTS #17 的同一个坑）。只搬一次，不动其他键；老键由下一次
+    # `update()` 落盘时自然消失。
+    for section, old_key, new_key in (("jvm", "timeout", "check_timeout"),
+                                      ("debug", "timeout", "chain_timeout")):
+        raw_section = data.get(section)
+        if isinstance(raw_section, dict) and old_key in raw_section and new_key not in raw_section:
+            raw_section[new_key] = raw_section.pop(old_key)
 
 
 #: ``(section, key)`` → 收敛函数。**没登记就是未知键**，由 coerce 返回 None 丢弃。
@@ -234,17 +295,19 @@ _SPECS: Dict[tuple, Any] = {
     ("jvm", "app_repo"): _to_path,
     ("jvm", "android_sdk_dir"): _to_path,
     ("jvm", "keyword"): lambda v: (str(v).strip() or DEFAULTS["jvm"]["keyword"]),
-    ("jvm", "timeout"): lambda v: _to_int(
-        v, DEFAULTS["jvm"]["timeout"], *LIMITS["jvm_timeout"]),
+    ("jvm", "check_timeout"): lambda v: _to_int(
+        v, DEFAULTS["jvm"]["check_timeout"], *LIMITS["jvm_check_timeout"]),
     ("jvm", "concurrency"): lambda v: _to_int(
         v, DEFAULTS["jvm"]["concurrency"], *LIMITS["jvm_concurrency"]),
     ("jvm", "chunk_size"): lambda v: _to_int(
         v, DEFAULTS["jvm"]["chunk_size"], *LIMITS["jvm_chunk_size"]),
+    ("jvm", "daemon_port"): _to_daemon_port,
     ("jvm", "depth"): lambda v: (str(v).strip().lower()
                                  if str(v).strip().lower() in JVM_DEPTHS
                                  else DEFAULTS["jvm"]["depth"]),
-    ("debug", "timeout"): lambda v: _to_int(
-        v, DEFAULTS["debug"]["timeout"], *LIMITS["debug_timeout"]),
+    ("debug", "chain_timeout"): lambda v: _to_int(
+        v, DEFAULTS["debug"]["chain_timeout"], *LIMITS["debug_chain_timeout"]),
+    ("debug", "stage_timeout"): _to_stage_timeouts,
 }
 
 
@@ -346,49 +409,34 @@ def resolve_proxy() -> str:
     return str(load()["network"]["proxy"] or "")
 
 
-def debug_timeout() -> int:
-    """单次调试的整链墙钟预算（秒，``debug.timeout``）。
+def debug_chain_timeout() -> int:
+    """单次调试的**整链**墙钟预算（秒，``debug.chain_timeout``）。
 
     **唯一入口**：本机引擎与连 App 两条调试路都读它（口径同 ``resolve_proxy``：
-    分散读会让两条通道的预算不一样而没人知道）。前端**不传参**就吃这个值；
-    显式传值由路由按 ``LIMITS["debug_timeout"]`` 拒收，不静默夹。CLI 的 argparse
+    分散读会让两条通道的预算不一样而没人知道）。没指定具体步骤时吃这个值；
+    显式传值由路由按 ``LIMITS["debug_chain_timeout"]`` 拒收，不静默夹。CLI 的 argparse
     默认值是独立的另一条链路（AGENTS #8），不从这里统一。
     """
-    return int(load().get("debug", {}).get("timeout") or DEFAULTS["debug"]["timeout"])
+    return int(load().get("debug", {}).get("chain_timeout")
+               or DEFAULTS["debug"]["chain_timeout"])
 
 
-def resolve_check(override: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """算出「这次校验实际用哪套参数」：全局设置打底，``override`` 里非 None 的键覆盖。
+def debug_stage_timeout(stage: str) -> int:
+    """单步调试按**段**取的预算（秒，``debug.stage_timeout``）。
 
-    这是校验参数取值的**唯一入口**（``backend/api/ops.py`` 调它）。三层优先级
-    「本次覆盖 > 全局设置 > 内置默认」中，后两层由 :func:`load` 完成，这里只做第一层。
-
-    **判据必须是 ``is not None``，不能是 ``payload.get(k) or 全局``**：
-    ``0`` / ``""`` 都是有意义的值——
-      - ``probe_depth=0``（或任何非法值）会在 :func:`coerce` 那层落回 ``DEPTH_HOME``，
-        不能在这里被 ``or`` 吃掉而退回全局值
-      - ``proxy=""`` = 明确要本次直连（哪怕全局配了代理）
-    用 ``or`` 会把这两个当成「没传」，覆盖**静默失效**，现象只是「参数好像没生效」，
-    几乎不可能从界面上查出来。
-
-    反过来 ``None`` 视同「没传」→ 用全局值：覆盖表单是从全局值预填的，
-    用户把输入框清空 = 想回落全局，而不是想回落编译期默认。
-
-    覆盖值同样过 ``coerce``——它也是不可信输入，传 concurrency=9999 不该
-    绕过区间检查直接进 Semaphore。
+    段名与 ``core.debug_keys.TARGETS`` 同集合（`search` / `explore` / `info` / `toc` /
+    `content`）。不认识的段**回落到整链预算**，不编一个「默认段」——拼错的段名静默拿到
+    某个预算，正是「原因没走到用户眼前」那类错（AGENTS #4）。
     """
-    cfg = load()["check"]
-    if isinstance(override, dict):
-        for key in DEFAULTS["check"]:
-            value = override.get(key)
-            if value is not None:
-                cfg[key] = value
-    for key in DEFAULTS["check"]:
-        cfg[key] = coerce("check", key, cfg[key])
-    return cfg
+    stages = load().get("debug", {}).get("stage_timeout") or {}
+    try:
+        got = int((stages or {}).get(str(stage or ""), 0) or 0)
+    except (TypeError, ValueError):
+        got = 0
+    return got or debug_chain_timeout()
 
 
 __all__ = ["DEFAULTS", "DEPTH_CONTENT", "DEPTH_HOME", "DEPTH_SEARCH", "DEPTH_TOC",
            "LIMITS", "PROBE_DEPTHS", "PROBE_DEPTH_CHOICES", "SETTINGS_NAME", "VERSION",
-           "coerce", "load", "reset", "resolve_check", "resolve_proxy", "settings_path",
-           "update"]
+           "coerce", "debug_chain_timeout", "debug_stage_timeout", "load", "reset",
+           "resolve_proxy", "settings_path", "update"]

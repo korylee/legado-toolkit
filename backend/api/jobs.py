@@ -337,6 +337,7 @@ def list_jobs(
     scope: Literal["recent", "all"] = "recent",
     status: Literal["", "active", "done", "failed", "cancelled"] = "",
     kind: str = "",
+    kinds: str = "",
     exclude_kind: str = "",
     st=Depends(get_store),
 ):
@@ -344,8 +345,9 @@ def list_jobs(
 
     ``scope=recent``（默认）给「进行中 + 最近 ``JOBS_TTL_DAYS`` 天」——任务多起来以后
     全部历史在首屏就是噪音；``scope=all`` 才是全量。筛选口径都在这里决定，前端只传档位名。
-    ``exclude_kind`` 给任务中心用：**调试运行（``jvm_debug``）不进这份列表**——
-    它由调试页自己观测，一次点击一条会把任务中心刷成流水账。
+    ``kinds`` 是**类目页签**的过滤（CSV：校验 = ``jvm_run,check``）——映射只在前端
+    ``utils/jobs.js`` 一份，这里只拆 CSV，不做「哪个 kind 属于哪类」的判断。
+    ``exclude_kind`` 给要排除一类时用（目前没人传：调试进了任务中心的分类页签）。
 
     每行带 ``summary``（通过 / 未通过 / 检查数 / 相对上次变化），**不带 result_json**：
     列表要能直接看出这次跑得好不好，而上百 KB 的结果不能进列表响应。
@@ -358,7 +360,9 @@ def list_jobs(
     rows = st.list_jobs(
         limit=_LIST_LIMIT,
         statuses=_STATUS_SCOPES.get(status) or (),
-        kind=kind.strip(), recent_since=since, exclude_kind=exclude_kind.strip())
+        kind=kind.strip(),
+        kinds=[k for k in (s.strip() for s in kinds.split(",")) if k] or None,
+        recent_since=since, exclude_kind=exclude_kind.strip())
     return {"items": [_job_row(row) for row in rows], "limit": _LIST_LIMIT,
             # 界面把窗口天数写进档位名（「进行中 + 最近 N 天」）：数字从这里走，
             # 别在文案里再抄一份（JOBS_TTL_DAYS 改了标签跟着变）

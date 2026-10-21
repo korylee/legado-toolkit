@@ -8,7 +8,7 @@
 - 反过来，更深的批次覆盖更浅的永远是对的——更深的结论包含更浅的全部信息
 
 这条规则**只有一份实现**（`Store.latest_jvm_conclusions`），`/api/jvm/results`
-与列表回填都调它；两处各写一次就会漂（lessons §二十三 已栽过两次）。
+与列表回填都调它；两处各写一次就会漂（已栽过两次）。
 
 `ListFillTypeGateTests` 守的是**回填时的类型闸门**：结论值是 Kotlin 侧一行一个 JSON
 产的，形状不对时不许把 `GET /api/sources` 整页带走。见那个类的注释。

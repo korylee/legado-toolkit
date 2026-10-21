@@ -177,7 +177,11 @@ def _ensure_jvm_debug_lane_idle(st: Store) -> None:
     # 批量校验允许调试越过；已有调试不可重入/中断。
     active_jobs = st.list_jobs(limit=10000, statuses=ACTIVE_JOB_STATUSES)
     if any(job.get("kind") in {"jvm_debug"} for job in active_jobs):
-        raise JvmLaneBusyError("校验引擎正忙，本次调试未排队，请稍后重试")
+        # 「取消等待」只是前端不再等结果，引擎那一次会跑完（shield 纪律）——
+        # 409 要把这件事说到用户眼前，否则看起来像坏了
+        raise JvmLaneBusyError(
+            "校验引擎正忙：上一次调试还在跑或收尾（取消等待不会中断引擎）。"
+            "等它结束后再试")
 
 
 @asynccontextmanager
@@ -338,15 +342,16 @@ ORPHAN_RUN_DIR_HOURS = 24
 
 
 def _run_dir_job_id(entry: pathlib.Path) -> str:
-    """目录属于哪个任务：批量校验写在信封 ``manifest.json`` 里，调试目录名里就带。"""
+    """目录属于哪个任务：批量校验写在信封 ``manifest.json`` 里，调试与 AI 补全按目录名。"""
     try:
         data = json.loads((entry / "manifest.json").read_text(encoding="utf-8"))
         if isinstance(data, dict) and data.get("job_id"):
             return str(data["job_id"])
     except (OSError, ValueError):
         pass
-    if entry.name.startswith("debug-"):
-        return entry.name[len("debug-"):]
+    # 前缀即 kind（``debug-<job_id>`` / ``agent-<job_id>``）：目录名里就带着任务号
+    if entry.name.startswith(("debug-", "agent-")):
+        return entry.name.split("-", 1)[1]
     return ""
 
 
@@ -357,7 +362,7 @@ def sweep_run_dirs() -> int:
     正在跑的）就留着——时间线读的就是目录里的两本账，按"目录个数上限"删会让
     任务列表里那条的时间线凭空空掉。没有任务行的目录按 mtime 超期删。
 
-    只认本工具链创建的 ``batch-*`` / ``debug-*``，不碰别的目录。
+    只认本工具链创建的 ``batch-*`` / ``debug-*`` / ``agent-*``，不碰别的目录。
     """
     root = pathlib.Path(data_dir()) / "app_probe" / "runs"
     if not root.is_dir():
@@ -372,7 +377,7 @@ def sweep_run_dirs() -> int:
                     continue
             except OSError:
                 continue
-            if not entry.name.startswith(("batch-", "debug-")):
+            if not entry.name.startswith(("batch-", "debug-", "agent-")):
                 continue
             try:
                 job_id = _run_dir_job_id(entry)

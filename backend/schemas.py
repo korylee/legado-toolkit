@@ -24,7 +24,7 @@ class SourceOut(BaseModel):
     #: empty_js_shell/login_wall/timeout/error/invalid，空串 = 没跑过。hit 是**命中的条数**
     #: （命中条数，不是命中率）。
     #: 这一行的结论**是谁判的**（`checks.engine`：jvm / device）。
-    #: 界面用它标出处——藏"选择"不藏"证据来源"（口径见 lessons §七十二）。
+    #: 界面用它标出处——藏"选择"不藏"证据来源"。
     #: **Optional**：没有 checks 行的源这一列是 NULL（同 health），
     #: 声明成 `str` 会让「从未校验过的源」把整页的出参校验带走（AGENTS #22）
     #: 校验失败的原因（`checks.error`）：引擎归因后给用户看的那句判词
@@ -37,6 +37,10 @@ class SourceOut(BaseModel):
     #: 结论跑到的最深一段（search/toc/content）。列表 tooltip 按它决定展示哪几行：
     #: 「跑到搜索」的行不该显示「目录：未验证」——那是**没跑**，不是**跑了没过**
     jvm_stage: str = ""
+    #: 超时归因（闭集，`core.jvm_health.TIMEOUT_KINDS`）：budget = 我们的每源预算用尽
+    #: （动作：调参数 / 单步重跑）；app = App 内部请求超时（动作：源慢，连 App 试或换章）。
+    #: 非超时行为空；认不出的取值原样下发（不在这里改写成「未知」）。
+    jvm_timeout_kind: str = ""
     jvm_hit: Optional[int] = None
     jvm_toc_count: Optional[int] = None
     jvm_toc_ok: Optional[bool] = None
@@ -168,9 +172,10 @@ class JvmDebugRequest(BaseModel):
     target: str = "search"
     query: str = ""
     key: str = ""
-    #: 整次调试的墙钟预算（秒）。**不给就吃设置里的 ``debug.timeout``**（默认值只在
+    #: 这次调试的墙钟预算（秒）。**不给就按段取**：指定了具体步骤吃
+    #: ``debug.stage_timeout[那一段]``，跑整链吃 ``debug.chain_timeout``（默认值只在
     #: `core/settings_store`，前端不再写死 60——它曾与桥的渲染上限同为 60 而互相
-    #: 掐死）；显式给要落在 ``LIMITS["debug_timeout"]`` 区间内，越界 400 不静默夹
+    #: 掐死）；显式给要落在 ``LIMITS["debug_stage_timeout"]`` 区间内，越界 400 不静默夹
     timeout: Optional[int] = None
     #: 手工注入的一条 cookie（可选）。不给就按源 URL 从浏览器 profile 读——
     #: 登录墙的源要先在同一个 profile 里登录一次（`scripts/jvm_login.py`）
@@ -321,7 +326,7 @@ class JvmSettingsPatch(BaseModel):
     """JVM 校验服务的**环境**设置（core.settings_store.DEFAULTS["jvm"] 里的环境键）。
     同 CheckSettingsPatch 的约定：收敛全部交给 settings_store.coerce。
 
-    **批量校验那五个参数（keyword / timeout / concurrency / depth / limit）不在这里**：
+    **批量校验那五个参数（keyword / check_timeout / concurrency / depth / limit）不在这里**：
     它们由 `settings_store` 的常量定默认值与区间、由 `JVM_RUN_PARAMS` 允许本次覆盖，
     没有「改永久默认值」这个动作——所以这里不设字段。Pydantic 默认忽略未声明的键，
     提交 `{"jvm": {"keyword": …}}` 会被静默丢弃（等价于没传）；要改这次的搜索词就在
@@ -330,6 +335,8 @@ class JvmSettingsPatch(BaseModel):
 
     app_repo: Optional[str] = None
     android_sdk_dir: Optional[str] = None
+    #: daemon 端口窗口起点（0 = 自动按 data 目录推导）。收敛在 settings_store.coerce。
+    daemon_port: Optional[int] = None
 
 
 class NetworkSettingsPatch(BaseModel):
@@ -346,7 +353,11 @@ class NetworkSettingsPatch(BaseModel):
 class DebugSettingsPatch(BaseModel):
     """调试设置（core.settings_store.DEFAULTS["debug"]）。收敛交给 coerce。"""
 
-    timeout: Optional[int] = None
+    #: 整链墙钟上限（秒）——没指定具体步骤时用
+    chain_timeout: Optional[int] = None
+    #: 单步按段预算：**只改提交里出现的段**，其余段保住原值（`_to_stage_timeouts`
+    #: 做逐段收敛，不做整段替换）
+    stage_timeout: Optional[Dict[str, int]] = None
 
 
 class SettingsPatch(BaseModel):
@@ -454,3 +465,40 @@ class AgentPlanRequest(BaseModel):
     runtime: Dict[str, Any] = Field(default_factory=dict)
     network: List[Dict[str, Any]] = Field(default_factory=list)
     model_available: bool = False
+
+
+class AutofillRunRequest(BaseModel):
+    """一键填充 / AI 补全的输入：**只报引用，不传材料**。
+
+    材料在后端：本机引擎调试的 steps/pages 存在任务行 ``result_json``
+    （``get_job(job_id)``），按 ``job_id + step`` 取；前端只传任务号与步骤。
+    """
+
+    job_id: str = ""
+    step: str = "bookUrl"
+    #: AI 段开关：false 只出免费段（不发模型请求），true 才进 Agent 循环。
+    #: **默认 false**：花钱动作必须由调用方显式传 true（用户点击触发，与
+    #: `/suggest-rule` 的边界一致）——省略 = 不花钱，不许「忘传就花钱」。
+    use_ai: bool = False
+    #: 只提议这些字段（FILL_SPECS 的蛇形键，如 ``["author"]``）。空 = 整组。
+    #: 单字段「AI 重议」用：一颗按钮只影响一个字段的行。
+    fields: Optional[List[str]] = None
+
+
+class OutlineRequest(BaseModel):
+    """DOM 大纲的输入：**只报引用**（同 `/rule-try`）——材料从任务行取。"""
+
+    job_id: str = ""
+    step: str = "bookUrl"
+
+
+class RuleTryRequest(BaseModel):
+    """轻量验证（rule_try）的输入：**只报引用**——材料从任务行取（同 `/agent-loop`）。
+
+    试一条建议规则：引擎在该步的整页 HTML 上直跑它（不跑调试链），返回取到的值。
+    它只回答「选不选得中」，不替代整步验收（AGENTS #3）。
+    """
+
+    job_id: str = ""
+    step: str = "bookUrl"
+    rule: str = ""

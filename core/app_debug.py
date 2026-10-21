@@ -326,7 +326,7 @@ def preflight(host: str, source: Any, ws_port: Optional[int] = None,
     except Exception as e:
         # error 是给用户看的动作指引，detail 是原始异常。**别把异常类名混进
         # error**：那是开发者视角，前端只该展示「接下来做什么」。detail 留给
-        # 前端记 console，异常不能无声无息地过去（lessons §二）
+        # 前端记 console，异常不能无声无息地过去
         return {"state": "unreachable", "detail": "%s: %s" % (type(e).__name__, e),
                 "error": "连不上 App。确认「Web 服务」已打开、手机与电脑在同一"
                          "局域网、端口填的是 App 显示的 HTTP 端口。"}
@@ -572,6 +572,41 @@ def engine_pages(raw: Any) -> Dict[str, str]:
 #: 抽屉里是给人看的（还要能复制去改规则），几万字没有意义、只会把 tooltip 拖垮。
 MAX_MATCHED_CHARS = 20000
 
+#: 详情段子键（`bookUrl.<字段>`）→ 展示标签。字段名与 Kotlin 侧
+#: `DebugService.MATCHED_INFO_FIELDS` 同一份词汇（逐词比对钉在
+#: ``TestMatchedStepNameParity``）；顺序即拼接顺序。
+BOOKINFO_FIELD_LABELS = (
+    ("name", "书名"), ("author", "作者"), ("kind", "分类"),
+    ("word_count", "字数"), ("last_chapter", "最新章节"),
+    ("intro", "简介"), ("cover_url", "封面"), ("toc_url", "目录链接"),
+)
+
+#: 详情段逐字段拼接后的总上限（与单段 ``MAX_MATCHED_CHARS`` 同量级——8 个字段
+#: 各自带子树，全放开会把材料页签拖垮）。超出在末尾写明，不静默吞。
+MAX_INFO_MATCHED_CHARS = 20000
+
+
+def _bookinfo_matched_html(per_step: Dict[str, str]) -> str:
+    """把 ``bookUrl.<字段>`` 子键拼成一段展示 HTML（每个字段一个小节头）。
+
+    详情段是**字段规则族**：用户改的是单个字段，他要核对的是「我改的这条规则
+    命中了哪块」——逐字段小节头才答得出这个问题。某字段没命中就没键，那一节
+    不出现（不造「未命中」节）。整段超长截断并写明。
+    """
+    parts: List[str] = []
+    for field, label in BOOKINFO_FIELD_LABELS:
+        html = per_step.get("bookUrl." + field)
+        if not html:
+            continue
+        parts.append("【%s】%s" % (label, html))
+    if not parts:
+        return ""
+    out = "\n".join(parts)
+    if len(out) > MAX_INFO_MATCHED_CHARS:
+        out = out[:MAX_INFO_MATCHED_CHARS] + \
+            "\n…（已截断：详情命中共 %d 字符）" % len(out)
+    return out
+
 
 #: 抓包条目的单条上限（Kotlin 侧也截过一道；这里是 Python 侧的第二道，防的是手改侧车）。
 MAX_NET_BODY_CHARS = 256 * 1024
@@ -640,7 +675,8 @@ def matched_map(raw: Any) -> Dict[str, Dict[str, str]]:
 
 
 def build_steps(events: Sequence[Any], matched: Optional[Dict[str, Dict[str, str]]] = None,
-                structured: Optional[Dict[str, Any]] = None
+                structured: Optional[Dict[str, Any]] = None,
+                runtime: Optional[Dict[str, Any]] = None
                 ) -> List[Dict[str, Any]]:
     """**纯函数**：事件列表 → ``steps[]``（只做分段与判定，不抓页面）。
 
@@ -652,6 +688,9 @@ def build_steps(events: Sequence[Any], matched: Optional[Dict[str, Dict[str, str
     第四期结构化采集（形状闸门 :func:`structured_map`）。按**段名**直接取（Kotlin 侧
     采集时就按段记），与 ``matched`` 按 url 取不同——那是因为采集页本来就是按段的
     `︾开始解析X页` 事件配的 URL。
+
+    ``runtime``：L3 运行时形状（形状闸门 :func:`runtime_map`）——只对正文页武装采集，
+    挂在正文步上（L3 源「看运行时形状 → 生成正文图片规则草稿」的材料）。
 
     ``events`` 可以是 ``collect_debug_events`` 的返回值（``{"t","text"}``），
     也可以是裸文本列表——聚合只用到文本，这样测试不必构造事件字典。
@@ -705,11 +744,18 @@ def build_steps(events: Sequence[Any], matched: Optional[Dict[str, Dict[str, str
                             Q.SHAPE_TEXT, notes, evidence)
         # 卡片上那行小字：优先失败原因，其次 ◇ 统计（比「20 条事件」有信息量）
         detail = j.reason or ("；".join(notes) if notes else "%d 条事件" % len(values))
+        # 详情段命中是**字段子键**（`bookUrl.<字段>`，Kotlin 逐字段记）：
+        # 拼成带小节头的一段展示 HTML；单规则段照旧按段名直取
+        per_step = (matched or {}).get(url) or {}
+        if name == "bookUrl":
+            step_matched = _bookinfo_matched_html(per_step)
+        else:
+            step_matched = per_step.get(name, "")
         steps.append(j.as_step_dict(
             name, url=url, page_id=PAGE_IDS.get(name, ""),
             values=values,
-            # 按**这一段自己的 url + 段名**取，取不到就是空（设备通道、或引擎没回填）
-            matched_html=((matched or {}).get(url) or {}).get(name, ""),
+            # 取不到就是空（设备通道、或引擎没回填）
+            matched_html=step_matched,
             detail=detail,
         ))
         # 结构化结果按**段名**直接取（Kotlin 采集时就按段记）；没有就不设键——
@@ -729,6 +775,10 @@ def build_steps(events: Sequence[Any], matched: Optional[Dict[str, Dict[str, str
                 steps[-1]["notes"] = list(steps[-1]["notes"]) + [
                     "结构化采集没采成：" + f for f in mine]
                 steps[-1]["has_notes"] = True
+        # L3 运行时形状挂在**正文步**（采集只对正文页武装——形状是这次正文页上的
+        # params 观测）。没有就不设键：设备通道没有这份材料，消费方用键存在性判断。
+        if name == "content" and runtime:
+            steps[-1]["runtime"] = runtime
     return steps
 
 
@@ -781,6 +831,49 @@ def structured_map(raw: Any) -> Dict[str, Dict[str, Any]]:
     fails = raw.get("fails")
     if isinstance(fails, list) and fails:
         out["_fails"] = [str(f)[:200] for f in fails]
+    return out
+
+
+#: ``runtime`` 的形状闸门（L3 运行时形状采集）。**形状不对整块丢掉并打日志**（与
+#: :func:`matched_map` / :func:`structured_map` 同一条纪律，AGENTS #22②）。
+#: 它是给口袋漫画类 L3 源「看运行时形状 → 生成正文图片规则草稿」用的材料：
+#: **只有形状没有值**——Kotlin 侧的采集表达式就只采类型/键名/计数（表达式原文
+#: 钉在 ``TestRuntimeParity``），这里再兜一层：意外出现的键丢弃，键名疑似密钥的
+#: 丢弃（与 :data:`core.agent_context.SECRET_KEY_RE` 同一套判据，防手改侧车）。
+#: 空 dict = 没采（非正文页 / params 未就绪），调用方用键存在性判断。
+RUNTIME_KEYS_MAX = 40
+
+
+def runtime_map(raw: Any) -> Dict[str, Any]:
+    from core.agent_context import SECRET_KEY_RE
+
+    if not isinstance(raw, dict):
+        if raw:
+            print("[app_debug] runtime 形状不对（期望 {params_type, keys, chapter_images}，"
+                  "实测 %s），已忽略" % type(raw).__name__, file=sys.stderr)
+        return {}
+    out: Dict[str, Any] = {}
+    params_type = str(raw.get("params_type") or "").strip()
+    # params_type 必须是 `Object.prototype.toString` 的形状（[object X]）：
+    # 布尔/数字混进来是侧车被手改的信号，丢弃
+    if params_type.startswith("[object ") and params_type.endswith("]"):
+        out["params_type"] = params_type
+    keys = raw.get("keys")
+    if isinstance(keys, list):
+        out["keys"] = [str(k)[:60] for k in keys[:RUNTIME_KEYS_MAX]
+                       if str(k).strip() and not SECRET_KEY_RE.search(str(k))]
+    ci = raw.get("chapter_images")
+    if isinstance(ci, dict):
+        kept_ci: Dict[str, Any] = {}
+        for key in ("type", "count", "http", "blob", "sample_host"):
+            if key in ci:
+                kept_ci[key] = ci[key]
+        if kept_ci:
+            out["chapter_images"] = kept_ci
+    # 失败原因要走到用户眼前（AGENTS #4）：Kotlin 侧记的采集失败随键带出
+    fails = raw.get("fails")
+    if isinstance(fails, list) and fails:
+        out["fails"] = [str(f)[:200] for f in fails[:5]]
     return out
 
 
@@ -1032,4 +1125,7 @@ def run_app_debug(host: str, source_url_raw: str, key: str,
     out["pages"] = pages
     # 同一口径：只有 fail 会让 all_ok 变 False（unknown 不算坏）
     out["all_ok"] = all(s["ok"] for s in steps)
+    # 详情组一键填充建议内嵌进结果（与本机引擎同一条纪律，core.autofill.attach_autofill）
+    from core.autofill import attach_autofill
+    attach_autofill(steps, pages)
     return out

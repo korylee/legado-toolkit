@@ -54,6 +54,45 @@ test("missing observations are omitted entirely, with the real error retained", 
   assert.equal(actual.reason, "搜索请求失败");
 });
 
+test("content facts come from the event stream: chars, first line, pages, next-page links", () => {
+  const actual = stepResult({
+    name: "content",
+    values: [
+      "┌获取章节名称", "└第 1 章",
+      "┌获取正文内容", "└", "　　第一段正文", "第二段正文",
+      "┌获取正文下一页链接", "└https://s/2.html，https://s/3.html",
+      "◇本章总页数:3", "︽正文页解析完成",
+    ],
+  });
+  assert.equal(actual.content.hasText, true);
+  assert.equal(actual.content.chars, "第一段正文\n第二段正文".length);
+  assert.equal(actual.content.firstLine, "第一段正文");
+  assert.equal(actual.content.pages, 3);
+  assert.deepEqual(actual.content.nextLinks,
+    ["https://s/2.html", "https://s/3.html"]);
+  // 其它步没有这份事实：正文的产出不冒充别步的
+  assert.equal(stepResult({ name: "toc", values: ["◇目录总数:3"] }).content, null);
+});
+
+test("content prefers the event text over the engine sample, and says when it is a sample", () => {
+  const sample = "甲".repeat(20);
+  const fromEvents = stepResult({
+    name: "content", values: ["┌获取正文内容", "└", "甲".repeat(30)],
+    structured: { content: sample },
+  });
+  assert.equal(fromEvents.content.chars, 30);
+  assert.equal(fromEvents.content.sampleChars, 20);
+  assert.ok(fromEvents.content.sampleChars < fromEvents.content.chars);
+
+  // 事件里没记正文（连 App 之外的情形）才回落样本：它**就是**样本，不许被读成全文
+  const onlySample = stepResult({
+    name: "content", values: ["︽正文页解析完成"], structured: { content: sample },
+  });
+  assert.equal(onlySample.content.hasText, true);
+  assert.equal(onlySample.content.chars, 20);
+  assert.equal(onlySample.content.pages, null);
+});
+
 test("detail step exposes the fields BookInfo records; toc samples come from ◇ lines", () => {
   const detail = stepResult({ name: "bookUrl", url: "https://site/book/1", values: [
     "┌获取书名", "└甲", "┌获取简介", "└\n多行简介", "┌获取封面链接", "└/img/a.jpg",

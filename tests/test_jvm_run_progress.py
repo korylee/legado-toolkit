@@ -54,7 +54,7 @@ class JvmRunProgressTests(unittest.TestCase):
             readiness_checked_at="", source_count=(1 if single else 2),
             urls=(["https://a.com"] if single else
                   ["https://a.com", "https://b.com"]),
-            params={"keyword": "我", "timeout": 25, "concurrency": 8,
+            params={"keyword": "我", "check_timeout": 25, "concurrency": 8,
                     "depth": "search"},
             chunks=[1 if single else 2])
         return {

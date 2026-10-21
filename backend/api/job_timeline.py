@@ -221,8 +221,12 @@ def _run_dir_of(row: Dict[str, Any]) -> pathlib.Path:
     if value:
         return pathlib.Path(value)
     job_id = str(row.get("id") or "")
-    if job_id and str(row.get("kind") or "") == "jvm_debug":
+    kind = str(row.get("kind") or "")
+    if job_id and kind == "jvm_debug":
         from backend.jobs.jvm_debug_job import run_dir_of
+        return run_dir_of(job_id)
+    if job_id and kind == "agent_loop":
+        from backend.jobs.agent_loop_job import run_dir_of
         return run_dir_of(job_id)
     return pathlib.Path("<none>")
 
@@ -315,6 +319,34 @@ def job_timeline(job_id: str, after: int = 0, after_failures: int = 0,
                  st: Store = Depends(get_store)):
     """帧的**拉**形态：``after`` / ``after_failures`` 之前的不重发（行号游标）。"""
     return run_frame(st, job_id, after, after_failures)
+
+
+@router.get("/{job_id}/llm-calls")
+def job_llm_calls(job_id: str, after: int = 0, st: Store = Depends(get_store)):
+    """AI 补全这次任务里**模型调用**的摘要列表（提示词与输出的原文按 ``seq`` 单取）。
+
+    列表不带全文：提示词几十 KB，塞进每次轮询等于让轮询背着一坨历史。
+    """
+    from backend.jobs.agent_loop_job import llm_calls
+
+    row = st.get_job_summary(job_id)
+    if not row:
+        raise HTTPException(404, "任务不存在")
+    return llm_calls(_run_dir_of(row), after=after)
+
+
+@router.get("/{job_id}/llm-calls/{seq}")
+def job_llm_call_detail(job_id: str, seq: int, st: Store = Depends(get_store)):
+    """一次模型调用的**全文**：发出去的提示词 + 模型原样输出（排查「它为什么这么说」）。"""
+    from backend.jobs.agent_loop_job import llm_call
+
+    row = st.get_job_summary(job_id)
+    if not row:
+        raise HTTPException(404, "任务不存在")
+    record = llm_call(_run_dir_of(row), seq)
+    if record is None:
+        raise HTTPException(404, "没有第 %s 次调用" % seq)
+    return record
 
 
 @router.get("/{job_id}/stream")

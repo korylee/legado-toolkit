@@ -20,7 +20,9 @@ _STAT_KEYS = ("links", "images", "images_with_src", "text_len")
 _CAPABILITY_KEYS = (
     "jvm_debug", "app_debug", "webview_runtime", "login_context", "cookie_jar",
 )
-_SECRET_KEY_RE = re.compile(
+#: 密钥样子的键名（运行时键摘要的另一份消费者在 `core.app_debug.runtime_map`，
+#: 那边防的是手改侧车——公开这一份，两边不做两个判据）。
+SECRET_KEY_RE = re.compile(
     r"(?:cookie|authorization|password|passwd|secret|token|api[_-]?key|credential|"
     r"private[_-]?key|cipher(?:text)?|session[_-]?id)", re.I,
 )
@@ -49,7 +51,7 @@ def _sensitive_summary(value: Any) -> dict[str, Any]:
 
 def _redact(value: Any, *, key: str = "", limit: int = 160) -> Any:
     """Return a bounded scalar; never copy a value that looks like a secret."""
-    if _SECRET_KEY_RE.search(str(key)) or (isinstance(value, str) and _SECRET_VALUE_RE.search(value)):
+    if SECRET_KEY_RE.search(str(key)) or (isinstance(value, str) and _SECRET_VALUE_RE.search(value)):
         return _sensitive_summary(value)
     if value is None or isinstance(value, (bool, int, float)):
         return value
@@ -80,7 +82,7 @@ def _json_shape(value: Any, depth: int = 0) -> Any:
     if isinstance(value, Mapping):
         keys = sorted(
             _text(key, 60) for key in value
-            if not _SECRET_KEY_RE.search(str(key))
+            if not SECRET_KEY_RE.search(str(key))
         )[:30]
         return {"type": "object", "keys": keys}
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
@@ -190,7 +192,7 @@ def _runtime(raw: Any) -> dict[str, Any]:
         out["object_types"] = sorted({_text(value, 50) for value in object_types if value})[:30]
     keys = raw.get("keys", raw.get("object_keys"))
     if isinstance(keys, Sequence) and not isinstance(keys, (str, bytes)):
-        out["keys"] = sorted({_text(value, 60) for value in keys if value and not _SECRET_KEY_RE.search(str(value))})[:40]
+        out["keys"] = sorted({_text(value, 60) for value in keys if value and not SECRET_KEY_RE.search(str(value))})[:40]
     counts = raw.get("counts")
     if isinstance(counts, Mapping):
         out["counts"] = {

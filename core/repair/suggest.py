@@ -533,3 +533,120 @@ async def suggest(ctx: Dict[str, Any], client: Any = None,
     if not out["candidates"]:
         out["error"] = "模型没有给出可用的规则（原文前 200 字：%s）" % str(text)[:200]
     return out
+
+
+SYSTEM_PROMPT_MANY = """你是 Legado（阅读 App）书源的规则专家。用户正在调试**一步**规则，一次给出多个字段的候选规则。只输出 JSON，不要解释。
+
+Legado 规则语法（`@` 分段，前面是选择器，最后一段是取值动作）：
+- 简写：class.xxx 等于 .xxx；id.xxx 等于 #xxx；tag.a 等于 a
+- 链式：class.book-list@tag.li@tag.a@href
+- 索引：.0 取第一个，.-1 取最后一个
+- 取值动作：text / textNodes / ownText / html，或任意属性名（href、src、data-original）
+- 正则后处理：规则##正则##替换（支持 $1 反向引用）
+- JSON 接口：$.data.list[*].name
+
+输出格式（严格 JSON；每个字段最多 3 条候选，按可能性从高到低；只给要的字段，一个字段拿不准就给空 candidates 加一句 reason，不要影响别的字段）：
+{"fields":[{"field":"字段名","candidates":[{"rule":"规则文本","why":"一句话说明为什么"}],"reason":"该字段的整体判断"}]}
+
+硬性要求：
+1. 规则里用到的 class / id 必须**真实存在于**我给的 DOM 大纲里，不许臆造。
+2. `@js:` / `<js>` / `@xpath:` 是允许的：候选会由本机 App 引擎验收。用它们时在 why 里
+   说明依赖什么（全局对象 / 登录态 / 接口），因为取不到材料的那次会判失败。
+3. 一条候选只写规则文本本身，不要带字段名、不要写 JSON 以外的内容。
+"""
+
+
+def build_batch_prompt(ctx: Dict[str, Any]) -> str:
+    """批量提议的提示词（纯函数，可离线测）。
+
+    段落顺序沿用 :func:`build_prompt` 的**前缀缓存约束**：稳定内容（这一步是什么、
+    DOM 大纲）在前，字段与实测值在后——同一步里「提议 → 改规则 → 再提议」
+    大纲一段是共用的，批量把这份共用从 N 次调用压成 1 次。
+    """
+    L: List[str] = []
+    L.append("这一步：%s（一次给出下列字段的候选规则）"
+             % (ctx.get("step_label") or ctx.get("step") or ""))
+    L.append("")
+    L.append("【要的字段】")
+    for f in ctx.get("fields") or []:
+        L.append("- %s：%s" % (f.get("field") or "",
+                               f.get("want_label") or ""))
+    L.append("")
+    L.append("【页面 DOM 大纲（缩进表示层级）】")
+    L.append(_outline(ctx.get("html") or "", ctx.get("focus") or ""))
+    values = [
+        (str(f.get("field") or ""),
+         [str(v).strip()[:120] for v in (f.get("app_values") or []) if str(v).strip()])
+        for f in (ctx.get("fields") or [])
+    ]
+    values = [(name, vs) for name, vs in values if vs]
+    if values:
+        L.append("")
+        L.append("【App 实测取到的值（正确的规则应当取到形似的东西）】")
+        for name, vs in values:
+            L.append("%s：" % name)
+            for v in vs[:MAX_APP_VALUES]:
+                L.append("- " + v)
+    return "\n".join(L)
+
+
+async def suggest_many(ctx: Dict[str, Any], client: Any = None,
+                       temperature: Optional[float] = None) -> Dict[str, Any]:
+    """一轮提议多个字段（同一步、同一取样类型的一族）：**一次调用共享 DOM 大纲**。
+
+    逐字段问的代价不只是 N 倍 token：同一份 90 行大纲重复喂 N 遍，延迟也是 N 次
+    往返（8 个字段 = 半分钟起）。返回体恒有 ``fields`` / ``llm`` / ``error``；
+    ``fields`` 是 ``{field: [candidates]}``，**单字段失败不塌整批**——某个字段
+    没给候选就在返回体里缺席，调用方读成「该字段没有候选」。只提议不判定
+    （AGENTS #3）：每条候选落地前由调用方的 rule_try 自查。
+
+    ``client`` 可注入（离线测试用假客户端）。
+
+    返回体里带 ``prompt`` / ``response`` 原文（**排障要看的原件**）：调用方据此落
+    ``llm.jsonl`` 账本。它们只描述刚刚这一次调用，不缓存、不跨调用复用。
+    """
+    from core.repair.llm import LLMClient, extract_json
+
+    client = client if client is not None else LLMClient()
+    out: Dict[str, Any] = {"fields": {}, "llm": "ok", "error": "",
+                           "model": getattr(getattr(client, "config", None), "model", ""),
+                           "usage": {}, "prompt": "", "response": ""}
+    if not getattr(client, "enabled", False):
+        out["llm"] = "off"
+        out["error"] = "没有可用的模型：到「设置 → 模型」配置一个（或设 LEGADO_LLM_API_KEY）"
+        return out
+    prompt = build_batch_prompt(ctx)
+    out["prompt"] = prompt
+    try:
+        text = await client.chat(SYSTEM_PROMPT_MANY, prompt, temperature=temperature)
+    except Exception as e:
+        out["llm"] = "error"
+        out["error"] = "模型调用失败：%s: %s" % (type(e).__name__, e)
+        return out
+    out["response"] = str(text or "")
+    out["usage"] = dict(getattr(client, "last_usage", None) or {})
+    data = extract_json(text)
+    if not isinstance(data, dict):
+        out["llm"] = "error"
+        out["error"] = "模型输出不是合法 JSON（原文前 200 字：%s）" % str(text)[:200]
+        return out
+    for item in data.get("fields") or []:
+        if not isinstance(item, dict):
+            continue
+        field = str(item.get("field") or "").strip()
+        if not field:
+            continue
+        seen = set()
+        cands: List[Dict[str, str]] = []
+        for c in item.get("candidates") or []:
+            if not isinstance(c, dict):
+                continue
+            rule = str(c.get("rule") or "").strip()
+            if not rule or rule in seen:
+                continue
+            seen.add(rule)
+            cands.append({"rule": rule, "why": str(c.get("why") or "").strip()[:200]})
+            if len(cands) >= MAX_CANDIDATES:
+                break
+        out["fields"][field] = cands
+    return out

@@ -14,7 +14,7 @@
 import { ref, computed, watch } from "vue";
 import { ElMessageBox } from "element-plus";
 import { appDebug, appPreflight, jvmDebug } from "../api/rules";
-import { getJobDetail, listJobs } from "../api/jobs";
+import { cancelJob, getJobDetail, listJobs } from "../api/jobs";
 import { useJobs } from "../composables/useJobs";
 import { asRunStatus } from "../utils/runStream";
 import { jvmReadiness } from "../api/jvm.js";
@@ -63,6 +63,10 @@ let ticker = 0;
 let abort = null;
 let runPending = null;
 let stopWatch = null;
+//: 会话代次：开新会话（resetDebugState）或开新运行时 +1。在途那次回写结果前
+//: 校验代次——否则「开新会话 = 旧会话的一切作废」在微任务顺序上会输给旧 run 的
+//: storeResult，把生成源首屏验证冲掉。
+let runGeneration = 0;
 //: 「不再等待」的出口（等结果那一步）。见 `waitForJob`
 let cancelPending = null;
 const CANCEL_WAIT_NOTE = "已不再等待；后端那一次仍会跑完，结果留在那次调试的记录里";
@@ -91,9 +95,8 @@ let waitStartedAt = 0;
 //: （`null` = 还没有过结果）
 const lastRunAt = ref(null);
 const lastRunMs = ref(0);
-const lastRunInput = ref(null);
 
-const { watchJob, frameOf } = useJobs();
+const { watchJob, frameOf, removeJob, jobById } = useJobs();
 
 function errorMessage(e) {
   if (e && e.message) return String(e.message);
@@ -157,23 +160,6 @@ function waitForJob(jobId) {
  * 有任务行才挂得上——这正是调试进 jobs 表的收益之一：观测登记放在进程内存里时，
  * 一次刷新就等于"那次调试从界面上消失了"。
  */
-function restoredRunInput(detail) {
-  const input = detail && detail.debug_input;
-  if (!detail || detail.kind !== "jvm_debug" || !input || input.available !== true
-      || typeof input.target !== "string"
-      || typeof input.query !== "string"
-      || typeof input.cache !== "string") {
-    return { available: false };
-  }
-  return {
-    available: true,
-    channel: "jvm",
-    target: input.target,
-    query: input.query,
-    cache: input.cache,
-  };
-}
-
 async function resumeRunning() {
   if (running.value) return runId.value;
   let row = null;
@@ -184,14 +170,12 @@ async function resumeRunning() {
     return "";
   }
   if (!row || !row.id) return "";
+  const gen = ++runGeneration;
   beginWait();
   try {
-    try {
-      lastRunInput.value = restoredRunInput(await getJobDetail(row.id));
-    } catch (_e) {
-      lastRunInput.value = { available: false };
-    }
-    storeResult(await waitForJob(row.id));
+    const value = await waitForJob(row.id);
+    // 等的过程里开了新会话：这次结果作废（不再盖进新会话）
+    if (gen === runGeneration) storeResult(value);
     return row.id;
   } finally {
     endWait();
@@ -278,12 +262,9 @@ const host = ref(
 
 const env = ref(null);
 const envLoading = ref(false);
-const envTitle = computed(() => {
-  if (envLoading.value) return "正在检查本机引擎环境…";
-  return env.value?.ok ? "本机引擎可用" : "本机引擎不可用";
-});
-// 调试预算口径（debug.timeout）：默认值只在后端 settings_store（AGENTS #8），
-// 这里读来显示；请求不传 timeout，由后端取同一份
+// 调试预算口径（`debug.chain_timeout`）：默认值只在后端 settings_store（AGENTS #8），
+// 这里读来显示；请求不传 timeout，由后端按段取（`debug.stage_timeout`）。
+// 显示的是**整链上限**——单步跑的实际预算按段取，界面不另摆一个数字
 const budget = ref(null);
 
 let environmentPending = null;
@@ -295,7 +276,7 @@ function loadEnvironment() {
     const settingsPending = getSettings()
       .then((s) => {
         budget.value =
-          (s.values.debug || {}).timeout ?? s.defaults?.debug?.timeout ?? null;
+          (s.values.debug || {}).chain_timeout ?? s.defaults?.debug?.chain_timeout ?? null;
       })
       .catch(() => {});
     try {
@@ -323,8 +304,6 @@ function loadEnvironment() {
 // 预检结果：null=还没测过 / {state: ready|missing|unreachable, error}
 const preflightState = ref(null);
 const checking = ref(false);
-// 本次调试前做了什么推送："" | "missing"（新建）| "stale"（覆盖旧规则）
-const pushed = ref("");
 
 // 在途的预检请求。输入框失焦和「连 App 调试」会问同一个问题——合成一次：
 // 并发会让「检测中…」在第一个先回来时提前熄灭
@@ -421,7 +400,6 @@ watch(host, (value, oldValue) => {
   // 预检和推送都绑定 App 实例；换地址后，旧状态不能继续冒充当前实例。
   if (oldValue !== undefined && h !== String(oldValue || "").trim()) {
     clearPreflight();
-    pushed.value = "";
   }
 });
 
@@ -450,23 +428,31 @@ function clearPreflight() {
   preflightPending = null;
   checking.value = false;
   preflightState.value = null;
-  pushed.value = "";
 }
 
 function invalidatePreflight() {
   // missing/stale/unreachable 对本地规则改动仍成立；但在途请求和 ready
-  // 都绑定旧输入，必须作废。推送状态更严格：它绑定整份已推送快照，规则
-  // 一改就不能继续显示「已推送」。
+  // 都绑定旧输入，必须作废。
   if (preflightPending || checking.value || (preflightState.value || {}).state === "ready") {
     clearPreflight();
   }
-  pushed.value = "";
 }
 
 function resetDebugState() {
+  // 开新会话 = 旧会话的一切作废。代次先 +1：在途那次（还在提交 POST、或已拿到
+  // 任务号在等结果）的回写都作废——否则它的 storeResult 会晚于 clearResult()
+  // 落进新会话（生成源首屏验证被冲掉就是这么来的）。
+  // 在途的运行**分离等待**（后端照跑完，结果留在任务行），同时把那行从 `active`
+  // 里删掉——分离之后没人看流、终态帧没人收，不删的话它就是一条隐形在跑任务：
+  // 主页徽标数着 1、任务抽屉又看不见（那边的列表 exclude 了 jvm_debug）、下次
+  // 打开还会被 resumeRunning 重挂。
+  runGeneration += 1;
+  if (runPending && runId.value) {
+    if (cancelPending) cancelPending();
+    removeJob(runId.value);
+  }
   clearResult();
   clearPreflight();
-  pushed.value = "";
 }
 
 // ---------------------------------------------------------------- 一次运行
@@ -490,38 +476,37 @@ async function executeRun({ source: runSource, target: runTarget, query: runQuer
   const runHost = String(host.value || "").trim();
   const runCacheMode = cacheMode.value;
   activeResultRevision = draftRevision;
-  lastRunInput.value = {
-    available: true,
-    channel: runChannel,
-    target: String(runTarget || ""),
-    query: String(runQuery || ""),
-    cache: runCacheMode,
-  };
   const runSourceSnapshot = runSource && typeof runSource === "object"
     ? JSON.parse(JSON.stringify(runSource))
     : runSource;
   // 上一次运行的观测句柄在提交之后才有（本机引擎那条）：它是任务号。
   // 连 App 走的是设备 WS，没有任务行，等待期只有本地秒表。
   runId.value = "";
+  //: 这次运行的代次快照：回写结果前校验——开新会话（resetDebugState）之后，
+  //: 在途这次（含还在提交 POST 的）结果一律作废，不许盖进新会话。
+  const gen = ++runGeneration;
+  const storeIfCurrent = (value) => {
+    if (gen !== runGeneration) return null;
+    return storeResult(value);
+  };
   beginWait();
-  pushed.value = "";
   try {
     if (runChannel === "jvm") {
       const submitted = await jvmDebug({ source: runSourceSnapshot, target: runTarget,
         query: runQuery, cache: runCacheMode, signal: abort?.signal });
       const jobId = (submitted && submitted.job_id) || "";
       if (!jobId) {
-        return storeResult({ error: "调试任务没有拿到任务号，请重试" });
+        return storeIfCurrent({ error: "调试任务没有拿到任务号，请重试" });
       }
       // 结果体走 `getJobDetail`（那是 steps/pages），状态与失败原因走那条流
-      return storeResult(await waitForJob(jobId));
+      return storeIfCurrent(await waitForJob(jobId));
     }
     // 连 App：先预检——调试 WS 对 App 库里查不到的 tag 静默无响应，而且它跑的
     // 始终是 **App 里那份规则**，预检把「是旧版本」一并判掉
     const pf = await runPreflight(runSourceSnapshot, runHost,
       abort ? abort.signal : null);
     if (pf.state === "unreachable") {
-      return storeResult({ error: pf.error || "连不上 App", detail: pf.detail || "" });
+      return storeIfCurrent({ error: pf.error || "连不上 App", detail: pf.detail || "" });
     }
     const needPush = pf.state !== "ready";
     if (needPush && !(askPush ? await askPush(pf.state) : false)) {
@@ -530,9 +515,8 @@ async function executeRun({ source: runSource, target: runTarget, query: runQuer
     const r = await appDebug({ source: runSourceSnapshot, target: runTarget,
       query: runQuery, host: runHost, port: 0, push: needPush,
       cache: runCacheMode, signal: abort?.signal });
-    const stored = storeResult(r);
-    if (!stored.error) {
-      pushed.value = needPush ? pf.state : "";
+    const stored = storeIfCurrent(r);
+    if (stored && !stored.error) {
       preflightState.value = { state: "ready", error: "", detail: "" };
     }
     return stored;
@@ -540,7 +524,7 @@ async function executeRun({ source: runSource, target: runTarget, query: runQuer
     // 取消等待不是失败：单独标记，界面按提示而不是错误渲染（结果体里 error 仍要有值，
     // 调用方「结果体含 error 时自行呈现」的约定不变）
     const cancelled = !!(e && e.name === "AbortError");
-    return storeResult({
+    return storeIfCurrent({
       error: cancelled ? CANCEL_WAIT_NOTE : errorMessage(e),
       detail: e && e.detail ? e.detail : "",
       cancelled,
@@ -558,6 +542,19 @@ async function executeRun({ source: runSource, target: runTarget, query: runQuer
 // 单例会话上同时开启两条请求，互相覆盖秒表、取消器和结果。
 function startRun(params) {
   if (runPending) return runPending;
+  // 上一次本机调试还没终态（等待被分离过、结果体也清过）：**显式取消旧行**
+  // 再提交——新调试 = 不要上一次了。不这么做的话后端 lane 查重会 409（旧任务行
+  // 还在 running）。引擎那一次仍会跑完（shield 纪律），新提交排队等 lane；
+  // `!running.value` 保证不把当前正在等的运行误杀。
+  const staleId = String(runId.value || "");
+  if (staleId && !running.value && jobById(staleId)) {
+    // 取消失败不能静默吞掉（先前 catch(() => {})）：行已从本地 active 表删掉，
+    // 失败的话它在后端还在跑而本地看不见——唯一痕迹是下一次提交的 409，
+    // 而那句文案不提取消失败。console 是文案机检的豁免面，留给排障。
+    void cancelJob(staleId).catch((e) => console.warn("旧调试任务取消失败：", e));
+    removeJob(staleId);
+    runId.value = "";
+  }
   const pending = executeRun(params);
   const shared = pending.finally(() => {
     if (runPending === shared) runPending = null;
@@ -584,7 +581,6 @@ export function useDebugSession() {
     liveEvents,
     lastRunAt,
     lastRunMs,
-    lastRunInput,
     budget,
     channel,
     target,
@@ -593,10 +589,8 @@ export function useDebugSession() {
     host,
     env,
     envLoading,
-    envTitle,
     preflightState,
     checking,
-    pushed,
     // 动作
     startRun,
     cancelRun,

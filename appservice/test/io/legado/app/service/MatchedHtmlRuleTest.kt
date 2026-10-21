@@ -5,6 +5,7 @@ import io.legado.app.model.analyzeRule.AnalyzeRule
 import io.legado.app.model.analyzeRule.RuleData
 import org.jsoup.nodes.Element
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -16,7 +17,7 @@ import org.robolectric.annotation.Config
  * 命中回填的取值口径（第三期）：**末段是取值动作的规则，`getElements` 直接跑恒取空**。
  *
  * 为什么要有这条：`matched_html` 就是拿 `getElements` 算的，而正文规则末段是
- * `@html` / `@text` 这类动作的**占了七成以上**（实测在 lessons §七十五）——不处理
+ * `@html` / `@text` 这类动作的**占了七成以上**——不处理
  * 它们，「命中源码」在正文段上就一直是空的，而那是最需要看 DOM 的一段。
  *
  * 两条断言分工：① 用 App 自己的 `AnalyzeRule` 钉住「带动作就取不到元素」这个事实
@@ -78,5 +79,30 @@ class MatchedHtmlRuleTest {
         assertNull(DebugService.elementsPartOf("class.mulu"))
         // 整个规则就是一段 JS
         assertNull(DebugService.elementsPartOf("<js>result</js>"))
+    }
+
+    @Test
+    fun content_start_mark_survives_the_time_prefix() {
+        // 上游 `Debug.log` 给每条事件拼 `[mm:ss.SSS] ` 前缀：直接 startsWith 恒 false，
+        // 完整链路的形状采集就静默失效（2026-10-19 实测）
+        assertTrue(DebugService.isContentStart("[00:12.345] ︾开始解析正文页"))
+        assertTrue(DebugService.isContentStart("︾开始解析正文页"))
+        assertFalse(DebugService.isContentStart("[00:12.345] ︾开始解析搜索页"))
+    }
+
+    @Test
+    fun attribute_tails_fall_back_to_the_carrying_node() {
+        // @href/@src 是封面/目录链接的常见写法；原样跑恒取不到（末段被当成选择器），
+        // 剥掉属性段就是承载它的元素——这类字段的命中 DOM 就靠这条兜底
+        assertEquals("class.mulu@tag.a", DebugService.attributeTailOf("class.mulu@tag.a@href"))
+        val nodes = analyze(DebugService.attributeTailOf("class.mulu@tag.a@href")!!)
+        assertEquals("<a href=\"/1.html\">第1页</a>", (nodes[0] as Element).outerHtml())
+    }
+
+    @Test
+    fun action_tails_are_not_attribute_candidates() {
+        assertNull(DebugService.attributeTailOf("id.nr1@tag.p@html"))
+        assertNull(DebugService.attributeTailOf("class.mulu"))
+        assertNull(DebugService.attributeTailOf("<js>result</js>"))
     }
 }

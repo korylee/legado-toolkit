@@ -167,6 +167,88 @@ class MatchedHtmlTests(unittest.TestCase):
     def test_blank_html_is_dropped(self):
         self.assertEqual(matched_map({"u": {"s": "   ", "t": "<i></i>"}}), {"u": {"t": "<i></i>"}})
 
+    def test_bookinfo_field_keys_are_assembled_with_headers(self):
+        """详情段命中是**字段子键**（`bookUrl.<字段>`）：按字段拼小节头，没命中的字段不造节。
+
+        详情段是字段规则族，用户改的是单个字段——他要核对的是「我改的这条规则
+        命中了哪块」，逐字段小节头才答得出；汇成一条 DOM 就看不出谁命中的。
+        """
+        detail_url = self.TOC_URL  # 详情页与目录页共用 detail，SAMPLE 里 toc 段就有这个 URL
+        steps = build_steps(SAMPLE, matched={detail_url: {
+            "bookUrl.name": "<h1>书名</h1>",
+            "bookUrl.author": "<span>作者</span>",
+            "bookUrl.toc_url": "<a href='/1.html'>目录</a>",
+            "search": "<div class='so'></div>",  # 别的段不许被拖进详情拼接
+        }})
+        got = step_of(steps, "bookUrl")["matched_html"]
+        self.assertIn("【书名】<h1>书名</h1>", got)
+        self.assertIn("【作者】<span>作者</span>", got)
+        self.assertIn("【目录链接】", got)
+        self.assertNotIn("【分类】", got, "没命中的字段不该出现占位节")
+        self.assertNotIn("<div class='so'></div>", got, "别的段的命中不许串进详情段")
+        # 目录段照旧按段名直取，不受字段子键影响
+        self.assertEqual(step_of(steps, "toc")["matched_html"], "")
+
+    def test_bookinfo_field_keys_absent_means_empty(self):
+        """引擎没记字段子键（设备通道 / 旧侧车）：详情段命中照旧是空串，不报错。"""
+        steps = build_steps(SAMPLE, matched={self.TOC_URL: {"toc": "<li></li>"}})
+        self.assertEqual(step_of(steps, "bookUrl")["matched_html"], "")
+
+
+class RuntimeMapTests(unittest.TestCase):
+    """L3 运行时形状闸门：只采形状不采值；挂正文步；坏形状整块丢。"""
+
+    SHAPE = {
+        "params_type": "[object Object]",
+        "keys": ["chapter_images", "sign"],
+        "chapter_images": {"type": "[object Array]", "count": 3, "http": 3,
+                            "blob": 0, "sample_host": "https://img.example.com"},
+    }
+
+    CONTENT_URL = "https://a.com/book/1/c1.html"
+
+    def test_hangs_on_content_step_only(self):
+        from core.app_debug import runtime_map
+        steps = build_steps(EMPTY_CONTENT_SAMPLE,
+                            runtime=runtime_map(dict(self.SHAPE)))
+        content = step_of(steps, "content")
+        self.assertEqual(content["runtime"]["chapter_images"]["count"], 3)
+        # 别的步没有 runtime 键
+        for s in steps:
+            if s["name"] != "content":
+                self.assertNotIn("runtime", s)
+
+    def test_bad_shape_is_dropped_whole(self):
+        from core.app_debug import runtime_map
+        with patch("sys.stderr") as err:
+            self.assertEqual(runtime_map("nope"), {})
+            self.assertEqual(runtime_map(123), {})
+            self.assertEqual(runtime_map(None), {})
+            self.assertIn("形状不对", err.write.call_args_list[0][0][0])
+        self.assertEqual(runtime_map({"params_type": 123, "keys": "not-a-list"}), {})
+
+    def test_oversized_keys_are_clipped(self):
+        """键名列表带上界（RUNTIME_KEYS_MAX）：防御手改侧车，正常采集远小于它。"""
+        from core.app_debug import RUNTIME_KEYS_MAX, runtime_map
+        raw = {"params_type": "[object Object]",
+               "keys": ["k%d" % i for i in range(RUNTIME_KEYS_MAX + 10)]}
+        self.assertEqual(len(runtime_map(raw)["keys"]), RUNTIME_KEYS_MAX)
+
+    def test_collection_failures_pass_through(self):
+        """Kotlin 记的采集失败随 fails 键带出（AGENTS #4）：没有它，「params 未就绪」
+        与「不是正文页」在侧车上分不开。"""
+        from core.app_debug import runtime_map
+        raw = {"fails": ["形状表达式没跑成（ReferenceError: params is not defined）"]}
+        self.assertEqual(runtime_map(raw)["fails"], raw["fails"])
+
+    def test_secret_looking_key_names_are_dropped(self):
+        """键名疑似密钥的丢弃（与 core.agent_context.SECRET_KEY_RE 同一判据）：
+        侧车可能被手改，键名列表也不该把 token/cookie 这类名字带出去。"""
+        from core.app_debug import runtime_map
+        out = runtime_map({"params_type": "[object Object]",
+                           "keys": ["chapter_images", "access_token", "sign"]})
+        self.assertEqual(out["keys"], ["chapter_images", "sign"])
+
 
 class StructuredMapTests(unittest.TestCase):
     """第四期 `structured` 闸门：形状/尺寸/失败原因三条纪律。

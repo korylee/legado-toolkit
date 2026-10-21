@@ -327,7 +327,7 @@ class AppDebugRouteKeyTests(unittest.TestCase):
 
     SETTINGS = {"network": {"proxy": ""},
                 "jvm": {"app_repo": "", "android_sdk_dir": "", "keyword": "斗破"},
-                "debug": {"timeout": 120}}
+                "debug": {"chain_timeout": 120}}
 
     def _body(self, **kw):
         from backend.schemas import AppDebugRequest

@@ -430,9 +430,13 @@ def judge_content(
                 "正文规则为空；Legado 会把章节链接当作正文，无法阅读",
                 shape, [], evidence)
         if st in (1, 2):
+            # **豁免不是验证**：图片/音频源回退用章节链接是 Legado 的正常行为
+            # （WebBook.kt:400-403），但这次没有验证任何取值。与引擎那条链同一口径
+            # （ValidateService.runContentStage 记 content_ok=null）——同一条事实
+            # 两处各判一版，界面就分不清该信哪份（AGENTS #10）。
             return Judgement(
-                VERDICT_PASS,
-                "正文规则为空；Legado 回退为使用章节链接本身，这对音频/图片源是正常配置",
+                VERDICT_UNKNOWN,
+                "正文规则为空；Legado 回退为使用章节链接本身，未验证取值",
                 shape, [], evidence)
         return Judgement(
             VERDICT_UNKNOWN,
@@ -585,7 +589,7 @@ def rate_interval_ms(value: Any) -> int:
 
     放在 quality 而不是 checker：checker（异步批量校验）与 fetch（同步抓取，
     试跑 / App 调试补抓 / 快速新增源都走它）都要用，而 fetch 不该反向依赖 checker
-    （lessons §十记过这个反向依赖的坑）。判定与限速的口径全仓库只此一处。
+    （这个反向依赖的坑有前例）。判定与限速的口径全仓库只此一处。
 
     注意这个字段在 Legado 里是 String（``BaseSource.kt:35``），别按 int 解析——
     ``"1/2"`` 会被 int() 打回 0，那正是我们曾经在 sanitize 里犯过的错。

@@ -261,10 +261,12 @@ class ExecutionActionParityTests(unittest.TestCase):
         from core import agent_actions
 
         for action, kinds in agent_actions.EXECUTION_ACTIONS.items():
-            # inspect_runtime / ask_user / stop_unsupported 这类「交模型/交人工/
-            # 终止」的动作没有执行 kind 是合法的：它们不落到调试动作链上
-            # （预算仍记 model_call/evidence，终止动作本身 free）。
-            if action in ("inspect_runtime", "ask_user", "stop_unsupported"):
+            # inspect_runtime / ask_user / stop_unsupported / autofill_propose
+            # 这类「交模型/交人工/终止/观察」的动作没有执行 kind 是合法的：
+            # 它们不落到调试动作链上（autofill_propose 是循环的观察入口，
+            # 结果直接回 Agent，不走调试动作链）。
+            if action in ("inspect_runtime", "ask_user", "stop_unsupported",
+                          "autofill_propose"):
                 continue
             self.assertTrue(kinds, "路由动作 %s 没有展开出执行 kind" % action)
 

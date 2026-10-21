@@ -4,7 +4,7 @@
 
 为什么单开一个模块：前端读这套键的是**同一份代码**（`parseCheckResult` /
 `applyCheckResults`）——「一条源点校验」走哪条路，界面上不该看得出来。两处各写一份
-必然漂，而漂的表现是「某几条源校验完列表不更新」，看不出来是谁的问题（lessons §二十三）。
+必然漂，而漂的表现是「某几条源校验完列表不更新」，看不出来是谁的问题。
 
 两个 builder 的入参不同（一个吃 Record、一个吃 checks 行），但**吐出来的键必须完全相同**：
 `tests/test_check_summary.py` 有一条断言逐键比对（同形状不是靠注释保证的）。
@@ -33,7 +33,7 @@ def check_items_from_records(results: Iterable[Any]) -> List[Dict[str, Any]]:
         # url 必须**归一化**后再下发：前端拿它当 key 回填列表，而列表里的
         # `source_url` 是 Store 归一化后存的（去空白/尾斜杠/转小写），而 `r.url`
         # 是 build_record 从 bookSourceUrl 直接取的原文——两侧不归一的话前端
-        # 一条都匹配不上，表现是「校验完了列表不更新」，且看不出任何异常（lessons §五）
+        # 一条都匹配不上，表现是「校验完了列表不更新」，且看不出任何异常
         "url": _normalize_url(r.url), "name": r.name, "health": r.health,
         "error": r.error,
         "toc_complete": r.toc_complete, "content_ok": r.content_ok,

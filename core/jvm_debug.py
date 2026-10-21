@@ -3,7 +3,7 @@
 
 **为什么单开一个模块**：这条链有两个消费方——CLI（`scripts/jvm_debug_run.py`）与后端
 `POST /api/rules/jvm-debug`。参数拼装与产物解析各写一份就会漂，而漂的表现是「界面上跑
-出来的和命令行跑出来的不一样」——排查时根本想不到是两份实现（lessons §二十三）。
+出来的和命令行跑出来的不一样」——排查时根本想不到是两份实现。
 
 **返回体与设备通道（`core/app_debug.run_app_debug`）同形状**
 （`source/steps/pages/all_ok/events/error`），且事件流与设备 WS **逐事件同构**——
@@ -29,7 +29,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from uuid import uuid4
 
 from core.app_debug import (build_steps, engine_pages, fetch_debug_pages, matched_map,
-                            network_entries, structured_map)
+                            network_entries, runtime_map, structured_map)
 from core.debug_keys import EXPLORE_PREFIX
 from core.fetch import CACHE_AUTO
 from core.paths import ARGS_PARTS, data_path
@@ -56,8 +56,7 @@ CODE_TEXT = {
 
 #: **批量校验与调试共用一把锁**：两条链都写 `appservice/args.properties`（批量校验写
 #: keyword/depth，调试写 file/key/out），而那个文件是**另一个进程**的入参入口——
-#: 同时跑会互相踩（参数被改写），那种失败看起来像「JVM 坏了」。D2 之后调试默认走常驻、
-#: 不碰 Gradle，所以「抢同一个 Gradle 任务」只对**回落那条路**成立；锁仍然必须有，
+#: 同时跑会互相踩（参数被改写），那种失败看起来像「JVM 坏了」。锁仍然必须有，
 #: 理由就是那个参数文件。非阻塞获取——拿不到就直说，**不排队**：排队会让界面上的一张
 #: 卡片转十几分钟，那比一句「另一个任务在跑」糟得多。
 #:
@@ -99,28 +98,48 @@ BUSY_REASON = ("另一个本机引擎任务在跑（批量校验与调试共用�
                "等它跑完再来")
 
 
+def _props_escape(value: str) -> str:
+    """Java Properties 的转义（读它的是 `AppserviceEnv.loadArgs` → `Properties.load`）。
+
+    反斜杠在 properties 里是**转义符**：规则里的 ``\\d`` 会被读成 ``d``、
+    ``\\u4e2d`` 会被读成「中」——透明改名，不是报错（2026-10-20 审出的静默改写）。
+    路径/URL 没有反斜杠时这一步是恒等变换。
+    """
+    out = str(value).replace("\\", "\\\\")
+    out = out.replace("\r", "\\r").replace("\n", "\\n").replace("\t", "\\t")
+    return out
+
+
 def _write_args(src_file: str, key: str, out_file: str, timeout: int, cookie: str = "",
-                proxy: str = "", args_path: Optional[pathlib.Path] = None) -> None:
+                proxy: str = "", args_path: Optional[pathlib.Path] = None,
+                extra: Optional[List[Tuple[str, str]]] = None) -> None:
     """写 args.properties。
 
-    **必须 `newline="\n"`**：这是 git 跟踪的文件，而 `write_text` 在 Windows 上把 `\n`
-    翻成 `\r\n`——跑一次就把工作区弄脏（内容与 HEAD 逐字节相同，只差行尾，
+    ``extra``：调用方追加的键值对（如 rule_try 的 ``try_body`` / ``try_step``）——
+    **这份文件的格式只有这里一份**，别让调用方在拿到路径后自己再拼一遍。
+    **值一律过 :func:`_props_escape`**：自由文本（规则、关键词）走 properties 不转义
+    就会被 `Properties.load` 改写。
+
+    **必须 `newline="\\n"`**：这是 git 跟踪的文件，而 `write_text` 在 Windows 上把 `\\n`
+    翻成 `\\r\\n`——跑一次就把工作区弄脏（内容与 HEAD 逐字节相同，只差行尾，
     `git diff` 连内容都不显示）。同 `agent-write-safety` §三。
     """
-    lines = [
-        "# 由 core/jvm_debug.py 生成（批量校验时后端会重写它）",
-        "file=%s" % pathlib.Path(src_file).as_posix(),
-        "key=%s" % key,
-        "out=%s" % pathlib.Path(out_file).as_posix(),
-        "timeout=%d" % timeout,
+    pairs: List[Tuple[str, str]] = [
+        ("file", pathlib.Path(src_file).as_posix()),
+        ("key", key),
+        ("out", pathlib.Path(out_file).as_posix()),
+        ("timeout", str(timeout)),
     ]
     if cookie:
-        lines.append("cookie=%s" % cookie)
+        pairs.append(("cookie", cookie))
     # 浏览器那一侧的代理（Chrome 只认启动参数；与源 header 里那个 OkHttp 代理配套）。
     # **写进这个文件而不是环境变量**：常驻 daemon 早就起来了、环境变量它读不到；
     # 而这个文件每次运行都重写，`AppserviceEnv.loadArgs()` 现读现用
     if proxy:
-        lines.append("proxy=%s" % proxy)
+        pairs.append(("proxy", proxy))
+    pairs.extend((str(name), str(value)) for name, value in (extra or []))
+    lines = ["# 由 core/jvm_debug.py 生成（批量校验时后端会重写它）"]
+    lines += ["%s=%s" % (name, _props_escape(value)) for name, value in pairs]
     target = args_path or ARGS
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text("\n".join(lines + [""]), encoding="utf-8", newline="\n")
@@ -204,9 +223,9 @@ def verify_generated(source: Dict[str, Any], keyword: str, detail_url: str = "",
 
     为什么收在这里而不是各写一份：两条路（CLI 的 `services.add_source.run_add`、Web 的
     `backend/api/ops.py`）验的是同一件事——「这份刚生成的源在 App 的真引擎上跑得通吗」。
-    各写一份就会漂，而漂的表现是**两边的结论不一样**，看的人不知道该信哪个（lessons §二十三
-    那类）。离线推断（静态材料上的候选与样本比对）看到的是**另一份东西**：它跑不了 JS、
-    没有登录态，对 L2–L4 的页面注定不同——那份结论只用于挑选，不是「通过」（lessons §七十七）。
+    各写一份就会漂，而漂的表现是**两边的结论不一样**，看的人不知道该信哪个。
+    离线推断（静态材料上的候选与样本比对）看到的是**另一份东西**：它跑不了 JS、
+    没有登录态，对 L2–L4 的页面注定不同——那份结论只用于挑选，不是「通过」。
 
     两条边界：
 
@@ -340,7 +359,7 @@ def page_from_engine(url: str, *, timeout: int = 60, render: bool = True,
     真浏览器渲染 + 求值 `js` 选项），交回来的是页面脚本跑过之后的那份 DOM。
 
     **拿不到就抛，带原因**：调用方据此「这一段规则先不给」，**不退回我们抓的那份**——
-    材料不对产出的规则是假成功（lessons §八十）。
+    材料不对产出的规则是假成功。
     """
     from core.paths import data_path
     parts = urllib.parse.urlsplit(url)
@@ -491,6 +510,9 @@ def run_jvm_debug(source: Dict[str, Any],
     out["code_text"] = CODE_TEXT.get(code, "未知（没产出侧车）")
     out["cost_sec"] = round(cost, 1)
     out["cookie_len"] = int(meta.get("cookie_len") or 0)
+    # 「没带登录态」要说得出为什么：sidecar 一直有 `cookie_note`（`no_cookie_for_domain` /
+    # `store_error: …`），只带 len 的话界面只能说「没带」——本机与真机的第一差异就没法归因
+    out["cookie_note"] = str(meta.get("cookie_note") or "")
     # WebView 能力边界是运行级证据，不参与步骤判定；类型不对时显式降级为空。
     out["webview_unsupported"] = webview_unsupported(
         meta.get("webview_unsupported")
@@ -522,8 +544,10 @@ def run_jvm_debug(source: Dict[str, Any],
     # 第三期 matched_html 回填：本机引擎会把每段规则命中的 DOM 带回来，
     # 形状 {url: {step: html}}——**过一道显式闸门**（AGENTS #22），不合法就整块忽略并留日志。
     # structured 的失败原因由 build_steps 并进对应段的 notes（AGENTS #4），这里不用接。
+    # runtime（L3 运行时形状）同样过闸门，build_steps 把它挂在正文步上。
     steps = build_steps(events_raw, matched=matched_map(meta.get("matched_html")),
-                        structured=structured_map(meta.get("structured")))
+                        structured=structured_map(meta.get("structured")),
+                        runtime=runtime_map(meta.get("runtime")))
     # 拉起方式的痕迹进附注（回落了要说出来；正常走常驻时这里是空的）。
     # 放最后一段附注**之前**：先讲「这次是怎么跑起来的」，再讲「跑的过程中缺了什么」
     if launch_notes and steps:
@@ -544,6 +568,10 @@ def run_jvm_debug(source: Dict[str, Any],
     out["network"] = network_entries(meta.get("network"))
     out["steps"] = steps
     out["all_ok"] = all(s["ok"] for s in steps)
+    # 详情组一键填充建议内嵌进结果（材料与锚点都是这次调试现成的；
+    # 建议失败不带走判定——纪律见 core.autofill.attach_autofill）
+    from core.autofill import attach_autofill
+    attach_autofill(steps, out.get("pages") or [])
     sidecar_error = str(meta.get("error") or "").strip()
     if sidecar_error:
         out["error"] = "本机引擎异常：" + sidecar_error

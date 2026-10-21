@@ -54,9 +54,37 @@ const KIND_LABELS = {
   check: "校验",
   jvm_run: "本机引擎校验",
   jvm_debug: "本机引擎调试",
+  agent_loop: "AI 补全",
   add: "添加书源",
   ping: "连通性检查",
 };
+
+// ---------------------------------------------------------------- 任务分类
+//
+// 任务中心按**类目**分页签（全部 / 校验 / 调试 / AI）。映射只在这份——后端
+// kinds 是平铺的名字，谁需要分类谁在这里查；后端再抄一份，加一个 kind 就要
+// 两边同时改，漏一边的任务会**从所有页签里消失**（页签是排除式过滤）。
+
+export const JOB_CATEGORIES = [
+  { key: "check", label: "校验", kinds: ["jvm_run", "check"] },
+  { key: "debug", label: "调试", kinds: ["jvm_debug"] },
+  { key: "ai", label: "AI", kinds: ["agent_loop"] },
+];
+
+/** 某个 kind 属于哪个类目；没登记的返回 null（界面据此落「其他」，不藏起来）。 */
+export function jobCategoryOf(kind) {
+  const k = String(kind || "");
+  for (const c of JOB_CATEGORIES) {
+    if (c.kinds.includes(k)) return c.key;
+  }
+  return null;
+}
+
+/** 类目 → 后端 kinds 过滤参数（CSV；null = 不过滤）。 */
+export function categoryKinds(key) {
+  const c = JOB_CATEGORIES.find((x) => x.key === key);
+  return c ? c.kinds.join(",") : "";
+}
 
 export function jobStatusLabel(status) {
   return STATUS_LABELS[status] || status || "未知";

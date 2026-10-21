@@ -452,7 +452,7 @@ class PageCacheTests(CacheIsolatedTestCase):
         """换 UA / 换 charset 就是另一次请求：抓到的不是同一份页面。
 
         只按 URL 做键会把两种身份的内容串在一起——带登录态与不带登录态的源、
-        换过 UA 的源，缓存互相污染（同一类坑见 lessons §五）。
+        换过 UA 的源，缓存互相污染（同一类坑）。
         """
         self._fetch("https://a.com/x")
         self._fetch("https://a.com/x", headers={"Referer": "https://b.com"})

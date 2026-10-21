@@ -7,7 +7,7 @@ from core.urls import abs_url as _abs_url
 from core.fetch import fetch
 
 #: 书名上的「装饰」：实测 samsbook 的搜索结果标题写成 `[历史]绍宋` / `【言情】绍宋之后`，
-#: 文本**永远不会**恰好等于关键词——这一类站点原来必然失配（lessons §七十七）。
+#: 文本**永远不会**恰好等于关键词——这一类站点原来必然失配。
 _TITLE_DECOR_RE = re.compile(r"^\s*[\[【(（][^\]】)）]{1,10}[\]】)）]\s*")
 
 

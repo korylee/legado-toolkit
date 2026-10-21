@@ -89,7 +89,9 @@ from core.tags import RULE_INCOMPLETE_TAG
 # 17：校验结果改为只保留健康状态和逐段验证事实，移除星级及来源字段。
 # 旧缓存即使含有星级，也不能作为新结果形状继续复用。
 # 18：校验引擎新增 retry / keyword / root_kind 口径，旧结论不可复用。
-CACHE_VERSION = 18
+# 19：正文豁免口径收严（2026-10-19）：图片/音频源正文规则为空时 content_ok 从
+# true 改为 null（豁免不是验证）。旧结论把豁免记成「验证通过」，不可复用。
+CACHE_VERSION = 19
 
 
 def classify_transport_error(error: str) -> str:
@@ -379,8 +381,10 @@ def health_for(row: Dict[str, Any], *, host: str = "",
     state = str(row.get("state") or "")
     if state in _STATE_HEALTH:
         # 非 error 的几态：判词直接用结论行自带的那句（它是我们 Kotlin 侧按术语表写的），
-        # 没有就留空——**不要在这里另编一句**
-        return _STATE_HEALTH[state], ("" if state == "ok" else str(row.get("reason") or ""))
+        # 没有就留空——**不要在这里另编一句**。ok 行的 reason 也放行：豁免/浏览器渲染
+        # 这类「通过但要说清怎么来的」的说明写在 ok 行的 reason 里，压掉它
+        # 「豁免不是验证」就到不了用户眼前（AGENTS #4：原因被上层压掉）。
+        return _STATE_HEALTH[state], str(row.get("reason") or "")
     cause = classify_cause(row)
     if cause == CAUSE_SELF:
         return Health.PENDING, "本机引擎这次没跑成（不是源的问题）：%s" % _brief(row)

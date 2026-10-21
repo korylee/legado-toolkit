@@ -42,8 +42,27 @@ class DebugServiceLauncher {
             return
         }
 
-        // 没有 key= 就是批量校验的参数文件，不归本启动器管——**跳过而不是失败**：
-        // 不带上 --tests 跑全量测试时两个启动器都会执行，这里失败会平白弄红一次构建
+        // 没有 key= 也没有 try_body= 就不是本启动器的参数文件——**跳过而不是失败**：
+        // 不带上 --tests 跑全量测试时其他启动器也会执行，这里失败会平白弄红一次构建。
+        // `try_body=` 在 ⇒ 轻量验证分派（RuleTry，不走调试链）。
+        val tryBody = props.getProperty("try_body")
+        if (!tryBody.isNullOrBlank()) {
+            val tryStep = props.getProperty("try_step") ?: ""
+            val tryRule = props.getProperty("try_rule") ?: ""
+            val tryBase = props.getProperty("try_base") ?: ""
+            val tryFile = props.getProperty("file") ?: ""
+            val tryOut = props.getProperty("out") ?: ""
+            println("APPSERVICE-LAUNCHER(rule_try): step=$tryStep")
+            val code = DebugService.main(listOf(
+                "--file", tryFile, "--try", "--try-body", tryBody,
+                "--try-step", tryStep, "--try-rule", tryRule,
+                "--try-base", tryBase, "--out", tryOut).toTypedArray())
+            println("APPSERVICE-LAUNCHER(rule_try): done, code=$code")
+            if (code != DebugService.OK) {
+                throw AssertionError("RuleTry 退出码 $code（0=跑完 / 4=入参或 IO 错误）")
+            }
+            return
+        }
         val key = props.getProperty("key")
         if (key.isNullOrBlank()) {
             println("APPSERVICE-LAUNCHER: args.properties 里没有 key=，不是调试参数，跳过")

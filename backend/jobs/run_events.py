@@ -27,20 +27,31 @@ _LOCK = threading.Lock()
 
 EVENTS_NAME = "events.jsonl"
 FAILURES_NAME = "failures.jsonl"
+#: 模型调用的账本（AI 补全）：**输入输出原文**。与事件账本同一套读法（行号即游标），
+#: 单独一本的理由是形状与体量都不同：提示词几十 KB，按需单取，不进事件流。
+LLM_NAME = "llm.jsonl"
 
-#: 清场时保留事件、失败账本及其 per-job attempts 容器（唯一一份，共批量校验与调试使用）。
-KEEP_ON_TRIM = (EVENTS_NAME, FAILURES_NAME, "attempts")
+#: 清场时保留事件、失败、模型调用三本账及其 per-job attempts 容器
+#: （唯一一份，共批量校验、调试与 AI 补全使用）。
+KEEP_ON_TRIM = (EVENTS_NAME, FAILURES_NAME, LLM_NAME, "attempts")
 
 
-def append_event(run_dir: Optional[pathlib.Path], kind: str, **fields: Any) -> None:
+def append_event(run_dir: Optional[pathlib.Path], event: str, /, **payload: Any) -> None:
     """骨架事件追加到运行目录的 ``events.jsonl``。
 
     一行一条、**坏行也占号**（消费端按行号增量读，见 ``backend/api/job_timeline``）。
     事件是辅助证据：写不进去（OSError）不拦运行本身。
+
+    事件名是**位置专用参数**（``/``）：事件数据里本来就有叫 ``kind`` / ``fields``
+    的字段（提议族的取样类型、这一族要问哪些字段），形参若可被关键字命中，撞名会抛
+    「got multiple values for argument」——真踩过：兜底 except 把它吞了，界面上只
+    看到进度缺一段、账本里少一类行。
     """
     if run_dir is None:
         return
-    record = {"ts": round(time.time(), 3), "kind": kind, **fields}
+    # ``kind`` / ``ts`` 是账本的**保留键**：放在最后展开，载荷里的同名键覆盖不掉它们
+    # （真踩过：AI 补全把取样类型也叫 kind，事件名当场被换成 "text"/"media"）
+    record = {**payload, "ts": round(time.time(), 3), "kind": event}
     with _LOCK:
         try:
             with open(pathlib.Path(run_dir) / EVENTS_NAME, "a", encoding="utf-8") as f:
@@ -70,8 +81,23 @@ def append_failure(run_dir: Optional[pathlib.Path], *, url: Any, name: Any, stat
             pass
 
 
-def record_failures(run_dir: Optional[pathlib.Path], rows: Iterable[Any],
-                    chunk: str = "") -> None:
+def append_llm_call(run_dir: Optional[pathlib.Path], record: Dict[str, Any]) -> None:
+    """把**一次模型调用**记进 ``llm.jsonl``（输入输出原文）。
+
+    与事件账本同一套约定：一行一条、坏行也占号、写不进去（OSError）不拦运行本身
+    ——账本是排障材料，不是运行的前置条件。锁也共用一把：块线程与任务协程会交错写。
+    """
+    if run_dir is None:
+        return
+    with _LOCK:
+        try:
+            with open(pathlib.Path(run_dir) / LLM_NAME, "a", encoding="utf-8") as f:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except OSError:
+            pass
+
+
+def record_failures(run_dir: Optional[pathlib.Path], rows: Iterable[Any],                    chunk: str = "") -> None:
     """一批结论里没通过的那些记进失败清单。
 
     通过判据与 ``core.jvm_health`` 的映射同一条：**只有 ``state == "ok"`` 算通过**，

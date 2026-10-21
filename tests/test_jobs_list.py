@@ -201,6 +201,16 @@ class JobListFilterTests(unittest.TestCase):
         self.assertEqual(self._ids(status="active"),
                          {"running", "cancelling", "long_run"})
 
+    def test_kinds_filter_covers_a_category(self):
+        """类目页签的过滤（校验 = jvm_run + check）：CSV 拆给 SQL 的 IN。
+
+        单个 ``kind`` 参数盖不住一类多个 kind；前端按页拆行过滤会把别的行悄悄藏掉
+        ——「其他」桶也就推不出来了。"""
+        ids = self._ids(scope="all", kinds="jvm_run,check")
+        self.assertEqual(ids, {"running", "cancelling", "finished",
+                               "ancient", "long_run"})
+        self.assertNotIn("generated", ids, "add 不在校验类里")
+
     def test_status_and_kind_filters_combine(self):
         self.assertEqual(self._ids(status="done", kind="add"), {"generated"})
 

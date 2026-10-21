@@ -122,7 +122,7 @@ class AddResult:
 
     为什么不是一个裸 int：原因原来只 print 到 stdout，调用方（job / CLI）手里只剩一个码，
     于是「工具认不出这个页面」被压成「生成失败」，看起来与「源坏了」一模一样
-    （lessons §七十七、AGENTS #4）。两者绑在同一个返回值里，上层就没有「顺手把原因丢掉」
+    （AGENTS #4）。两者绑在同一个返回值里，上层就没有「顺手把原因丢掉」
     的位置。**约定：`rc != 0` 时 `error` 必须非空**——`tests/test_quick_generate.py` 钉着它。
     """
     rc: int
@@ -148,7 +148,7 @@ def _page_for_analysis(url: str, want: str, notes: List[str], timeout: int = 60,
 
     **引擎拿不到就抛**（带原因）——调用方据此「这一段规则先不给」。**不回退**：
     在 L2–L4 的页面上用我们抓的那份写规则，产出的是「看着正常、实际取不到」的假成功
-    （lessons §八十：引擎是材料就当硬要求）。
+    （引擎是材料就当硬要求）。
     """
     from core.js_hints import classify_with_scripts
     from core.quality import interstitial_marker
@@ -267,7 +267,7 @@ def run_add(url, name="", source_type="novel", group="📖新增源",
     # （`interstitial_marker` 要 28KB 那份材料才判得出「安全验证」），所以这里必须去问引擎——
     # 就地降级成「搜索不可用 → 仅发现」会把**「机器过不去那道验证」读成「站点不能搜」**，
     # 产出是一条静默的空源、rc=0，而原因一路被压掉（AGENTS #4；实测 18read.net 回 2 字节的
-    # `CN`，见 lessons §八十九）。
+    # `CN`）。
     if not discover and _too_small_to_be_a_page(html):
         n = len(html.encode("utf-8"))
         print("   ℹ️  抓回来这一份只有 %d 字节（不像站点），改用本机引擎取这一页…" % n)

@@ -92,6 +92,13 @@ class _Base(unittest.TestCase):
             self.addCleanup(p.stop)
         self.fake = _FakeDaemon()
         self.addCleanup(self.fake.stop)
+        # 端口窗口钉到假 daemon 那个端口：身份只认窗口里的应答，不钉的话扫描会去问真机器
+        # （`_listen_map` 也打桩——测试不许依赖本机真实的监听表）
+        for name, val in (("_daemon_window", lambda: [self.fake.port]),
+                          ("_listen_map", lambda: {self.fake.port: self.fake.pid})):
+            p = mock.patch.object(jvm_daemon, name, val)
+            p.start()
+            self.addCleanup(p.stop)
 
 
 class ProtocolTests(_Base):
@@ -171,19 +178,27 @@ class SigTests(_Base):
     def test_stop_prefers_graceful_op(self) -> None:
         info = {"pid": self.fake.pid, "port": self.fake.port, "sig": "sig-a"}
         jvm_daemon.info_path().write_text(json.dumps(info), encoding="utf-8", newline="\n")
-        self.assertTrue(jvm_daemon.stop())
+        # 假 daemon 的 pid（4242）是编的、没有真进程：成功判据的第二半（进程也没了）在这里
+        # 必须 mock 掉，否则「这台机器上恰好有 4242」会让用例偶发变红。
+        with mock.patch.object(jvm_daemon, "_pid_alive", return_value=False):
+            self.assertTrue(jvm_daemon.stop())
         self.assertEqual(self.fake.received[-1].get("op"), "stop",
                          "**必须先发 op=stop**：只 kill 的话浏览器会活下来占着 profile")
         self.assertFalse(jvm_daemon.info_path().exists(), "停完要把 info 清掉")
 
-    def test_stop_does_not_kill_a_foreign_pid(self) -> None:
-        """info 里的 pid 与端口上应答的 pid 不一致 → 不动手（pid 会被系统复用）。"""
+    def test_stop_ignores_the_cached_pid_and_stops_the_responder(self) -> None:
+        """缓存里的 pid **不参与停止判据**：此刻应答的那个才是要停的进程。
+
+        旧实现拿「记录 pid ≠ 应答 pid」当拒绝理由，于是存量旧记录永远停不掉；现在端口
+        来自窗口、身份来自应答，缓存（这里写着一个不存在的 999999）只是缓存。
+        """
         info = {"pid": 999999, "port": self.fake.port, "sig": "sig-a"}
         jvm_daemon.info_path().write_text(json.dumps(info), encoding="utf-8", newline="\n")
-        with mock.patch.object(jvm_daemon.os, "kill") as k:
-            jvm_daemon.stop()
-        k.assert_not_called()
-        self.assertEqual([r for r in self.fake.received if r.get("op") == "stop"], [])
+        with mock.patch.object(jvm_daemon, "_pid_alive", return_value=False), \
+             mock.patch.object(jvm_daemon.os, "kill") as kill:
+            self.assertTrue(jvm_daemon.stop())
+        kill.assert_not_called()          # 优雅停走 op=stop，不碰任何 pid
+        self.assertEqual(self.fake.received[-1].get("op"), "stop")
 
     def test_stop_reports_false_when_the_daemon_ignores_it(self) -> None:
         """**「有应答」不等于「停了」**：不认 `op=stop` 的 daemon（跑旧类那种）会把指令
@@ -193,8 +208,12 @@ class SigTests(_Base):
         self.addCleanup(fake.stop)
         info = {"pid": fake.pid, "port": fake.port, "sig": "sig-a"}
         jvm_daemon.info_path().write_text(json.dumps(info), encoding="utf-8", newline="\n")
-        with mock.patch.object(jvm_daemon.time, "sleep", lambda _s: None):
+        with mock.patch.object(jvm_daemon, "_daemon_window", lambda: [fake.port]), \
+             mock.patch.object(jvm_daemon, "_listen_map",
+                               lambda: {fake.port: fake.pid}), \
+             mock.patch.object(jvm_daemon.time, "sleep", lambda _s: None):
             self.assertFalse(jvm_daemon.stop(), "没真停就必须报 False")
+        self.assertTrue(jvm_daemon.info_path().exists(), "没停干净就不许清缓存")
 
 
 class FallbackTests(_Base):

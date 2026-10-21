@@ -39,6 +39,9 @@ class AgentActionSchemaTests(unittest.TestCase):
             },
             "ask_user": {"question": "请选择运行通道", "options": ["本机", "App"]},
             "stop_unsupported": {},
+            "rule_try": {"step": "bookUrl", "rule": "class.title@text",
+                         "field": "ruleBookInfo.name"},
+            "autofill_propose": {"step": "bookUrl"},
         }
         reasons = {
             "suggest_rule": "candidate_available",
@@ -49,6 +52,8 @@ class AgentActionSchemaTests(unittest.TestCase):
             "suggest_api_rule": "needs_network_evidence",
             "ask_user": "user_confirmation_required",
             "stop_unsupported": "unsupported_layer",
+            "rule_try": "candidate_available",
+            "autofill_propose": "rule_missing",
         }
         for action in ACTIONS:
             with self.subTest(action=action):

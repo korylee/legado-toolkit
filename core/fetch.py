@@ -174,7 +174,7 @@ def _cache_key(url: str, headers: dict, charset: Any, proxy: str,
                method: str = "GET", body: str = "") -> str:
     """缓存键 = **请求身份**（URL + 请求头 + charset + 代理 + 方法 + body）。
 
-    只按 URL 做键会把两种身份的内容串在一起（同一类坑见 lessons §五）：带登录态
+    只按 URL 做键会把两种身份的内容串在一起（同一类坑）：带登录态
     与不带登录态的源、换过 UA 的源，抓回来的不是同一份页面。代理也进键——换了
     出口 IP，同一个 URL 可能给出另一个地区的页面。method/body 同理：同 URL 的
     GET 与 POST（或不同 body）是两个请求，混用键会静默给出另一份响应——
@@ -441,7 +441,7 @@ def _too_small_to_be_a_page(html: str) -> bool:
 
     为什么值得单独一道闸门：`if html:` 这种判据会把 2 字节的 `CN` 当成「拿到了页面」，
     于是下游把「机器过不去那道验证」读成「站点不能搜」——**产出是一条静默的空源**
-    （AGENTS #4；lessons §八十九）。它比 `_page_has_search_results` 更靠前：那条问的是
+    （AGENTS #4）。它比 `_page_has_search_results` 更靠前：那条问的是
     「这份页面里有没有结果」，它问的是「这算不算一份页面」。
     """
     text = html or ""

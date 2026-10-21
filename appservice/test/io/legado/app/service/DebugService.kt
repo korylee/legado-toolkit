@@ -141,6 +141,14 @@ object DebugService {
 
     @JvmStatic
     fun main(args: Array<String>): Int {
+        // `--try` = 轻量验证分派（rule_try，不走调试链）：file=源 JSON、
+        // try-body=页面 HTML、try-step=步骤、try-rule=规则、try-base=baseUrl、
+        // out=结果 JSON。与调试共用本 main 的参数解析（未知参数照样显式拒绝）。
+        var tryMode = false
+        var tryBody = ""
+        var tryStep = ""
+        var tryRule = ""
+        var tryBase = ""
         var file: String? = null
         var key = ""
         var outPath = ""
@@ -149,6 +157,11 @@ object DebugService {
         var i = 0
         while (i < args.size) {
             when (args[i]) {
+                "--try" -> { tryMode = true }
+                "--try-body" -> { tryBody = args[++i] }
+                "--try-step" -> { tryStep = args[++i] }
+                "--try-rule" -> { tryRule = args[++i] }
+                "--try-base" -> { tryBase = args[++i] }
                 "--file" -> { file = args[++i] }
                 "--key" -> { key = args[++i] }
                 "--out" -> { outPath = args[++i] }
@@ -163,6 +176,13 @@ object DebugService {
             }
             i++
         }
+        if (tryMode) {
+            if (file.isNullOrBlank() || tryBody.isBlank() || tryStep.isBlank() || outPath.isBlank()) {
+                System.err.println("[appservice] --try 缺参数：file/try-body/try-step/out 都要给")
+                return BAD_INPUT
+            }
+            return runTry(file, tryBody, tryStep, tryRule, tryBase, outPath)
+        }
         if (file.isNullOrBlank() || key.isBlank() || outPath.isBlank()) {
             System.err.println("[appservice] 缺参数：file/key/out 都要给（timeout 可选）")
             return BAD_INPUT
@@ -172,6 +192,28 @@ object DebugService {
             return BAD_INPUT
         }
         return runOnce(Config(file, key, outPath, timeoutSec, cookie))
+    }
+
+    /**
+     * 轻量验证的一次性入口：产物 = `out` 指定的 JSON（`{ok, values, count, error}`）。
+     * 与调试同一条 Gradle 拉起链（DebugServiceLauncher），靠 `--try` 分派；
+     * RuleTry.run 不抛，这里只兜文件 IO。退出码：0=跑完（含「取不到」），
+     * 4=入参/IO 错误。
+     */
+    private fun runTry(file: String, bodyPath: String, step: String,
+                       rule: String, baseUrl: String, outPath: String): Int {
+        ValidateService.ensureStarted()
+        return try {
+            val source = io.legado.app.service.RuleTry.readSource(file)
+            val body = java.io.File(bodyPath).readText(Charsets.UTF_8)
+            val result = RuleTry.run(source, body, baseUrl, step, rule)
+            java.io.File(outPath).writeText(
+                ServiceJson.toJsonObject(result).toString(), Charsets.UTF_8)
+            OK
+        } catch (e: Throwable) {
+            System.err.println("[appservice] rule_try 失败: ${e::class.simpleName}: ${e.message?.take(200)}")
+            BAD_INPUT
+        }
     }
 
     /**
@@ -185,6 +227,20 @@ object DebugService {
         val timeoutSec: Long = DEFAULT_TIMEOUT_SEC,
         val cookie: String = "",
     )
+
+    /**
+     * 源 JSON 的取法：数组取第一条（与批量校验同一个导出形状），单对象原样。
+     * 空数组返回空串——「文件里没有源」由调用方用自己的口径说；
+     * 解析失败抛出，调用方按各自的退出码处置。两处调用（调试 / rule_try 一次性）
+     * 共用这一份，各写一遍就会在「空数组」上分叉。
+     */
+    internal fun sourceJsonOf(text: String): String {
+        val t = text.trim()
+        if (!t.startsWith("[")) return t
+        val arr = kotlinx.serialization.json.Json.parseToJsonElement(t)
+            as kotlinx.serialization.json.JsonArray
+        return if (arr.isEmpty()) "" else arr.first().toString()
+    }
 
     /**
      * 跑一次调试：读源 → 注入 cookie → 走 App 的调试链 → 落 NDJSON + 侧车 → 退出码。
@@ -205,14 +261,7 @@ object DebugService {
 
         // 源 JSON：数组取第一条（与批量校验同一个导出形状），也允许单个对象（手工跑方便）
         val sourceJson = try {
-            val text = File(file).readText(Charsets.UTF_8).trim()
-            if (text.startsWith("[")) {
-                val arr = kotlinx.serialization.json.Json.parseToJsonElement(text)
-                    as kotlinx.serialization.json.JsonArray
-                if (arr.isEmpty()) "" else arr.first().toString()
-            } else {
-                text
-            }
+            sourceJsonOf(File(file).readText(Charsets.UTF_8))
         } catch (e: Exception) {
             System.err.println("[appservice] 读源文件失败: ${file} — ${e.message?.take(160)}")
             return BAD_INPUT
@@ -285,6 +334,15 @@ object DebugService {
         // 时只造 `发现::`，但判据本身按上游抄）。**列表段只记一个段名**，
         // 侧车里不为没跑的那条管道多算一份材料。
         val listStep = if (key.contains("::")) "explore" else "search"
+        // L3 形状采集的**武装时机**：正文取数即将开始时武装一次（`runtimeProbeArmed`，
+        // shadow 下一次渲染取走）。唯一武装点是下文的 `CONTENT_START_MARK` 锚事件：
+        // 两个入口（`--URL` 单段与完整链路）上游都经 contentDebug 打它（上游
+        // `Debug.kt`，逐词比对钉在 TestRuntimeParity），且它先于正文那次取数。
+        // **不再按 key 预武装**：预武装会在 matched 补抓（webView 类源走 shadow）
+        // 上被消费，把 `lastRuntimeShape` 覆盖成非正文页的形状；此后正文翻页的另发
+        // 请求也走同一条 getStrResponse，但武装只消费一次，采到的是**第一章主页**
+        // ——正是「选了具体章节」要的那个页。列表/详情段的取数没有武装，shadow 侧
+        // `runtimeProbe` 为 false，不多 evaluate。
         var lastUrl = ""
         //: 引擎取回来的整页 HTML（{url: 整页}）。只在收集线程里写，收尾之后才读
         val engineHtml = EngineHtmlCollector()
@@ -315,6 +373,12 @@ object DebugService {
                             }
                             if (event.kind.isTerminal) sawTerminal.set(true)
                             val text = event.message ?: ""
+                            // 两个入口的正文段都从这里开始（contentDebug 的第一条，先于
+                            // 正文那次浏览器取数）——武装形状采集（只消费一次）。字面量
+                            // 与上游 `Debug.kt` 逐词比对钉在 TestRuntimeParity。
+                            if (isContentStart(text)) {
+                                ShadowBackstageWebView.runtimeProbeArmed.set(true)
+                            }
                             // 非 payload 事件才可能带 `≡获取成功`；记住它，payload 来时就知道页址
                             gotUrlOf(text)?.let { lastUrl = it }
                             // 收集在 payload 过滤**之后**：那一类事件的 text 是整页 HTML，
@@ -376,7 +440,7 @@ object DebugService {
         // 浏览器收掉之前做：URL 带 webView 选项时要用它，此时还热着（省一次 0.65s 的
         // 启动）；收尾那段的取舍见下面。
         val matchedResult = if (urls.isEmpty()) MatchedResult.empty()
-        else runMatchedWithPhase(source, urls.toList(), engineHtml.pages())
+        else runMatchedWithPhase(source, urls.toList(), engineHtml.pages(), urlsByStep)
         val matched = matchedResult.html
 
         // ---------------------------------------------------------------- 结构化结果（第四期）
@@ -420,9 +484,8 @@ object DebugService {
         //     必须同步 `core/app_debug.py` 与 `tests/test_jvm_debug_contract.py`；
         //   · 排障键 —— 只服务人看侧车（stderr 也打一份摘要），删除/改名不影响判定，
         //     但删之前 grep 一遍 `data/app_probe` 里的对拍脚本。
-        // 现有 47 键中协议键：code/code_text/events/dropped_payload/saw_terminal/
-        // timed_out/webview_unsupported/cookie_len/engine_html/matched_html/
-        // structured/network/error/hint。
+        // 协议键在下面 map 里自标（各键带「Python 侧消费」注释），不另抄一份清单——
+        // 那份清单必然过期（AGENTS #23③）。
         writeMeta(outPath + ".meta.json", mapOf(
             // ---- 协议键：Python 侧消费（形状闸门见各键注释）----
             "code" to code,
@@ -448,6 +511,9 @@ object DebugService {
             // `v` 是它的版本轴（AGENTS #5b）——字段集或口径一变要 bump。
             // steps/fails 都在这一个键里，不另抄一份计数（另一份必然漂，AGENTS #10）。
             "structured" to structured,
+            // L3 运行时形状（形状闸门在 Python 侧：`core/app_debug.runtime_map`）。
+            // 只有正文段武装过采集才非空；**只采形状不采值**——图片地址与密钥不进侧车。
+            "runtime" to (ShadowBackstageWebView.lastRuntimeShape ?: emptyMap<String, Any?>()),
             "error" to failure.get(),
             "hint" to if (code == ZERO_EVENT) ZERO_EVENT_HINT else "",
             // ---- 排障键：人看侧车用（四个计数差太远说明规则没命中或页面取不到）----
@@ -584,20 +650,64 @@ object DebugService {
     internal fun stripEventTimePrefix(text: String): String =
         EVENT_TIME_PREFIX_RE.replaceFirst(text, "")
 
+    /**
+     * 正文段开始的锚事件匹配：事件 message 带 [EVENT_TIME_PREFIX_RE] 的时间前缀
+     * （上游 `Debug.log` 每条都拼），直接 `startsWith` 恒 false——先剥前缀再比。
+     */
+    internal fun isContentStart(text: String): Boolean =
+        stripEventTimePrefix(text).startsWith(CONTENT_START_MARK)
+
     private val GOT_URL_RE = Regex("≡获取成功[:：](.+)$")
+
+    /**
+     * 正文段开始的**事件锚**：上游 `Debug.kt` 的 `contentDebug` 第一条 log
+     * （`︾开始解析正文页`）。它是唯一「两个调试入口都打、且先于正文取数」的事件，
+     * L3 形状采集的武装就盯它——上游改了这行措辞，采集会静默失效（侧车里没有
+     * runtime 键），所以逐词比对钉在 `TestRuntimeParity`。
+     */
+    internal const val CONTENT_START_MARK = "︾开始解析正文页"
 
     private fun gotUrlOf(text: String): String? =
         GOT_URL_RE.find(text)?.groupValues?.get(1)?.trim()?.takeIf { it.isNotEmpty() }
 
     /**
-     * 能记命中 DOM 的段名（= `core/app_debug.SEGMENT_NAMES` 的取值；**没有 `bookUrl`**：
-     * 详情段是 `ruleBookInfo.*` 那一族字段规则，不是一条列表/正文规则，本批不覆盖）。
+     * 能记命中 DOM 的段名（= `core/app_debug.SEGMENT_NAMES` 的取值）。
+     * **`bookUrl` 走字段表**：详情段是 `ruleBookInfo.*` 字段规则族，单条 DOM 装不下，
+     * 按 `bookUrl.<字段>` 子键逐字段记（见 [MATCHED_INFO_FIELDS]）。
      *
      * 段名是 **Python 那边的词汇**——跨语言没法共享代码，逐词比对钉在
-     * `tests/test_jvm_debug_contract.py::TestMatchedStepNameParity`（加一个名字就要加
-     * [matchedRuleOf] 的分支，否则这个名字永远记不出东西来）。
+     * `tests/test_jvm_debug_contract.py::TestMatchedStepNameParity`。
      */
-    private val MATCHED_STEP_NAMES = listOf("search", "explore", "toc", "content")
+    private val MATCHED_STEP_NAMES = listOf("search", "explore", "bookUrl", "toc", "content")
+
+    /**
+     * 详情段按字段记命中的**字段后缀表**：`bookUrl.<字段>` 的字段名与
+     * `StructuredResult` 的详情字段同名（snake_case）——Python 侧拼接（`core.app_debug`
+     * 的 `BOOKINFO_FIELD_LABELS`）与展示标签按它取，逐词比对钉在
+     * `TestMatchedStepNameParity`。
+     */
+    internal val MATCHED_INFO_FIELDS = listOf(
+        "name", "author", "kind", "word_count", "last_chapter",
+        "intro", "cover_url", "toc_url",
+    )
+
+    /**
+     * 字段后缀 → 该字段的详情规则。**coverUrl / tocUrl 按属性取值**（`@src` /
+     * `@href`）：属性名与标签名同形（AGENTS #21），`elementsPartOf` 猜不了——
+     * 这类规则用 `getElements` 原样跑多半取空，那个字段就不记键（不是失败）。
+     */
+    internal fun matchedInfoRuleOf(source: BookSource, field: String): String =
+        when (field) {
+            "name" -> source.getBookInfoRule().name
+            "author" -> source.getBookInfoRule().author
+            "kind" -> source.getBookInfoRule().kind
+            "word_count" -> source.getBookInfoRule().wordCount
+            "last_chapter" -> source.getBookInfoRule().lastChapter
+            "intro" -> source.getBookInfoRule().intro
+            "cover_url" -> source.getBookInfoRule().coverUrl
+            "toc_url" -> source.getBookInfoRule().tocUrl
+            else -> ""
+        }.orEmpty()
 
     /**
      * 段名 → 该段的取值规则。**这里只按「哪条规则命中」命名，不解析事件流的分段**
@@ -642,10 +752,11 @@ object DebugService {
         source: BookSource,
         urls: List<String>,
         enginePages: Map<String, EnginePage>,
+        urlsByStep: Map<String, String>,
     ): MatchedResult {
         ShadowBackstageWebView.phase.set("matched")
         return try {
-            runMatched(source, urls, enginePages)
+            runMatched(source, urls, enginePages, urlsByStep)
         } finally {
             ShadowBackstageWebView.phase.set("debug")
         }
@@ -690,6 +801,7 @@ object DebugService {
         source: BookSource,
         urls: List<String>,
         enginePages: Map<String, EnginePage>,
+        urlsByStep: Map<String, String>,
     ): MatchedResult {
         val done = java.util.concurrent.atomic.AtomicBoolean(false)
         val out = java.util.concurrent.atomic.AtomicReference<MatchedResult?>(null)
@@ -698,7 +810,7 @@ object DebugService {
             val fails = mutableListOf<String>()
             val html = runBlocking {
                 try {
-                    collectMatched(source, urls, enginePages, stats, fails)
+                    collectMatched(source, enginePages, urlsByStep, stats, fails)
                 } catch (e: Throwable) {
                     fails.add("整段失败 — ${e::class.simpleName}: ${e.message?.take(120)}")
                     emptyMap()
@@ -723,20 +835,46 @@ object DebugService {
     /**
      * 逐个 URL：取一次页面（**每个 URL 只取一次**，详情页与目录页常常同 URL），在上面跑
      * 该源每条取值规则，命中就记 `out[url][段名]`。返回 `{url: {段名: 命中 DOM}}`。
+     *
+     * `urlsByStep`（App 的 payload 管道配好的「段 → URL」）负责把规则送到**正确的页**上：
+     * 列表/正文段只在管道记的那个 URL 上跑，详情字段子键也只跑详情 URL——不再对每个
+     * URL 全量试规则（10 倍规模下那 24 次多余解析是 matched 预算最先烂的地方）。
+     * 管道没记的段自然不跑，与 structured 采集同一纪律。
      */
     private suspend fun collectMatched(
         source: BookSource,
-        urls: List<String>,
         enginePages: Map<String, EnginePage>,
+        urlsByStep: Map<String, String>,
         stats: MatchStats,
         fails: MutableList<String>,
     ): Map<String, Map<String, String>> {
-        val rules = MATCHED_STEP_NAMES.map { it to matchedRuleOf(source, it) }
-            .filter { (_, rule) -> rule.isNotBlank() }
-        if (rules.isEmpty()) return emptyMap()
+        // 段 → 规则：**只保留管道真的跑到的段**（urlsByStep 里没有的段无从谈起）
+        val rules = MATCHED_STEP_NAMES.filter { it != "bookUrl" }
+            .mapNotNull { step ->
+                val url = urlsByStep[step] ?: return@mapNotNull null
+                val rule = matchedRuleOf(source, step)
+                if (rule.isBlank()) null else (step to rule) to url
+            }
+        // 详情段按字段展开：每条字段规则各命中各的子树（见 MATCHED_INFO_FIELDS）
+        val infoUrl = urlsByStep["bookUrl"] ?: ""
+        val infoFields = if (infoUrl.isEmpty()) emptyList()
+        else MATCHED_INFO_FIELDS.mapNotNull { field ->
+            val rule = matchedInfoRuleOf(source, field)
+            if (rule.isBlank()) null else field to rule
+        }
+        if (rules.isEmpty() && infoFields.isEmpty()) return emptyMap()
+        // 段 → 页面：一个 URL 承载哪些段（详情页与目录页共用 URL 时同页两段）
+        val stepsByUrl = LinkedHashMap<String, MutableList<Pair<String, String>>>()
+        for ((stepRule, url) in rules) {
+            stepsByUrl.getOrPut(url) { mutableListOf() }.add(stepRule)
+        }
+        if (infoFields.isNotEmpty()) {
+            val list = stepsByUrl.getOrPut(infoUrl) { mutableListOf() }
+            for ((field, rule) in infoFields) list.add("bookUrl.$field" to rule)
+        }
         val out = LinkedHashMap<String, Map<String, String>>()
         val deadline = System.currentTimeMillis() + MATCH_BUDGET_MS
-        for (url in urls) {
+        for (url in stepsByUrl.keys) {
             val left = deadline - System.currentTimeMillis()
             if (left <= 0) {
                 stats.skipped++
@@ -751,7 +889,7 @@ object DebugService {
                     continue
                 }
                 val perStep = LinkedHashMap<String, String>()
-                for ((step, rule) in rules) {
+                for ((step, rule) in stepsByUrl[url] ?: continue) {
                     try {
                         hitOf(source, body, url, rule)?.let { perStep[step] = it }
                     } catch (e: Throwable) {
@@ -824,14 +962,36 @@ object DebugService {
     }
 
     /**
+     * 属性末段的**候选**选择器（[elementsPartOf] 返回 null、末段又不是那五个动作词时）：
+     * 把末段剥掉。它只是候选——调用方先跑原样那次（末段可能是标签选择器，
+     * 属性与标签名同形，不许猜，AGENTS #21），取不到才用它。
+     */
+    internal fun attributeTailOf(rule: String): String? {
+        val body = rule.substringBefore("##").trim()
+        val idx = body.lastIndexOf('@')
+        if (idx <= 0) return null
+        if (body.substring(idx + 1).trim() in VALUE_ACTION_TAILS) return null
+        return body.substring(0, idx).trim().takeIf { it.isNotEmpty() }
+    }
+
+    /**
      * 在这份页面上跑一条取值规则，返回命中节点的 HTML（没命中返回 null）。
      *
-     * 末段是取值动作的规则（[elementsPartOf]）**直接用元素部分**，不先跑原样那次：
-     * 那次必然拿不到东西（末段被当成选择器），而带 `##替换` 的形态实测还会让 jsoup
-     * 收到空选择器、抛 `SelectorParseException`——先跑一次等于给失败留个位置。
+     * 三步取法、层层验证：
+     * ① 末段是取值动作的规则（[elementsPartOf]）**直接用元素部分**，不先跑原样那次：
+     *    那次必然拿不到东西（末段被当成选择器），而带 `##替换` 的形态实测还会让 jsoup
+     *    收到空选择器、抛 `SelectorParseException`——先跑一次等于给失败留个位置；
+     * ② 其余原样跑（末段是标签选择器的规则在这里就命中了）；
+     * ③ 还取不到且末段疑似属性（`@src`/`@href`）：按「属性所在节点」兜一次——
+     *    封面/目录链接这类字段规则的常见写法，剥掉属性段就是承载它的元素。
+     *    命中回填只进展示层、不进判定；取不到仍是 null，不静默也不猜。
      */
-    private suspend fun hitOf(source: BookSource, body: String, url: String, rule: String): String? =
-        htmlOn(source, body, url, elementsPartOf(rule) ?: rule)
+    private suspend fun hitOf(source: BookSource, body: String, url: String, rule: String): String? {
+        elementsPartOf(rule)?.let { return htmlOn(source, body, url, it) }
+        htmlOn(source, body, url, rule)?.let { return it }
+        attributeTailOf(rule)?.let { return htmlOn(source, body, url, it) }
+        return null
+    }
 
     /**
      * 按一条规则取元素，返回命中节点的 HTML（没命中返回 null）。

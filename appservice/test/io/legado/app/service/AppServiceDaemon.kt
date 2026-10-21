@@ -14,7 +14,7 @@ import java.net.SocketTimeoutException
 
 /**
  * 常驻引擎服务：**起一次**（JVM + Robolectric + App + Koin），之后每次调试或校验只付站点的时间。
- * 为什么值得存在、实测数字与取舍见 lessons §六十五 / §六十六 / §六十七（别在这儿抄）。
+ * 为什么值得存在、取舍与实测数字见 `git log`（别在这儿抄）。
  *
  * ## 与旧的两个 daemon（DebugServiceDaemon / ValidateServiceDaemon，2026-10-18 合并）
  *
@@ -119,7 +119,7 @@ object AppServiceDaemon {
         if (req.str("op") == "ping") {
             out.println(respond(id, DebugService.OK, 0, "", mapOf(
                 "kind" to "engine",
-                "ops" to listOf("debug", "validate"),
+                "ops" to listOf("debug", "validate", "rule_try"),
                 "pid" to ProcessHandle.current().pid(),
                 "sig" to sig,
             )))
@@ -138,9 +138,10 @@ object AppServiceDaemon {
         return when (req.str("op").ifBlank { "debug" }) {
             "debug" -> handleDebug(id, req, out)
             "validate" -> handleValidate(id, req, out)
+            "rule_try" -> handleRuleTry(id, req, out)
             else -> {
                 out.println(respond(id, DebugService.BAD_INPUT, 0,
-                    "未知 op：" + req.str("op") + "（支持 debug / validate）"))
+                    "未知 op：" + req.str("op") + "（支持 debug / validate / rule_try）"))
                 out.flush()
                 true
             }
@@ -223,6 +224,41 @@ object AppServiceDaemon {
         out.println(respond(id, code, cost, error))
         out.flush()
         println("[appservice] daemon 校验完成 job=$ownerJob chunk=$ownerChunk code=$code ${cost}ms")
+        return true
+    }
+
+    /**
+     * 轻量验证 op（rule_try）：页面 HTML 从**文件**读（几百 KB 的正文不该挤一行
+     * JSON），源与规则走请求体。RuleTry.run 不抛（失败进 error 字段），这里只兜
+     * 入参缺失与读文件失败。应答带 `result`（{ok, values, count, error}）。
+     */
+    private fun handleRuleTry(id: Long, req: JsonObject, out: PrintWriter): Boolean {
+        val sourcePath = req.str("file")
+        val bodyPath = req.str("body_path")
+        val step = req.str("step")
+        val rule = req.str("rule")
+        val baseUrl = req.str("base_url")
+        if (sourcePath.isBlank() || bodyPath.isBlank() || step.isBlank()) {
+            out.println(respond(id, DebugService.BAD_INPUT, 0,
+                "缺参数：file（源 JSON）/ body_path（页面 HTML）/ step 都要给"))
+            out.flush()
+            return true
+        }
+        val started = System.currentTimeMillis()
+        val (code, result) = try {
+            val source = RuleTry.readSource(sourcePath)
+            val body = java.io.File(bodyPath).readText(Charsets.UTF_8)
+            DebugService.OK to RuleTry.run(source, body, baseUrl, step, rule)
+        } catch (e: Throwable) {
+            System.err.println("[appservice] daemon rule_try 异常: ${e.stackTraceStr()}")
+            DebugService.BAD_INPUT to mapOf<String, Any>(
+                "ok" to false, "values" to emptyList<String>(), "count" to 0,
+                "error" to ("%s: %s".format(e::class.simpleName, e.message?.take(160) ?: "")))
+        }
+        val cost = System.currentTimeMillis() - started
+        out.println(respond(id, code, cost, "", mapOf("result" to result)))
+        out.flush()
+        println("[appservice] daemon rule_try 完成 step=$step code=$code ${cost}ms")
         return true
     }
 

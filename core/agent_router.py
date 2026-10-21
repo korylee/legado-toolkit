@@ -146,18 +146,6 @@ def route_agent_context(context: Mapping[str, Any] | None,
         return plan
 
     if layer == "L3":
-        from core.agent_pocket_comic import build_pocket_comic_strategy
-
-        pocket = build_pocket_comic_strategy(context)
-        if pocket.get("ready"):
-            plan = _base(context, "suggest_rule", "candidate_available",
-                         "已确认章节运行时图片可访问，可生成正文图片草稿；仍需 App 实测验收",
-                         mode="deterministic", requires_model=False,
-                         method="app")
-            plan["strategy"] = pocket["strategy"]
-            plan["draft"] = pocket["draft"]
-            plan["verification_note"] = pocket["verification_note"]
-            return plan
         if runtime:
             runtime_field = _runtime_field(runtime)
             if runtime_field:
