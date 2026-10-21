@@ -37,7 +37,7 @@ from core.tags import (
     split_system_user as _split_group,
 )
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 #: 本进程内已经建过 schema 的库（绝对路径）。
 #:
@@ -156,7 +156,10 @@ DDL = [
         content_response_ms INTEGER,
         content_ok          INTEGER,
         error               TEXT DEFAULT '',
-        checked_at          TEXT NOT NULL
+        checked_at          TEXT NOT NULL,
+        state               TEXT DEFAULT '',
+        stage               TEXT DEFAULT '',
+        timeout_kind        TEXT DEFAULT ''
     )""",
     "CREATE INDEX IF NOT EXISTS idx_checks_url ON checks(source_url, checked_at DESC)",
     """CREATE TABLE IF NOT EXISTS diagnosis (
@@ -293,6 +296,16 @@ class Store:
         # 判据强度不同（真机有登录态和用户自己的网络出口），不记出处就是一份
         # 没有来源的结论。**本地回放那个取值随本地校验链退场（十-4）**
         ("engine", "TEXT NOT NULL DEFAULT ''"),
+        # 段级结论（S3-4）：**哪一段、哪一类超时**要结构化，不能只留 `error` 里那句
+        # 文案——529 条超时结论今天只剩「超时」两个字加一句话，动作分不出来（AGENTS #4）。
+        # `state` 是结论行状态名（ok / no_result / timeout / error / …，Kotlin 产出侧写、
+        # 前端 `sourceRow.JVM_STATE_LABELS` 取词）；`stage` 是跑到的段（appservice 的
+        # `DEPTH_*`，读取侧同一份枚举见本文件 `_JVM_STAGE_RANK`）；`timeout_kind` 是超时
+        # 归因的闭集（`ValidateService.TIMEOUT_BUDGET` / `TIMEOUT_APP`，两侧逐词比对见
+        # tests/test_jvm_service_parity.py）。
+        ("state", "TEXT DEFAULT ''"),
+        ("stage", "TEXT DEFAULT ''"),
+        ("timeout_kind", "TEXT DEFAULT ''"),
     ], "jobs": [
         # 任务保留：对齐 exports（expires_at + pinned + sweep），**原来完全没有**——
         # list_jobs 只是显示时 LIMIT 50，表本身无限增长
@@ -311,7 +324,8 @@ class Store:
         SELECT s.id, s.source_url, s.name, s.source_type, s.group_name, s.enabled,
                s.user_tags, s.system_tags_locked, s.fingerprint, s.deleted_at, s.updated_at,
                c.health, c.checked_at, c.probe_depth, c.error AS check_error,
-               c.toc_complete, c.content_ok, c.search_hit, c.quality_tags, c.engine
+               c.toc_complete, c.content_ok, c.search_hit, c.quality_tags, c.engine,
+               c.state, c.stage, c.timeout_kind
         FROM sources s
         LEFT JOIN checks c ON c.id = (%s)""" % _latest_check_id_sql("s")
 
@@ -410,7 +424,7 @@ class Store:
         包含更浅的全部信息。
 
         **同一个 URL 只留一条**、两侧都过宽松归一——库里的 URL 本身有脏字符
-        （前导空格/尾斜杠），实测 77/77 靠归一对上（lessons §五十一）。
+        （前导空格/尾斜杠），实测 77/77 靠归一对上。
         """
         import json as _json
         import re as _re
@@ -521,7 +535,7 @@ class Store:
 
         名字是公开的（原来叫 `_known_user_tags`）：它现在有库外的调用方
         （导入接口），私有名会把「白名单到底包含什么」变成一个只有本类知道的
-        事实——而 lessons §三十四/三十五 已经把它写成对外契约。
+        事实——这条已经写成对外契约。
         """
         out = set(_DEFAULT_USER_TAGS)
         for row in self.conn.execute(
@@ -821,7 +835,7 @@ class Store:
         比对，同一个源再导入一次会被判成「规则冲突」——而原因只是改过名字。
 
         **不走 `save_source`**：那条路径会 `set_user_tags([url], body.user_tags)`
-        整组覆盖，漏传就把标签清空（lessons §三十五 记过）。
+        整组覆盖，漏传就把标签清空。
         """
         from core.loader import _normalize_url
         from core.loader import fingerprint as fp_of
@@ -1174,6 +1188,9 @@ class Store:
                 str(r.get("error", "") or ""),
                 str(r.get("checked_at", "") or ts),
                 str(r.get("engine", "") or ""),
+                str(r.get("state", "") or ""),
+                str(r.get("stage", "") or ""),
+                str(r.get("timeout_kind", "") or ""),
             ))
         if not out:
             return 0
@@ -1181,8 +1198,9 @@ class Store:
             "INSERT INTO checks(source_url,fingerprint,cache_version,health,"
             "status_code,response_time_ms,search_hit,search_response_ms,search_probed,"
             "quality_tags,probe_depth,chapter_count,toc_complete,content_ok,"
-            "toc_fail_reason,content_fail_reason,content_response_ms,error,checked_at,engine) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+            "toc_fail_reason,content_fail_reason,content_response_ms,error,checked_at,engine,"
+            "state,stage,timeout_kind) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
         with self.conn:
             self.conn.executemany(sql, out)
         return len(out)

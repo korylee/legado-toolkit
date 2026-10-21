@@ -36,15 +36,31 @@ class TestJvmDefaultsParity(unittest.TestCase):
         concurrency = re.search(r"var concurrency = (\d+)", text)
         self.assertIsNotNone(timeout, "ValidateService.main 里找不到 timeoutSec 字面量")
         self.assertIsNotNone(concurrency, "ValidateService.main 里找不到 concurrency 字面量")
-        self.assertEqual(int(timeout.group(1)), DEFAULTS["jvm"]["timeout"])
+        self.assertEqual(int(timeout.group(1)), DEFAULTS["jvm"]["check_timeout"])
         self.assertEqual(int(concurrency.group(1)), DEFAULTS["jvm"]["concurrency"])
         self.assertIn('var keyword = "%s"' % DEFAULTS["jvm"]["keyword"], text)
 
     def test_budget_param_defaults_match(self):
         """validateOne / validateBatch 的默认预算不能另写一个数。"""
         vals = {int(v) for v in re.findall(r"timeoutSec: Long = (\d+)", kotlin_text())}
-        self.assertEqual(vals, {DEFAULTS["jvm"]["timeout"]},
+        self.assertEqual(vals, {DEFAULTS["jvm"]["check_timeout"]},
                          "Kotlin 侧默认预算与 settings_store 漂了")
+
+
+class TestTimeoutKindParity(unittest.TestCase):
+    """`timeout_kind` 的闭集两侧必须逐词相同（S3-4）。
+
+    判定在 Kotlin（产出结论的一侧），权威词表在 ``core.jvm_health.TIMEOUT_KINDS``。
+    漂了不会报错：``budget``（我们的每源预算用尽 → 重跑/调参数）与 ``app``（App 内部
+    请求超时 → 站点慢，换章或连 App 试）动作相反，说反了用户会照着错的下一步走。
+    """
+
+    def test_timeout_kinds_match_the_python_side(self):
+        from core.jvm_health import TIMEOUT_KINDS
+        vals = set(re.findall(r'const val TIMEOUT_[A-Z]+ = "([a-z]+)"', kotlin_text()))
+        self.assertEqual(vals, set(TIMEOUT_KINDS),
+                         "timeout_kind 闭集两侧漂了：改一边就得改另一边"
+                         "（权威在 core/jvm_health.py）")
 
 
 class TestRootKindParity(unittest.TestCase):

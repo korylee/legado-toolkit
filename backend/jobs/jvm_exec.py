@@ -192,7 +192,7 @@ def _manifest_error(manifest: Any) -> str:
         return "JVM 任务 manifest 结构不受支持：chunks 与 source_count 不一致"
     if bool(manifest.get("single")) != (source_count == 1):
         return "JVM 任务 manifest 结构不受支持：single 与 source_count 不一致"
-    missing_params = sorted({"keyword", "timeout", "concurrency", "depth"}
+    missing_params = sorted({"keyword", "check_timeout", "concurrency", "depth"}
                               - set(manifest["params"]))
     if missing_params:
         return "JVM 任务 manifest 缺少执行参数：%s" % ", ".join(missing_params)
@@ -214,7 +214,11 @@ def _manifest_error(manifest: Any) -> str:
 def _write_args(keyword: str, timeout: int, concurrency: int,
                 out_path: Path, source_file: Path, depth: str = "search",
                 args_path: Optional[Path] = None) -> None:
-    """把批量校验参数写进启动器的参数文件（Launcher 的唯一参数入口）。"""
+    """把批量校验参数写进启动器的参数文件（Launcher 的唯一参数入口）。
+
+    参数文件里的键是**启动器的契约**（`timeout=` / `keyword=` / `depth=`），与设置里的
+    键（`jvm.check_timeout`）同名不同字面量——翻译只在这一处。
+    """
     st_conf = settings_store.load().get("jvm", {})
     repo = st_conf.get("app_repo", "").strip()
     if not repo:
@@ -242,7 +246,7 @@ def _write_args(keyword: str, timeout: int, concurrency: int,
 def _write_manifest_args(manifest: Dict[str, Any], out_path: Path,
                          source_file: Path, args_path: Path) -> None:
     params = manifest["params"]
-    _write_args(str(params["keyword"]), int(params["timeout"]),
+    _write_args(str(params["keyword"]), int(params["check_timeout"]),
                 int(params["concurrency"]), out_path, source_file,
                 str(params["depth"]), args_path=args_path)
 
@@ -569,6 +573,14 @@ def _tail_progress(job_id: str, out_path: Path, stop: threading.Event,
     文件还没出现（JVM 尚未写出第一条）时保持安静，不把 0 反复写库。
     分块执行时 ``base`` 是前面各块已完成条数（跨块累计）。
     """
+    # 启动时的行数：重试会复用 run 目录，旧的结果文件本来就在——判「执行段开始了」
+    # 必须看**比启动时多了一行**，不是「文件存在」。
+    try:
+        with open(out_path, "rb") as fh:
+            started_lines = fh.read().count(b"\n")
+    except OSError:
+        started_lines = 0
+    phase_pushed = False
     while not stop.wait(interval):
         try:
             with open(out_path, "rb") as fh:
@@ -583,6 +595,12 @@ def _tail_progress(job_id: str, out_path: Path, stop: threading.Event,
         done = base + count
         if done:
             runner.update_progress(job_id, done)
+        if not phase_pushed and count > started_lines:
+            # 执行段真的开始了：`starting_gradle` 是**启动**相位，而 Gradle 的一次
+            # 阻塞调用能让它挂满整段执行（2026-10-09 实测「进度 150/400 仍写着
+            # 启动 Gradle」）。判据是行数增长，不是「文件存在」。
+            runner.update_phase(job_id, "running_validate")
+            phase_pushed = True
 
 
 @runner.register("jvm_run")
@@ -810,7 +828,7 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
         RUN_LOCK.acquire()
         # 块墙钟：每块耗时随环境变化，不能把推演当作性能结论。
         started = time.monotonic()
-        per_source_budget = int(manifest["params"]["timeout"])
+        per_source_budget = int(manifest["params"]["check_timeout"])
         try:
             if chunk_dir is not None:
                 _write_run_manifest(chunk_dir, manifest, job_id,
@@ -973,7 +991,7 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
 
         params = manifest["params"]
         keyword = str(params["keyword"])
-        timeout = int(params["timeout"])
+        timeout = int(params["check_timeout"])
         concurrency = int(params["concurrency"])
         depth = str(params["depth"])
         try:

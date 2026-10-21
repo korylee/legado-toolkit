@@ -227,6 +227,27 @@ class ChecksRowTests(unittest.TestCase):
         self.assertIsNone(search["toc_complete"])
         self.assertIsNone(search["content_ok"])
 
+    def test_timeout_row_keeps_which_stage_and_which_side(self) -> None:
+        """超时结论要留住**哪一段、哪一边断的**（S3-4）。
+
+        判据：`state` / `stage` / `timeout_kind` 原样落库。2026-10-21 实测：库里
+        529 条超时结论只剩一句 `error` 文本，分不出搜索段还是正文段、也分不出是我们
+        的每源预算用尽还是 App 内部 60s 读超时——而这两种的下一步动作不同。
+        """
+        it = H.checks_row({"url": "https://a.com", "state": "timeout", "stage": "content",
+                           "timeout_kind": "budget", "cost_ms": 25012}, batch="b")
+        self.assertEqual(it["state"], "timeout")
+        self.assertEqual(it["stage"], "content")
+        self.assertEqual(it["timeout_kind"], "budget")
+        self.assertEqual(it["probe_depth"], 4, "段→深度轴仍要跟着走")
+        app = H.checks_row({"url": "https://a.com", "state": "timeout", "stage": "toc",
+                            "timeout_kind": "app", "cost_ms": 60000}, batch="b")
+        self.assertEqual(app["timeout_kind"], "app")
+        # 认不出的取值**原样透传**：在映射层改写成「未知」等于把「对端换了词表」藏起来
+        odd = H.checks_row({"url": "https://a.com", "state": "timeout", "stage": "search",
+                            "timeout_kind": "x-future"}, batch="b")
+        self.assertEqual(odd["timeout_kind"], "x-future")
+
     def test_row_without_url_is_skipped(self) -> None:
         self.assertIsNone(H.checks_row({"state": "ok"}, batch="b"))
 
@@ -239,7 +260,7 @@ class ChecksRowTests(unittest.TestCase):
 
 
 class StoreChecksTests(unittest.TestCase):
-    """**让真函数跑起来**：落库那一步不打死结（lessons §六十九 的判据）。"""
+    """**让真函数跑起来**：落库那一步不打死结。"""
 
     def setUp(self) -> None:
         self.root = os.path.join(_ROOT, "tmp_jvm_health_" + uuid.uuid4().hex[:8])

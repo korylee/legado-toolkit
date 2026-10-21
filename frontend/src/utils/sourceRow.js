@@ -132,6 +132,18 @@ export const JVM_STATE_LABELS = {
 };
 export function jvmStateLabel(state) { return JVM_STATE_LABELS[state] || state; }
 
+//: 超时归因的取词（闭集来自 Kotlin `ValidateService.TIMEOUT_BUDGET` / `TIMEOUT_APP`，
+//: 经 `jvm_timeout_kind` 下发）。**哪一种断的决定下一步动作**：预算用尽 = 我们的参数
+//: 或这条源没验完，可以重跑一次；站点慢 = 换章节 / 连 App 试。认不出就只说「超时」，
+//: 不替它编一个原因。
+const TIMEOUT_KIND_TEXT = {
+  budget: "我们这边的预算用尽",
+  app: "站点太慢（撞了 App 自己的 60s 读超时）",
+};
+
+//: 段名（`jvm_stage` 的取值）→ 明细行的标签
+const STAGE_LABEL = { search: "搜索", toc: "目录", content: "正文" };
+
 //: 结论按**段**展开成若干行，供 tooltip 逐行显示（原来这些只喂 JVM 列那一格，
 //: 现在「验证」列一列一结论，明细全在它的 tooltip 里）。
 //:
@@ -160,6 +172,13 @@ export function jvmSteps(row) {
       text: row.jvm_content_len != null ? row.jvm_content_len + " 字" : "未取到",
       ok: row.jvm_content_ok === true ? true : row.jvm_content_ok === false ? false : null,
     });
+  }
+  // 超时那一档要说清**哪一边断的**（我们的预算用尽 / 站点慢撞 App 自己的 60s 读超时），
+  // 因为下一步动作不同（重跑一次 vs 换章或连 App）；归因缺失就只说「超时」，不编原因。
+  if (row.jvm_state === "timeout") {
+    const kind = TIMEOUT_KIND_TEXT[row.jvm_timeout_kind] || "";
+    const line = out.find((s) => s.label === STAGE_LABEL[stage]);
+    if (line && kind) line.text += "（" + kind + "）";
   }
   return out;
 }

@@ -197,6 +197,17 @@ class BookSourceRecord:
     content_ok: Optional[bool] = None    # 正文可用性（True/False/None=无法验证）
     content_fail_reason: str = ""    # 正文验证失败归因
     content_response_ms: int = 0     # 抽样章节正文响应耗时
+    #: 段级结论（S3-4）。三者同为空 = 这一行是这些轴落地之前写的（那时只留 `error`
+    #: 一句文本，分不出哪一段、哪类超时）。
+    #: `stage`：跑到的段（`home`/`search`/`toc`/`content`，产出侧 ValidateService.DEPTH_*，
+    #: 读取侧同一份枚举见 `Store._JVM_STAGE_RANK`）。
+    stage: str = ""
+    #: `state`：结论行状态名（`ok`/`no_result`/`timeout`/`error`/`login_wall`/…，
+    #: 取词见 `frontend/src/utils/sourceRow.js` 的 `JVM_STATE_LABELS`）。
+    state: str = ""
+    #: `timeout_kind`：超时归因闭集（`jvm_health.TIMEOUT_KINDS`：
+    #: budget = 我们的预算用尽；app = App 内部请求超时）。非超时行为空。
+    timeout_kind: str = ""
 
     @property
     def type_name(self) -> str:

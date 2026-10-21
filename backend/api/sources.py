@@ -86,8 +86,17 @@ def list_sources(
             j = jvm.get(url) or {}
             # 每个字段都过 `_jvm_field`：**类型不对就 None**，不让一行坏数据把整页拖走。
             # 谁的值是什么类型，以 `SourceOut` 的声明为准（那边是 response_model 的口径）
-            it["jvm_state"] = _jvm_field(j.get("state"), str, "jvm_state", url) or ""
-            it["jvm_stage"] = _jvm_field(j.get("stage"), str, "jvm_stage", url) or ""
+            it["jvm_state"] = (_jvm_field(j.get("state"), str, "jvm_state", url)
+                               or str(it.get("state") or ""))
+            it["jvm_stage"] = (_jvm_field(j.get("stage"), str, "jvm_stage", url)
+                               or str(it.get("stage") or ""))
+            #: 超时归因（S3-4）：**两条路都留着**——最近一批的逐段明细（meta 的
+            #: jvm_check JSON）字段最全；没有就退回 `checks` 那一行。529 条超时结论
+            #: 只落在 checks 里（实测 meta 里 0 条），只取前者的话界面上这些源连
+            #: 「哪一段超时、哪一边断的」都显示不出来（AGENTS #4）。
+            it["jvm_timeout_kind"] = (
+                _jvm_field(j.get("timeout_kind"), str, "jvm_timeout_kind", url)
+                or str(it.get("timeout_kind") or ""))
             it["jvm_hit"] = _jvm_field(j.get("hit"), int, "jvm_hit", url)
             it["jvm_toc_count"] = _jvm_field(j.get("toc_count"), int, "jvm_toc_count", url)
             it["jvm_toc_ok"] = _jvm_field(j.get("toc_complete"), bool, "jvm_toc_ok", url)
@@ -107,7 +116,7 @@ def list_sources(
             it["check_error"] = str(it.get("check_error") or "")
     except Exception as exc:
         # 静默吞掉的话，「为什么列表上看不到 JVM 结论」就永远查不出来——
-        # 这里至少要留下痕迹（ lessons §二：不接受静默失败）
+        # 这里至少要留下痕迹（不接受静默失败）
         import traceback
         traceback.print_exc()
         print(f"[list_sources] JVM 结论回填失败: {exc!r}", flush=True)
@@ -325,7 +334,7 @@ def list_deleted(limit: int = Query(200, ge=1, le=1000),
 # ---------------------------------------------------------------- 名称清洗
 # 三步走：preview（只读建议）→ apply（改名，返回旧名）→ undo（回写旧名）。
 # 写路径**不共用 `save_source`**：那条会 `set_user_tags` 整组覆盖，漏传就把标签
-# 清空（lessons §三十五 记过）。改名会同时更新 raw_json 与 fingerprint 列，
+# 清空。改名会同时更新 raw_json 与 fingerprint 列，
 # 见 `Store.set_source_name`。清洗判据在 config/name_clean.json（core/name_clean 加载）。
 
 

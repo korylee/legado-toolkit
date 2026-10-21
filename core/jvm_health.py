@@ -35,7 +35,7 @@ from core.tags import RULE_INCOMPLETE_TAG
 # ---------------------------------------------------- 校验判定表（原 core/checker.py）
 #
 # 2026-10-18 随消费者并入：本地校验链退场后，本模块（引擎结论 → checks 口径）是
-# 这些符号的唯一消费方（lessons §十：判据跟着调用者走）。判据、版本轴与历史理由
+# 这些符号的唯一消费方（判据跟着调用者走）。判据、版本轴与历史理由
 # 原样搬来，**不 bump 版本**——符号搬家不改判定口径。别在别处再开第二份定义。
 
 # 缓存版本 8：判定口径新增「验过搜索」这一维（结论行的 `search_probed` 列）。
@@ -410,6 +410,13 @@ def _hit_name(row: Dict[str, Any]) -> str:
     return ""
 
 
+#: 超时归因的**闭集**（产出侧 `ValidateService.TIMEOUT_BUDGET` / `TIMEOUT_APP`）：
+#: budget = 我们的每源总预算用尽（下一步是调参数）；app = App 内部请求超时（源慢）。
+#: 逐词比对见 tests/test_jvm_service_parity.py。**认不出的取值原样透传**，不在这里
+#: 改写成「未知」——那等于把「对端换了词表」这件事故意藏起来（AGENTS #4）。
+TIMEOUT_KINDS = ("budget", "app")
+
+
 def checks_row(row: Dict[str, Any], *, batch: str, checked_at: str = "",
                raw: Optional[Dict[str, Any]] = None,
                has_search: Optional[bool] = None,
@@ -442,6 +449,12 @@ def checks_row(row: Dict[str, Any], *, batch: str, checked_at: str = "",
         "engine": Engine.JVM,
         "fingerprint": fp or (fingerprint(raw) if raw else ""),
         "health": health,
+        # 段级结论（S3-4）：`state` / `stage` / `timeout_kind` 原样落库——以前只把
+        # `stage` 折成 `probe_depth`、把原因折成一句 `error` 文本，于是界面上同一条
+        # 「超时」分不出是搜索段还是正文段、是我们的预算还是站点慢（动作不同）。
+        "state": state,
+        "stage": stage,
+        "timeout_kind": str(row.get("timeout_kind") or ""),
         "error": note,
         "status_code": None,
         "response_time_ms": cost_ms,
@@ -497,7 +510,7 @@ def store_checks(rows: List[Dict[str, Any]], *, batch: str,
 
     **两条路共用这一份**：产品（``POST /api/jvm/run``）与 CLI
     （``scripts/jvm_readback.py``）——各写一份必然漂，而这个端点的两次 500 都是
-    「同一件事两处各写一遍」的产物（lessons §六十九）。
+    「同一件事两处各写一遍」的产物。
 
     源数据只查**这一批**涉及的 url：批量落库的成本随批大小走，不随库大小走
     （2026-10-18 前这里是全表扫 raw_json，增量批次也在解析整个库）。指纹读

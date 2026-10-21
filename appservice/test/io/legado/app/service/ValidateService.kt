@@ -183,6 +183,13 @@ object ValidateService {
     const val DEPTH_TOC = "toc"
     const val DEPTH_CONTENT = "content"
 
+    //: 超时归因的**闭集**：budget = 我们的每源总预算用尽；app = App 内部请求超时
+    //: （okhttp readTimeout 60s，符号名查证）。两种的下一步动作不同（调参数 vs 源慢），
+    //: 所以不许只留一句文案——结构化字段是 `timeout_kind`，Python 侧
+    //: `core/jvm_health.TIMEOUT_KINDS` 逐词比对（tests/test_jvm_service_parity.py）。
+    const val TIMEOUT_BUDGET = "budget"
+    const val TIMEOUT_APP = "app"
+
     //: 「引擎把异常消息当成了规则的值」的识别。
     //:
     //: 实测（塔读系 4 条，占当批 ok 的 5%）：正文规则 `#x@value@js: java.ajax(result)...`
@@ -373,7 +380,7 @@ object ValidateService {
     suspend fun validateOne(
         sourceJson: String,
         keyword: String,
-        timeoutSec: Long = 75,
+        timeoutSec: Long = 25,
         stripWebView: Boolean = true,
         depth: String = DEPTH_SEARCH,
         manualCookie: String = "",
@@ -437,7 +444,7 @@ object ValidateService {
 
         val startedAt = System.currentTimeMillis()
         // **每源总预算**，不是每段一份：目录+正文比搜索慢好几倍，按段各给一份的话
-        // 一个慢源能把整场拖成 O(源数 × 段数 × timeout)（lessons §五十四）
+        // 一个慢源能把整场拖成 O(源数 × 段数 × timeout)
         val deadline = startedAt + timeoutSec * 1000
         fun remaining(): Long = (deadline - System.currentTimeMillis()).coerceAtLeast(1L)
 
@@ -499,17 +506,20 @@ object ValidateService {
                                     }
                                 } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
                                     val spent = System.currentTimeMillis() - startedAt
+                                    val overBudget = spent >= timeoutSec * 1000 - 1000
                                     row["state"] = "timeout"
                                     row["stage"] = DEPTH_CONTENT
+                                    row["timeout_kind"] =
+                                        if (overBudget) TIMEOUT_BUDGET else TIMEOUT_APP
                                     row["cost_ms"] = spent
-                                    // **不要把两种超时说成一种**：本次预算用尽，与 App 内部
-                                    // 请求超时，用户要采取的动作不同（前者是我们的参数，后者是源慢）。
-                                    // App 的 okhttp 读超时是 **60s**（`HttpHelper` 的
-                                    // `.readTimeout(60, SECONDS)`，符号名查证，行号会漂）——
-                                    // 实测 timeout=90 时这 14 条仍在 60–65s 断，正是它。
-                                    // → 所以**每源总预算要 > 60s 才有意义**，否则两个限制重叠，
-                                    // 用户分不清是哪一边断的。
-                                    row["reason"] = if (spent >= timeoutSec * 1000 - 1000)
+                                    // **两种超时的动作不同**：本次预算用尽 = 我们的参数，可以
+                                    // 重跑；App 内部请求超时 = 源慢，换章或连 App。App 的 okhttp
+                                    // 读超时是 **60s**（`HttpHelper` 的 `.readTimeout(60, SECONDS)`，
+                                    // 符号名查证，行号会漂）。**校验的默认预算 25s 特意压在它
+                                    // 下面**，于是「预算用尽」不会被 App 内部超时抢先——要分辨
+                                    // 两种就把预算给到 60s 以上，不过那是调试那条路
+                                    // （`debug.chain_timeout` / `debug.stage_timeout`）的事。
+                                    row["reason"] = if (overBudget)
                                         "正文段超时（每源总预算 ${timeoutSec}s 用尽）"
                                     else "正文段超时（用时 ${spent}ms，是 App 内部的请求超时，非本次预算）"
                                 } catch (e: Throwable) {
@@ -526,10 +536,12 @@ object ValidateService {
                             }
                         } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
                             val spent = System.currentTimeMillis() - startedAt
+                            val overBudget = spent >= timeoutSec * 1000 - 1000
                             row["state"] = "timeout"
                             row["stage"] = DEPTH_TOC
+                            row["timeout_kind"] = if (overBudget) TIMEOUT_BUDGET else TIMEOUT_APP
                             row["cost_ms"] = spent
-                            row["reason"] = if (spent >= timeoutSec * 1000 - 1000)
+                            row["reason"] = if (overBudget)
                                 "目录段超时（每源总预算 ${timeoutSec}s 用尽）"
                             else "目录段超时（用时 ${spent}ms，是 App 内部的请求超时，非本次预算）"
                         } catch (e: Throwable) {
@@ -616,12 +628,15 @@ object ValidateService {
                 }
             }
         } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
+            val spent = System.currentTimeMillis() - startedAt
+            val overBudget = spent >= timeoutSec * 1000 - 1000
             linkedMapOf(
                 "url" to source.bookSourceUrl, "name" to source.bookSourceName,
                 "state" to "timeout",
                 "stage" to DEPTH_SEARCH,
-                "cost_ms" to (System.currentTimeMillis() - startedAt),
-                "reason" to if (System.currentTimeMillis() - startedAt >= timeoutSec * 1000 - 1000)
+                "timeout_kind" to if (overBudget) TIMEOUT_BUDGET else TIMEOUT_APP,
+                "cost_ms" to spent,
+                "reason" to if (overBudget)
                     "搜索超时（每源总预算 ${timeoutSec}s 用尽）"
                 else "搜索超时（是 App 内部的请求超时，非本次预算）",
                 "webview_stripped" to stripped,
@@ -889,7 +904,7 @@ object ValidateService {
         sourceJsons: List<String>,
         keyword: String,
         concurrency: Int = 8,
-        timeoutSec: Long = 75,
+        timeoutSec: Long = 25,
         stripWebView: Boolean = true,
         depth: String = DEPTH_SEARCH,
         manualCookie: String = "",
@@ -922,9 +937,9 @@ object ValidateService {
         var file: String? = null
         var keyword = "我"
         var concurrency = 8
-        //: 与 settings_store.DEFAULTS jvm.timeout 同值（tests/test_jvm_service_parity.py
-        //: 钉着）：每源总预算必须 > App okhttp callTimeout 60s，两种超时才分得开
-        var timeoutSec = 75L
+        //: 与 settings_store.DEFAULTS jvm.check_timeout 同值（tests/test_jvm_service_parity.py
+        //: 钉着）：25s 特意压在 App okhttp callTimeout 60s 下面，App 内部超时不会先到
+        var timeoutSec = 25L
         var outPath = ""
         var limit = 0
         var noStrip = false
