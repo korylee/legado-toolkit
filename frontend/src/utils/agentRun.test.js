@@ -56,6 +56,24 @@ test("结果体兜底：验过的算 accepted，只有原因的算 failed", () =
   assert.equal(rows[2].state, "failed");
 });
 
+test("快验测不了：规则落了但标待引擎验收，不冒充已写入", () => {
+  // 材料是脚本输出、规则是选择器：快验答不了（core.rule_try.unfaithful_reason）。
+  // 落成 accepted 会让界面说「已写入」，而它一次都没被引擎验过（D1）。
+  const events = foldAgentFields([
+    { kind: "ai_accepted", field: "name", rule: "h1@text", pending_engine: true,
+      reason_code: "material_is_script" },
+  ], ["name"]);
+  assert.equal(events[0].state, "pending_engine");
+  assert.equal(events[0].rule, "h1@text");
+
+  const body = resultAgentFields({ fields: [
+    { field: "content", rule: "@js:result", pending_engine: true,
+      try_result: { unfaithful: true, reason_code: "result_absent" } },
+  ] }, ["content"]);
+  assert.equal(body[0].state, "pending_engine");
+  assert.equal(body[0].rule, "@js:result");
+});
+
 test("过程行取词：ai_* 都有词，失败原因原样带出，没有裸码", () => {
   const started = agentEventLine({ kind: "ai_started", step: "bookUrl", fields: ["name"] });
   assert.match(started.text, /AI 补全开始（详情）：书名/);

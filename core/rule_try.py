@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import re
 import uuid
 from typing import Any, Dict, Optional
 
@@ -29,6 +30,49 @@ _TRY_DIR = ("app_probe", "rule_try")
 #: 那次是**先编译再跑**，按分钟计——两种路径的超时在 run() 里分开给。
 _DAEMON_TIMEOUT_SEC = 30
 _GRADLE_TIMEOUT_MIN = 10
+
+#: 原因码（消费侧按码取词，前端文案在 `debugMaterial.js` 的 `UNFAITHFUL_TEXT`）。
+UNFAITHFUL_RULE_EMPTY = "rule_empty"
+UNFAITHFUL_MATERIAL_IS_SCRIPT = "material_is_script"
+UNFAITHFUL_RESULT_ABSENT = "result_absent"
+UNFAITHFUL_CODES = (UNFAITHFUL_RULE_EMPTY, UNFAITHFUL_MATERIAL_IS_SCRIPT,
+                    UNFAITHFUL_RESULT_ABSENT)
+
+
+def rule_shape(rule: str) -> str:
+    """规则形态：`container` / `selector` / `js_result`（`@js:` 且读 `result`）/
+    `js_other` / `empty`。
+
+    前端 `debugMaterial.js` 的 `ruleShape` 与这份同构——它只为显隐按钮，判据在后端。
+    """
+    text = str(rule or "").strip()
+    if not text:
+        return "empty"
+    if text.startswith("@js:"):
+        return "js_result" if "result" in text else "js_other"
+    # 列表容器规则（`class.list@tag.a`）：末段仍是选择器，不是取值；与 `getElements` 同一口径
+    if re.search(r"@(tag|class|id)\.", text) and not re.search(r"@(text|href|src|textNodes|ownText|html)$", text):
+        return "container"
+    return "selector"
+
+
+def unfaithful_reason(material_kind: str, rule: str) -> str:
+    """这条规则快验答得**忠实**吗：返回原因码，空串 = 可以跑。
+
+    判据 = 「这种材料能不能验这种形态的规则」（`core.material.can_fast_verify`）。
+    两档实测：材料是**页面脚本的输出**而规则是选择器 → 解的是 URL 列表；材料是 **DOM**
+    而规则读 `result` → `result` 不是脚本产出，跑的不是引擎里那条。
+    快验**只有否决权**：忠实才给结论，通过也不升格为可用建议（验收仍看重调本步）。
+    """
+    from core.material import can_fast_verify
+
+    shape = rule_shape(rule)
+    if shape == "empty":
+        return UNFAITHFUL_RULE_EMPTY
+    if can_fast_verify(material_kind, shape):
+        return ""
+    return (UNFAITHFUL_RESULT_ABSENT if shape == "js_result"
+            else UNFAITHFUL_MATERIAL_IS_SCRIPT)
 
 
 def rule_try(source: Dict[str, Any], step: str, body: str, base_url: str,

@@ -196,11 +196,51 @@ class RenderAttributionTests(unittest.TestCase):
         self.assertEqual(hit["render_reason"], "browser_unavailable")
         self.assertNotIn("rendered", other, "别人的渲染不算到这一页头上")
 
+    def test_failed_last_call_does_not_claim_rendered(self) -> None:
+        """前一次渲染成功、最后一次失败：失败页不许被标成「已渲染」。
+
+        `shadow_rendered` 是**成功计数**，`shadow_last_url` 是**最后一次调用**（可能失败）。
+        只看计数会把失败页标成 True，界面据此说「已经渲染了」，而材料其实没回来。
+        """
+        out = {"rendered": 1, "render_url": "https://a.com/ch/1.html",
+               "render_reason": "render_timeout"}
+        page = {"url": "https://a.com/ch/1.html"}
+        jvm_debug._annotate_render([page], out)
+        self.assertIs(page["rendered"], False)
+        self.assertEqual(page["render_reason"], "render_timeout")
+
+    def test_render_js_lands_only_with_the_fact(self) -> None:
+        hit = {"url": "https://a.com/ch/1.html"}
+        jvm_debug._annotate_render(
+            [hit], {"rendered": 1, "render_url": "https://a.com/ch/1.html",
+                    "render_reason": "", "render_js": True})
+        self.assertIs(hit["render_js"], True)
+        self.assertEqual(hit["material_kind"], jvm_debug.MATERIAL_WEBJS_OUTPUT)
+        # 老侧车没有 shadow_last_js_len：不写该键，种类只能判 unknown
+        old = {"url": "https://a.com/ch/1.html"}
+        jvm_debug._annotate_render(
+            [old], {"rendered": 1, "render_url": "https://a.com/ch/1.html",
+                    "render_reason": ""})
+        self.assertNotIn("render_js", old)
+        self.assertEqual(old["material_kind"], jvm_debug.MATERIAL_UNKNOWN)
+
+    def test_every_page_gets_a_material_kind(self) -> None:
+        """种类判到**每一页**上；没走渲染的页是 unknown，不许冒充 static_html。"""
+        hit = {"url": "https://a.com/ch/1.html"}
+        other = {"url": "https://a.com/search"}
+        jvm_debug._annotate_render(
+            [hit, other], {"rendered": 1, "render_url": "https://a.com/ch/1.html",
+                           "render_reason": "", "render_js": False})
+        self.assertEqual(hit["material_kind"], jvm_debug.MATERIAL_RENDERED_DOM)
+        self.assertEqual(other["material_kind"], jvm_debug.MATERIAL_UNKNOWN)
+
     def test_absent_sidecar_facts_annotate_nothing(self) -> None:
-        """读不到就不写：不写 False 冒充「这次没渲染」（AGENTS #12）。"""
+        """读不到就不写渲染事实：不写 False 冒充「这次没渲染」（AGENTS #12）。"""
         page = {"url": "https://a.com/ch/1.html"}
         jvm_debug._annotate_render([page], {"rendered": None})
         self.assertNotIn("rendered", page)
+        self.assertEqual(page["material_kind"], jvm_debug.MATERIAL_UNKNOWN,
+                         "读不到 ≠ 静态页：种类只说 unknown")
 
 
 class PlaceholderRuleTests(_RunCase):
@@ -264,16 +304,41 @@ class MaterialKindTests(unittest.TestCase):
     """
 
     def test_kind_follows_render_fact_and_page_script(self):
-        webjs = {"ruleContent": {"webJs": "result = params.chapter_images.join('\\n')"}}
-        plain = {"ruleContent": {"content": "id.content@text"}}
-        self.assertEqual(jvm_debug.material_kind({"rendered": True}, webjs),
-                         jvm_debug.MATERIAL_WEBJS_OUTPUT)
-        self.assertEqual(jvm_debug.material_kind({"rendered": True}, plain),
-                         jvm_debug.MATERIAL_RENDERED_DOM)
+        # 判据只看页上的引擎事实：这次渲染成没成 + 响应体是不是脚本求值结果
+        self.assertEqual(
+            jvm_debug.material_kind({"rendered": True, "render_js": True}),
+            jvm_debug.MATERIAL_WEBJS_OUTPUT)
+        self.assertEqual(
+            jvm_debug.material_kind({"rendered": True, "render_js": False}),
+            jvm_debug.MATERIAL_RENDERED_DOM)
         # 没渲染 = 浏览器没参与、脚本也没机会跑 → 静态页
-        self.assertEqual(jvm_debug.material_kind({}, webjs), jvm_debug.MATERIAL_STATIC)
-        self.assertEqual(jvm_debug.material_kind({"rendered": None}, plain),
+        self.assertEqual(jvm_debug.material_kind({"rendered": False}),
                          jvm_debug.MATERIAL_STATIC)
+
+    def test_unknown_when_render_facts_are_missing(self):
+        """读不到渲染事实时不许说它是静态页（AGENTS #12）。
+
+        三种「读不到」：整份侧车没有渲染键（老侧车 / 设备通道）、`rendered` 为空、
+        以及渲染成功但老侧车没说这次传没传 JS（`render_js` 缺席）。
+        """
+        self.assertEqual(jvm_debug.material_kind({}), jvm_debug.MATERIAL_UNKNOWN)
+        self.assertEqual(jvm_debug.material_kind({"rendered": None}),
+                         jvm_debug.MATERIAL_UNKNOWN)
+        self.assertEqual(jvm_debug.material_kind({"rendered": True}),
+                         jvm_debug.MATERIAL_UNKNOWN)
+
+    def test_our_own_fetch_is_a_static_page(self):
+        """我们另抓的一份（`origin == "fetch"`）：浏览器没参与，一定是静态页。
+
+        2026-10-23 实测（正文页截图）：引擎没交回这一页，界面显示「材料：另抓的一份」，
+        而快验把 `@js:` 规则的 `result` 当成整页 HTML 用了——那一档必须拦得掉的依据就是它。
+        """
+        self.assertEqual(
+            jvm_debug.material_kind({"origin": "fetch", "url": "https://a.com/1.html"}),
+            jvm_debug.MATERIAL_FETCHED)
+        # 引擎交回但没有任何渲染事实：那是「读不到」，不是「确认静态」
+        self.assertEqual(jvm_debug.material_kind({"origin": "engine"}),
+                         jvm_debug.MATERIAL_UNKNOWN)
 
 
 class StaticNotesTests(_RunCase):
@@ -366,12 +431,21 @@ class RunJvmDebugTests(_RunCase):
         self.assertEqual(got["webview_calls"], 2)
         self.assertEqual(got["render_url"], "https://a.com/ch/1.html")
         self.assertEqual(got["render_reason"], "")
+        self.assertIsNone(got["render_js"], "侧车没说 js 长度 → None，不补 False")
+        # 侧车带 js 长度：这次渲染的响应体是脚本求值结果（material_kind 的第二个事实）
+        self._patch("_run_launcher", self._fake_launcher(
+            events=self._fixture_events(),
+            meta={"code": 0, "hint": "", "error": "", "shadow_rendered": 1,
+                  "shadow_last_url": "https://a.com/ch/1.html",
+                  "shadow_last_reason": "", "shadow_last_js_len": 137}))
+        self.assertIs(self._run()["render_js"], True)
         # 同一份侧车里去掉渲染那几项：读不到就是读不到，不许变成 0 / 空串冒充事实
         self._patch("_run_launcher", self._fake_launcher(
             events=self._fixture_events(), meta={"code": 0, "hint": "", "error": ""}))
         blank = self._run()
         self.assertIsNone(blank["rendered"])
         self.assertIsNone(blank["webview_calls"])
+        self.assertIsNone(blank["render_js"])
 
     def test_matched_html_from_the_sidecar_reaches_the_right_step(self) -> None:
         """第三期：侧车里的 `matched_html` 按**每段自己的 url + 段名**落到 steps 上。

@@ -92,7 +92,7 @@ async def run_loop(html: str, structured: Dict[str, Any], source: Dict[str, Any]
             # 我们自己的 bug 不许静默：这一行就是「事件账本里少了一类行」的唯一线索
             print("[agent_loop] 事件回调失败：%s: %s" % (type(e).__name__, e))
 
-    out = autofill_detail(html, structured, step=step)
+    out = autofill_detail(html, structured, step=step, material_kind=material_kind)
     rows: List[Dict[str, Any]] = out["fields"]
     if fields is not None:
         wanted = {str(f) for f in fields}
@@ -111,31 +111,66 @@ async def run_loop(html: str, structured: Dict[str, Any], source: Dict[str, Any]
         if budget["rule_tries"] >= agent_actions.RULE_TRY_PER_TURN:
             budget["try_limit_reached"] = True
             return None
+        # 快验答不了这条（材料种类 × 规则形态不匹配）：**不跑引擎**——跑了只会给出方向
+        # 相反的结论（材料是脚本输出却用选择器解、材料是 DOM 却把它当 result 用）。
+        # 回一个「不忠实」标记：候选照落，但不给通过权（D1），仍待重调本步验收。
+        from core.rule_try import unfaithful_reason
+
+        why = unfaithful_reason(material_kind, rule)
+        if why:
+            return {"ok": False, "unfaithful": True, "reason_code": why,
+                    "count": 0, "values": [], "error": ""}
         budget["rule_tries"] += 1
         return await asyncio.to_thread(run_rule_try, source, step, html, base_url, rule)
 
     def _usable(checked: Optional[Dict[str, Any]]) -> bool:
-        return bool(checked and checked.get("ok") and checked.get("count"))
+        """这条候选能不能收下。
+
+        **快验答不忠实（`unfaithful`）时也收**：它只有否决权——收下但不升格
+        （`_accept` 里标 `pending_engine`，验收仍看重调本步）。
+        """
+        if not checked:
+            return False
+        if checked.get("unfaithful"):
+            return True
+        return bool(checked.get("ok") and checked.get("count"))
 
     def _accept(row: Dict[str, Any], rule: str, why: str,
                 checked: Optional[Dict[str, Any]]) -> None:
-        """可用的提议**升格为普通建议**：rule 落位、ref_only/need_ai 撤掉。
+        """收下提议：rule 落位、ref_only/need_ai 撤掉。
 
-        前端的写入路径只认 ``row.rule``——在数据上完成升格，比让前端为
-        「AI 行」另开一条渲染路径简单且不会漏。``ai`` 留着记来源，
-        ``try_result`` 带自查结论。
+        前端的写入路径只认 ``row.rule``——在数据上完成落地，比让前端为「AI 行」
+        另开一条渲染路径简单且不会漏。``ai`` 留着记来源，``try_result`` 带自查结论。
+
+        **快验答不忠实时只落地、不升格**（`pending_engine`）：前端的升格路径只认
+        ``try_result.ok``，这里不给它——「快验通过」不等于「可用」（D1），验收仍走
+        重调本步。
         """
         row["rule"] = rule
         row.pop("ref_only", None)
         row.pop("need_ai", None)
         row["ai"] = {"rule": rule, "why": why}
         row["try_result"] = checked
+        if (checked or {}).get("unfaithful"):
+            row["pending_engine"] = True
 
     # ---- 提议段（只对免费段没把握的行花钱；按 kind 分组，一族一次调用）----
     groups: Dict[str, List[Dict[str, Any]]] = {}
+    # 材料本身就不够（`core.material.blocked_next` 的码）：这时候让模型猜，只会花掉一次调用
+    # 换来一串取不到的选择器。**先给一步能做的事**，提议留给下一次（材料够了之后）。
+    # 判据在常量表里，这里只取码（AGENTS #24④：文案不进后端）。
+    from core.material import blocked_next
+
+    next_step = blocked_next(material_kind)
     for row in rows:
         if row.get("rule"):
             continue  # 免费段拍板的行：跳过提议，下面自查
+        if next_step:
+            row["needs_material"] = next_step
+            row["fail_code"] = "need_material"
+            row["reason"] = "材料还不够，先做下一步（%s）" % next_step
+            _emit("ai_blocked", field=row["field"], reason_code=next_step)
+            continue
         if budget["model_stop"]:
             continue  # 整段 AI 已停：原因在 budget.model_stop
         kind = _field_kind(step, row["field"])
@@ -179,7 +214,9 @@ async def run_loop(html: str, structured: Dict[str, Any], source: Dict[str, Any]
                     break
             if accepted:
                 _emit("ai_accepted", field=field, rule=str(row.get("rule") or ""),
-                      count=int((row.get("try_result") or {}).get("count") or 0))
+                      count=int((row.get("try_result") or {}).get("count") or 0),
+                      pending_engine=bool(row.get("pending_engine")),
+                      reason_code=str((row.get("try_result") or {}).get("reason_code") or ""))
                 continue
             # 模型的都不中：换候选头名（免费，不另花模型调用）
             tried = {str(c.get("rule") or "") for c in cands}
@@ -195,16 +232,22 @@ async def run_loop(html: str, structured: Dict[str, Any], source: Dict[str, Any]
                     _accept(row, str(alt["rule"]),
                             "模型提议未选中，改用候选头名（轻量验证取到值）", checked2)
                     _emit("ai_accepted", field=field, rule=str(row.get("rule") or ""),
-                          count=int((row.get("try_result") or {}).get("count") or 0))
+                          count=int((row.get("try_result") or {}).get("count") or 0),
+                          pending_engine=bool(row.get("pending_engine")),
+                          reason_code=str((row.get("try_result") or {}).get("reason_code") or ""))
                     continue
             # 都取不到：**不出规则文本**（宁空着），只留原因——落在输入框旁边的
-            # 已知不可用规则正是「不如不填」的那个噪音
+            # 已知不可用规则正是「不如不填」的那个噪音。
+            # 原因是**码**不是句子：消费侧要按它决定「让你改材料 / 改规则 / 就是模型没答上」
+            # （同一套规矩见 `core.material` 的下一步码；文案在消费侧取，AGENTS #24④）。
             row.pop("ai", None)
             row["ai_failed"] = True
+            row["fail_code"] = "no_candidates" if cands else "model_empty"
             row["reason"] = ("模型提议了 %d 条，轻量验证都没选中" % len(cands)
                              if cands else "模型没有给出该字段的候选")
             row["try_result"] = None
-            _emit("ai_failed", field=field, reason=str(row["reason"])[:200])
+            _emit("ai_failed", field=field, reason=str(row["reason"])[:200],
+                  fail_code=row["fail_code"])
 
     # ---- 免费段有把握的行：程序分数 + 引擎真跑双重确认（成本低、价值高）----
     for row in rows:
@@ -259,6 +302,9 @@ async def _propose_group(html: str, structured: Dict[str, Any], step: str,
         "fields": [
             {"field": r["field"],
              "want_label": FIELD_LABELS.get(r["field"], r["field"]),
+             # 取样类型也要进提示词：`script` 那一族要写成页面脚本（判据在 FILL_SPECS），
+             # 只说字段名的话模型会给出取值规则
+             "kind": _field_kind(step, r["field"]),
              "app_values": _engine_values(structured, r["field"], step=step)}
             for r in group
         ],

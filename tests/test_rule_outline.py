@@ -57,23 +57,24 @@ class RuleOutlineTests(unittest.TestCase):
         self.assertIn("页面材料", str(ctx.exception.detail))
 
     def test_webjs_output_is_not_treated_as_dom(self):
-        """材料是页面脚本（webJs）的输出时不给大纲，说清原因与下一步。
+        """材料是页面脚本的输出时不给大纲，说清原因与下一步。
 
-        实测（2026-10-21，同一页）：有 webJs 时引擎交回的「整页」是那段脚本的返回值
+        实测（2026-10-21，同一页）：页面脚本生效时引擎交回的「整页」是那段脚本的返回值
         （27150 字节、137 行图片地址、没有任何标签）。压大纲会得到空树，而界面默认就看
         大纲——用户会读成「这页没有可写的结构」（AGENTS #12：读不到 ≠ 没有）。
+        判据只看页上的引擎事实（`rendered` + `render_js`），不看源里配没配 webJs。
         """
         store = job_store(
-            source={"bookSourceUrl": "http://example.com",
-                    "ruleContent": {"webJs": "result = params.chapter_images.join('\\n')"}},
+            source={"bookSourceUrl": "http://example.com"},
             steps=[{"name": "content", "page_id": "chapter", "url": "http://x/1"}],
             pages=[{"id": "chapter", "url": "http://x/1", "rendered": True,
+                    "render_js": True,
                     "html": "https://img.example.com/1.jpg\nhttps://img.example.com/2.jpg"}])
 
         with self.assertRaises(HTTPException) as ctx:
             _call(store, step="content")
         self.assertIn("页面脚本", str(ctx.exception.detail))
-        self.assertIn("清空", str(ctx.exception.detail), "要给出能执行的那一步")
+        self.assertIn("js 选项", str(ctx.exception.detail), "要给出能执行的那一步")
 
 
 if __name__ == "__main__":

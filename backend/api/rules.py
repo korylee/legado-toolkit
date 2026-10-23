@@ -342,7 +342,7 @@ async def rule_outline(body: OutlineRequest, st=Depends(get_store)):
     这里只是把它端到人眼前，**不新增第二套解析**。行数是显示的预算（比提示词宽），
     超了**自报不全**（AGENTS #4：不能把「前 N 行」说成全部）。
     """
-    from core.jvm_debug import MATERIAL_WEBJS_OUTPUT
+    from core.material import can_fill_dom
     from core.repair.evidence import DISPLAY_OUTLINE_LINES, dom_outline
 
     job = st.get_job(body.job_id)
@@ -351,10 +351,10 @@ async def rule_outline(body: OutlineRequest, st=Depends(get_store)):
     # 压大纲会得到空树，而看起来像「这页没有结构」（AGENTS #12：读不到 ≠ 没有）
     html, _base_url, _result, kind, _structured, _runtime = (
         debug_materials.debug_step_material(job, body.job_id, body.step))
-    if kind == MATERIAL_WEBJS_OUTPUT:
+    if not can_fill_dom(kind):
         raise HTTPException(
-            400, "这一步的材料是页面脚本（webJs）的输出，不是 DOM——要结构请先清空 "
-                 "webJs 再重调本步（渲染后的页面会作为材料回来）")
+            400, "这一步的材料是页面脚本的输出，不是 DOM——先去掉脚本再重调本步"
+                 "（webJs 规则或 URL 里的 js 选项；去掉后渲染出的页面会作为材料回来）")
     # 多取一行用来判截断：够了就说明后面还有（与 dom_outline 的预算语义共用一份实现）
     text = await asyncio.to_thread(dom_outline, html, DISPLAY_OUTLINE_LINES + 1)
     lines = text.split("\n")
@@ -374,14 +374,21 @@ async def rule_try(body: RuleTryRequest, st=Depends(get_store)):
     它只回答「这条规则选不选得中」，**不替代整步验收**（AGENTS #3）——
     写入草稿后仍要点「重调本步验证」。
     """
-    from core.rule_try import rule_try as run_rule_try
+    from core.rule_try import rule_try as run_rule_try, unfaithful_reason
 
     job = st.get_job(body.job_id)
     source = debug_materials.job_source(job)
-    html, base_url, _r, _kind, _structured, _runtime = (
+    html, base_url, _r, kind, _structured, _runtime = (
         debug_materials.debug_step_material(job, body.job_id, body.step))
     if not (body.rule or "").strip():
         raise HTTPException(400, "规则为空：先填一条再试")
+    # 快验只对它**答得忠实**的规则给判决：材料是脚本输出时选择器解的是 URL 列表、
+    # 材料是 DOM 时 `@js:` 读的 `result` 是整页 HTML——两种都会给出方向相反的结论
+    # （AGENTS #4）。拒绝回**原因码**、不回 ok/count，消费侧按码取词。
+    why = unfaithful_reason(kind, body.rule)
+    if why:
+        return {"ok": False, "unfaithful": True, "reason_code": why,
+                "count": 0, "values": [], "error": ""}
     return await asyncio.to_thread(
         run_rule_try, source, body.step, html, base_url, body.rule)
 
@@ -397,13 +404,13 @@ async def agent_loop(body: AutofillRunRequest, st=Depends(get_store)):
     验收仍是「重调本步验证」（AGENTS #3）：rule_try 只回答「选不选得中」。
     """
     job = st.get_job(body.job_id)
-    html, base_url, _result, _kind, structured, _runtime = (
+    html, base_url, _result, kind, structured, _runtime = (
         debug_materials.debug_step_material(job, body.job_id, body.step))
     if not body.use_ai:
         # 免费段是纯计算（不发请求、不调模型），秒级返回，不值得起一个任务
         from core.autofill import autofill_detail
         return await asyncio.to_thread(autofill_detail, html, structured,
-                                       step=body.step)
+                                       step=body.step, material_kind=kind)
     # AI 段是**一次任务**（``kind="agent_loop"``）：一轮补全 = 若干次模型调用 +
     # 若干次 rule_try，几十秒到几分钟。同步请求的等待期界面上没有任何产物（进度是
     # 假的：响应回来才更新），刷新一次就丢；进 jobs 表之后逐字段事件写进事件账本、

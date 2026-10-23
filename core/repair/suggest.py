@@ -269,7 +269,9 @@ def outline_plan(ctx: Dict[str, Any]) -> Dict[str, Any]:
         没有可用信息，但**统计数字本身是判据**（「图不在 DOM」），所以给一行代替。
       - ``full``：其余情况照旧压大纲（文本页正是这么用的）。
     """
-    if str(ctx.get("material_kind") or "") == "webjs_output":
+    from core.material import can_fill_dom
+
+    if not can_fill_dom(str(ctx.get("material_kind") or "")):
         return {"mode": "skip"}
     stats = ctx.get("page_stats")
     if isinstance(stats, dict):
@@ -629,8 +631,43 @@ def _sec_fields(ctx: Dict[str, Any]) -> Optional[List[str]]:
         return None
     L = ["", "【要的字段】"]
     for f in fields:
-        if isinstance(f, dict):
-            L.append("- %s：%s" % (f.get("field") or "", f.get("want_label") or ""))
+        if not isinstance(f, dict):
+            continue
+        L.append("- %s：%s" % (f.get("field") or "", f.get("want_label") or ""))
+        if f.get("kind") == "script":
+            # 页面脚本这一族的**定义**（叶子成员见 `core.autofill.FILL_SPECS`）：
+            # 不写清「跑在哪、结果去哪」，模型给出的往往是取值规则或一段注释
+            L.append("  （页面脚本：跑在页面环境里，能读页面变量；它的结果成为这一步的响应体，"
+                     "由取值规则通过 `result` 读）")
+    return L
+
+
+#: 页面内容在页面变量里时，**产出顺序**。这是「该产出什么」的判据，不是措辞：
+#: `webJs` 是内容的来源（页面变量只在那个环境里可读），`content` 只是把它的产出包成
+#: 正文。先有 `webJs` 才谈得上 `content`——顺序反了，模型只能给一条读 `result` 的规则，
+#: 而那时还没有 `result`（实测：没有 webJs 时同一条 content 把整页 HTML 逐行包成 img，照样 pass）。
+SCRIPT_ORDER_NOTE = (
+    "**产出顺序**：这一步的内容在页面变量里，先写 `webJs` 把内容取出来"
+    "（`result = params.<键>.join('\\n')`），再写 `content` 读 `result` 并包装。"
+    "没有 `webJs` 时不要给引用页面变量的 `content` 候选——那个环境里它们一律是 `undefined`。")
+
+
+def _sec_script_step(ctx: Dict[str, Any]) -> Optional[List[str]]:
+    """这一步有两个字段族（页面脚本 + 取值规则）时，点明先后关系与解密场景。
+
+    **为什么必须是这一段而不是在 system prompt 里加句子**：顺序取决于「这一步有哪些
+    字段」，只有 ctx 知道；而且这条判据只在 `webJs` 与 `content` 同组时成立。
+    """
+    fields = ctx.get("fields")
+    kinds = {f.get("kind") for f in (fields or []) if isinstance(f, dict)}
+    if "script" not in kinds or len(kinds) < 2:
+        return None
+    L = ["", "【产出顺序】", SCRIPT_ORDER_NOTE]
+    runtimes = ctx.get("runtimes")
+    if isinstance(runtimes, list) and runtimes:
+        L.append("若内容是被加密的（页面里有长 base64 负载 / CryptoJS / 解密调用），"
+                 "**页面自己已经把解密写在脚本里了**：读你列出来的变量（如解密后的数组），"
+                 "不要在 webJs 里重写解密算法——重写必错，而错法看不出来（解出来是乱码）。")
     return L
 
 
@@ -744,6 +781,8 @@ def _sec_diagnosis(ctx: Dict[str, Any]) -> Optional[List[str]]:
 #: ——判据写两处必然漂，而且它除被自己调用外没人用。
 SECTIONS: Tuple[Callable[[Dict[str, Any]], Optional[List[str]]], ...] = (
     _sec_fields,
+    # 顺序段紧跟字段段：「先写哪个」依赖「这一步有哪些字段」，读者（模型）按顺序读
+    _sec_script_step,
     _outline_section,
     _sec_js_globals,
     _sec_known_webjs,

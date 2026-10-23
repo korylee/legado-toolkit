@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  layerRow, materialOrigin, materialTabs, networkText, preferredMaterial,
+  canFastVerify, layerRow, materialOrigin, materialTabs, networkText, preferredMaterial,
   renderLine, runtimeText, verifyAction,
 } from "./debugMaterial.js";
 
@@ -52,6 +52,20 @@ test("the action follows material + layer, not the rule", () => {
   assert.equal(verifyAction({ layer: "L3", origin: "fetch" }).kind, "verify");
   assert.equal(verifyAction({ layer: "", origin: "fetch" }).kind, "verify");
   assert.equal(verifyAction({ layer: "L2", origin: "engine" }).kind, "verify");
+});
+
+test("快验按钮跟材料 × 规则形态走，答不了就不给按钮", () => {
+  // 材料是页面脚本的输出：选择器解的是 URL 列表 → 不给按钮
+  assert.equal(canFastVerify("webjs_output", "class.a@text"), false);
+  // 同一份材料 + 读 result 的规则：忠实
+  assert.equal(canFastVerify("webjs_output", '@js:result.split("\\n")'), true);
+  // 材料是 DOM：选择器忠实，读 result 的规则不忠实
+  assert.equal(canFastVerify("rendered_dom", "class.a@text"), true);
+  assert.equal(canFastVerify("rendered_dom", '@js:result.split("\\n")'), false);
+  // 说不清时不拦（侧车只记最后一次渲染，非末页永远 unknown）；空规则不给按钮
+  assert.equal(canFastVerify("", "class.a@text"), true);
+  assert.equal(canFastVerify("unknown", "class.a@text"), true);
+  assert.equal(canFastVerify("rendered_dom", "  "), false);
 });
 
 test("only materials that exist get a tab; the most specific one opens first", () => {

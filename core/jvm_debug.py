@@ -413,20 +413,38 @@ def page_from_engine(url: str, *, timeout: int = 60, render: bool = True,
 MATERIAL_WEBJS_OUTPUT = "webjs_output"
 MATERIAL_RENDERED_DOM = "rendered_dom"
 MATERIAL_STATIC = "static_html"
+#: 读不到渲染事实（老侧车 / 设备通道 / 多页渲染里没有事实的那几页）。
+#: **读不到 ≠ 静态页**（AGENTS #12）：没有「这次没渲染」这条事实，就不许说它是静态页。
+MATERIAL_UNKNOWN = "unknown"
+#: **我们自己另抓的一份**（`page.origin == "fetch"`）：走的是普通 HTTP，浏览器压根没参与，
+#: 所以它一定是没跑过页面脚本的静态 HTML——这不是「读不到」，是知道。
+#: 判据用它把「`@js:` 读 result」的规则拦掉（那种材料里没有 result，拿到的会是整页 HTML）。
+MATERIAL_FETCHED = "fetched_html"
 
 
-def material_kind(page: Any, source: Any) -> str:
-    """这一步的材料种类（纯函数，只读已有事实）。
+def material_kind(page: Any) -> str:
+    """这一页的材料种类（纯函数，只读**页上**的事实）。
 
-    判据：**渲染过没有**（`page.rendered`，由 `_annotate_render` 判到页上）+ **源有没有
-    页面脚本**（`ruleContent.webJs`）。没渲染 → 静态页（浏览器没参与，脚本也没机会跑）。
+    判据只看两件事：这次渲染成没成（`page.rendered`，由 `_annotate_render` 判到页上）、
+    渲染回来的响应体是不是脚本求值结果（`page.render_js`，侧车 `shadow_last_js_len`——
+    上游 `BackstageWebView` 有 `javaScript` 时响应体就是脚本返回值）。
+    两者都没有时看 `page.origin`：**我们另抓的**（`fetch`）一定是静态页（浏览器没参与），
+    其余（引擎交回的、来源未知）只能说 `unknown`。
+
+    **不读源配置**：源里配了 `webJs` 但 URL 没开 `webView` 时那段脚本压根不生效、材料仍是
+    真 DOM，按源判会把 DOM 说成脚本输出（AGENTS #12）。
     """
     page = page if isinstance(page, dict) else {}
-    src = source if isinstance(source, dict) else {}
-    webjs = str((src.get("ruleContent") or {}).get("webJs") or "").strip()
-    if page.get("rendered") is True:
-        return MATERIAL_WEBJS_OUTPUT if webjs else MATERIAL_RENDERED_DOM
-    return MATERIAL_STATIC
+    rendered = page.get("rendered")
+    if rendered is False:
+        return MATERIAL_STATIC
+    if rendered is not True:
+        return (MATERIAL_FETCHED if str(page.get("origin") or "") == "fetch"
+                else MATERIAL_UNKNOWN)
+    js = page.get("render_js")
+    if js is None:
+        return MATERIAL_UNKNOWN
+    return MATERIAL_WEBJS_OUTPUT if js else MATERIAL_RENDERED_DOM
 
 
 def _annotate_render(pages: Any, out: Dict[str, Any]) -> None:
@@ -438,27 +456,37 @@ def _annotate_render(pages: Any, out: Dict[str, Any]) -> None:
     剥选项只有一份权威实现（`core.urls.split_url_options`，AGENTS #20），前端没有、也
     不该有第二份。
 
-    落三档，全部只写**这一页的事实**：
-      - `rendered` = True：这一页就是那次渲染的结果；
-      - `rendered` = False + `render_reason`：这一页要渲染但没成（同一个地址）；
-      - 不写 `rendered`：这次没有任何页面走渲染（`rendered=0` 且没有渲染地址）——
-        写 False 也成立，但「这一页没走渲染」对搜索/目录那种静态页是废话，不写更干净。
-    侧车没有这些键（老侧车）时整块不写：**读不到 ≠ 没渲染**（AGENTS #12）。
+    落什么：
+      - 命中页写 `rendered`：这一页就是那次渲染的结果（成功与否）；
+      - 失败时写 `render_reason`——原因不写，用户只剩「失败了」三个字（AGENTS #4）；
+      - 渲染成功且有 `render_js` 事实时写 `render_js`（响应体是不是脚本求值结果）；
+      - **每一页**都写 `material_kind`（`material_kind()` 一份判据，含 unknown）——
+        没有渲染事实的页也写，消费方据此知道「读不到」，不必自己再猜。
+    侧车没有渲染键（老侧车 / 设备通道）时只跳过渲染事实部分：**读不到 ≠ 没渲染**（AGENTS #12）。
     """
-    if out.get("rendered") is None:
-        return
-    render_url = str(out.get("render_url") or "")
-    rendered = int(out.get("rendered") or 0)
-    reason = str(out.get("render_reason") or "")
-    bare_render = split_url_options(render_url)[0].rstrip("/") if render_url else ""
+    if out.get("rendered") is not None:
+        render_url = str(out.get("render_url") or "")
+        rendered = int(out.get("rendered") or 0)
+        reason = str(out.get("render_reason") or "")
+        # `shadow_rendered` 是**成功计数**，而 `shadow_last_url` 是**最后一次调用的地址**
+        # （含失败那次）：前一次渲染成功、最后一次失败时，`rendered>0` 会把失败页标成已渲染。
+        # 扣掉 `render_reason` 才是这一页的事实。
+        ok = bool(rendered) and not reason
+        render_js = out.get("render_js")
+        bare_render = split_url_options(render_url)[0].rstrip("/") if render_url else ""
+        for page in pages or []:
+            if not isinstance(page, dict):
+                continue
+            bare = split_url_options(str(page.get("url") or ""))[0].rstrip("/")
+            if bare_render and bare == bare_render:
+                page["rendered"] = ok
+                if reason:
+                    page["render_reason"] = reason
+                if ok and render_js is not None:
+                    page["render_js"] = bool(render_js)
     for page in pages or []:
-        if not isinstance(page, dict):
-            continue
-        bare = split_url_options(str(page.get("url") or ""))[0].rstrip("/")
-        if bare_render and bare == bare_render:
-            page["rendered"] = bool(rendered)
-            if not rendered:
-                page["render_reason"] = reason
+        if isinstance(page, dict):
+            page["material_kind"] = material_kind(page)
 
 
 def _mark_placeholder(steps: Any) -> None:
@@ -631,6 +659,10 @@ def run_jvm_debug(source: Dict[str, Any],
     #: 没渲染成的原因（`no_url` / `browser_unavailable` / `unsupported_is_rule*` /
     #: 渲染失败原因；空串 = 渲染成功或没走到）
     out["render_reason"] = str(meta.get("shadow_last_reason") or "") if has_shadow else ""
+    #: 这次渲染的响应体是不是脚本求值结果（`shadow_last_js_len > 0`）。老侧车没有这个键 →
+    #: None：「读不到传没传 JS」不是「没传 JS」（AGENTS #12）。
+    out["render_js"] = (int(meta.get("shadow_last_js_len") or 0) > 0
+                        if "shadow_last_js_len" in meta else None)
     out["hint"] = str(meta.get("hint") or "")
     # 源级的**静态错配**（与这次抓取结果无关，读 Legado 源码才知道的那些）。
     # 判据一份在 `core.quality.static_misconfig_notes`——这里只是把它**接到用户眼前**：

@@ -43,6 +43,8 @@ const notes = computed(() => agentBudgetNotes(run.result.value));
 
 const STATE_TEXT = {
   accepted: "已写入",
+  pending_engine: "待引擎验收",
+  need_material: "先取材料",
   failed: "取不到",
   proposed: "验证中",
   pending: "还没轮到",
@@ -50,8 +52,12 @@ const STATE_TEXT = {
 //: Element Plus 的 el-tag 只认 primary|success|info|warning|danger 五档；
 //: 传空串是**未定义行为**（渲染成默认色还是原样写到 class 上，看版本）。
 //: 「验证中」没有语义词，落 info（中性）——它既不是成功也不是失败。
+//: 「待引擎验收」用 warning：规则落了，但结论还没出，别让人以为验过了。
+//: 「先取材料」也用 warning：它不是失败，是下一步动作。
 const STATE_TONE = {
   accepted: "success",
+  pending_engine: "warning",
+  need_material: "warning",
   failed: "danger",
   proposed: "info",
   pending: "info",
@@ -191,14 +197,14 @@ onUnmounted(() => {});
           <el-tag size="small" :type="STATE_TONE[row.state]" effect="plain">
             {{ STATE_TEXT[row.state] }}
           </el-tag>
-          <span v-if="row.state === 'accepted'" class="ar-rule" :title="row.rule">
+          <span v-if="row.state === 'accepted' || row.state === 'pending_engine'" class="ar-rule" :title="row.rule">
             {{ row.rule }}
           </span>
-          <span v-else-if="row.state === 'failed'" class="ar-reason" :title="row.error">
+          <span v-else-if="row.state === 'failed' || row.state === 'need_material'" class="ar-reason" :title="row.error">
             {{ row.error || "原因未记录" }}
           </span>
           <span v-else class="muted ar-reason">
-            {{ row.state === "proposed" ? "已提议，还在验证" : "这一轮还没轮到它" }}
+            {{ row.state === "proposed" ? "正在验证中，请稍候。" : "本轮暂未轮到当前项，请稍候。" }}
           </span>
           <span class="grow" />
           <span v-if="row.state === 'accepted' && row.count" class="muted ar-count">

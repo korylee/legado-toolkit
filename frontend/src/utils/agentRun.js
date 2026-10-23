@@ -31,6 +31,14 @@ export function fieldLabelOf(field) {
   return key;
 }
 
+//: 材料不够时的下一步（码的取值域是后端 `core.material.MATERIALS` 的 `next_step`，
+//: 由 `blocked_next()` 取出；逐项比对钉在 `tests/test_jvm_debug_contract.py`）。
+//: 文案在消费侧，后端只出码（AGENTS #24④）。
+export const NEXT_STEP_TEXT = {
+  render_first: "先取渲染材料（这一步要浏览器跑过才有内容）",
+  drop_script: "先去掉页面脚本再重调本步（要看结构得让 DOM 回来）",
+};
+
 /** 后端字段键 → 写入草稿的规则字段路径（`name` → `ruleBookInfo.name`）。 */
 export function ruleFieldOf(step, field) {
   return (AUTOFILL_RULE_FIELDS[step] || {})[field] || "";
@@ -73,6 +81,11 @@ export function agentEventLine(ev = {}) {
     }
     case "ai_accepted":
       return { text: `${fieldLabelOf(ev.field)}：已写入`, tone: "info" };
+    case "ai_blocked": {
+      // 材料不够，没花钱让模型猜：说清下一步（码→词只在消费侧）
+      const next = NEXT_STEP_TEXT[ev.reason_code] || "";
+      return { text: `${fieldLabelOf(ev.field)}：${next || "材料还不够"}`, tone: "warn" };
+    }
     case "ai_failed":
       return { text: `${fieldLabelOf(ev.field)}：没有可用的提议（${ev.reason || "原因未记录"}）`,
         tone: "error" };
@@ -89,8 +102,11 @@ export function agentEventLine(ev = {}) {
 /** 一轮的事件账本 → 逐字段状态（`{field, label, state, tries, count, error, rule}`）。
  *
  * 状态判据（**只有这一份**）：
- *   accepted  `ai_accepted` 落到这个字段——规则写进去了；
+ *   accepted  `ai_accepted` 落到这个字段，且快验答得忠实——规则写进去了、验过了；
+ *   pending_engine  `ai_accepted` 但快验答不了（材料种类 × 规则形态不匹配）——规则写了，
+ *             还没被引擎验收，不能显示成「已写入」（D1：快验只有否决权）；
  *   failed    `ai_failed`，或者 `ai_try` 过但没被接受——都是「这条取不到」；
+ *   need_material  结果是「材料不够」：不是取不到，是**先要做一步**（给的是动作）；
  *   proposed  有 `ai_try` 但还没有结论；
  *   pending   一个事件都没提到——还没轮到它。
  * 没有事件的字段不编状态：`fields` 由调用方给（首屏要显示全部字段），没人提过就是
@@ -127,7 +143,9 @@ export function foldAgentFields(events, fields) {
         target.error = String(ev.error || "");
       }
     } else if (ev.kind === "ai_accepted") {
-      target.state = "accepted";
+      // 快验答不了这条（材料 × 规则形态不匹配）：规则落了，但还没被引擎验收——
+      // 标 accepted 会让界面说「已写入」（像是验过了），那是方向相反的结论（D1）
+      target.state = ev.pending_engine ? "pending_engine" : "accepted";
       target.rule = String(ev.rule || target.rule);
       target.count = Number(ev.count || target.count || 0);
       target.error = "";
@@ -142,7 +160,8 @@ export function foldAgentFields(events, fields) {
 /** 结果体兜底：事件漏了（流接晚了）也要给出同样的四态，外加**再补哪些字段**。
  *
  * 与 `foldAgentFields` 同一套状态判据，输入从事件换成 `run_loop` 的返回行：
- * `rule` + `try_result.ok` = accepted；`ai_failed` / `reason` = failed。
+ * `rule` + `pending_engine` = pending_engine（落了、快验测不了）；`rule` + `try_result.ok`
+ * = accepted；`ai_failed` / `reason` = failed。
  * 规则文本也带出来——调用方据此把验过的提议落进草稿。
  */
 export function resultAgentFields(result, fields) {
@@ -153,7 +172,12 @@ export function resultAgentFields(result, fields) {
     if (!target) continue;
     const checked = row.try_result || null;
     const passed = !!(checked && checked.ok && row.rule);
-    if (passed) {
+    if (row.rule && (row.pending_engine || (checked && checked.unfaithful))) {
+      target.state = "pending_engine";
+      target.rule = String(row.rule);
+      target.count = 0;
+      target.error = "";
+    } else if (passed) {
       target.state = "accepted";
       target.rule = String(row.rule);
       target.count = Number(checked.count || 0);
@@ -163,6 +187,8 @@ export function resultAgentFields(result, fields) {
       // 单独一个 `rule` 不能算补上——落进输入框的必须是验过的（同 agent_loop 的纪律）
       target.state = "failed";
       target.rule = "";
+      // 材料不够是**可执行的下一步**，不是「取不到」：照实标出来，界面给的是动作
+      if (row.fail_code === "need_material") target.state = "need_material";
       target.error = String(row.reason || (checked && checked.error) || "这条规则没选中");
     }
   }

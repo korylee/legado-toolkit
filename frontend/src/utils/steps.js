@@ -29,7 +29,7 @@ export const STEP_LABELS = {
 //: `key` 是 AI 补全那一侧认字段用的名字（`core.autofill.FILL_SPECS` 的蛇形键）：
 //: 没有它的行，AI 补全弹窗就拿不到这个字段的中文名。它只影响取词，不影响写入落点
 //: （落点表 `AUTOFILL_RULE_FIELDS` 自己带完整路径；写源用的是 `field`）。
-//: **只有能 AI 补全的步才有意义**（现在 `bookUrl` / `search`），其余步的 `key` 没人读。
+//: **只有能 AI 补全的步才有意义**（现在 `bookUrl` / `search` / `content`），其余步的 `key` 没人读。
 export const RULE_FIELD_DEFS = [
   { step: "search", field: "ruleSearch.bookList", group: "ruleSearch", key: "bookList", label: "搜索 · bookList", placeholder: "class.book-list@tag.li" },
   { step: "search", field: "ruleSearch.name", group: "ruleSearch", key: "name", label: "搜索 · 书名", placeholder: "class.title@text" },
@@ -43,13 +43,13 @@ export const RULE_FIELD_DEFS = [
   { step: "bookUrl", field: "ruleBookInfo.coverUrl", group: "ruleBookInfo", key: "cover_url", label: "详情 · 封面链接", placeholder: "class.cover img@src" },
   { step: "bookUrl", field: "ruleBookInfo.tocUrl", group: "ruleBookInfo", key: "toc_url", label: "详情 · 目录链接", placeholder: "class.list a@href" },
   { step: "toc", field: "ruleToc.chapterList", group: "ruleToc", key: "chapterList", label: "目录 · chapterList", placeholder: "class.chapter@tag.a" },
-  // 正文不给行内快验：rule_try 只回答「选不选得中」，而正文对不对看的是**内容**。
-  // 实测同一张图片正文页：`class.content@text` → 取到 0 条、`body@html` → 取到 1 条
-  // （整页 HTML 也算「取到」）——两条结论都读不出正文有没有真取到，按钮只会说反。
-  // 验收只有一条：重调本步（暖机 ~2s），看引擎的 verdict。
-  { step: "content", field: "ruleContent.content", group: "ruleContent", key: "content", label: "正文 · content", placeholder: "id.content@text", verify: "none", factHint: "正文的验收看引擎：改完重调本步" },
-  // 分页：单条时串行跟随、多条时并发抓取（上游 BookContent.kt），所以它取的是一**组**链接
-  { step: "content", field: "ruleContent.nextContentUrl", group: "ruleContent", key: "nextContentUrl", label: "正文 · 下一页链接", placeholder: "class.next@href", verify: "none", factHint: "分页规则没有快验，改这条要重调本步验证" },
+  // 正文**给行内快验**（D6：按事实判，不是一刀切）：材料与规则形态对不上时按钮根本不出现
+  // （判据在后端 `core.rule_try`，前端 `canFastVerify` 只为显隐）；快验只回答取没取到，
+  // 正文可用性一律以「重调本步」的 verdict 为准。
+  { step: "content", field: "ruleContent.content", group: "ruleContent", key: "content", label: "正文 · content", placeholder: "id.content@text" },
+  // 分页：单条时串行跟随、多条时并发抓取（上游 BookContent.kt），所以它取的是一**组**链接——
+  // 组规则拿单值口径去验会说反，这行不给按钮（`verify: "none"` 是**步骤级**的原因，与材料无关）
+  { step: "content", field: "ruleContent.nextContentUrl", group: "ruleContent", key: "nextContentUrl", label: "正文 · 下一页链接", placeholder: "class.next@href", verify: "none" },
   // 页面脚本（不是取值规则）：它的结果成为这一步的响应体，取值由 content 那条做；
   // 生效前提是某条 URL 规则开了 webView，判据在后端 `core.quality.static_misconfig_notes`
   { step: "content", field: "ruleContent.webJs", group: "ruleContent", key: "webJs", label: "正文 · webJs（页面脚本）", placeholder: "var urls = params.chapter_images; …", fact: "none", verify: "none" },
@@ -86,5 +86,10 @@ export const AUTOFILL_RULE_FIELDS = {
   search: {
     book_url: "ruleSearch.bookUrl",
     name: "ruleSearch.name",
+  },
+  // 正文步手写：两个字段同在 ruleContent 组（`key` 是 FILL_SPECS 的蛇形键，落点是驼峰路径）
+  content: {
+    webJs: "ruleContent.webJs",
+    content: "ruleContent.content",
   },
 };

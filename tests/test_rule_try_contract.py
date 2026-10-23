@@ -8,7 +8,7 @@ from __future__ import annotations
 import pathlib
 import unittest
 
-from core.rule_try import _gate, _DAEMON_TIMEOUT_SEC
+from core.rule_try import _gate, _DAEMON_TIMEOUT_SEC, unfaithful_reason
 
 AGSVC = pathlib.Path(__file__).resolve().parents[1] / "appservice" / "test" / "io" / "legado" / "app" / "service"
 
@@ -67,6 +67,59 @@ class RuleTryContractTests(unittest.TestCase):
     def test_timeout_budget_is_daemon_scale(self):
         """daemon 路径是纯内存解析（秒级）；预算给成分钟级会把卡死藏半分钟。"""
         self.assertLessEqual(_DAEMON_TIMEOUT_SEC, 60)
+
+
+class UnfaithfulReasonTests(unittest.TestCase):
+    """快验的忠实性判据（材料种类 × 规则形态）：答不了就给码，不给判决。
+
+    为什么要有它：快验**只有否决权**（AGENTS #3/D1）。判据不在的话，材料是脚本输出
+    时一条选择器规则会「取到 0 条」（看起来像源坏了），材料是 DOM 时读 `result` 的规则
+    拿整页 HTML 当 result 用（看起来像成了）——两种都会把用户带向反的方向（AGENTS #4）。
+    """
+
+    def test_reason_follows_material_and_rule_shape(self):
+        from core.rule_try import (UNFAITHFUL_MATERIAL_IS_SCRIPT,
+                                   UNFAITHFUL_RESULT_ABSENT, UNFAITHFUL_RULE_EMPTY,
+                                   unfaithful_reason)
+
+        cases = (
+            # (材料种类, 规则, 期望码)
+            ("rendered_dom", "class.a@text", ""),                      # 选择器要 DOM ✓
+            ("static_html", "class.a@href", ""),
+            ("webjs_output", "class.a@text", UNFAITHFUL_MATERIAL_IS_SCRIPT),
+            ("webjs_output", '@js:result.split("\n")', ""),            # 读 result 要脚本产出 ✓
+            ("rendered_dom", '@js:result.split("\n")', UNFAITHFUL_RESULT_ABSENT),
+            ("rendered_dom", "@js:java.ajax(url)", ""),                # 不读 result：与材料无关
+            # 说不清就照跑：侧车只有最后一次渲染的事实，非末页永远 unknown，
+            # 一律拒绝会把整条 AI 验证链变成「待验收」
+            ("unknown", "class.a@text", ""),
+            ("unknown", "@js:result", UNFAITHFUL_RESULT_ABSENT),
+            # 我们另抓的静态页：浏览器没参与，result 不存在 → 读 result 的规则拦掉
+            ("fetched_html", "@js:result", UNFAITHFUL_RESULT_ABSENT),
+            ("fetched_html", "class.a@text", ""),
+            ("", "class.a@text", ""),
+            ("rendered_dom", "", UNFAITHFUL_RULE_EMPTY),
+        )
+        for material_kind, rule, want in cases:
+            self.assertEqual(unfaithful_reason(material_kind, rule), want,
+                             "%r × %r 判据变了" % (material_kind, rule))
+
+    def test_unknown_material_stays_permissive(self):
+        """认不出的材料种类（对端升级 / 空串）：不阻塞、选择器照验。
+
+        宁可多试一次，也不要把「对端多了一种材料」变成「这一步什么都做不了」——
+        这条兜底的方向是判据的一部分，不是实现细节。
+        """
+        from core.jvm_debug import MATERIAL_FETCHED, MATERIAL_WEBJS_OUTPUT
+        from core.material import blocked_next, can_fast_verify, can_fill_dom
+
+        for kind in ("brand_new", ""):
+            self.assertTrue(can_fill_dom(kind), kind)
+            self.assertEqual(blocked_next(kind), "", kind)
+            self.assertTrue(can_fast_verify(kind, "selector"), kind)
+        # 反方向：材料事实明确时不许再「宽松」——脚本输出拦选择器、另抓的静态页要渲染
+        self.assertFalse(can_fast_verify(MATERIAL_WEBJS_OUTPUT, "selector"))
+        self.assertEqual(blocked_next(MATERIAL_FETCHED), "render_first")
 
 
 if __name__ == "__main__":

@@ -41,6 +41,8 @@ import {
   networkText,
   preferredMaterial,
   runtimeText,
+  UNFAITHFUL_TEXT,
+  canFastVerify,
   verifyAction,
 } from "../utils/debugMaterial";
 import { agentPlan, ruleTry, ruleOutline } from "../api/rules";
@@ -969,7 +971,14 @@ function applyAiResult(result, { fill } = {}) {
   for (const row of rows) {
     const target = map[row.field];
     const checked = row.try_result;
-    if (!target || !row.rule || !checked || !checked.ok) continue;
+    if (!target || !row.rule) continue;
+    // 快验答不了（材料 × 规则形态不匹配）：规则照落（AI 写的就填），但不升格——
+    // 「快验通过」不是「可用」（D1），验收仍走重调本步；底纹也就不给
+    if (row.pending_engine || (checked && checked.unfaithful)) {
+      if (fill && !String(flatRuleOf(target) || "").trim()) onFlatRuleInput(target, String(row.rule));
+      continue;
+    }
+    if (!checked || !checked.ok) continue;
     if (fill && String(flatRuleOf(target) || "").trim()) continue;
     suggestedRules.value = { ...suggestedRules.value, [target]: String(row.rule) };
     if (fill) onFlatRuleInput(target, String(row.rule));
@@ -1011,10 +1020,12 @@ function scheduleQuickVerify(field) {
   }, QUICK_VERIFY_IDLE_MS);
 }
 
-//: 这一行有没有行内「验证」的口径（词表在 utils/steps 的 def.verify）
+//: 这一行能不能行内「验证」：口径位（`utils/steps` 的 `def.verify`）+ **材料与规则形态对得上**
+//: （判据在后端 `core.rule_try`）。对不上就不给按钮，也不解释——点了才知道答不了才是噪音
 function verifyAllowed(field) {
   const def = stepFields.value.find((d) => d.field === field);
-  return !!def && def.verify !== "none";
+  if (!def || def.verify === "none") return false;
+  return canFastVerify((currentPage.value || {}).material_kind, flatRuleOf(field));
 }
 
 //: 快验（rule_try）：验的是**这行草稿规则**，结论贴在它自己的行上。
@@ -1023,7 +1034,14 @@ async function verifyField(field) {
   // 连 App 调试没有任务行（材料在后端），行内验证只在本机引擎通道可用
   if (!runId.value || !field) return;
   const rule = String(flatRuleOf(field) || "").trim();
-  if (!rule) return;
+  if (!rule) {
+    // 空规则点下去什么都不跑：不给原因的话就是静默失败（AGENTS #4）
+    fieldValues.value = {
+      ...fieldValues.value,
+      [field]: { count: 0, values: [], error: UNFAITHFUL_TEXT.rule_empty },
+    };
+    return;
+  }
   const gen = (quickGen[field] = (quickGen[field] || 0) + 1);
   fieldValues.value = {
     ...fieldValues.value,
@@ -1037,6 +1055,19 @@ async function verifyField(field) {
     });
     if (gen !== quickGen[field]) return; // 期间又改了：这次结论已经过期
     const ok = !!(out && out.ok);
+    // 快验答不了这条（材料种类 × 规则形态不匹配）：说清是「快验测不了」，
+    // 不冒充「这条规则取不到」——方向相反的结论比没有结论更坏（AGENTS #4）
+    if (out && out.unfaithful) {
+      fieldValues.value = {
+        ...fieldValues.value,
+        [field]: {
+          count: 0,
+          values: [],
+          error: UNFAITHFUL_TEXT[out.reason_code] || String(out.reason_code || "快验测不了这条规则"),
+        },
+      };
+      return;
+    }
     // 应答带值（values ≤5 条）：原样收下，标签/悬停/展开都从它取
     fieldValues.value = {
       ...fieldValues.value,
@@ -1331,12 +1362,11 @@ async function copyRaw(text, okMsg) {
                 <span
                   v-if="d.fact !== 'none'"
                   class="flat-rule-facts"
-                  :title="d.factHint || ''"
                 >
                   <span
                     v-if="!fieldValues[d.field]"
                     class="flat-rule-fact state-empty"
-                    >还没有实测值</span
+                    >{{ flatRuleOf(d.field) ? "还没有实测值" : "还没有填规则" }}</span
                   >
                   <span
                     v-else-if="fieldValues[d.field].loading"
@@ -1393,10 +1423,10 @@ async function copyRaw(text, okMsg) {
                   >
                 </span>
                 <span class="flat-rule-actions">
-                  <!-- `verify: "none"` 的行没有快验口径（拿单值口径去验一组分页链接会说反），
-                       那一行不渲染按钮：主动作是组头的「重调本步验证」 -->
+                  <!-- 没快验口径、或者这一行的规则为空时**不渲染按钮**：空规则点下去什么都验不了，
+                       把「该不该给按钮」留给按钮自己的存在与否，不再配一句解释（提示只在不出现会卡住时才加） -->
                   <el-button
-                    v-if="d.verify !== 'none'"
+                    v-if="verifyAllowed(d.field)"
                     size="small"
                     link
                     type="primary"
@@ -2105,6 +2135,7 @@ async function copyRaw(text, okMsg) {
   }
   .debug-panes {
     display: block;
+    overflow: auto;
   }
   .debug-step-main {
     overflow-y: visible;

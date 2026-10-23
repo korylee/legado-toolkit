@@ -43,7 +43,8 @@ FIELD_LABELS = {
 #: 加一步（search / toc / content）= 加一个键，编排函数（autofill_detail /
 #: attach_autofill / agent_loop）按表展开，**不再加 bookUrl 特判**。
 #: 键语义（dict 顺序即预览表行序）：
-#:   kind        候选取样类型（core.candidates.KINDS）；也是 AI 提议的取样类型
+#:   kind        候选取样类型（core.candidates.KINDS）；也是 AI 提议的取样类型。
+#:               ``script`` 是**没有 DOM 候选可采**的那一类（页面脚本，不是取值规则）
 #:   anchor      structured 里锚点值的取法——None = 直取字段名；
 #:               列表形状给 ``(键, 子键)``：从 items[0] 取子键
 FILL_SPECS = {
@@ -60,6 +61,12 @@ FILL_SPECS = {
     "search": {
         "book_url": {"kind": "link", "anchor": ("items", "book_url")},
         "name": {"kind": "text", "anchor": ("items", "name")},
+    },
+    #: 正文步：`webJs` 是页面脚本（跑在页面环境里，它的结果成为这一步的响应体），
+    #: `content` 是取值规则——材料是脚本输出时，它读的 `result` 就是 webJs 的产出。
+    "content": {
+        "webJs": {"kind": "script"},
+        "content": {"kind": "text"},
     },
 }
 
@@ -152,7 +159,9 @@ def attach_autofill(steps: List[Dict[str, Any]],
             structured = (step or {}).get("structured")
             if not (html.strip() and isinstance(structured, dict)):
                 continue
-            step["autofill"] = autofill_detail(html, structured, step=name)
+            step["autofill"] = autofill_detail(
+                html, structured, step=name,
+                material_kind=str((page or {}).get("material_kind") or ""))
     except Exception as e:  # 建议是附赠品：炸了说一声，判定不动
         for step in (steps or []):
             if step.get("name") in FILL_SPECS:
@@ -163,7 +172,8 @@ def attach_autofill(steps: List[Dict[str, Any]],
 
 
 def autofill_detail(html: str, structured: Dict[str, Any],
-                    limit: int = 3, step: str = "bookUrl") -> Dict[str, Any]:
+                    limit: int = 3, step: str = "bookUrl",
+                    material_kind: str = "") -> Dict[str, Any]:
     """逐字段出建议（按 FILL_SPECS 表展开）。返回 ``{fields: [...], free_ok: True}``：
     每行 ``{field, reason, ...}``，**只有 ``rule`` 是敢拍板的那一条**——没有 ``rule``
     就是不产出规则（``need_ai`` = 比不出结论 / ``no_anchor`` = 没有实测值可比），
@@ -171,7 +181,14 @@ def autofill_detail(html: str, structured: Dict[str, Any],
 
     ``structured`` 的形状按表里的 ``anchor`` 取：详情段是平的（直取字段名），
     搜索段是列表（items[0].子键）。
+
+    ``material_kind`` 是这一步材料的**引擎事实**（`page["material_kind"]`，判据一份在
+    `core.jvm_debug.material_kind`）：材料是页面脚本的输出时，DOM 候选没有意义——
+    实测在那种材料上找候选会拍出「把地址列表逐行当正文」的假通过（`body@html` 也 pass）。
+    这类字段一律标 ``need_ai``，让 AI 按材料范式写。
     """
+    from core.material import can_fill_dom
+
     html = html or ""
     structured = structured if isinstance(structured, dict) else {}
     spec = FILL_SPECS.get(step) or {}
@@ -181,6 +198,22 @@ def autofill_detail(html: str, structured: Dict[str, Any],
         row: Dict[str, Any] = {"field": field}
         if not html.strip():
             row["reason"] = "这一步没有页面材料"
+            fields.append(row)
+            continue
+        if kind == "script":
+            # 页面脚本没有「DOM 候选」可采（它不是取值规则，跑在页面环境里）。交给 AI——
+            # 真去调 find_candidates 只会抛「未知的候选类型」再被吞成一句工具故障（AGENTS #4）
+            row["reason"] = "页面脚本要在页面环境里写（result = params.<键>…），交给 AI"
+            row["need_ai"] = True
+            fields.append(row)
+            continue
+        if not can_fill_dom(material_kind):
+            # 材料**不是 DOM**（页面脚本的输出）：在它上面找候选会拍出「把地址列表当正文」
+            # 那种假通过（同一页实测：不写 webJs 时整页 HTML 逐行包成 <img> 也 pass）。
+            # 取值规则得读 result，按材料交 AI 写——判据是引擎事实，不读源配置。
+            row["reason"] = ("这一步的材料是页面脚本的输出，取值规则要读 result"
+                             "——交给 AI 按材料写")
+            row["need_ai"] = True
             fields.append(row)
             continue
         try:

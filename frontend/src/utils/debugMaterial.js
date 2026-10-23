@@ -147,11 +147,9 @@ export function materialOrigin(page) {
   if (!page || typeof page !== "object") return null;
   const origin = String(page.origin || "");
   if (origin === "engine") {
-    return {
-      kind: "engine",
-      label: "引擎那份（0 请求）",
-      hint: "本机引擎这次调试交回来的整页：过了它的 JS / cookie / UA",
-    };
+    // 不给 hint：同一句话已经作为材料栏的注脚显示在标签下面（`pageOriginNote`），
+    // 悬停里再说一遍是复述
+    return { kind: "engine", label: "引擎那份（0 请求）", hint: "" };
   }
   if (origin === "fetch") {
     const when = String(page.fetched_at || "");
@@ -213,11 +211,8 @@ const NETWORK_BODY_CHARS = 4000;
 export function renderLine(page) {
   if (!page || typeof page !== "object") return null;
   if (page.rendered === true) {
-    return {
-      kind: "rendered",
-      text: "这一页是渲染后的",
-      hint: "浏览器跑完页面脚本才拿到的这份材料",
-    };
+    // 不给 hint：字面已经说完「这一页是渲染后的」，再解释一遍机制是复述
+    return { kind: "rendered", text: "这一页是渲染后的", hint: "" };
   }
   if (page.rendered === false) {
     const code = String(page.render_reason || "");
@@ -225,6 +220,45 @@ export function renderLine(page) {
     return { kind: "failed", text: "这一页要渲染但没成" + (why ? "：" + why : ""), hint: "" };
   }
   return null;
+}
+
+//: 快验答不忠实的原因码 → 人话。码的取值域只有一份：后端 `core.rule_try.UNFAITHFUL_CODES`
+//: （判据也在那里），两侧逐项比对钉在 `tests/test_jvm_debug_contract.py`。**认不出的原样显示**。
+//: 快验答不了不是「这条规则坏了」，句子必须说清楚是「快验测不了」。
+export const UNFAITHFUL_TEXT = {
+  rule_empty: "这一行还没有规则",
+  material_is_script: "这一步的材料是页面脚本的输出",
+  result_absent: "这一步的材料里没有脚本产出",
+};
+
+//: 快验答不忠实的组合（材料种类 × 规则形态）。**判据在后端**：`core.material.MATERIALS`
+//: 每行的 `allows` 经 `can_fast_verify()` 算出来的那几对（`core/rule_try.py` 里那份是
+//: 原因码，不是这张表）。这里只为「不给一个点了才知道答不了的按钮」，逐项比对钉在
+//: `tests/test_jvm_debug_contract.py`。表外一律照跑（`unknown` 不在表里：侧车只记最后一次
+//: 渲染的事实，非末页永远 unknown）。
+export const UNFAITHFUL_PAIRS = [
+  ["webjs_output", "selector"],
+  ["rendered_dom", "js_result"],
+  ["static_html", "js_result"],
+  ["fetched_html", "js_result"],
+];
+
+/** 规则形态（与后端 `core.rule_try.rule_shape` 同构）：容器 / 选择器 / 读 result / 其他。 */
+export function ruleShape(rule) {
+  const text = String(rule || "").trim();
+  if (!text) return "empty";
+  if (text.startsWith("@js:")) return text.includes("result") ? "js_result" : "js_other";
+  // 列表容器规则（`class.list@tag.a`）：末段仍是选择器，不是取值
+  if (/@(tag|class|id)\./.test(text)
+    && !/@(text|href|src|textNodes|ownText|html)$/.test(text)) return "container";
+  return "selector";
+}
+
+/** 这一行的材料与规则形态对得上吗——对不上就不给「验证」按钮（判据在后端）。 */
+export function canFastVerify(materialKind, rule) {
+  const shape = ruleShape(rule);
+  if (shape === "empty") return false;
+  return !UNFAITHFUL_PAIRS.some(([kind, s]) => kind === materialKind && s === shape);
 }
 
 //: 侧车 `shadow_last_reason` 的码 → 人话。**认不出的原样显示**：那是「对端多了一个码」，

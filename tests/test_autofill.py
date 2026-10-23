@@ -83,6 +83,28 @@ class AutofillDetailTests(unittest.TestCase):
             self.assertNotIn("rule", row)
             self.assertTrue(row.get("reason"))
 
+    def test_content_step_goes_to_ai_on_script_material(self):
+        """正文步：材料是脚本输出时不采 DOM 候选；`webJs` 本身没有候选可采。
+
+        实测那种材料是「137 行图片地址、没有任何标签」——在它上面找 DOM 候选会拍出
+        「把地址列表逐行当正文」的假通过（`body@html` 也 pass）。判据是**引擎事实**
+        （`material_kind`），不读源配置；两行都标 `need_ai`，交 AI 按材料写。
+        """
+        urls = "https://img.example.com/1.jpg\nhttps://img.example.com/2.jpg"
+        rows = {r["field"]: r for r in autofill_detail(
+            urls, {}, step="content", material_kind="webjs_output")["fields"]}
+        self.assertEqual(set(rows), {"webJs", "content"})
+        for row in rows.values():
+            self.assertNotIn("rule", row)
+            self.assertTrue(row.get("need_ai"))
+        # `webJs` 不是 DOM 取样：不许把「未知的候选类型」这种工具故障当原因（AGENTS #4）
+        self.assertNotIn("候选生成失败", rows["webJs"].get("reason") or "")
+        # 材料是 DOM 时不再拦它
+        dom = autofill_detail(DETAIL_HTML, dict(STRUCTURED), step="content",
+                              material_kind="rendered_dom")["fields"]
+        self.assertTrue(all("页面脚本的输出" not in (r.get("reason") or "")
+                            for r in dom))
+
 
 if __name__ == "__main__":
     unittest.main()

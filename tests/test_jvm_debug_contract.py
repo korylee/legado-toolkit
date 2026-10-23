@@ -630,16 +630,91 @@ class TestAutofillFieldMapParity(unittest.TestCase):
         body = block[1].split("\n};", 1)[0]
         for step in FILL_SPECS:
             self.assertIn("%s:" % step, body, "AUTOFILL_RULE_FIELDS 缺 %s 步" % step)
-        # 搜索步的落点手写在这里：逐词比对 + 组不能串（搜索是条目级规则）
-        search_block = re.search(r"search:\s*\{([^}]*)\}", body)
-        self.assertIsNotNone(search_block, "AUTOFILL_RULE_FIELDS 缺 search 段")
-        search_map = dict(re.findall(r"(\w+):\s*\"([^\"]+)\"", search_block.group(1)))
-        self.assertEqual(set(search_map), set(FILL_SPECS["search"]),
-                         "search 步的写入落点与 FILL_SPECS 漂了")
-        for field, rule_field in search_map.items():
-            self.assertTrue(rule_field.startswith("ruleSearch."),
-                            "search 步的 %s 落在 %s——组不能串（搜索是条目级规则）"
-                            % (field, rule_field))
+        # 手写的段落逐词比对：键集必须与 FILL_SPECS 一致，且不能串组
+        # （bookUrl 那条是派生表，覆盖性由上面一条钉）
+        for step, prefix in (("search", "ruleSearch."), ("content", "ruleContent.")):
+            m = re.search(r"%s:\s*\{([^}]*)\}" % step, body)
+            self.assertIsNotNone(m, "AUTOFILL_RULE_FIELDS 缺 %s 段" % step)
+            mapping = dict(re.findall(r"(\w+):\s*\"([^\"]+)\"", m.group(1)))
+            self.assertEqual(set(mapping), set(FILL_SPECS[step]),
+                             "%s 步的写入落点与 FILL_SPECS 漂了" % step)
+            for field, rule_field in mapping.items():
+                self.assertTrue(rule_field.startswith(prefix),
+                                "%s 步的 %s 落在 %s——组不能串" % (step, field, rule_field))
+
+
+class TestUnfaithfulCodeParity(unittest.TestCase):
+    """快验原因码：权威在后端 `core.rule_try.UNFAITHFUL_CODES`，前端只取词。
+
+    两边各改一边的后果不是报错，是界面把「快验测不了」显示成裸码
+    （同 AGENTS #4：原因要走到用户眼前）；逐码比对（#22⑤）。
+    """
+
+    DEBUG_MATERIAL = (pathlib.Path(__file__).parent.parent /
+                      "frontend/src/utils/debugMaterial.js")
+
+    def test_every_code_has_a_sentence(self):
+        from core.rule_try import UNFAITHFUL_CODES
+
+        text = self.DEBUG_MATERIAL.read_text(encoding="utf-8")
+        block = text.split("export const UNFAITHFUL_TEXT = {", 1)
+        self.assertEqual(len(block), 2, "debugMaterial.js 里找不到 UNFAITHFUL_TEXT")
+        body = block[1].split("\n};", 1)[0]
+        keys = set(re.findall(r"(\w+):", body))
+        self.assertEqual(keys, set(UNFAITHFUL_CODES),
+                         "快验原因码两侧漂了：多了 %s，缺了 %s"
+                         % (sorted(keys - set(UNFAITHFUL_CODES)),
+                            sorted(set(UNFAITHFUL_CODES) - keys)))
+
+    def test_material_table_matches_frontend_mirror(self):
+        """材料表与前端镜像一致：前端按它显隐按钮，后端按它拒答。
+
+        漂了的后果不是报错，是「按钮在那儿、点下去才说答不了」（前端宽），或
+        「按钮不出现、其实答得了」（后端宽）。表里的材料种类还必须是
+        `core.jvm_debug` 的常量值——那是 `material_kind` 的取值域（#7 同一条）。
+        """
+        from core.jvm_debug import (MATERIAL_FETCHED, MATERIAL_RENDERED_DOM,
+                                    MATERIAL_STATIC, MATERIAL_UNKNOWN,
+                                    MATERIAL_WEBJS_OUTPUT)
+        from core.material import can_fast_verify
+
+        text = self.DEBUG_MATERIAL.read_text(encoding="utf-8")
+        block = text.split("export const UNFAITHFUL_PAIRS = [", 1)
+        self.assertEqual(len(block), 2, "debugMaterial.js 里找不到 UNFAITHFUL_PAIRS")
+        body = block[1].split("];", 1)[0]
+        js_pairs = {tuple(m) for m in re.findall(r'\[\s*"([^"]+)"\s*,\s*"([^"]+)"\s*\]', body)}
+        js_kinds = {kind for kind, _ in js_pairs}
+        # 前端只列「拒」的少数几对；后端是判据 → 从后端反算出该拒的那几对。
+        # unknown 那组是「材料说不清」，前端不值得为它再写一份规则
+        backend_pairs = {(kind, shape)
+                         for kind in (MATERIAL_WEBJS_OUTPUT, MATERIAL_RENDERED_DOM,
+                                      MATERIAL_STATIC, MATERIAL_FETCHED)
+                         for shape in ("selector", "js_result")
+                         if not can_fast_verify(kind, shape)}
+        self.assertEqual(js_pairs, backend_pairs,
+                         "快验组合表两侧漂了：前端 %s，后端 %s"
+                         % (sorted(js_pairs), sorted(backend_pairs)))
+        known = {MATERIAL_WEBJS_OUTPUT, MATERIAL_RENDERED_DOM, MATERIAL_STATIC,
+                 MATERIAL_FETCHED, MATERIAL_UNKNOWN}
+        self.assertEqual(js_kinds - known, set(),
+                         "组合表里出现了 material_kind 取值域外的种类：%s"
+                         % sorted(js_kinds - known))
+
+
+    def test_next_step_codes_have_sentences(self):
+        """`core.material` 的每个下一步码在前端都有词（AGENTS #24④：后端只出码）。"""
+        from core.material import MATERIALS
+
+        text = (pathlib.Path(__file__).parent.parent /
+                "frontend/src/utils/agentRun.js").read_text(encoding="utf-8")
+        block = text.split("export const NEXT_STEP_TEXT = {", 1)
+        self.assertEqual(len(block), 2, "agentRun.js 里找不到 NEXT_STEP_TEXT")
+        body = block[1].split("\n};", 1)[0]
+        keys = set(re.findall(r"(\w+):", body))
+        codes = {m.next_step for m in MATERIALS.values() if m.next_step}
+        self.assertEqual(keys, codes,
+                         "下一步码两侧漂了：前端 %s，后端 %s"
+                         % (sorted(keys), sorted(codes)))
 
 
 if __name__ == "__main__":
