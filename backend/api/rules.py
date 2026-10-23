@@ -422,5 +422,4 @@ async def agent_loop(body: AutofillRunRequest, st=Depends(get_store)):
     return {"job_id": runner.submit(
         "agent_loop",
         {"debug_job_id": body.job_id, "step": body.step,
-         "fields": list(body.fields or [])},
-        lane_kind="debug")}
+         "fields": list(body.fields or [])})}

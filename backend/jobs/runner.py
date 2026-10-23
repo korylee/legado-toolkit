@@ -176,7 +176,7 @@ def lane_snapshot_threadsafe(name: str) -> Dict[str, Any]:
 def _ensure_jvm_debug_lane_idle(st: Store) -> None:
     # 批量校验允许调试越过；已有调试不可重入/中断。
     active_jobs = st.list_jobs(limit=10000, statuses=ACTIVE_JOB_STATUSES)
-    if any(job.get("kind") in {"jvm_debug"} for job in active_jobs):
+    if any(job.get("kind") == "jvm_debug" for job in active_jobs):
         # 「取消等待」只是前端不再等结果，引擎那一次会跑完（shield 纪律）——
         # 409 要把这件事说到用户眼前，否则看起来像坏了
         raise JvmLaneBusyError(

@@ -1360,8 +1360,7 @@ class Store:
     def list_jobs(self, limit: int = 200,
                   statuses: Optional[Sequence[str]] = None,
                   kind: str = "", kinds: Optional[Sequence[str]] = None,
-                  recent_since: str = "",
-                  exclude_kind: str = "") -> List[Dict[str, Any]]:
+                  recent_since: str = "") -> List[Dict[str, Any]]:
         """按筛选条件取任务行（新的在前），最多 ``limit`` 条。
 
         筛选条件全部由调用方给（见 ``backend/api/jobs.py``）：这里不做口径判断——
@@ -1389,11 +1388,6 @@ class Store:
             marks = ",".join("?" * len(kinds))
             where.append("kind IN (%s)" % marks)
             args.extend(str(k) for k in kinds)
-        if exclude_kind:
-            # 任务中心按**排除**过滤（默认不看调试运行）：白名单会让新增的 kind
-            # 悄悄从列表里消失，而"哪一类不该出现在这里"是明确的
-            where.append("kind != ?")
-            args.append(str(exclude_kind))
         if recent_since:
             marks = ",".join("?" * len(ACTIVE_JOB_STATUSES))
             where.append("(created_at >= ? OR status IN (%s))" % marks)

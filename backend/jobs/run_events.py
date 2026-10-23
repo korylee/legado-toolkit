@@ -97,7 +97,8 @@ def append_llm_call(run_dir: Optional[pathlib.Path], record: Dict[str, Any]) -> 
             pass
 
 
-def record_failures(run_dir: Optional[pathlib.Path], rows: Iterable[Any],                    chunk: str = "") -> None:
+def record_failures(run_dir: Optional[pathlib.Path], rows: Iterable[Any],
+                    chunk: str = "") -> None:
     """一批结论里没通过的那些记进失败清单。
 
     通过判据与 ``core.jvm_health`` 的映射同一条：**只有 ``state == "ok"`` 算通过**，
