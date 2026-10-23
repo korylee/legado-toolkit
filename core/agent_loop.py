@@ -36,12 +36,19 @@ from core.autofill import (
     _field_kind,
 )
 
+#: 送模型的候选数据源条数上限（按「像数据」排序后的前 N）。实测一页 8-9 条，
+#: 真实站点会更多；12 条足够覆盖，又不至于把键名段落撑爆。
+RUNTIME_PROMPT_ITEMS = 12
+
 
 async def run_loop(html: str, structured: Dict[str, Any], source: Dict[str, Any],
                    base_url: str, step: str = "bookUrl",
                    fields: Optional[List[str]] = None,
                    on_event: Optional[Callable[..., None]] = None,
                    on_llm: Optional[Callable[[Dict[str, Any]], None]] = None,
+                   runtime: Optional[Dict[str, Any]] = None,
+                   material_kind: str = "",
+                   page_stats: Optional[Dict[str, Any]] = None,
                    ) -> Dict[str, Any]:
     """跑一轮 Agent 循环。返回体与一键填充的 ``fields`` 同形（前端零改动渲染），
     每行多带 ``try_result``（rule_try 的结果 dict，或 None = 预算用尽未自查）。
@@ -143,7 +150,10 @@ async def run_loop(html: str, structured: Dict[str, Any], source: Dict[str, Any]
         # 取样类型不能叫 kind：那是事件账本的保留键（事件名），撞了会把事件名换掉
         _emit("ai_family", sample_kind=kind, fields=group_fields)
         proposals, stop = await _propose_group(html, structured, step, kind, group,
-                                               on_llm=on_llm)
+                                               on_llm=on_llm,
+                                               runtime=runtime, source=source,
+                                               material_kind=material_kind,
+                                               page_stats=page_stats)
         if proposals is None:
             # llm 未配置 / 调用失败 / 输出不是 JSON：停整段 AI（同因，逐行报是噪音），
             # 但原因**原样带出**（AGENTS #4）——不冒充「次数已用完」
@@ -207,15 +217,24 @@ async def run_loop(html: str, structured: Dict[str, Any], source: Dict[str, Any]
 
 def run_loop_sync(html: str, structured: Dict[str, Any], source: Dict[str, Any],
                   base_url: str, step: str = "bookUrl",
-                  fields: Optional[List[str]] = None) -> Dict[str, Any]:
+                  fields: Optional[List[str]] = None,
+                  runtime: Optional[Dict[str, Any]] = None,
+                  material_kind: str = "",
+                  page_stats: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """:func:`run_loop` 的同步版：端点（``/agent-loop`` 走线程池，避免
     rule_try 的同步调用卡住事件循环）与测试共用这一份判据。"""
-    return asyncio.run(run_loop(html, structured, source, base_url, step, fields))
+    return asyncio.run(run_loop(html, structured, source, base_url, step, fields,
+                                runtime=runtime, material_kind=material_kind,
+                                page_stats=page_stats))
 
 
 async def _propose_group(html: str, structured: Dict[str, Any], step: str,
                          kind: str, group: List[Dict[str, Any]],
                          on_llm: Optional[Callable[[Dict[str, Any]], None]] = None,
+                         runtime: Optional[Dict[str, Any]] = None,
+                         source: Optional[Dict[str, Any]] = None,
+                         material_kind: str = "",
+                         page_stats: Optional[Dict[str, Any]] = None,
                          ) -> Tuple[Optional[Dict[str, List[Dict[str, str]]]], str]:
     """一族字段（同取样类型）的模型提议。返回 ``({field: [candidates]}, "")`` 或
     ``(None, 终止原因)``。
@@ -232,19 +251,45 @@ async def _propose_group(html: str, structured: Dict[str, Any], step: str,
     """
     from core.repair.suggest import suggest_many
 
+    proposal_ctx: Dict[str, Any] = {
+        "html": html,
+        "step": step,
+        "step_label": "、".join(FIELD_LABELS.get(r["field"], r["field"])
+                                for r in group),
+        "fields": [
+            {"field": r["field"],
+             "want_label": FIELD_LABELS.get(r["field"], r["field"]),
+             "app_values": _engine_values(structured, r["field"], step=step)}
+            for r in group
+        ],
+    }
+    # 页面里的候选数据源（渲染后枚举的全局对象/数组，只有形状）。正文的地址常常不在
+    # DOM 里而在某个全局变量上，而**变量名不能猜**——所以把清单原样交给模型判。
+    # 已有 `webJs` 的源（期 B）把那条规则当线索一并给出去：它本身就是「数据在哪」的答案。
+    globals_ = (runtime or {}).get("globals")
+    if isinstance(globals_, list) and globals_:
+        # **降权不删**：按「像不像数据」排序取前 N（数组优先、方法袋靠后），并把
+        # 「还有几条没列」带出去——只列前 N 条不说剩下的，模型会把「没列出来」读成
+        # 「不存在」（AGENTS #12）。排序判据在 `core.app_debug.data_likeness`。
+        from core.app_debug import rank_globals
+
+        kept, dropped = rank_globals(globals_, RUNTIME_PROMPT_ITEMS)
+        if kept:
+            proposal_ctx["runtimes"] = kept
+            total_dropped = dropped + int(((runtime or {}).get("globals_dropped") or 0))
+            if total_dropped > 0:
+                proposal_ctx["runtime_dropped"] = total_dropped
+    webjs = str(((source or {}).get("ruleContent") or {}).get("webJs") or "").strip()
+    if webjs:
+        proposal_ctx["known_webjs"] = webjs
+    # 材料种类与页面统计：**判据在 `core.repair.suggest.outline_plan`**，这里只转交事实。
+    # 少了这两项，材料不是 DOM 时也会硬压大纲（喂一堆 URL 给模型当结构）。
+    if material_kind:
+        proposal_ctx["material_kind"] = material_kind
+    if isinstance(page_stats, dict):
+        proposal_ctx["page_stats"] = page_stats
     try:
-        proposals = await suggest_many({
-            "html": html,
-            "step": step,
-            "step_label": "、".join(FIELD_LABELS.get(r["field"], r["field"])
-                                    for r in group),
-            "fields": [
-                {"field": r["field"],
-                 "want_label": FIELD_LABELS.get(r["field"], r["field"]),
-                 "app_values": _engine_values(structured, r["field"], step=step)}
-                for r in group
-            ],
-        })
+        proposals = await suggest_many(proposal_ctx)
     except Exception as e:
         return None, "模型提议没跑成：%s: %s" % (type(e).__name__, str(e)[:120])
     if on_llm is not None:

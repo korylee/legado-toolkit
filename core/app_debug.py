@@ -837,6 +837,46 @@ def structured_map(raw: Any) -> Dict[str, Dict[str, Any]]:
 #: 丢弃（与 :data:`core.agent_context.SECRET_KEY_RE` 同一套判据，防手改侧车）。
 #: 空 dict = 没采（非正文页 / params 未就绪），调用方用键存在性判断。
 RUNTIME_KEYS_MAX = 40
+#: `globals` 最多留几个候选（与 Kotlin 侧 `RUNTIME_SHAPE_EXPR` 的 40 对齐）。
+#: 超出由 `globals_dropped` 自报——**不许把「只列了前 N 个」说成「页面只有 N 个」**。
+RUNTIME_GLOBALS_MAX = 40
+
+
+def data_likeness(item: Dict[str, Any]) -> int:
+    """候选数据源的「像数据」程度（越小越像数据）。**排序用，不删**。
+
+    判据是结构事实，不是名字：
+      - 数组里装着元素（`count > 0`）最像数据；
+      - 对象按**函数值占比**排：纯值袋（`fn == 0`）最前，方法袋（键几乎全是函数）最后。
+        占比而不是「是否全是函数」——实测踩过这个坑：`umami`（2 键全是函数）曾被排到
+        `CMS`（10 键里 1 个函数、有数据字段）前面，方向正好反了。
+
+    为什么只排序不删：有的站点把图片列表挂在**类实例**上（既有方法也有数据），
+    删了就丢答案；排序可回退，删不可逆。
+    """
+    kind = str((item or {}).get("type") or "")
+    if kind == "[object Array]":
+        return 0 if int((item or {}).get("count") or 0) > 0 else 2
+    fn = int((item or {}).get("fn") or 0)
+    if fn == 0:
+        return 1
+    keys = (item or {}).get("keys")
+    total = len(keys) if isinstance(keys, list) and keys else fn
+    # 0（无函数）已经在上面返回，所以这里从占比映射到 3..13：占比越高越靠后
+    return 3 + min(10, int(round(10.0 * fn / max(total, 1))))
+
+
+def rank_globals(items: Any, limit: int) -> Tuple[List[Dict[str, Any]], int]:
+    """把全局候选按「像数据」排序，取前 ``limit`` 条；返回 ``(保留, 被丢的条数)``。
+
+    被丢的条数必须回传——只发前 N 条而不说「还有 K 条」，模型会把「没列出来」
+    读成「不存在」（AGENTS #12）。
+    """
+    if not isinstance(items, list):
+        return [], 0
+    rows = [i for i in items if isinstance(i, dict)]
+    rows.sort(key=data_likeness)
+    return rows[:max(0, limit)], max(0, len(rows) - max(0, limit))
 
 
 def runtime_map(raw: Any) -> Dict[str, Any]:
@@ -857,6 +897,38 @@ def runtime_map(raw: Any) -> Dict[str, Any]:
     if isinstance(keys, list):
         out["keys"] = [str(k)[:60] for k in keys[:RUNTIME_KEYS_MAX]
                        if str(k).strip() and not SECRET_KEY_RE.search(str(k))]
+    # 全局候选数据源（页面里所有对象/数组值的**形状**，不采值）。存在的意义：
+    # 变量名叫什么**不能猜**——`params` 只是某个站点自己挂的名字（上游只注入
+    # cache/source/java）。这里只转发事实（名字 + 类型 + 长度/键名），「哪个是图片」
+    # 交给 AI 判。`globals_total` / `globals_dropped` 让「只列了前 N 个」可被看出来。
+    globals_raw = raw.get("globals")
+    if isinstance(globals_raw, list):
+        items = []
+        for rec in globals_raw[:RUNTIME_GLOBALS_MAX]:
+            if not isinstance(rec, dict):
+                continue
+            name = str(rec.get("name") or "").strip()
+            if not name or SECRET_KEY_RE.search(name):
+                continue
+            item: Dict[str, Any] = {"name": name[:60],
+                                    "type": str(rec.get("type") or "")[:40]}
+            count = rec.get("count")
+            if isinstance(count, int) and not isinstance(count, bool):
+                item["count"] = max(0, count)
+            fn = rec.get("fn")
+            if isinstance(fn, int) and not isinstance(fn, bool):
+                item["fn"] = max(0, fn)
+            ks = rec.get("keys")
+            if isinstance(ks, list):
+                item["keys"] = [str(k)[:60] for k in ks[:RUNTIME_KEYS_MAX]
+                                if str(k).strip() and not SECRET_KEY_RE.search(str(k))]
+            items.append(item)
+        if items:
+            out["globals"] = items
+    for key in ("globals_total", "globals_dropped"):
+        value = raw.get(key)
+        if isinstance(value, int) and not isinstance(value, bool):
+            out[key] = max(0, value)
     ci = raw.get("chapter_images")
     if isinstance(ci, dict):
         kept_ci: Dict[str, Any] = {}

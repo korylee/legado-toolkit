@@ -15,43 +15,27 @@ import unittest
 from unittest import mock
 
 from backend.jobs import agent_loop_job
+from tests.support import (
+    fake_rule_try,
+    fake_suggest,
+    one_step_job,
+)
 
 HTML = """<html><body><h1 class="title">甲书</h1></body></html>"""
-SOURCE = {"bookSourceUrl": "http://example.com", "bookSourceName": "测试源"}
 
 
 def _store(*, html=HTML):
-    job = {
-        "payload": json.dumps({"source": SOURCE}),
-        "result_json": json.dumps({
-            "steps": [{"name": "bookUrl", "page_id": "detail",
-                       "structured": {"name": "甲书"}}],
-            "pages": [{"id": "detail", "url": "http://x/d", "html": html}],
-        }),
-    }
-
-    class _St:
-        def get_job(self, _job_id):
-            return job
-
-    return _St()
+    return one_step_job(html, structured={"name": "甲书"})
 
 
 def _patch_suggest(rule="class.title@text"):
-    async def fake(ctx):
-        return {"llm": "ok", "model": "fake",
-                "fields": {f["field"]: [{"rule": rule, "why": "w"}]
-                           for f in ctx.get("fields") or []},
-                "prompt": "PROMPT-" + str(len(ctx.get("fields") or [])),
-                "response": "{\"fields\":[]}",
-                "usage": {"prompt_tokens": 7}}
-    return fake
+    """假模型：带上调用账本要的字（model / prompt / response / usage）。"""
+    return fake_suggest(rule, model="fake", response="{\"fields\":[]}",
+                        usage={"prompt_tokens": 7})
 
 
 def _patch_try():
-    def fake(_source, _step, _body, _base, _rule):
-        return {"ok": True, "values": ["甲书"], "count": 1, "error": ""}
-    return fake
+    return fake_rule_try([{"ok": True, "values": ["甲书"], "count": 1, "error": ""}])
 
 
 class AgentLoopJobTests(unittest.TestCase):

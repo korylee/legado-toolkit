@@ -36,18 +36,21 @@ import {
 import {
   layerRow,
   materialOrigin,
+  renderLine,
   materialTabs,
   networkText,
   preferredMaterial,
   runtimeText,
   verifyAction,
 } from "../utils/debugMaterial";
-import { ruleTry, ruleOutline } from "../api/rules";
+import { agentPlan, ruleTry, ruleOutline } from "../api/rules";
 // 一轮 AI 补全的观测与收尾（**唯一一份**）：提交、逐字段事件、结果体、重挂
 import { useAgentRun } from "../composables/useAgentRun";
 import AgentRunDialog from "./AgentRunDialog.vue";
 // 在途调试的相位码 → 中文（唯一一份；后端只给码与事实）
 import { debugRunState } from "../utils/debugRun";
+// 「下一步做什么」的取词与事实组装（判据在后端 core/agent_plan，前端只送事实）
+import { gapLine, planSnapshot } from "../utils/agentPlan";
 
 const props = defineProps({
   initialStep: { type: String, default: "" },
@@ -221,6 +224,15 @@ const currentLayer = computed(() => layerRow(currentPage.value));
 //: 这份材料**是谁取回来的**：`engine` = 引擎手上那份，`fetch` = 我们另抓的一份。
 //: 「验证」验的就是它，所以它必须说得出来（两份可能不是同一页，L2–L4 尤其）
 const currentOrigin = computed(() => materialOrigin(currentPage.value));
+//: 这一页走没走浏览器渲染（后端判到 `pages[].rendered`）：与「材料是谁取的」是两件事
+//: ——`origin=engine` 也可能是静态页，判据只能读渲染事实（AGENTS #12）
+const currentRender = computed(() => renderLine(currentPage.value));
+//: 源级静态错配（后端 `static_notes`）：与这次抓取无关的事实，直出后端文案
+//: （典型：「webJs 配了但 URL 规则没开 webView → 不会生效」）
+const staticNotes = computed(() => {
+  const notes = (result.value || {}).static_notes;
+  return Array.isArray(notes) ? notes.map((n) => String(n || "")).filter(Boolean) : [];
+});
 //: 本步该给哪个动作（判据在 utils/debugMaterial）：材料不对味时要先取渲染材料——
 //: 那与「重调本步验证」是**同一个动作**（`rerunFrom`），只是措辞按材料说真话
 const currentRun = computed(() =>
@@ -371,6 +383,38 @@ function applyDefaultMaterial() {
   const want = values.includes(picked) ? picked : preferredMaterial(currentTabs.value);
   if (want) materialKind.value = want;
 }
+
+//: 「下一步做什么」只由后端判（`core/agent_plan`），这里只存那一句话与失败原因。
+//: **只问正文这一步**：判据虽然按层分段通用，但其余段的缺口码还没补齐，摊开只会多出
+//: 一堆说不到点上的话——先接一格，接稳了再扩（见 `planSnapshot` 的调用条件）。
+const planLine = ref(null);
+const planError = ref("");
+
+async function loadPlan() {
+  planLine.value = null;
+  planError.value = "";
+  const step = current.value || null;
+  if (!step || String(step.name || "") !== "content") return;
+  const body = planSnapshot({
+    source: props.source,
+    step,
+    page: currentPage.value,
+    layer: (currentLayer.value || {}).code || "",
+    channel: String((result.value || {}).source || ""),
+    webviewUnsupported: unsupportedForStep(result.value, String(step.url || "")),
+  });
+  if (!body) return;
+  try {
+    planLine.value = gapLine(await agentPlan(body));
+  } catch (e) {
+    // 「下一步做什么」取不到也要说：静默消失会让界面看着一切正常（AGENTS #4）
+    planError.value = "判据没取到：" + String((e && e.message) || e);
+  }
+}
+
+watch([() => (current.value || {}).name, runId, resultRevision], () => {
+  void loadPlan();
+});
 
 // 换步或换任务号：默认材料跟着这一步换，这份大纲作废（看大纲时按需重拉——不预取，
 // 多数时候用户在改规则）
@@ -1177,14 +1221,30 @@ async function copyRaw(text, okMsg) {
           </div>
 
           <!-- 这一行的材料是哪来的：**「验证」验的就是它**。引擎那份（0 请求）与我们另抓的
-               一份可能不是同一页（L2–L4 尤其）；登录态是本机与真机的第一差异，一起摆出来 -->
-          <div v-if="currentOrigin" class="debug-origin muted">
-            <span :title="currentOrigin.hint">材料：{{ currentOrigin.label }}</span>
+               一份可能不是同一页（L2–L4 尤其）；「渲染过没有」是另一件事实（origin=engine
+               也可能是静态页）；登录态是本机与真机的第一差异。三样一起摆出来 -->
+          <div v-if="currentOrigin || currentRender || loginState" class="debug-origin muted">
+            <span v-if="currentOrigin" :title="currentOrigin.hint">材料：{{ currentOrigin.label }}</span>
+            <template v-if="currentRender">
+              <span v-if="currentOrigin">·</span>
+              <span :title="currentRender.hint">{{ currentRender.text }}</span>
+            </template>
             <template v-if="loginState">
-              <span>·</span>
+              <span v-if="currentOrigin || currentRender">·</span>
               <span :title="loginState.hint">{{ loginState.text }}</span>
             </template>
           </div>
+
+          <!-- 源级静态错配（后端的运行事实，不是下一步动作）：最典型的是「配了 webJs
+               但 URL 规则没开 webView → 这段 JS 不会生效」。文案直接用后端那句，不在这里重写 -->
+          <p v-for="note in staticNotes" :key="note" class="debug-static-note muted">
+            {{ note }}
+          </p>
+
+          <!-- 下一步做什么：**判据只有一处**（后端 core/agent_plan 按事实给一条缺口），
+               这里只渲染那一句。同一现象不在这里再说第二遍——其余缺口在 title 里备查 -->
+          <p v-if="planLine" class="debug-plan">{{ planLine.text }}</p>
+          <p v-else-if="planError" class="debug-plan muted">{{ planError }}</p>
 
           <!-- 本步规则：唯一编辑入口；改一个字符即入草稿并标过期，
             验收仍走「重调本步验证」的真引擎，这里不提供第二种判定。
@@ -1927,6 +1987,16 @@ async function copyRaw(text, okMsg) {
   align-items: baseline;
   flex-wrap: wrap;
   gap: 6px;
+  margin: 0 0 var(--app-space-2);
+  font-size: 12px;
+}
+/* 下一步做什么：一次只说一条，所以给它一行自己的位置（不塞进上面的材料行内） */
+.debug-plan {
+  margin: 0 0 var(--app-space-2);
+  font-size: 12px;
+}
+/* 源级静态错配：事实区，一行一条；与「下一步做什么」分开（一个是事实，一个是动作） */
+.debug-static-note {
   margin: 0 0 var(--app-space-2);
   font-size: 12px;
 }

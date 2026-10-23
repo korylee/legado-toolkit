@@ -528,22 +528,31 @@ class TestRuntimeParity(unittest.TestCase):
              "appservice/test/io/legado/app/service/DebugService.kt")
 
     def test_the_shape_expression_produces_the_fields_python_consumes(self):
-        """表达式里的字段名 ⊇ 闸门认的字段名（params_type/keys + chapter_images 五键）。"""
-        from core.app_debug import RUNTIME_KEYS_MAX
+        """表达式里的字段名 ⊇ 闸门认的字段名（全局候选 + params 兼容段）。"""
+        from core.app_debug import RUNTIME_GLOBALS_MAX, RUNTIME_KEYS_MAX
         expr = self.BRIDGE.read_text(encoding="utf-8")
         block = expr.split("internal val RUNTIME_SHAPE_EXPR", 1)
         self.assertEqual(len(block), 2, "BrowserBridge.kt 里找不到 RUNTIME_SHAPE_EXPR")
         body = block[1].split('"""', 1)[1].split('"""', 1)[0]
-        for field in ("params_type", "keys", "chapter_images",
-                      "type", "count", "http", "blob", "sample_host"):
+        for field in ("globals", "globals_total", "globals_dropped",
+                      "name", "type", "count", "keys", "fn",
+                      "params_type", "chapter_images",
+                      "http", "blob", "sample_host"):
             self.assertIn(field, body,
                           "形状表达式里没有 %s：Python 闸门认这个字段" % field)
         # 只采形状不采值：表达式里不许出现把地址原样塞进结果的写法
         self.assertNotIn("chapter_images[i]", body,
                          "表达式在采地址值而不是形状（只许类型/计数/origin）")
+        # 全局候选**只许出现长度/键名**，不许把元素值带出去
+        self.assertNotIn("rec.value", body, "全局候选在采元素值而不是形状")
         # 键名上限两侧一致
-        self.assertIn("slice(0, %d)" % RUNTIME_KEYS_MAX, body,
+        self.assertIn("slice(0, KEY_MAX)", body,
+                      "Kotlin 的键名上限变量名变了，与 core.app_debug 的对齐要重写")
+        self.assertIn("KEY_MAX = %d" % RUNTIME_KEYS_MAX, body,
                       "Kotlin 的键名上限与 core.app_debug.RUNTIME_KEYS_MAX 漂了")
+        # 候选数量上限两侧一致（多了会静默截断，看不见「还有 N 个」）
+        self.assertIn("globals = cands.slice(0, %d)" % RUNTIME_GLOBALS_MAX, body,
+                      "Kotlin 的候选上限与 core.app_debug.RUNTIME_GLOBALS_MAX 漂了")
 
     def test_the_sidecar_key_and_gate_are_wired(self):
         """侧车写 `runtime`、jvm_debug 读 `runtime`——键名两边一样（同 TestEngineHtmlKeyParity）。"""

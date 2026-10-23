@@ -56,6 +56,15 @@ def build_key(target: str, query: str, explore_url: str = "", keyword: str = "")
     return q or _search_start(keyword)      # search：空则用默认关键词
 
 
+def is_content_key(key: str) -> bool:
+    """这个调试 key 是不是「从章节点起跑」（= 正文步）。
+
+    `--` 前缀的权威就在本文件（:data:`_CONTENT_PREFIX`）——调用方别自己写
+    ``startswith("--")``，否则 App 侧语法一改就有第二处要同步。
+    """
+    return str(key or "").startswith(_CONTENT_PREFIX)
+
+
 def _search_start(keyword: str) -> str:
     if not str(keyword or "").strip():
         raise ValueError("没有可用的搜索关键词（设置里的 jvm.keyword 为空）")

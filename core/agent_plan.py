@@ -29,6 +29,7 @@ GAP_CODES = (
     "no_url",              # App 没请求这一步的页面，也没有可用的章节链接
     "page_fetch_missing",  # 页面没抓回来
     "webview_unsupported", # 这一段走的 WebView 能力本机没覆盖：拿不到材料，不是规则错
+    "render_missing",      # 这一页没走渲染，而正文只在渲染后才取得到
     "no_wanted_nodes",     # 这一页没有目标这类节点（改选择器没用）
     "runtime_missing",     # 动态层 + 本机引擎，缺运行时材料
     "no_hit",              # 规则在这份页面上一条都没选中
@@ -104,6 +105,19 @@ def _decision_gaps(context: Mapping[str, Any]) -> List[Dict[str, Any]]:
     if (channel == "jvm" and step.get("verdict") == "unknown"
             and layer not in ("", "L1")):
         add("runtime_missing")
+    # 正文页**要渲染才取得到**，而这次没走渲染：动作是「在 URL 规则上声明 webView」。
+    # **必须排在 `no_wanted_nodes` / `runtime_missing` / `no_hit` 之前**：没渲染时那一页上
+    # 的观测（有没有目标节点、选中几条）说的都是**静态页**，不是 App 会看到的那一页——
+    # 拿它下结论就会让人去改选择器，而改一百遍也没用（2026-10-21 实测：只差 URL 上的
+    # `{"webView":true}`，正文从取不到变成取得到）。
+    # 只认显式的 `rendered is False`：读不到（老结果 / 设备通道）时**不给这一档**，
+    # 那是「不知道」，不是「没渲染」（AGENTS #12）。
+    # `render_reason` 非空 = 渲染试过但失败了（浏览器不可用等），那种情况另说：原因已经
+    # 显示在材料行上，这里的判据只管「压根没走渲染」。
+    if (context.get("page_rendered") is False and not context.get("render_reason")
+            and target.get("step") == "content" and layer in ("L2", "L3")
+            and str(step.get("verdict") or "") != "pass"):
+        add("render_missing")
     if not rule_empty:
         # 取值类缺口只看引擎给的事实：取到 0 条 = 规则没选中任何节点；取到了但判不达标 =
         # 问题在内容。**`values_count` 缺失时不给这两档**——没给的事实不当成 0
@@ -146,6 +160,9 @@ def _fix_for(code: str, layer: str, context: Mapping[str, Any]) -> Optional[Dict
     if code == "no_engine":
         return {"kind": "run_debug"}
     if code in ("no_wanted_nodes", "runtime_missing"):
+        return _layer_fix(layer)
+    if code == "render_missing":
+        # 「改源就是声明这一层的取数方式」的同一件事：正文要渲染，而源没声明 webView
         return _layer_fix(layer)
     if code == "no_hit":
         rule = _first_candidate_rule(context)

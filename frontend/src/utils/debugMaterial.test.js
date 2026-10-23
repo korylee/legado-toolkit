@@ -2,8 +2,26 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   layerRow, materialOrigin, materialTabs, networkText, preferredMaterial,
-  runtimeText, verifyAction,
+  renderLine, runtimeText, verifyAction,
 } from "./debugMaterial.js";
+
+test("render facts are a separate thing from material origin", () => {
+  // 后端判到页上的事实：这一页就是那次渲染的结果
+  const rendered = renderLine({ url: "https://a.com/ch/1.html", rendered: true });
+  assert.equal(rendered.kind, "rendered");
+  assert.match(rendered.text, /渲染后的/);
+
+  // 要渲染但没成：原因翻成人话，不是把码丢给用户
+  const failed = renderLine({ rendered: false, render_reason: "no_url" });
+  assert.equal(failed.kind, "failed");
+  assert.match(failed.text, /既没有 url 也没有 html/);
+  // 认不出的码原样显示（对端多了一个码，藏起来就没人补）
+  assert.match(renderLine({ rendered: false, render_reason: "x-new" }).text, /x-new/);
+
+  // 没判到（静态页 / 老侧车 / 设备通道）→ 不说：读不到 ≠ 没渲染（AGENTS #12）
+  assert.equal(renderLine({ url: "https://a.com" }), null);
+  assert.equal(renderLine(null), null);
+});
 
 test("material origin says who fetched it: the engine's copy, or ours", () => {
   const engine = materialOrigin({ origin: "engine", id: "content" });

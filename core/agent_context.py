@@ -360,6 +360,11 @@ def build_agent_context(snapshot: Mapping[str, Any] | None) -> dict[str, Any]:
     page_present = (bool(page.get("present")) if "present" in page else bool(page))
     #: 「这一页有没有目标」按层无关的方式带出去：它是页面事实，不是某一层的分支产物
     has_wanted = page.get("has_wanted") if isinstance(page.get("has_wanted"), bool) else None
+    #: 「这一页走没走浏览器渲染」也是事实（判到 `pages[].rendered`，见
+    #: `core.jvm_debug._annotate_render`）。**只认显式的 true/false**：读不到（老结果、
+    #: 设备通道）就不带这个键——把「没说」当成「没渲染」会让判据凭空多出一档（AGENTS #12）。
+    page_rendered = page.get("rendered") if isinstance(page.get("rendered"), bool) else None
+    render_reason = _redact(page.get("render_reason"), key="render_reason", limit=80)
     channel = _text(snapshot.get("channel"), 16)
     replay_raw = snapshot.get("replay")
     replay_raw = replay_raw if isinstance(replay_raw, Mapping) else {}
@@ -401,6 +406,10 @@ def build_agent_context(snapshot: Mapping[str, Any] | None) -> dict[str, Any]:
     }
     if isinstance(webview_unsupported, bool):
         context["webview_unsupported"] = webview_unsupported
+    if page_rendered is not None:
+        context["page_rendered"] = page_rendered
+    if render_reason:
+        context["render_reason"] = render_reason
     return context
 
 

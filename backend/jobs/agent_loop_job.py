@@ -37,11 +37,6 @@ def run_dir_of(job_id: str) -> pathlib.Path:
     return pathlib.Path(data_dir()) / "app_probe" / _RUNS_DIR / ("agent-" + str(job_id))
 
 
-def _trim(text: Any, limit: int) -> str:
-    value = str(text or "")
-    return value if len(value) <= limit else value[:limit] + "…"
-
-
 @runner.register("agent_loop")
 async def run_agent_loop_job(job_id: str, st: Any, payload: Dict[str, Any],
                              ) -> Dict[str, Any]:
@@ -57,16 +52,24 @@ async def run_agent_loop_job(job_id: str, st: Any, payload: Dict[str, Any],
 
     debug_job = st.get_job(debug_job_id)
     # 材料取法与自报原因都在共用件里（没有任务 / 没有这一步 / 没有页面各说各的）
-    html, base_url, result = debug_step_material(debug_job, debug_job_id, step)
+    html, base_url, result, material_kind, structured, runtime = (
+        debug_step_material(debug_job, debug_job_id, step))
     source = job_source(debug_job)
-    steps = result.get("steps") if isinstance(result, dict) else None
-    step_row = next((s for s in (steps or [])
+    # 这一页的**层与统计**：判「要不要给 DOM 大纲」要用它（图片多而带地址的少 = 地址不在
+    # DOM 属性里）。判据在 `core.repair.suggest.outline_plan`，这里只把页面找出来。
+    step_row = next((s for s in ((result or {}).get("steps") or [])
                      if isinstance(s, dict) and s.get("name") == step), {})
-    structured = step_row.get("structured") if isinstance(step_row.get("structured"), dict) else {}
+    page = next((p for p in ((result or {}).get("pages") or [])
+                 if isinstance(p, dict) and p.get("id") == step_row.get("page_id")), {})
+    page_stats = (page.get("page_layer") or {}).get("stats")
+    page_stats = page_stats if isinstance(page_stats, dict) else None
 
     run_events.append_event(run_dir, "ai_started", step=step,
                             debug_job_id=debug_job_id,
-                            fields=list(wants or []))
+                            fields=list(wants or []),
+                            # 这一轮是在哪种材料上提议的（rendered_dom / webjs_output /
+                            # static_html）：排障时要能回答「它看的是 DOM 还是一串 URL」
+                            material_kind=material_kind)
     runner.update_phase(job_id, "starting")
 
     def on_event(event: str, /, **payload: Any) -> None:
@@ -97,7 +100,8 @@ async def run_agent_loop_job(job_id: str, st: Any, payload: Dict[str, Any],
     started = time.monotonic()
     try:
         out = await run_loop(html, structured, source, base_url, step, wants,
-                             on_event=on_event, on_llm=on_llm)
+                             on_event=on_event, on_llm=on_llm, runtime=runtime,
+                             material_kind=material_kind, page_stats=page_stats)
     except Exception as e:
         # 失败原因要能走到界面（AGENTS #4）：事件 + 任务行都留一份
         reason = "AI 补全没跑成：%s: %s" % (type(e).__name__, str(e)[:200])
@@ -111,13 +115,6 @@ async def run_agent_loop_job(job_id: str, st: Any, payload: Dict[str, Any],
                             rule_tries=int(budget.get("rule_tries") or 0),
                             stop=str(budget.get("model_stop") or "")[:200])
     return out
-
-
-def agent_payload(debug_job_id: str, *, step: str,
-                  fields: Optional[List[str]] = None) -> Dict[str, Any]:
-    """提交时的 payload（**唯一一份**）：只放引用，材料按 job_id 现取。"""
-    return {"debug_job_id": str(debug_job_id), "step": str(step),
-            "fields": [str(f) for f in (fields or [])]}
 
 
 def llm_calls(run_dir: pathlib.Path, after: int = 0,
@@ -154,7 +151,7 @@ def llm_calls(run_dir: pathlib.Path, after: int = 0,
             "model": rec.get("model"),
             "usage": rec.get("usage") or {},
             "prompt_chars": rec.get("prompt_chars") or 0,
-            "response_head": _trim(rec.get("response"), 200),
+            "response_head": str(rec.get("response") or "")[:200],
             "error": rec.get("error") or "",
         })
     truncated = len(items) > limit

@@ -30,9 +30,11 @@ from uuid import uuid4
 
 from core.app_debug import (build_steps, engine_pages, fetch_debug_pages, matched_map,
                             network_entries, runtime_map, structured_map)
-from core.debug_keys import EXPLORE_PREFIX
+from core.debug_keys import EXPLORE_PREFIX, is_content_key
 from core.fetch import CACHE_AUTO
 from core.paths import ARGS_PARTS, data_path
+from core import quality as Q
+from core.urls import split_url_options
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 AGSVC = ROOT / "appservice"
@@ -43,6 +45,18 @@ AGSVC = ROOT / "appservice"
 ARGS = pathlib.Path(data_path(*ARGS_PARTS))
 LAUNCHER = AGSVC / "legado-gradle.bat"
 LAUNCHER_CLASS = "io.legado.app.service.DebugServiceLauncher"
+
+#: 正文规则为空时注入的**占位规则**：只为了让 App 去请求并渲染正文页。
+#:
+#: 上游 `WebBook.getContent` 在 `content` 为空时**直接返回章节地址、一个请求都不发**
+#: （`getContentRule().content.isNullOrEmpty()` 那一段），所以规则为空的源连正文页都
+#: 拿不到、运行时形状也采不到。注入一条非空规则即可让它走完整链路。
+#:
+#: **必须选「故意选不中」的规则**：实测 `body@html` 会把整页 HTML 当正文 →
+#: `verdict=pass`（假成功，用户以为规则写好了）；`#legado_probe@html` 选不中任何节点 →
+#: 引擎报 `ContentEmptyException`，而**材料完全一样**（渲染后 DOM + 运行时形状）。
+#: 无论哪种，占位规则的结论都不算数——见 `_mark_placeholder`。
+PLACEHOLDER_CONTENT_RULE = "#legado_probe@html"
 
 #: 退出码 → 文案。**与 `DebugService.kt` 的常量一一对应**，改那边要改这里；
 #: 契约钉在 `tests/test_jvm_debug_contract.py::test_exit_codes_match_the_service`。
@@ -389,6 +403,79 @@ def page_from_engine(url: str, *, timeout: int = 60, render: bool = True,
     return html
 
 
+#: 材料种类：引擎交回来的「整页」到底是什么。**判据只有这一份**（后端判、消费方读）。
+#:
+#: 实测（2026-10-21，同一条源同一页、都声明 webView）：
+#:   - 不写 `webJs` → 218461 字节、2071 行、含 `<html>/<div>/<img>` = **渲染后的 DOM**；
+#:   - 写 `webJs`   → 27150 字节、137 行 URL、无标签 = **那段脚本的返回值**。
+#: 上游 `BackstageWebView(javaScript = webJs ?: jsStr)` 的响应体就是脚本返回值，所以
+#: 有 webJs 时 DOM 不再回来。把两者都当「整页」用，就会拿 URL 列表去解 HTML。
+MATERIAL_WEBJS_OUTPUT = "webjs_output"
+MATERIAL_RENDERED_DOM = "rendered_dom"
+MATERIAL_STATIC = "static_html"
+
+
+def material_kind(page: Any, source: Any) -> str:
+    """这一步的材料种类（纯函数，只读已有事实）。
+
+    判据：**渲染过没有**（`page.rendered`，由 `_annotate_render` 判到页上）+ **源有没有
+    页面脚本**（`ruleContent.webJs`）。没渲染 → 静态页（浏览器没参与，脚本也没机会跑）。
+    """
+    page = page if isinstance(page, dict) else {}
+    src = source if isinstance(source, dict) else {}
+    webjs = str((src.get("ruleContent") or {}).get("webJs") or "").strip()
+    if page.get("rendered") is True:
+        return MATERIAL_WEBJS_OUTPUT if webjs else MATERIAL_RENDERED_DOM
+    return MATERIAL_STATIC
+
+
+def _annotate_render(pages: Any, out: Dict[str, Any]) -> None:
+    """把「这一页走没走渲染」判到**页**上（前端只读事实，不再自己比地址）。
+
+    为什么必须在这里判、而不是让前端比字符串：页面地址身上带着 App 才懂的请求选项
+    （`…/1.html,{"webView":true}`），而引擎报回来的渲染地址是**裸地址**——直接比会
+    判成「没渲染」，也就是说反（2026-10-21 实测：C 用例渲染成功却会被说成没渲染）。
+    剥选项只有一份权威实现（`core.urls.split_url_options`，AGENTS #20），前端没有、也
+    不该有第二份。
+
+    落三档，全部只写**这一页的事实**：
+      - `rendered` = True：这一页就是那次渲染的结果；
+      - `rendered` = False + `render_reason`：这一页要渲染但没成（同一个地址）；
+      - 不写 `rendered`：这次没有任何页面走渲染（`rendered=0` 且没有渲染地址）——
+        写 False 也成立，但「这一页没走渲染」对搜索/目录那种静态页是废话，不写更干净。
+    侧车没有这些键（老侧车）时整块不写：**读不到 ≠ 没渲染**（AGENTS #12）。
+    """
+    if out.get("rendered") is None:
+        return
+    render_url = str(out.get("render_url") or "")
+    rendered = int(out.get("rendered") or 0)
+    reason = str(out.get("render_reason") or "")
+    bare_render = split_url_options(render_url)[0].rstrip("/") if render_url else ""
+    for page in pages or []:
+        if not isinstance(page, dict):
+            continue
+        bare = split_url_options(str(page.get("url") or ""))[0].rstrip("/")
+        if bare_render and bare == bare_render:
+            page["rendered"] = bool(rendered)
+            if not rendered:
+                page["render_reason"] = reason
+
+
+def _mark_placeholder(steps: Any) -> None:
+    """正文步用的是**占位规则**取材料：结论改写成「未验证」，别让引擎的判定冒充验证。
+
+    为什么不留引擎原判：占位规则（`PLACEHOLDER_CONTENT_RULE`）不是源里的规则，跑出来的
+    `fail`（`ContentEmptyException`）会被读成「这个源正文坏了」——而我们根本没用它的规则。
+    `unknown` + 一句原因才是事实（AGENTS #4：原因要走到用户眼前）。
+    """
+    for step in steps or []:
+        if isinstance(step, dict) and step.get("name") == "content":
+            step["verdict"] = Q.VERDICT_UNKNOWN
+            step["ok"] = False
+            step["detail"] = ("正文规则为空：这次用临时占位规则只取页面材料，正文未验证"
+                              "（写好规则后重调本步）")
+
+
 def run_jvm_debug(source: Dict[str, Any],
                   key: str = "我",
                   timeout: int = 60,
@@ -426,6 +513,16 @@ def run_jvm_debug(source: Dict[str, Any],
     # 代理走**源的 header**（App 唯一认的注入点）：只影响交给 App 的那份，
     # 调用方手里那份不动；`proxy` 同时用于我们自己的补抓（fetch_debug_pages）
     src = apply_proxy_header(source or {}, proxy)
+    # 正文规则为空 → App 直接短路（不发请求、不渲染、采不到运行时形状）。注入一条
+    # 「故意选不中」的占位规则只为了把页面材料取回来；它的结论不算数（`_mark_placeholder`）。
+    # **只在正文步注入**：别的段（搜索/详情/目录）各有自己的规则族，不欠这一条。
+    placeholder = ""
+    if is_content_key(key) and not str((src.get("ruleContent") or {}).get("content") or "").strip():
+        rule_content = dict(src.get("ruleContent") or {})
+        rule_content["content"] = PLACEHOLDER_CONTENT_RULE
+        # `apply_proxy_header` 是浅拷贝：嵌套的 ruleContent 与调用方共享，必须换新 dict
+        src = dict(src, ruleContent=rule_content)
+        placeholder = PLACEHOLDER_CONTENT_RULE
     if not str(src.get("bookSourceUrl", "") or "").strip():
         out["error"] = "缺少 bookSourceUrl（它同时是 cookie 注入的键，不能空）"
         return out
@@ -517,7 +614,37 @@ def run_jvm_debug(source: Dict[str, Any],
     out["webview_unsupported"] = webview_unsupported(
         meta.get("webview_unsupported")
     )
+    # 渲染事实（S3-4）：**这次有没有真的走浏览器渲染**，以及没走的原因。
+    # 为什么必须单独带出来：`pages[].origin == "engine"` 只说明那份 HTML 是引擎取回来的，
+    # 不等于「渲染过」——实测源没在 URL 上声明 webView 时它同样是静态页
+    # （`rendered=0`、48KB），加 `{"webView":true}` 后才是渲染页（`rendered=1`、218KB）。
+    # 少了这一项，界面只能靠 origin 猜，而猜错的方向正好是「以为拿到了真页面」。
+    #
+    # **读不到 ≠ 没渲染**（AGENTS #12）：老侧车没有这些键时给 None，不许补 0——那会把
+    # 「这份侧车没说」写成「这次没渲染」，一个凭空多出来的结论。
+    has_shadow = "shadow_rendered" in meta
+    out["rendered"] = int(meta.get("shadow_rendered") or 0) if has_shadow else None
+    out["webview_calls"] = (int(meta.get("shadow_webview_calls") or 0)
+                            if "shadow_webview_calls" in meta else None)
+    #: 被渲染的那一页地址（空=没渲染过）。前端据此判断「渲染的是不是我看的这一页」
+    out["render_url"] = str(meta.get("shadow_last_url") or "") if has_shadow else ""
+    #: 没渲染成的原因（`no_url` / `browser_unavailable` / `unsupported_is_rule*` /
+    #: 渲染失败原因；空串 = 渲染成功或没走到）
+    out["render_reason"] = str(meta.get("shadow_last_reason") or "") if has_shadow else ""
     out["hint"] = str(meta.get("hint") or "")
+    # 源级的**静态错配**（与这次抓取结果无关，读 Legado 源码才知道的那些）。
+    # 判据一份在 `core.quality.static_misconfig_notes`——这里只是把它**接到用户眼前**：
+    # 那条判据早就写好、有测试，却一直没有生产消费者（AGENTS #4：原因产生了没人看，
+    # 等于没有）。典型一条：「配了 webJs 但 URL 规则没开 webView → 这段 JS 不会生效」。
+    # **它是运行事实，不是下一步动作**：动作仍由 `core/agent_plan` 一处判。
+    try:
+        from core.quality import static_misconfig_notes
+
+        notes = static_misconfig_notes(src)
+        if notes:
+            out["static_notes"] = list(notes)
+    except Exception as exc:  # 静态检查绝不能带走一次调试的结果
+        print("[jvm_debug] 静态错配检查失败：%s: %s" % (type(exc).__name__, exc))
     # L4 诊断：network 是过滤后的可用材料，下面三项说明「浏览器发过什么」以及
     # 「为什么材料没有留下」。只进排障，不参与调试结论。
     out["network_events"] = int(meta.get("network_events") or 0)
@@ -548,6 +675,11 @@ def run_jvm_debug(source: Dict[str, Any],
     steps = build_steps(events_raw, matched=matched_map(meta.get("matched_html")),
                         structured=structured_map(meta.get("structured")),
                         runtime=runtime_map(meta.get("runtime")))
+    if placeholder:
+        # 材料来自占位规则这件事必须留在结果里：消费方（界面 / 后续判据）据此知道
+        # 「这次正文没验证」。只放页面上不够——它是**这次运行**的属性。
+        out["placeholder_rule"] = placeholder
+        _mark_placeholder(steps)
     # 拉起方式的痕迹进附注（回落了要说出来；正常走常驻时这里是空的）。
     # 放最后一段附注**之前**：先讲「这次是怎么跑起来的」，再讲「跑的过程中缺了什么」
     if launch_notes and steps:
@@ -558,6 +690,7 @@ def run_jvm_debug(source: Dict[str, Any],
         # 有它就用它——**那是 App 手上的那份**，比我们另抓一遍真，而且不用再发请求
         out["pages"] = fetch_debug_pages(steps, src, proxy=proxy, cache=cache,
                                          engine_html=engine_pages(meta.get("engine_html")))
+        _annotate_render(out["pages"], out)
     except Exception as e:
         # 补证据失败绝不能把已经拿到的判定丢掉（与设备通道同一立场）
         if steps:

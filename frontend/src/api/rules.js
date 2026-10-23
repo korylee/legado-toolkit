@@ -96,6 +96,11 @@ export const ruleTry = (body) =>
 export const ruleOutline = (body) =>
   api.post("/rules/outline", body);
 
+// 首屏「下一步做什么」的唯一判据（`core/agent_plan`）：前端只送**观测到的事实**，
+// 后端只回缺口码与动作种类，中文句子在消费侧按码取词（utils/agentPlan）。
+export const agentPlan = (body) =>
+  api.post("/rules/agent-plan", body);
+
 // Agent 循环（一轮）：**AI 段是一次任务**——提交后返回 {job_id}，过程从那条观测流
 // 看（events 里有 ai_family / ai_try / ai_accepted / ai_failed），模型调用的输入输出
 // 落该任务的 llm.jsonl（`/api/jobs/{id}/llm-calls`）。跑完的结果体走 getJobDetail。

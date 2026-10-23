@@ -19,6 +19,8 @@ from core.agent_plan import (FIX_KINDS, FIX_TARGETS, GAP_CODES, PROBE_KINDS,
                              build_plan)
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
+#: 消费侧的取词表（`/agent-plan` 的缺口码 → 中文句子）。它必须与 `GAP_CODES` 一一对应。
+FRONTEND_PLAN = ROOT / "frontend" / "src" / "utils" / "agentPlan.js"
 
 #: 口袋漫画那一步的真实形状：正文规则为空、页面判到 L3、本机引擎没有运行时材料。
 #: `values_count` 是引擎给的事实（`planBody` 一直带它）：0 条 = 规则没选中任何节点。
@@ -53,6 +55,47 @@ def plan_for(snapshot, **changes):
     data = dict(snapshot)
     data.update(changes)
     return build_plan(build_agent_context(data))
+
+
+class RenderMissingTests(unittest.TestCase):
+    """正文页没走渲染：先说「声明 webView」，别说「改选择器」。
+
+    2026-10-21 实测：同一条正文规则、只差 URL 上的 `{"webView":true}`——不带选项时层 L2、
+    静态页 48KB、正文取不到；带上之后渲染成 218KB 的 DOM、正文取得到。所以「没渲染」这一档
+    必须排在 `no_hit` / `fail_content` 之前，否则用户照着「改选择器」改一百遍也没用。
+    """
+
+    def _snapshot(self, **page):
+        base = {"layer": "L2",
+                "target": {"step": "content", "want": "text", "rule_empty": False},
+                "step": {"verdict": "fail", "values_count": 0,
+                         "page_id": "p1", "url": "https://a.com/c/1"},
+                "page": {"present": True, "has_wanted": False,
+                         "stats": {"links": 1, "images": 0, "images_with_src": 0}},
+                "channel": "jvm", "signals": {"can_suggest": True, "llm_ready": True}}
+        base["page"].update(page)
+        return base
+
+    def test_unrendered_content_page_asks_for_the_webview_declaration(self):
+        plan = plan_for(self._snapshot(rendered=False))
+        self.assertEqual(plan["gap"]["code"], "render_missing")
+        self.assertEqual(plan["fix"]["kind"], "edit_rule")
+        self.assertEqual(plan["fix"]["target"], "layer")
+
+    def test_rendered_page_falls_through_to_the_selector_gap(self):
+        """渲染过之后就不再是「缺渲染」：动作回到改规则那一族。"""
+        plan = plan_for(self._snapshot(rendered=True))
+        self.assertNotEqual(plan["gap"]["code"], "render_missing")
+
+    def test_a_failed_render_keeps_its_own_reason(self):
+        """渲染试过但失败（浏览器不可用等）：不冒充「没走渲染」——原因另有出处。"""
+        plan = plan_for(self._snapshot(rendered=False, render_reason="browser_unavailable"))
+        self.assertNotEqual(plan["gap"]["code"], "render_missing")
+
+    def test_reading_nothing_is_not_a_render_fact(self):
+        """读不到渲染事实（老结果 / 设备通道）时不给这一档：不知道 ≠ 没渲染。"""
+        plan = plan_for(self._snapshot())
+        self.assertNotEqual(plan["gap"]["code"], "render_missing")
 
 
 class DecisionGapTests(unittest.TestCase):
@@ -221,12 +264,24 @@ class AgentPlanRouteTests(unittest.TestCase):
 
 
 class FrontendWordTableParityTests(unittest.TestCase):
-    """跨语言契约：后端出的**码与动作种类**，前端消费方必须逐项覆盖。
+    """跨语言契约：后端出的**缺口码**，前端消费方必须逐项覆盖。
 
-    2026-10-16 工作台减法：诊断卡随「诊断与建议」块退场，前端不再有 GAP_TEXT 词表
-    （`frontend/src/utils/debugDecision.js` 已删）。这些断言转钉**后端自身的封闭性**：
-    码与动作种类仍须互洽，等 Agent 侧新消费方出现时再补它的词表契约。
+    2026-10-16 工作台减法时前端没有消费方（`debugDecision.js` 已删），那轮只钉了后端
+    自洽；2026-10-22 正文那一格接上 `/agent-plan` 之后消费方回来了
+    （`frontend/src/utils/agentPlan.js` 的 `GAP_TEXT`），所以这里按当初的说法补词表契约。
+
+    两个方向都要钉：**缺一条** → 用户看到一串英文码；**多一条** → 那是对端删了码而词表
+    没跟（误导比缺失更坏：界面照样说得头头是道）。
     """
+
+    def test_every_gap_code_has_a_sentence_on_the_consumer_side(self):
+        text = FRONTEND_PLAN.read_text(encoding="utf-8")
+        block = text.split("const GAP_TEXT = {", 1)
+        self.assertEqual(len(block), 2, "前端取词表不见了：判据没了消费方")
+        body = block[1].split("\n};", 1)[0]
+        keys = set(re.findall(r"^\s*([a-z_]+):", body, re.M))
+        self.assertEqual(keys, set(GAP_CODES),
+                         "缺口码表两侧漂了：改一边就得改另一边（权威在 core/agent_plan.py）")
 
     def test_gap_codes_and_action_kinds_stay_self_consistent(self):
         self.assertTrue(GAP_CODES, "缺口码表不应为空")

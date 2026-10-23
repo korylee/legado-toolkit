@@ -41,8 +41,8 @@ class AutofillDetailTests(unittest.TestCase):
         self.assertIn("abc.webp", "".join(rows["cover_url"]["samples"]))
         # 文本字段（name）拿不到锚？——锚有（structured.name），但 text 候选
         # 要求 200 字的块：h1 太短不成候选 → 如实比不了，不编规则
-        if not rows["name"].get("rule"):
-            self.assertTrue(rows["name"].get("reason"), "比不了要给原因")
+        self.assertNotIn("rule", rows["name"], "候选不成形就不出规则文本")
+        self.assertTrue(rows["name"].get("reason"), "比不了要给原因")
 
     def test_no_anchor_fields_produce_no_rule(self):
         """引擎取到的就是空的字段（没锚点）：**不产出规则**，只给原因。

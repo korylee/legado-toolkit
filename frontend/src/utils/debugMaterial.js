@@ -118,6 +118,21 @@ export function runtimeText(runtime) {
   for (const fail of Array.isArray(runtime.fails) ? runtime.fails : []) {
     lines.push("采集失败：" + String(fail));
   }
+  // 页面里的候选数据源（`globals`）：**只列形状**，不猜哪个是图片——那是判给 AI 的事。
+  // 空清单与采集失败是两件事：这里只在真有候选时说，失败走上面的「采集失败」。
+  const globals = Array.isArray(runtime.globals) ? runtime.globals : [];
+  if (globals.length) {
+    const rows = globals.map((g) => {
+      const name = String(g.name || "");
+      const type = String(g.type || "").replace(/^\[object\s*|\]$/g, "");
+      if (Number.isFinite(g.count)) return name + " · " + type + " · " + g.count + " 条";
+      const keys = Array.isArray(g.keys) ? g.keys.length : 0;
+      return name + " · " + type + (keys ? " · " + keys + " 个键" : "");
+    });
+    lines.push("候选数据源（" + globals.length + "）：\n  " + rows.join("\n  "));
+    const dropped = Number(runtime.globals_dropped || 0);
+    if (dropped > 0) lines.push("还有 " + dropped + " 个没列出来（超出上限）");
+  }
   return lines.join("\n");
 }
 
@@ -181,6 +196,46 @@ const NETWORK_BODY_CHARS = 4000;
  * 接口条目（L4 的材料：本页实际发过的请求）→ 文本。**它是证据**：方法、地址、状态、
  * 响应片段原样带出来，别在这里判「哪条才是正文接口」——那是用户或 AI 看着材料做的判断。
  */
+/**
+ * 这一页**走没走浏览器渲染**——与 `materialOrigin` 是两件事，别互相代替。
+ *
+ * `origin` 只说「这份 HTML 是谁交回来的」（引擎 / 我们另抓），**不等于渲染过**：实测
+ * 源没在 URL 规则上声明 `webView` 时，引擎那份同样是静态页（`rendered=0`、48KB）；
+ * 加 `{"webView":true}` 之后才是渲染页（`rendered=1`、218KB、运行时形状才有）。
+ *
+ * 判据**不在这里**：归属由后端判到页上（`core/jvm_debug._annotate_render`）——页面地址
+ * 带着 App 才懂的请求选项（`…,{"webView":true}`），剥它的权威实现只有 Python 那一份
+ * （AGENTS #20），前端比字符串会说反。这里只把 `page.rendered` 翻成人话：
+ *   - `true` → 这份材料是渲染后的；
+ *   - `false` → 这一页要渲染但没成，带上原因；
+ *   - 缺 → **不说**（读不到 ≠ 没渲染；没声明 webView 的静态页也不该被念叨）。
+ */
+export function renderLine(page) {
+  if (!page || typeof page !== "object") return null;
+  if (page.rendered === true) {
+    return {
+      kind: "rendered",
+      text: "这一页是渲染后的",
+      hint: "浏览器跑完页面脚本才拿到的这份材料",
+    };
+  }
+  if (page.rendered === false) {
+    const code = String(page.render_reason || "");
+    const why = REASON_TEXT[code] || code;
+    return { kind: "failed", text: "这一页要渲染但没成" + (why ? "：" + why : ""), hint: "" };
+  }
+  return null;
+}
+
+//: 侧车 `shadow_last_reason` 的码 → 人话。**认不出的原样显示**：那是「对端多了一个码」，
+//: 藏起来就没人知道要补这一条（AGENTS #4）。
+const REASON_TEXT = {
+  no_url: "既没有 url 也没有 html",
+  browser_unavailable: "本机浏览器不可用",
+  unsupported_is_rule: "这条页面脚本要用页面环境，本机调试不支持",
+  unsupported_is_rule_local: "这条页面脚本在本机求值失败",
+};
+
 export function networkText(entries) {
   const list = Array.isArray(entries) ? entries : [];
   return list

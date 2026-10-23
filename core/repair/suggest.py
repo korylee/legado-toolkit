@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from core import candidates as candidates_mod
 
@@ -31,6 +31,16 @@ MAX_APP_VALUES = 8
 #: 页面 HTML 的硬上限：提示词里只放大纲，但大纲本身也要先解析一遍，
 #: 别让一个几 MB 的页面把这次请求变成一次内存事故
 MAX_HTML_CHARS = 400_000
+#: 每条候选数据源在提示词里带几个键名（真实站点一个对象十几个键，全列会淹掉别的段）
+RUNTIME_PROMPT_KEYS = 20
+#: 源里已有 webJs 时，提示词里带多长（超了要自报截断）。脚本本身可能很长，
+#: 而它只是**线索**不是材料——600 字符足够看清它用了哪个变量/键。
+KNOWN_WEBJS_MAX = 600
+#: 「图片不在 DOM 里」的两道门槛：图片总数够多、带 src 的占比够低。
+#: 实测（2026-10-22 口袋漫画正文页）：139 个 img、只有 1 个带 src、图片地址全在页面脚本里
+#: ——这种页面的 DOM 大纲对「取正文」没有可用信息。
+OUTLINE_IMAGE_MIN = 10
+OUTLINE_SRC_RATIO = 0.1
 
 #: 候选验收只允许触碰书源规则组，不能借这个入口改元数据或请求上下文。
 CANDIDATE_RULE_GROUPS = ("ruleSearch", "ruleToc", "ruleContent", "ruleExplore", "ruleBookInfo")
@@ -214,30 +224,9 @@ def build_prompt(ctx: Dict[str, Any]) -> str:
                                           ctx.get("want_label") or "目标"))
     if ctx.get("field"):
         L.append("对应的规则字段：%s" % ctx["field"])
-
-    L.append("")
-    L.append("【页面 DOM 大纲（缩进表示层级）】")
-    L.append(_outline(ctx.get("html") or "", ctx.get("focus") or ""))
-
-    values = [str(v).strip()[:120] for v in (ctx.get("app_values") or []) if str(v).strip()]
-    if values:
-        L.append("")
-        L.append("【App 实测取到的值（正确的规则应当取到形似的东西）】")
-        for v in values[:MAX_APP_VALUES]:
-            L.append("- " + v)
-
-    # —— 易变部分 ——
-    L.append("")
-    L.append("【当前规则】%s" % (ctx.get("rule") or "（空）"))
-    if ctx.get("replay_note"):
-        L.append("【当前表现】%s" % ctx["replay_note"])
-
-    diag = [str(d) for d in (ctx.get("diagnosis") or []) if str(d).strip()]
-    if diag:
-        L.append("")
-        L.append("【已知的问题】")
-        for d in diag:
-            L.append("- " + d)
+    # 其余段落全走片段（与批量路径同一份实现）：这样单字段路径也能拿到
+    # 页面全局候选 / 已有 webJs / 按材料分档的大纲——此前它只有大纲与实测值。
+    L.extend(_sections(ctx))
     return "\n".join(L)
 
 
@@ -266,6 +255,55 @@ def focus_selector(rule: str) -> str:
     if prefix == "tag":
         return _FOCUS_NAME_RE.match(rest).group(0) if _FOCUS_NAME_RE.match(rest) else ""
     return _FOCUS_SHORTHAND[prefix] + rest
+
+
+def outline_plan(ctx: Dict[str, Any]) -> Dict[str, Any]:
+    """这次要不要给 DOM 大纲，给哪一种（纯函数，可离线测）。
+
+    三档，判据全是**已有的材料事实**：
+      - ``skip``：材料根本不是 DOM（`material_kind == "webjs_output"`）。有 `webJs` 时
+        引擎交回的「整页」是那段脚本的返回值（实测 27150 字节、137 行图片地址、无标签），
+        压出来的大纲是垃圾——喂给模型等于让它在一堆 URL 上找选择器。
+      - ``stats``：是 DOM，但图片不在 DOM 属性里（`images_with_src / images` 很低）。
+        实测该页 139 个 `img` 只有 1 个带 `src`，正文靠页面脚本填——这时 90 行大纲同样
+        没有可用信息，但**统计数字本身是判据**（「图不在 DOM」），所以给一行代替。
+      - ``full``：其余情况照旧压大纲（文本页正是这么用的）。
+    """
+    if str(ctx.get("material_kind") or "") == "webjs_output":
+        return {"mode": "skip"}
+    stats = ctx.get("page_stats")
+    if isinstance(stats, dict):
+        images = stats.get("images")
+        with_src = stats.get("images_with_src")
+        if (isinstance(images, int) and isinstance(with_src, int)
+                and not isinstance(images, bool) and not isinstance(with_src, bool)
+                and images >= OUTLINE_IMAGE_MIN
+                and with_src / images < OUTLINE_SRC_RATIO):
+            return {"mode": "stats", "images": images, "with_src": with_src,
+                    "links": stats.get("links")}
+    return {"mode": "full"}
+
+
+def _outline_section(ctx: Dict[str, Any]) -> List[str]:
+    """大纲那一段（三档共用一份实现：两个 builder 都不许各写一遍）。
+
+    为什么要分档：材料不是 DOM 时压大纲是**喂垃圾**；图片不在 DOM 属性里时 90 行大纲
+    没有可用信息，但「图多、带地址的少」这个统计本身就是判据。
+    """
+    plan = outline_plan(ctx)
+    mode = plan["mode"]
+    if mode == "skip":
+        return ["", "【页面材料说明】这一步的材料是页面脚本（webJs）的输出，不是 HTML——"
+                    "没有 DOM 结构可看，选择器类写法在这里不适用。"]
+    if mode == "stats":
+        links = plan.get("links")
+        return ["", "【页面统计（不给 DOM 大纲）】图片 %d 个，其中带 src 的只有 %d 个%s。"
+                    "图多而带地址的极少 = 图片地址不在 DOM 属性里，多半由页面脚本填，"
+                    "优先看下面的页面全局数据。"
+                % (plan["images"], plan["with_src"],
+                   "；链接 %d 个" % links if isinstance(links, int) else "")]
+    return ["", "【页面 DOM 大纲（缩进表示层级）】",
+            _outline(ctx.get("html") or "", ctx.get("focus") or "")]
 
 
 def _outline(html: str, focus: str = "") -> str:
@@ -552,12 +590,181 @@ Legado 规则语法（`@` 分段，前面是选择器，最后一段是取值动
 1. 规则里用到的 class / id 必须**真实存在于**我给的 DOM 大纲里，不许臆造。
 2. `@js:` / `<js>` / `@xpath:` 是允许的：候选会由本机 App 引擎验收。用它们时在 why 里
    说明依赖什么（全局对象 / 登录态 / 接口），因为取不到材料的那次会判失败。
+   **两个环境别搞混**（实测代价：写错必取空，而 verdict 只会说「没解析完成」）：
+     - `webJs`（页面脚本）跑在**页面里**，能读页面的全局变量（如 `params`）；
+     - 取值规则（如 `content`）跑在**规则环境**里，只能读 DOM 选择器或 `result`
+       ——`result` 就是 webJs 的产出；页面变量在那里一律 `undefined`
+       （实测 `@js:typeof params` → `undefined`）。
+     所以「内容在页面变量里」这件事要写成**两条规则**：webJs 取出来 → content 用 `result` 包装。
+     若这一步现在没有 webJs，就直说需要先写一条，不要给出引用页面变量的 content 候选。
 3. 一条候选只写规则文本本身，不要带字段名、不要写 JSON 以外的内容。
 """
 
 
+def _runtime_line(rt: Dict[str, Any]) -> str:
+    """一条候选数据源 → 一行（名字 · 类型 · 长度/键名）。只写形状，不写值。"""
+    name = str((rt or {}).get("name") or "")
+    type_name = str((rt or {}).get("type") or "").replace("[object ", "").rstrip("]")
+    line = "%s（%s" % (name, type_name or "?")
+    count = (rt or {}).get("count")
+    if isinstance(count, int) and not isinstance(count, bool):
+        line += "，%d 条" % count
+    keys = (rt or {}).get("keys")
+    if isinstance(keys, list) and keys:
+        line += "，键：%s" % "、".join(str(k) for k in keys[:RUNTIME_PROMPT_KEYS])
+    return line + "）"
+
+
+# ---------------------------------------------------------------- 提示词段落
+#
+# 段落顺序与「哪些段会出」的唯一判据都在 :data:`SECTIONS`：**每个段自己判**该不该出
+# （事实缺席就返回 None），顺序错了不会报错、只会让每次提问都全量计费（前缀缓存）。
+# 加一种页面结构 / 解析方式 = 在 `SECTIONS` 里加一个函数，基础提示词与两个 builder 都不动。
+
+
+def _sec_fields(ctx: Dict[str, Any]) -> Optional[List[str]]:
+    """要的字段（批量形态）。单字段路径的标题行已点名字段，这段缺席。"""
+    fields = ctx.get("fields")
+    if not isinstance(fields, list) or not fields:
+        return None
+    L = ["", "【要的字段】"]
+    for f in fields:
+        if isinstance(f, dict):
+            L.append("- %s：%s" % (f.get("field") or "", f.get("want_label") or ""))
+    return L
+
+
+def _sec_js_globals(ctx: Dict[str, Any]) -> Optional[List[str]]:
+    """页面全局候选（渲染后枚举，只有形状）。变量名不可猜——列事实，判断给模型。"""
+    runtimes = ctx.get("runtimes")
+    if not isinstance(runtimes, list) or not runtimes:
+        return None
+    L = ["", "【页面里的全局数据（渲染后枚举，只有形状没有值）】",
+         "这些是页面脚本自己挂的变量。判断哪个键装的是要取的内容。",
+         "**作用域是本段的要害**：这些变量**只在页面脚本（webJs）里可读**——"
+         "取值规则（content）跑在另一个环境，那里它们一律是 `undefined`"
+         "（实测：`@js:typeof params` 在 content 里返回 `undefined`）。",
+         "所以要取这类内容，正确形态是两条规则分工：",
+         "  1) webJs：`result = params.<键>.join('\\n')`（把变量里的内容取出来）",
+         "  2) content：`@js:result.split('\\n')...`（只读 `result`，那是上一步的产出）",
+         "**地址列表要包成 `<img>`**：若取到的是图片地址逐行列表，content 必须把它们包起来"
+         "（`result.split('\\n').filter(...).map(x => '<img src=\"'+x+'\">').join('')`）——"
+         "只写 `@js:result` 的话正文是一串裸地址文本，阅读器里显示的是文字不是图"
+         "（实测两者 verdict 都是 pass，差别只在这层包装）。",
+         "若本步现在还没有 webJs，就直说「需要先写一条 webJs 把内容取出来」，"
+         "不要给一条在 content 里引用页面变量、必然取不到的候选。"]
+    for rt in runtimes:
+        L.append("- %s" % _runtime_line(rt))
+    dropped = int(ctx.get("runtime_dropped") or 0)
+    if dropped > 0:
+        L.append("（另有 %d 个更小的候选未列出）" % dropped)
+    return L
+
+
+def _sec_known_webjs(ctx: Dict[str, Any]) -> Optional[List[str]]:
+    """源里已有的 webJs：比枚举全局更准的「数据在哪」线索（变量名是源作者选的）。"""
+    known = str(ctx.get("known_webjs") or "").strip()
+    if not known:
+        return None
+    L = ["", "【源里已有的页面脚本（webJs，不是本步的材料）】", known[:KNOWN_WEBJS_MAX]]
+    if len(known) > KNOWN_WEBJS_MAX:
+        L.append("（脚本已截断：只给了前 %d 个字符）" % KNOWN_WEBJS_MAX)
+    L.append("说明：这段脚本是源作者写的，执行结果会成为本步的响应体。"
+             "若它已经取到了要的内容，优先沿用它里面的变量名/键名；"
+             "若它引用的键在本页并不存在，直接指出来。")
+    return L
+
+
+def _clean_values(raw: Any) -> List[str]:
+    """取实测值：**先判原始值再转字符串**。
+
+    原实现写的是 `str(v).strip()` 作条件，于是 `None` 会变成字面量 `"None"` 混进提示词
+    ——模型看到的「实测值」里有个字符串 `None`，那是噪音，还可能被它当成模版抄进规则。
+    """
+    out: List[str] = []
+    for v in raw if isinstance(raw, list) else []:
+        if v is None:
+            continue
+        text = str(v).strip()
+        if text:
+            out.append(text[:120])
+    return out
+
+
+def _value_rows(ctx: Dict[str, Any]) -> List[Tuple[str, List[str]]]:
+    """实测值，两种形态归一：批量的逐字段（fields[].app_values）、单字段的平铺。"""
+    if isinstance(ctx.get("fields"), list) and ctx["fields"]:
+        rows = []
+        for f in ctx["fields"]:
+            if not isinstance(f, dict):
+                continue
+            vs = _clean_values(f.get("app_values"))
+            if vs:
+                rows.append((str(f.get("field") or ""), vs))
+        return rows
+    vs = _clean_values(ctx.get("app_values"))
+    return [("", vs)] if vs else []
+
+
+def _sec_app_values(ctx: Dict[str, Any]) -> Optional[List[str]]:
+    rows = _value_rows(ctx)
+    if not rows:
+        return None
+    L = ["", "【App 实测取到的值（正确的规则应当取到形似的东西）】"]
+    for name, vs in rows:
+        if name:
+            L.append("%s：" % name)
+        for v in vs[:MAX_APP_VALUES]:
+            L.append("- " + v)
+    return L
+
+
+def _sec_diagnosis(ctx: Dict[str, Any]) -> Optional[List[str]]:
+    """易变段：当前规则 / 当前表现 / 已知问题。**恒在最后**（前缀缓存约束）。"""
+    if not (ctx.get("rule") or ctx.get("replay_note") or ctx.get("diagnosis")):
+        return None
+    L = ["", "【当前规则】%s" % (ctx.get("rule") or "（空）")]
+    if ctx.get("replay_note"):
+        L.append("【当前表现】%s" % ctx["replay_note"])
+    diag = [str(d) for d in (ctx.get("diagnosis") or []) if str(d).strip()]
+    if diag:
+        L.append("")
+        L.append("【已知的问题】")
+        for d in diag:
+            L.append("- " + d)
+    return L
+
+
+#: 段落顺序 = **前缀缓存约束的落点**：稳定段（字段/大纲/全局数据/已有脚本/实测值）在前，
+#: 易变段（`_sec_diagnosis`：改一次规则就变）恒在最后。重排前先读 `build_prompt` 的 docstring
+#: ——顺序错了不会报错，只会让每次提问都全量计费。
+#:
+#: **每个段自己判「该不该出」**（返回 None = 缺席），所以这里只是一张有序表：不另设
+#: 「这次给哪几段」的清单。曾经有过一份（`prompt_plan`），它把每段的判据抄了第二遍
+#: ——判据写两处必然漂，而且它除被自己调用外没人用。
+SECTIONS: Tuple[Callable[[Dict[str, Any]], Optional[List[str]]], ...] = (
+    _sec_fields,
+    _outline_section,
+    _sec_js_globals,
+    _sec_known_webjs,
+    _sec_app_values,
+    _sec_diagnosis,
+)
+
+
+def _sections(ctx: Dict[str, Any]) -> List[str]:
+    """按 `SECTIONS` 顺序把非缺席的段拼起来（每段自带段前空行）。"""
+    out: List[str] = []
+    for section in SECTIONS:
+        out.extend(section(ctx) or [])
+    return out
+
+
 def build_batch_prompt(ctx: Dict[str, Any]) -> str:
     """批量提议的提示词（纯函数，可离线测）。
+
+    段落全走 :data:`SECTIONS`：与单字段路径同一份实现，两个 builder 只差标题行与
+    system prompt 的输出格式。加一种页面结构 = 在 `SECTIONS` 里加一个函数，这里不动。
 
     段落顺序沿用 :func:`build_prompt` 的**前缀缓存约束**：稳定内容（这一步是什么、
     DOM 大纲）在前，字段与实测值在后——同一步里「提议 → 改规则 → 再提议」
@@ -566,27 +773,7 @@ def build_batch_prompt(ctx: Dict[str, Any]) -> str:
     L: List[str] = []
     L.append("这一步：%s（一次给出下列字段的候选规则）"
              % (ctx.get("step_label") or ctx.get("step") or ""))
-    L.append("")
-    L.append("【要的字段】")
-    for f in ctx.get("fields") or []:
-        L.append("- %s：%s" % (f.get("field") or "",
-                               f.get("want_label") or ""))
-    L.append("")
-    L.append("【页面 DOM 大纲（缩进表示层级）】")
-    L.append(_outline(ctx.get("html") or "", ctx.get("focus") or ""))
-    values = [
-        (str(f.get("field") or ""),
-         [str(v).strip()[:120] for v in (f.get("app_values") or []) if str(v).strip()])
-        for f in (ctx.get("fields") or [])
-    ]
-    values = [(name, vs) for name, vs in values if vs]
-    if values:
-        L.append("")
-        L.append("【App 实测取到的值（正确的规则应当取到形似的东西）】")
-        for name, vs in values:
-            L.append("%s：" % name)
-            for v in vs[:MAX_APP_VALUES]:
-                L.append("- " + v)
+    L.extend(_sections(ctx))
     return "\n".join(L)
 
 

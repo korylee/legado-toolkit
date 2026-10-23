@@ -555,34 +555,92 @@ object BrowserBridge {
     private const val CF_CHALLENGE_PROBE = "!!window._cf_chl_opt"
 
     /**
-     * L3 运行时形状采集的**只读表达式**：采 `params`（App 注入进 WebView 的运行时对象）
-     * 的形状——类型、键名、`chapter_images` 的类型与 http/blob 计数、首条地址的 origin。
+     * L3 运行时形状采集的**只读表达式**：采页面里**所有可能装着数据的全局值**的形状。
      *
-     * **只采形状不采值**：图片地址本身、解密密钥、完整 URL 一律不进侧车——签名会过期、
-     * 密钥不属界面，采了只会诱导人把它们硬编码进书源（AGENTS #11 那一类「把一次性观测
-     * 写死」）。键名 40 上限、类型字符串、计数都是界面上答「下一步做什么」需要的最小集。
+     * **不猜变量名**（2026-10-22 实测的教训）：上一版写死 `params` + `chapter_images`，
+     * 而 `params` 根本不是 App 的约定（上游 `WebJsExtensions.getInjectionString` 只注入
+     * `cache / source / java`）——它是**那个站点自己挂的全局变量**。换站点即失效，
+     * 后面「AI 判哪个键是图片」就全部无从谈起。
+     *
+     * 遍历用 `Object.getOwnPropertyNames(window)` 再按 typeof 过滤，**不用 `for..in`**：
+     * 实测 `for..in` 会把 `window/self/document/onclick/onscroll…` 上百个内置属性混进来，
+     * 还带上原型链；过滤 Object/Array 之后只剩真正被赋值的那些（实测：chrome + 6 个候选）。
+     * `var x = …` 与**非严格模式的隐式全局** `x = …` 都能拿到；`let/const` 拿不到
+     * （它们在脚本的声明式环境里，不在 window）——这个缺口如实体现在结果里，不假装。
+     *
+     * **只采形状不采值**：数组只给长度，对象只给键名，元素值一律不进侧车（签名会过期、
+     * 密钥不属界面，采了只会诱导人硬编码进书源）。
+     *
+     * `params` 仍在（存在时照旧采 `params_type` / `keys` / `chapter_images` 五键）——
+     * 兼容现有消费方，等 `globals` 的消费方长齐再谈退役。
+     *
      * 字段名与 Python 闸门（`core.app_debug.runtime_map`）逐词比对钉在
      * `tests/test_jvm_debug_contract.py::TestRuntimeParity`。
      */
     internal val RUNTIME_SHAPE_EXPR = """
         JSON.stringify((function() {
-          var t = Object.prototype.toString.call(params);
-          if (t !== '[object Object]' && t !== '[object Array]') return {params_type: t};
-          var out = {params_type: t, keys: Object.keys(params).slice(0, 40)};
-          var imgs = params.chapter_images;
-          if (imgs === undefined || imgs === null) return out;
-          var it = Object.prototype.toString.call(imgs);
-          var arr = (it === '[object Array]') ? imgs : [String(imgs)];
-          var http = 0, blob = 0, host = '';
-          for (var i = 0; i < arr.length; i++) {
-            var s = String(arr[i] || '');
-            if (s.indexOf('blob:') === 0) { blob++; continue; }
-            if (s.indexOf('http') === 0) {
-              http++;
-              if (!host) { try { host = new URL(s).origin; } catch (e) {} }
+          var out = {globals: [], globals_total: 0, globals_dropped: 0};
+          var KEY_MAX = 40;
+          var names;
+          try {
+            names = Object.getOwnPropertyNames(window);
+          } catch (e) {
+            return {params_type: '[object Undefined]', globals: [],
+                    globals_total: 0, globals_dropped: 0,
+                    fails: ['枚举 window 失败：' + String(e)]};
+          }
+          var cands = [];
+          for (var i = 0; i < names.length; i++) {
+            var k = names[i];
+            var v;
+            try { v = window[k]; } catch (e) { continue; }
+            var t = Object.prototype.toString.call(v);
+            if (t !== '[object Object]' && t !== '[object Array]') continue;
+            var rec = {name: String(k).slice(0, 60), type: t};
+            if (t === '[object Array]') {
+              rec.count = v.length;
+            } else {
+              try {
+                var ks = Object.keys(v).slice(0, KEY_MAX);
+                rec.keys = ks;
+                // 自有键里**函数值**的个数：库/框架的方法袋与「装数据的对象」靠这个分。
+                // 仍然只采形状（typeof 不取值），实测能自己掉出 CryptoJS / jQuery 这类。
+                var fn = 0;
+                for (var j2 = 0; j2 < ks.length; j2++) {
+                  try { if (typeof v[ks[j2]] === 'function') fn++; } catch (e3) {}
+                }
+                rec.fn = fn;
+              } catch (e2) { rec.keys = []; rec.fn = 0; }
+            }
+            cands.push(rec);
+          }
+          out.globals_total = cands.length;
+          out.globals_dropped = Math.max(0, cands.length - 40);
+          out.globals = cands.slice(0, 40);
+          var params;
+          try { params = window['params']; } catch (e) { params = undefined; }
+          var pt = Object.prototype.toString.call(params);
+          out.params_type = pt;
+          if (pt === '[object Object]' || pt === '[object Array]') {
+            try { out.keys = Object.keys(params).slice(0, KEY_MAX); } catch (e) { out.keys = []; }
+            var imgs;
+            try { imgs = params.chapter_images; } catch (e) { imgs = undefined; }
+            if (imgs !== undefined && imgs !== null) {
+              var it = Object.prototype.toString.call(imgs);
+              var arr = (it === '[object Array]') ? imgs : [String(imgs)];
+              var http = 0, blob = 0, host = '';
+              for (var j = 0; j < arr.length; j++) {
+                var s = String(arr[j] || '');
+                if (s.indexOf('blob:') === 0) { blob++; continue; }
+                if (s.indexOf('http') === 0) {
+                  http++;
+                  if (!host) { try { host = new URL(s).origin; } catch (e) {} }
+                }
+              }
+              out.chapter_images = {type: it, count: arr.length, http: http,
+                                    blob: blob, sample_host: host};
             }
           }
-          out.chapter_images = {type: it, count: arr.length, http: http, blob: blob, sample_host: host};
           return out;
         })())
     """.trimIndent()
@@ -599,6 +657,29 @@ object BrowserBridge {
             }
             if (keys.isNotEmpty()) out["keys"] = keys
         }
+        // 全局候选数据源：**名字 + 形状**（数组给长度、对象给键名），不采值。
+        // `globals_total` / `globals_dropped` 说明「还有多少没列出来」——截断必须自报，
+        // 不能把「只列了 40 个」说成「页面只有 40 个」（AGENTS #4）。
+        o.optJSONArray("globals")?.let { arr ->
+            val items = (0 until arr.length()).mapNotNull { i ->
+                val rec = arr.optJSONObject(i) ?: return@mapNotNull null
+                val name = rec.optString("name")
+                if (name.isEmpty()) return@mapNotNull null
+                val item = linkedMapOf<String, Any?>(
+                    "name" to name, "type" to rec.optString("type"))
+                if (rec.has("count")) item["count"] = rec.optInt("count")
+                if (rec.has("fn")) item["fn"] = rec.optInt("fn")
+                rec.optJSONArray("keys")?.let { ks ->
+                    item["keys"] = (0 until ks.length()).mapNotNull { j ->
+                        ks.optString(j).takeIf { it.isNotEmpty() }
+                    }
+                }
+                item
+            }
+            if (items.isNotEmpty()) out["globals"] = items
+        }
+        if (o.has("globals_total")) out["globals_total"] = o.optInt("globals_total")
+        if (o.has("globals_dropped")) out["globals_dropped"] = o.optInt("globals_dropped")
         o.optJSONObject("chapter_images")?.let { ci ->
             out["chapter_images"] = linkedMapOf(
                 "type" to ci.optString("type"),
@@ -607,6 +688,12 @@ object BrowserBridge {
                 "blob" to ci.optInt("blob"),
                 "sample_host" to ci.optString("sample_host"),
             )
+        }
+        o.optJSONArray("fails")?.let { arr ->
+            val fails = (0 until arr.length()).mapNotNull { i ->
+                arr.optString(i).takeIf { it.isNotBlank() }
+            }
+            if (fails.isNotEmpty()) out["fails"] = fails
         }
         return if (out.isEmpty()) null else out
     }

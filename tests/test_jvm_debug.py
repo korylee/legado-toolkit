@@ -172,6 +172,135 @@ class _RunCase(unittest.TestCase):
         return jvm_debug.run_jvm_debug(fake_source(), key="我", out_path=str(self.out), **kw)
 
 
+class RenderAttributionTests(unittest.TestCase):
+    """「这一页走没走渲染」判在**页**上，且要认得出带请求选项的页面地址。
+
+    2026-10-21 实测的坑：渲染成功那一页的 `pages[].url` 是
+    `…/1.html,{"webView":true}`，而引擎报的渲染地址是**裸地址** `…/1.html`——
+    直接比字符串会把「渲染成功」判成「没渲染」，正好说反（AGENTS #4）。
+    """
+
+    def test_page_url_with_request_options_still_matches(self) -> None:
+        out = {"rendered": 1, "render_url": "https://a.com/ch/1.html", "render_reason": ""}
+        page = {"url": 'https://a.com/ch/1.html,{"webView":true}'}
+        jvm_debug._annotate_render([page], out)
+        self.assertIs(page["rendered"], True)
+
+    def test_failed_render_keeps_the_reason_on_that_page(self) -> None:
+        out = {"rendered": 0, "render_url": "https://a.com/ch/1.html",
+               "render_reason": "browser_unavailable"}
+        hit = {"url": "https://a.com/ch/1.html"}
+        other = {"url": "https://a.com/other"}
+        jvm_debug._annotate_render([hit, other], out)
+        self.assertIs(hit["rendered"], False)
+        self.assertEqual(hit["render_reason"], "browser_unavailable")
+        self.assertNotIn("rendered", other, "别人的渲染不算到这一页头上")
+
+    def test_absent_sidecar_facts_annotate_nothing(self) -> None:
+        """读不到就不写：不写 False 冒充「这次没渲染」（AGENTS #12）。"""
+        page = {"url": "https://a.com/ch/1.html"}
+        jvm_debug._annotate_render([page], {"rendered": None})
+        self.assertNotIn("rendered", page)
+
+
+class PlaceholderRuleTests(_RunCase):
+    """正文规则为空时注入「探针规则」：只取材料，结论一律「未验证」。
+
+    上游 `WebBook.getContent` 在 content 为空时**直接返回章节地址、不发请求**，于是正文页
+    与运行时形状都拿不到。注入一条非空规则能把材料取回来，但它跑的不是源里的规则——
+    所以结论必须改写，且「材料来自占位」这件事要留在结果里。
+    """
+
+    def _source_with(self, content: str) -> dict:
+        src = fake_source()
+        src["ruleContent"] = {"content": content}
+        return src
+
+    def _run_key(self, source: dict, key: str):
+        return jvm_debug.run_jvm_debug(source, key=key, out_path=str(self.out))
+
+    def test_content_key_with_empty_rule_injects_a_probe_rule(self) -> None:
+        self._patch("_run_launcher", self._fake_launcher(
+            events=self._fixture_events(), meta={"code": 0}))
+        src = self._source_with("")
+        before = json.dumps(src, ensure_ascii=False, sort_keys=True)
+        got = self._run_key(src, "--https://example.com/ch/1.html")
+        # 送给引擎的那份被注入了
+        written = json.loads((self.root / "source.json").read_text(encoding="utf-8"))
+        self.assertEqual(written[0]["ruleContent"]["content"], jvm_debug.PLACEHOLDER_CONTENT_RULE)
+        # 结论改写：占位规则跑出来的判定不许冒充验证
+        step = next((s for s in got["steps"] if s.get("name") == "content"), {})
+        self.assertEqual(step.get("verdict"), "unknown")
+        self.assertFalse(step.get("ok"))
+        self.assertIn("临时占位规则", step.get("detail", ""))
+        # 事实留在结果里（消费方据此知道这次正文没验证）
+        self.assertEqual(got.get("placeholder_rule"), jvm_debug.PLACEHOLDER_CONTENT_RULE)
+        # 调用方那份一个字都不许动
+        self.assertEqual(json.dumps(src, ensure_ascii=False, sort_keys=True), before)
+
+    def test_non_empty_rule_is_left_alone(self) -> None:
+        self._patch("_run_launcher", self._fake_launcher(
+            events=self._fixture_events(), meta={"code": 0}))
+        got = self._run_key(self._source_with("body@html"), "--https://example.com/ch/1.html")
+        written = json.loads((self.root / "source.json").read_text(encoding="utf-8"))
+        self.assertEqual(written[0]["ruleContent"]["content"], "body@html")
+        self.assertNotIn("placeholder_rule", got)
+
+    def test_other_steps_are_not_injected(self) -> None:
+        self._patch("_run_launcher", self._fake_launcher(
+            events=self._fixture_events(), meta={"code": 0}))
+        got = self._run_key(self._source_with(""), "我")
+        written = json.loads((self.root / "source.json").read_text(encoding="utf-8"))
+        self.assertEqual(written[0]["ruleContent"]["content"], "")
+        self.assertNotIn("placeholder_rule", got)
+
+
+class MaterialKindTests(unittest.TestCase):
+    """材料种类：引擎交回的「整页」是 DOM、还是页面脚本的输出。
+
+    实测（2026-10-21，同一页都声明 webView）：不写 webJs → 218461 字节含 `<html>/<img>`
+    的真 DOM；写 webJs → 27150 字节、137 行图片地址、没有任何标签。两者都顶着「整页」
+    这个名义进材料队列，所以种类必须由后端判、消费方读。
+    """
+
+    def test_kind_follows_render_fact_and_page_script(self):
+        webjs = {"ruleContent": {"webJs": "result = params.chapter_images.join('\\n')"}}
+        plain = {"ruleContent": {"content": "id.content@text"}}
+        self.assertEqual(jvm_debug.material_kind({"rendered": True}, webjs),
+                         jvm_debug.MATERIAL_WEBJS_OUTPUT)
+        self.assertEqual(jvm_debug.material_kind({"rendered": True}, plain),
+                         jvm_debug.MATERIAL_RENDERED_DOM)
+        # 没渲染 = 浏览器没参与、脚本也没机会跑 → 静态页
+        self.assertEqual(jvm_debug.material_kind({}, webjs), jvm_debug.MATERIAL_STATIC)
+        self.assertEqual(jvm_debug.material_kind({"rendered": None}, plain),
+                         jvm_debug.MATERIAL_STATIC)
+
+
+class StaticNotesTests(_RunCase):
+    """源级静态错配接进结果（`static_notes`）：判据在 `core.quality`，这里只钉「接上了」。
+
+    起点是一次真实遗漏：`static_misconfig_notes` 早就写好、有单测，但**没有生产消费者**
+    ——「配了 webJs 但 URL 规则没开 webView，这段 JS 不会生效」这句话没人看到（AGENTS #4）。
+    """
+
+    def _run_with(self, source: dict):
+        return jvm_debug.run_jvm_debug(source, key="我", out_path=str(self.out))
+
+    def test_webjs_without_webview_surfaces_the_note(self) -> None:
+        self._patch("_run_launcher", self._fake_launcher(
+            events=self._fixture_events(), meta={"code": 0}))
+        src = fake_source()
+        src["ruleContent"] = {"webJs": "result = params.x.join('\\n')"}
+        got = self._run_with(src)
+        self.assertTrue(got.get("static_notes"), "配了 webJs 却没开 webView 要说出来")
+        self.assertIn("不会生效", " ".join(got["static_notes"]))
+
+    def test_plain_source_has_no_static_notes(self) -> None:
+        self._patch("_run_launcher", self._fake_launcher(
+            events=self._fixture_events(), meta={"code": 0}))
+        self.assertNotIn("static_notes", self._run_with(fake_source()))
+
+
 class RunJvmDebugTests(_RunCase):
     def test_missing_book_source_url_is_reported(self) -> None:
         r = jvm_debug.run_jvm_debug({"bookSourceName": "没有 URL"}, out_path=str(self.out))
@@ -219,6 +348,30 @@ class RunJvmDebugTests(_RunCase):
         self.assertTrue(all({"t", "text"} <= set(e) for e in r["events"]),
                         "事件形状要与设备通道一致：[{t: 秒, text: 原文}]")
         self.assertEqual(len(r["pages"]), 1, "补抓要接上（抽屉靠它看源码）")
+
+    def test_render_facts_are_surfaced_and_absence_stays_empty(self) -> None:
+        """渲染事实带出来；**侧车没有这几项时留 None，不补 0**。
+
+        判据读的是 `shadow_rendered` / `shadow_last_url`：`origin == "engine"` 只说明 HTML
+        是引擎取回来的，源没声明 webView 时它同样是静态页（2026-10-21 实测同一页
+        48KB/rendered=0 vs 218KB/rendered=1）。补 0 会把「这份侧车没说」写成「这次没渲染」。
+        """
+        self._patch("_run_launcher", self._fake_launcher(
+            events=self._fixture_events(),
+            meta={"code": 0, "hint": "", "error": "", "shadow_rendered": 1,
+                  "shadow_webview_calls": 2, "shadow_last_url": "https://a.com/ch/1.html",
+                  "shadow_last_reason": ""}))
+        got = self._run()
+        self.assertEqual(got["rendered"], 1)
+        self.assertEqual(got["webview_calls"], 2)
+        self.assertEqual(got["render_url"], "https://a.com/ch/1.html")
+        self.assertEqual(got["render_reason"], "")
+        # 同一份侧车里去掉渲染那几项：读不到就是读不到，不许变成 0 / 空串冒充事实
+        self._patch("_run_launcher", self._fake_launcher(
+            events=self._fixture_events(), meta={"code": 0, "hint": "", "error": ""}))
+        blank = self._run()
+        self.assertIsNone(blank["rendered"])
+        self.assertIsNone(blank["webview_calls"])
 
     def test_matched_html_from_the_sidecar_reaches_the_right_step(self) -> None:
         """第三期：侧车里的 `matched_html` 按**每段自己的 url + 段名**落到 steps 上。

@@ -23,7 +23,9 @@ export const STEP_LABELS = {
 //:          的空格子，读起来像「引擎取不到」，其实是这行压根不是取值规则。
 //:   verify 这行能不能行内「验证」（rule_try）。`none` 的行**不渲染按钮**：
 //:          `nextContentUrl` 是 `getStringList(isUrl=true)`，而 rule_try 对 content 步
-//:          走单值口径，拿它验会给出误导结论（宁可不给，也不给一个会说反的按钮）。
+//:          走单值口径，拿它验会给出误导结论（宁可不给，也不给一个会说反的按钮）；
+//:          正文 `content` 同理——正文对不对看的是内容，不是「选不选得中」（判据见
+//:          该行定义处），验收一律走重调本步。
 //: `key` 是 AI 补全那一侧认字段用的名字（`core.autofill.FILL_SPECS` 的蛇形键）：
 //: 没有它的行，AI 补全弹窗就拿不到这个字段的中文名。它只影响取词，不影响写入落点
 //: （落点表 `AUTOFILL_RULE_FIELDS` 自己带完整路径；写源用的是 `field`）。
@@ -41,7 +43,11 @@ export const RULE_FIELD_DEFS = [
   { step: "bookUrl", field: "ruleBookInfo.coverUrl", group: "ruleBookInfo", key: "cover_url", label: "详情 · 封面链接", placeholder: "class.cover img@src" },
   { step: "bookUrl", field: "ruleBookInfo.tocUrl", group: "ruleBookInfo", key: "toc_url", label: "详情 · 目录链接", placeholder: "class.list a@href" },
   { step: "toc", field: "ruleToc.chapterList", group: "ruleToc", key: "chapterList", label: "目录 · chapterList", placeholder: "class.chapter@tag.a" },
-  { step: "content", field: "ruleContent.content", group: "ruleContent", key: "content", label: "正文 · content", placeholder: "id.content@text" },
+  // 正文不给行内快验：rule_try 只回答「选不选得中」，而正文对不对看的是**内容**。
+  // 实测同一张图片正文页：`class.content@text` → 取到 0 条、`body@html` → 取到 1 条
+  // （整页 HTML 也算「取到」）——两条结论都读不出正文有没有真取到，按钮只会说反。
+  // 验收只有一条：重调本步（暖机 ~2s），看引擎的 verdict。
+  { step: "content", field: "ruleContent.content", group: "ruleContent", key: "content", label: "正文 · content", placeholder: "id.content@text", verify: "none", factHint: "正文的验收看引擎：改完重调本步" },
   // 分页：单条时串行跟随、多条时并发抓取（上游 BookContent.kt），所以它取的是一**组**链接
   { step: "content", field: "ruleContent.nextContentUrl", group: "ruleContent", key: "nextContentUrl", label: "正文 · 下一页链接", placeholder: "class.next@href", verify: "none", factHint: "分页规则没有快验，改这条要重调本步验证" },
   // 页面脚本（不是取值规则）：它的结果成为这一步的响应体，取值由 content 那条做；

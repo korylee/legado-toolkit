@@ -8,7 +8,7 @@ from typing import Any, Dict, Optional
 from fastapi import APIRouter, Depends, HTTPException
 
 from backend.deps import get_store
-from backend.jobs import runner
+from backend.jobs import debug_materials, runner
 from backend.schemas import (
     AgentPlanRequest,
     AppDebugRequest,
@@ -333,22 +333,6 @@ async def agent_plan(body: AgentPlanRequest):
     return build_plan(context, model_available=body.model_available)
 
 
-def _job_source(job) -> Dict[str, Any]:
-    """任务行里的源 JSON（rule_try 的求值要用完整 BookSource）。
-
-    判据搬到 ``backend/jobs/debug_materials``（AI 补全任务体也要取同一份材料，
-    这里只留一行指针）。
-    """
-    from backend.jobs.debug_materials import job_source
-    return job_source(job)
-
-
-def _debug_step_material(job, job_id: str, step_name: str):
-    """从任务行取一步的材料（html / base_url）。判据同上，在 ``debug_materials``。"""
-    from backend.jobs.debug_materials import debug_step_material
-    return debug_step_material(job, job_id, step_name)
-
-
 @router.post("/outline")
 async def rule_outline(body: OutlineRequest, st=Depends(get_store)):
     """这一步页面的 **DOM 大纲**（缩进树）：人写选择器要看的是标签 / class / 层级，
@@ -358,11 +342,19 @@ async def rule_outline(body: OutlineRequest, st=Depends(get_store)):
     这里只是把它端到人眼前，**不新增第二套解析**。行数是显示的预算（比提示词宽），
     超了**自报不全**（AGENTS #4：不能把「前 N 行」说成全部）。
     """
+    from core.jvm_debug import MATERIAL_WEBJS_OUTPUT
     from core.repair.evidence import DISPLAY_OUTLINE_LINES, dom_outline
 
     job = st.get_job(body.job_id)
-    # 材料的取法与自报原因（没有任务 / 没有这一步 / 没有页面）都在共用件里
-    html, _base_url, _result = _debug_step_material(job, body.job_id, body.step)
+    # 材料的取法与自报原因（没有任务 / 没有这一步 / 没有页面）都在共用件里；
+    # 种类决定「这份东西能不能当 DOM 看」——`webjs_output` 是一串脚本返回值，
+    # 压大纲会得到空树，而看起来像「这页没有结构」（AGENTS #12：读不到 ≠ 没有）
+    html, _base_url, _result, kind, _structured, _runtime = (
+        debug_materials.debug_step_material(job, body.job_id, body.step))
+    if kind == MATERIAL_WEBJS_OUTPUT:
+        raise HTTPException(
+            400, "这一步的材料是页面脚本（webJs）的输出，不是 DOM——要结构请先清空 "
+                 "webJs 再重调本步（渲染后的页面会作为材料回来）")
     # 多取一行用来判截断：够了就说明后面还有（与 dom_outline 的预算语义共用一份实现）
     text = await asyncio.to_thread(dom_outline, html, DISPLAY_OUTLINE_LINES + 1)
     lines = text.split("\n")
@@ -385,8 +377,9 @@ async def rule_try(body: RuleTryRequest, st=Depends(get_store)):
     from core.rule_try import rule_try as run_rule_try
 
     job = st.get_job(body.job_id)
-    source = _job_source(job)
-    html, base_url, _ = _debug_step_material(job, body.job_id, body.step)
+    source = debug_materials.job_source(job)
+    html, base_url, _r, _kind, _structured, _runtime = (
+        debug_materials.debug_step_material(job, body.job_id, body.step))
     if not (body.rule or "").strip():
         raise HTTPException(400, "规则为空：先填一条再试")
     return await asyncio.to_thread(
@@ -404,11 +397,8 @@ async def agent_loop(body: AutofillRunRequest, st=Depends(get_store)):
     验收仍是「重调本步验证」（AGENTS #3）：rule_try 只回答「选不选得中」。
     """
     job = st.get_job(body.job_id)
-    html, base_url, result = _debug_step_material(job, body.job_id, body.step)
-    steps = result.get("steps") if isinstance(result, dict) else None
-    step_row = next((s for s in (steps or [])
-                     if isinstance(s, dict) and s.get("name") == body.step), {})
-    structured = step_row.get("structured") if isinstance(step_row.get("structured"), dict) else {}
+    html, base_url, _result, _kind, structured, _runtime = (
+        debug_materials.debug_step_material(job, body.job_id, body.step))
     if not body.use_ai:
         # 免费段是纯计算（不发请求、不调模型），秒级返回，不值得起一个任务
         from core.autofill import autofill_detail

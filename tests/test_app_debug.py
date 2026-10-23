@@ -227,6 +227,72 @@ class RuntimeMapTests(unittest.TestCase):
             self.assertIn("形状不对", err.write.call_args_list[0][0][0])
         self.assertEqual(runtime_map({"params_type": 123, "keys": "not-a-list"}), {})
 
+    def test_global_candidates_are_shape_only(self):
+        """全局候选：只转发名字与形状（长度/键名），不采值，截断要自报。
+
+        为什么要有它：变量名不能猜（`params` 只是某个站点自己挂的名字，上游只注入
+        cache/source/java）。这里钉两件事——值不带出去；「只列了前 N 个」不能被读成
+        「页面只有 N 个」。
+        """
+        from core.app_debug import RUNTIME_GLOBALS_MAX, runtime_map
+        raw = {"params_type": "[object Undefined]",
+               "globals": [
+                   {"name": "pageData", "type": "[object Object]",
+                    "keys": ["title", "images"]},
+                   {"name": "imgs", "type": "[object Array]", "count": 137,
+                    "values": ["https://leak/1.jpg"]},
+               ],
+               "globals_total": 2, "globals_dropped": 0}
+        out = runtime_map(raw)
+        self.assertEqual([g["name"] for g in out["globals"]], ["pageData", "imgs"])
+        self.assertEqual(out["globals"][1]["count"], 137)
+        self.assertNotIn("values", out["globals"][1], "全局候选不许把值带出去")
+        self.assertEqual(out["globals_total"], 2)
+        self.assertEqual(out["globals_dropped"], 0)
+        # 超出上限要截断，且 dropped 事实不能丢
+        many = {"globals": [{"name": "g%d" % i, "type": "[object Object]"}
+                            for i in range(RUNTIME_GLOBALS_MAX + 5)],
+                "globals_total": RUNTIME_GLOBALS_MAX + 5,
+                "globals_dropped": 5}
+        clipped = runtime_map(many)
+        self.assertEqual(len(clipped["globals"]), RUNTIME_GLOBALS_MAX)
+        self.assertEqual(clipped["globals_dropped"], 5)
+
+    def test_empty_globals_is_not_the_same_as_collection_failure(self):
+        """空清单 ≠ 采集失败（AGENTS #12）：前者没有 `fails`，后者有。"""
+        from core.app_debug import runtime_map
+        self.assertNotIn("globals", runtime_map({"globals": []}))
+        self.assertNotIn("fails", runtime_map({"globals": []}))
+
+    def test_globals_are_ranked_by_data_likeness_not_by_name(self):
+        """按「像不像数据」排序：数组带元素最前、方法袋最后；**删掉的条数要自报**。
+
+        判据是结构（`count` / `fn`），不是名字——按名字过滤就回到猜名字了。
+        实测该页 9 条候选里 CryptoJS / jQuery / chrome 是方法袋（自有键几乎全是函数），
+        `params` / `imgs` 是值袋。
+        """
+        from core.app_debug import data_likeness, rank_globals
+        data_arr = {"name": "imgs", "type": "[object Array]", "count": 137}
+        data_obj = {"name": "params", "type": "[object Object]", "fn": 0,
+                    "keys": ["chapter_images", "host"]}
+        lib = {"name": "CryptoJS", "type": "[object Object]", "fn": 18,
+               "keys": ["lib", "enc", "algo"]}
+        empty_arr = {"name": "empty", "type": "[object Array]", "count": 0}
+        # 有数据字段的站点对象要排在「纯方法袋」之前——实测踩过反的：
+        # umami（2 键全是函数）曾被排到 CMS（10 键里 1 个函数）前面
+        site_obj = {"name": "CMS", "type": "[object Object]", "fn": 1,
+                    "keys": ["init", "base64", "api", "common", "chapter", "lazy",
+                             "events", "share", "qrcode", "history"]}
+        all_fn = {"name": "umami", "type": "[object Object]", "fn": 2,
+                  "keys": ["track", "identify"]}
+        self.assertLess(data_likeness(data_arr), data_likeness(data_obj))
+        self.assertLess(data_likeness(data_obj), data_likeness(site_obj))
+        self.assertLess(data_likeness(site_obj), data_likeness(all_fn))
+        self.assertLess(data_likeness(site_obj), data_likeness(lib))
+        kept, dropped = rank_globals([lib, empty_arr, data_obj, data_arr], 2)
+        self.assertEqual([k["name"] for k in kept], ["imgs", "params"])
+        self.assertEqual(dropped, 2, "只列前 N 条时，「还有几条」必须自报")
+
     def test_oversized_keys_are_clipped(self):
         """键名列表带上界（RUNTIME_KEYS_MAX）：防御手改侧车，正常采集远小于它。"""
         from core.app_debug import RUNTIME_KEYS_MAX, runtime_map

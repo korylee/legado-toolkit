@@ -8,7 +8,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import unittest
 
 from fastapi import HTTPException
@@ -16,6 +15,7 @@ from fastapi import HTTPException
 from backend.api.rules import rule_outline
 from backend.schemas import OutlineRequest
 from core.repair.evidence import DISPLAY_OUTLINE_LINES
+from tests.support import job_store, one_step_job
 
 HTML = """<html><body>
 <div class="book"><h1 class="title">甲书</h1><span class="author">夏子久</span></div>
@@ -23,19 +23,7 @@ HTML = """<html><body>
 
 
 def _store(html=HTML, step="bookUrl"):
-    job = {
-        "payload": json.dumps({"source": {"bookSourceUrl": "http://example.com"}}),
-        "result_json": json.dumps({
-            "steps": [{"name": step, "page_id": "detail", "url": "http://x/d"}],
-            "pages": [{"id": "detail", "url": "http://x/d", "html": html}],
-        }),
-    }
-
-    class _St:
-        def get_job(self, _job_id):
-            return job
-
-    return _St()
+    return one_step_job(html, step=step)
 
 
 def _call(store, step="bookUrl"):
@@ -67,6 +55,25 @@ class RuleOutlineTests(unittest.TestCase):
         with self.assertRaises(HTTPException) as ctx:
             _call(_store(html="   "))
         self.assertIn("页面材料", str(ctx.exception.detail))
+
+    def test_webjs_output_is_not_treated_as_dom(self):
+        """材料是页面脚本（webJs）的输出时不给大纲，说清原因与下一步。
+
+        实测（2026-10-21，同一页）：有 webJs 时引擎交回的「整页」是那段脚本的返回值
+        （27150 字节、137 行图片地址、没有任何标签）。压大纲会得到空树，而界面默认就看
+        大纲——用户会读成「这页没有可写的结构」（AGENTS #12：读不到 ≠ 没有）。
+        """
+        store = job_store(
+            source={"bookSourceUrl": "http://example.com",
+                    "ruleContent": {"webJs": "result = params.chapter_images.join('\\n')"}},
+            steps=[{"name": "content", "page_id": "chapter", "url": "http://x/1"}],
+            pages=[{"id": "chapter", "url": "http://x/1", "rendered": True,
+                    "html": "https://img.example.com/1.jpg\nhttps://img.example.com/2.jpg"}])
+
+        with self.assertRaises(HTTPException) as ctx:
+            _call(store, step="content")
+        self.assertIn("页面脚本", str(ctx.exception.detail))
+        self.assertIn("清空", str(ctx.exception.detail), "要给出能执行的那一步")
 
 
 if __name__ == "__main__":
