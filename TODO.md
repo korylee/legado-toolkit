@@ -266,4 +266,19 @@ AGENTS.md #5b，core/settings_store.py
 指针：appservice/test/io/legado/app/service/DebugService.kt（runStructuredWithPhase），
 StructuredResult.kt，core/app_debug.py
 
+### 条目：sidecar-per-page-render-facts · 侧车按页记渲染事实
+状态：todo
+依赖：无
+优先级：P2
+背景：侧车只记「最后一次渲染」的 url / js_len / reason（`shadow_last_*`），所以除末页外
+  每一步的 `material_kind` 都是 `unknown`；`core.rule_try.unfaithful_reason` 因此只能
+  「说不清就照跑」——快验在非正文步无法收紧，页面脚本材料漏判的那一档也拦不住。
+约束：**只加键**（`shadow_render_calls`：每次调用的 url / js_len / ok / reason 列表），
+  旧引擎读不到就沿用「最后一次」那一档；`_annotate_render` 由按单地址匹配改成按列表匹配；
+  键名与形状两侧由契约测试钉住（同 AGENTS #22）。
+验收：同一源同一页，非末页也能拿到 `rendered` / `render_js`；`unfaithful_reason` 的
+  unknown 档可收紧为「拒绝」并补用例；`material_kind` 的四档在新侧车下各有实测例。
+指针：core/jvm_debug.py（_annotate_render），appservice/test/io/legado/app/service/DebugService.kt，
+tests/test_jvm_debug_contract.py
+
 ---
