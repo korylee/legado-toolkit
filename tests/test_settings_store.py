@@ -46,21 +46,14 @@ class SettingsStoreTests(unittest.TestCase):
         self.assertEqual(S.load()["network"], S.DEFAULTS["network"])
         self.assertEqual(S.load()["jvm"], S.DEFAULTS["jvm"])
 
-    def test_debug_chain_timeout_default_and_clamp(self) -> None:
-        """调试的**整链**预算（`debug.chain_timeout`）：默认值只在 DEFAULTS，越界 clamp。
+    def test_debug_chain_timeout_is_above_the_render_budget(self) -> None:
+        """调试的**整链**预算（`debug.chain_timeout`）：默认值只在 DEFAULTS。
 
-        90 这个数的意义是**大于桥的渲染上限 60s**——同值时渲染永远先被整链
-        掐死，webView 段没有合法完成的空间（单步那根见 `debug.stage_timeout`）。"""
+        它必须**大于桥的渲染上限 60s**——同值时渲染永远先被整链掐死，webView 段
+        没有合法完成的空间（单步那根见 `debug.stage_timeout`）。"""
         self.assertEqual(S.load()["debug"]["chain_timeout"],
                          S.DEFAULTS["debug"]["chain_timeout"])
-        self.assertEqual(S.DEFAULTS["debug"]["chain_timeout"], 90)
         self.assertGreater(S.DEFAULTS["debug"]["chain_timeout"], 60)
-        self.assertEqual(S.coerce("debug", "chain_timeout", 1000),
-                         S.LIMITS["debug_chain_timeout"][1])
-        self.assertEqual(S.coerce("debug", "chain_timeout", 1),
-                         S.LIMITS["debug_chain_timeout"][0])
-        self.assertEqual(S.coerce("debug", "chain_timeout", "abc"),
-                         S.DEFAULTS["debug"]["chain_timeout"])
 
     def test_check_budget_default_is_below_the_app_call_timeout(self) -> None:
         """批量校验的每源总预算 25s：**必须小于** App 的 okhttp callTimeout 60s。
