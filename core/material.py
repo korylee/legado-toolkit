@@ -33,16 +33,25 @@ from core.jvm_debug import (MATERIAL_FETCHED, MATERIAL_RENDERED_DOM, MATERIAL_ST
 ALWAYS_VERIFIABLE: FrozenSet[str] = frozenset({"container", "js_other"})
 
 
+#: 「这一步想干什么」。同一个材料种类对**两种目的**的答案可以相反——
+#: `webjs_output` 想**看结构**时要先清掉脚本（拿回 DOM），想**取内容**时它正是对的那份
+#: （页面脚本已经把内容取出来了）。原先只有一个 `next_step`，把这两件事混成一个码。
+INTENT_STRUCTURE = "structure"
+INTENT_CONTENT = "content"
+
+
 class _Material:
-    """一种材料的三条结论。字段名是**问题**，不是某个消费面的私语。"""
+    """一种材料的几条结论。字段名是**问题**，不是某个消费面的私语。"""
 
     __slots__ = ("kind", "dom", "next_step", "allows")
 
-    def __init__(self, kind: str, *, dom: bool, next_step: str = "",
+    def __init__(self, kind: str, *, dom: bool,
+                 next_step: Dict[str, str] = None,
                  allows: FrozenSet[str] = frozenset()) -> None:
         self.kind = kind
         self.dom = dom
-        self.next_step = next_step
+        #: 目的 → 「先做哪一步」的码。缺席 = 这个目的下材料够用。
+        self.next_step: Dict[str, str] = dict(next_step or {})
         self.allows = ALWAYS_VERIFIABLE | allows
 
     def __repr__(self) -> str:  # 测试失败时能直接看出是哪一行错了
@@ -54,14 +63,18 @@ class _Material:
 #: 事实」，不是「不是 DOM」——侧车只记最后一次渲染，非末页永远 unknown，排除掉会让 AI
 #: 在正常页面上也拿不到大纲）。
 MATERIALS: Dict[str, _Material] = {
-    MATERIAL_WEBJS_OUTPUT: _Material(MATERIAL_WEBJS_OUTPUT, dom=False,
-                                     next_step="drop_script", allows=frozenset({"js_result"})),
+    # 脚本产出：看结构要先清脚本；**取内容时够用**（内容已经在结果里了）
+    MATERIAL_WEBJS_OUTPUT: _Material(
+        MATERIAL_WEBJS_OUTPUT, dom=False, allows=frozenset({"js_result"}),
+        next_step={INTENT_STRUCTURE: "drop_script"}),
     MATERIAL_RENDERED_DOM: _Material(MATERIAL_RENDERED_DOM, dom=True,
                                      allows=frozenset({"selector"})),
     MATERIAL_STATIC: _Material(MATERIAL_STATIC, dom=True,
                                allows=frozenset({"selector"})),
-    MATERIAL_FETCHED: _Material(MATERIAL_FETCHED, dom=True, next_step="render_first",
-                                allows=frozenset({"selector"})),
+    # 我们另抓的静态页：两个目的都要先让浏览器跑一遍（页面变量与渲染后的 DOM 都不在）
+    MATERIAL_FETCHED: _Material(
+        MATERIAL_FETCHED, dom=True, allows=frozenset({"selector"}),
+        next_step={INTENT_STRUCTURE: "render_first", INTENT_CONTENT: "render_first"}),
     MATERIAL_UNKNOWN: _Material(MATERIAL_UNKNOWN, dom=True,
                                 allows=frozenset({"selector"})),
 }
@@ -90,16 +103,14 @@ def can_fast_verify(kind: str, shape: str) -> bool:
     return str(shape or "") in _material(kind).allows
 
 
-def blocked_next(kind: str) -> str:
-    """材料不够时**先做哪一步**（码，消费侧取词）；空串 = 材料够用。"""
-    return _material(kind).next_step
+def blocked_next(kind: str, intent: str = INTENT_CONTENT) -> str:
+    """**这个目的下**材料够不够，不够就先做哪一步（码，消费侧取词）；空串 = 够用。
 
-
-#: 字段族里**不能行内快验**的那些（原因在字段本身，与材料无关）：
-#:   script  页面脚本跑在页面环境里，`rule_try` 在规则环境求值——验不出「这段脚本对不对」；
-#:   list    列表规则取的是**一组**链接，快验走单值口径，会说反。
-#: 与 AGENTS #21 的 `getElements` / `getValue` 之分是同一件事。
-NO_FAST_VERIFY_KINDS: FrozenSet[str] = frozenset({"script", "list"})
+    `intent` 缺省按「取内容」算：调这个函数最多的消费者（AI 补全）问的就是
+    「这份材料能不能写出这一行」。想看结构的一方必须显式传 `INTENT_STRUCTURE`——
+    `webjs_output` 在这两个目的下答案相反（见 `MATERIALS` 的注释）。
+    """
+    return _material(kind).next_step.get(str(intent or INTENT_CONTENT), "")
 
 
 def check_table() -> None:

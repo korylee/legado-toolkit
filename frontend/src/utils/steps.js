@@ -45,9 +45,9 @@ export const RULE_FIELD_DEFS = [
   // 正文可用性一律以「重调本步」的 verdict 为准。
   { step: "content", field: "ruleContent.content", group: "ruleContent", key: "content", label: "正文 · content", placeholder: "id.content@text" },
   // 分页：单条时串行跟随、多条时并发抓取（上游 BookContent.kt），所以它取的是一**组**链接——
-  // 组规则拿单值口径去验会说反。这一行**不给按钮**的判据在后端
-  // （`core.material.NO_FAST_VERIFY_KINDS`：字段族 `list`），前端不再自带标记。
-  { step: "content", field: "ruleContent.nextContentUrl", group: "ruleContent", key: "nextContentUrl", label: "正文 · 下一页链接", placeholder: "class.next@href" },
+  // 组规则拿单值口径去验会说反。它**不在** `FILL_SPECS` 里（后端按字段族判的那道闸看不见
+  // 它——那是给 AI 提议用的字段表），所以由这一行自带的 `verify: "none"` 明说不给按钮。
+  { step: "content", field: "ruleContent.nextContentUrl", group: "ruleContent", key: "nextContentUrl", label: "正文 · 下一页链接", placeholder: "class.next@href", verify: "none" },
   // 页面脚本（不是取值规则）：它的结果成为这一步的响应体，取值由 content 那条做；
   // 生效前提是某条 URL 规则开了 webView，判据在后端 `core.quality.static_misconfig_notes`
   { step: "content", field: "ruleContent.webJs", group: "ruleContent", key: "webJs", label: "正文 · webJs（页面脚本）", placeholder: "var urls = params.chapter_images; …", fact: "none" },

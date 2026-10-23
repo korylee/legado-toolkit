@@ -711,10 +711,48 @@ class TestUnfaithfulCodeParity(unittest.TestCase):
         self.assertEqual(len(block), 2, "agentRun.js 里找不到 NEXT_STEP_TEXT")
         body = block[1].split("\n};", 1)[0]
         keys = set(re.findall(r"(\w+):", body))
-        codes = {m.next_step for m in MATERIALS.values() if m.next_step}
+        codes = {code for m in MATERIALS.values() for code in m.next_step.values()}
         self.assertEqual(keys, codes,
                          "下一步码两侧漂了：前端 %s，后端 %s"
                          % (sorted(keys), sorted(codes)))
+
+
+class TestPageVarsShapeParity(unittest.TestCase):
+    """`page_vars` / `functions`：侧车采、Python 读的两个新键（AGENTS #22③）。
+
+    两侧各解析一遍（Kotlin 在 `BrowserBridge` 造 JSON，Python 在
+    `core.app_debug.runtime_map` 收），对端改键名或改类型时 Python 侧**静默丢弃**
+    ——「读不到 ≠ 没有」（AGENTS #12）。所以钉两件事：生产侧确实写了这几个键、
+    消费侧确实把它们读出来。
+    """
+
+    BRIDGE = (pathlib.Path(__file__).parent.parent /
+              "appservice/test/io/legado/app/service/BrowserBridge.kt")
+
+    def test_producer_writes_the_keys_we_read(self):
+        kt = self.BRIDGE.read_text(encoding="utf-8")
+        for key in ('"page_vars"', '"functions"', '"arity"', '"first_len"'):
+            self.assertIn(key, kt, "侧车没写 %s——Python 侧会静默读不到" % key)
+
+    def test_runtime_map_keeps_the_shape(self):
+        from core.app_debug import runtime_map
+
+        out = runtime_map({
+            "globals": [{"name": "chapter_images", "type": "[object Array]", "count": 131,
+                         "keys": ["0"],
+                         "functions": [{"name": "decryptAes", "arity": 2},
+                                       {"name": "apiToken", "arity": 0}]}],
+            "page_vars": {"chapter_images": {"type": "[object Array]", "n": 131,
+                                             "first": "https://a/1.jpg", "first_len": 17},
+                          "images_base64": {"type": "[object Boolean]", "first": "false"}},
+        })
+        self.assertEqual(out["page_vars"]["chapter_images"],
+                         {"type": "[object Array]", "n": 131,
+                          "first": "https://a/1.jpg", "first_len": 17})
+        self.assertEqual(out["page_vars"]["images_base64"],
+                         {"type": "[object Boolean]", "first": "false"})
+        # 像密钥/口令的函数名不进提示词（与 `keys` 同一条 `SECRET_KEY_RE`）
+        self.assertEqual(out["globals"][0]["functions"], [{"name": "decryptAes", "arity": 2}])
 
 
 if __name__ == "__main__":

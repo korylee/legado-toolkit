@@ -374,27 +374,23 @@ async def rule_try(body: RuleTryRequest, st=Depends(get_store)):
     它只回答「这条规则选不选得中」，**不替代整步验收**（AGENTS #3）——
     写入草稿后仍要点「重调本步验证」。
     """
-    from core.rule_try import rule_try as run_rule_try, unfaithful_reason
-
     job = st.get_job(body.job_id)
     source = debug_materials.job_source(job)
-    html, base_url, _r, kind, _structured, _runtime = (
+    html, base_url, _r, kind, _structured, runtime = (
         debug_materials.debug_step_material(job, body.job_id, body.step))
     if not (body.rule or "").strip():
         raise HTTPException(400, "规则为空：先填一条再试")
-    # 快验只对它**答得忠实**的规则给判决，判据两半：字段族（列表规则 / 页面脚本走不了
-    # 单值口径，`NO_FAST_VERIFY_KINDS`）+ 材料 × 规则形态（`can_fast_verify`）。
-    from core.autofill import _field_kind
-    from core.material import NO_FAST_VERIFY_KINDS, can_fast_verify
-    from core.rule_try import rule_shape
+    # 闸与执行都收在 `core.rule_try`（一份判据，两个调用方：这里与 `agent_loop._try`）：
+    # `refusal_code` 不跑引擎、便宜；`fast_verify` 才真跑。页面脚本那一路吃 `runtime`
+    # 里的 `page_vars`（侧车采的形状），没有它就给「答不了」而不是跑出一句假的取不到。
+    from core.rule_try import fast_verify, refusal_code, refusal_result
 
-    if (_field_kind(body.step, body.field or "") in NO_FAST_VERIFY_KINDS
-            or not can_fast_verify(kind, rule_shape(body.rule))):
-        return {"ok": False, "unfaithful": True,
-                "reason_code": unfaithful_reason(kind, body.rule) or "field_not_verifiable",
-                "count": 0, "values": [], "error": ""}
+    why = refusal_code(body.step, body.field or "", kind, body.rule, runtime)
+    if why:
+        return refusal_result(why)
     return await asyncio.to_thread(
-        run_rule_try, source, body.step, html, base_url, body.rule)
+        fast_verify, source, body.step, body.field or "", html, base_url,
+        body.rule, kind, runtime)
 
 
 @router.post("/agent-loop")
@@ -420,7 +416,12 @@ async def agent_loop(body: AutofillRunRequest, st=Depends(get_store)):
     # 假的：响应回来才更新），刷新一次就丢；进 jobs 表之后逐字段事件写进事件账本、
     # 模型调用原文落 ``llm.jsonl``，取消/重挂/TTL 全部沿用既有那套。
     # 材料在 debug 任务行里，任务体自己按 job_id 取（payload 里不放几十万字符的页面）。
+    # `fields` 为空 = **整段补全**：字段清单从 FILL_SPECS 推（判据一份），调用方不必
+    # 抄一份字段表——抄出来的必然与 `segment_fields` 漂。
+    from core.autofill import segment_fields
+
+    fields = list(body.fields or []) or segment_fields(body.step)
     return {"job_id": runner.submit(
         "agent_loop",
         {"debug_job_id": body.job_id, "step": body.step,
-         "fields": list(body.fields or [])})}
+         "fields": fields})}

@@ -109,7 +109,6 @@ def _line_of(text: str, index: int) -> int:
     """第几行（1 起）：证据行要能指回去。"""
     return text.count("\n", 0, index) + 1
 
-
 def _gather(text: str, markers, source: str = "") -> List[Dict[str, Any]]:
     """在某一份材料（页面原文，或页面引用的某一份脚本）上找痕迹。
 

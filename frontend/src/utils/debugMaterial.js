@@ -229,6 +229,7 @@ export const UNFAITHFUL_TEXT = {
   rule_empty: "这一行还没有规则",
   material_is_script: "这一步的材料是页面脚本的输出",
   result_absent: "这一步的材料里没有脚本产出",
+  page_vars_absent: "这一步没采到页面变量，快验跑不了这段脚本——重调整步让引擎采一次",
 };
 
 //: 快验答不忠实的组合（材料种类 × 规则形态）。**判据在后端**：`core.material.MATERIALS`

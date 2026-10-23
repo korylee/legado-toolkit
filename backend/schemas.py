@@ -485,7 +485,7 @@ class RuleTryRequest(BaseModel):
 
     job_id: str = ""
     step: str = "bookUrl"
-    #: 哪一行（`FILL_SPECS` 的蛇形键）。字段族决定「能不能快验」——列表规则与页面脚本
-    #: 走不了单值口径，判据在 `core.material.NO_FAST_VERIFY_KINDS`，不填按可验处理。
+    #: 哪一行（`FILL_SPECS` 的蛇形键）。字段族由 `core.autofill.field_kind` 判（判据一份）：
+    #: 页面脚本那一路要拿 `page_vars` 合成 `params` 才能验（`core.rule_try.refusal_code`）。
     field: str = ""
     rule: str = ""

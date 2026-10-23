@@ -72,13 +72,37 @@ FILL_SPECS = {
 }
 
 
-def _field_kind(step: str, field: str) -> str:
+def field_kind(step: str, field: str) -> str:
     """某步某字段的候选取样类型——**只有 FILL_SPECS 一份**。
 
     ``kind`` 决定候选族与 AI 提议的取样范围；原先另有一张 ``FIELD_KINDS`` 表，
     两张表各改一边的后果不是报错，是「这个字段的候选永远猜不出来」。
     """
     return str(((FILL_SPECS.get(step) or {}).get(field) or {}).get("kind") or "text")
+
+
+def segment_fields(step: str) -> List[str]:
+    """这一步的**全部可补字段**（顺序即 `FILL_SPECS` 的定义序，也就是预览表行序）。
+
+    段级补全 = 一次 `run_loop(fields=segment_fields(step))`：同一段共享一份 DOM 大纲
+    与页面变量，一次调用问全段比逐字段问省 N 次往返（判据在 `suggest_many` 的
+    「按 kind 分组」——这里只回答「这一段有哪些字段」）。
+    """
+    return list((FILL_SPECS.get(step) or {}).keys())
+
+
+#: **源级字段**（不属于任何段，整个源共用）。与 `FILL_SPECS` 分开是因为落点不同：
+#: `FILL_SPECS` 的键是 `ruleBookInfo.name` 这类段内路径，而 `header` 挂在源根上
+#: （`BookSource.header`，上游 `BaseSource.getHeaderMap` 读它）。
+SOURCE_LEVEL_SPECS = {
+    #: 请求头规则：JSON 文本，或 `@js:` / `<js>` 求值出 JSON 字符串。
+    #: **什么时候该提它**：这一步的材料是拦截页（`core.quality.interstitial_marker`），
+    #: 或**别的段**被拦（`step_health`）——那是「请求被拒」的唯一可靠事实。
+    #: **不是**「页面声明了 no-referrer」也不是「图片打不开」：前者是页面给浏览器的期望，
+    #: 而 App 用 OkHttp/Cronet 发请求、根本不看 HTML 里的 referrerpolicy；
+    #: 后者是探活反推（TODO `image-probe-is-not-a-verdict`）。
+    "header": {"kind": "text"},
+}
 
 
 def _no_rule_reason(preselect_reason: str, has_basis: bool) -> str:

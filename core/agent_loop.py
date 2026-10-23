@@ -33,7 +33,7 @@ from core.autofill import (
     autofill_detail,
     _candidates_for_ai,
     _engine_values,
-    _field_kind,
+    field_kind,
 )
 
 #: 送模型的候选数据源条数上限（按「像数据」排序后的前 N）。实测一页 8-9 条，
@@ -76,8 +76,6 @@ async def run_loop(html: str, structured: Dict[str, Any], source: Dict[str, Any]
     ``model_limit_reached`` 只在真花满 ``MODEL_CALLS_PER_TURN`` 时为真。
     字段表按 ``core.autofill.FILL_SPECS[step]`` 展开（表扩即扩）。
     """
-    from core.rule_try import rule_try as run_rule_try
-
     def _emit(event_kind: str, /, **payload: Any) -> None:
         # 事件名位置专用 + 形参不叫 kind / fields：事件数据里就有这两个键
         # （提议族的取样类型、这一族要问的字段），可被关键字命中的形参会撞名，
@@ -108,34 +106,25 @@ async def run_loop(html: str, structured: Dict[str, Any], source: Dict[str, Any]
         跑在唯一的事件循环里：直接调会把 `/api/jobs/*` 与所有界面请求一起冻住，
         而「没有在跑的任务」正是别的请求要读的事实。放到线程池里。
 
-        **两道闸都在调引擎之前**（都不花 rule_tries 预算）：
-          1. 字段族根本不适合快验（页面脚本跑在页面环境、列表规则取一组链接）；
-          2. 材料种类 × 规则形态对不上。
+        **闸都在 `core.rule_try` 里**（`refusal_code` 不跑引擎、`fast_verify` 才跑）：
+        HTTP 端点与这里共用同一份，别在调用点再抄一遍。
         原先只有第 2 道，且只在 HTTP 端点里——内部这条链照常把页面脚本送进引擎，
         验不过之后再丢候选，结论写成「模型提议的都没选中」，**把「不该验」说成了「验不过」**
         （2026-10-23 实测：`result = params.chapter_images.join('\\n')` 是对的，
         因为它是页面脚本被判了「没选中」）。
         """
-        from core.autofill import _field_kind
-        from core.material import NO_FAST_VERIFY_KINDS
-        from core.rule_try import unfaithful_reason
+        from core.rule_try import fast_verify, refusal_code, refusal_result
 
-        if field and _field_kind(step, field) in NO_FAST_VERIFY_KINDS:
-            # 不是失败，是**验不了**：规则照落，标 pending_engine 交重调本步
-            return {"ok": False, "unfaithful": True, "reason_code": "field_not_verifiable",
-                    "count": 0, "values": [], "error": ""}
+        why = refusal_code(step, field, material_kind, rule, runtime)
+        if why:
+            # 不是失败，是**验不了**：规则照落、标 pending_engine，验收交重调本步
+            return refusal_result(why)
         if budget["rule_tries"] >= agent_actions.RULE_TRY_PER_TURN:
             budget["try_limit_reached"] = True
             return None
-        # 快验答不了这条（材料种类 × 规则形态不匹配）：**不跑引擎**——跑了只会给出方向
-        # 相反的结论（材料是脚本输出却用选择器解、材料是 DOM 却把它当 result 用）。
-        # 回一个「不忠实」标记：候选照落，但不给通过权（D1），仍待重调本步验收。
-        why = unfaithful_reason(material_kind, rule)
-        if why:
-            return {"ok": False, "unfaithful": True, "reason_code": why,
-                    "count": 0, "values": [], "error": ""}
         budget["rule_tries"] += 1
-        return await asyncio.to_thread(run_rule_try, source, step, html, base_url, rule)
+        return await asyncio.to_thread(fast_verify, source, step, field, html, base_url,
+                                       rule, material_kind, runtime)
 
     def _usable(checked: Optional[Dict[str, Any]]) -> bool:
         """这条候选能不能收下。
@@ -172,10 +161,12 @@ async def run_loop(html: str, structured: Dict[str, Any], source: Dict[str, Any]
     groups: Dict[str, List[Dict[str, Any]]] = {}
     # 材料本身就不够（`core.material.blocked_next` 的码）：这时候让模型猜，只会花掉一次调用
     # 换来一串取不到的选择器。**先给一步能做的事**，提议留给下一次（材料够了之后）。
+    # 目的按**取内容**算：补全要写的是这一行规则，不是去读结构——`webjs_output` 在
+    # 「取内容」下够用（内容已经在脚本产出里），只有「看结构」才要先清脚本。
     # 判据在常量表里，这里只取码（AGENTS #24④：文案不进后端）。
-    from core.material import blocked_next
+    from core.material import INTENT_CONTENT, blocked_next
 
-    next_step = blocked_next(material_kind)
+    next_step = blocked_next(material_kind, INTENT_CONTENT)
     for row in rows:
         if row.get("rule"):
             continue  # 免费段拍板的行：跳过提议，下面自查
@@ -187,7 +178,7 @@ async def run_loop(html: str, structured: Dict[str, Any], source: Dict[str, Any]
             continue
         if budget["model_stop"]:
             continue  # 整段 AI 已停：原因在 budget.model_stop
-        kind = _field_kind(step, row["field"])
+        kind = field_kind(step, row["field"])
         groups.setdefault(kind, []).append(row)
     for kind, group in groups.items():
         if budget["model_stop"]:
@@ -195,12 +186,6 @@ async def run_loop(html: str, structured: Dict[str, Any], source: Dict[str, Any]
         if budget["model_calls"] >= agent_actions.MODEL_CALLS_PER_TURN:
             budget["model_limit_reached"] = True
             continue
-        # 这一族**本来就不适合快验**（页面脚本 / 列表规则，判据 `NO_FAST_VERIFY_KINDS`）：
-        # `_try` 会给每条候选回「不忠实」，所以下面「都没选中」不等于「都不对」——
-        # 收第一条、标 pending_engine，验收交重调本步。在这里判一次，别每行重算。
-        from core.material import NO_FAST_VERIFY_KINDS
-
-        not_verifiable = kind in NO_FAST_VERIFY_KINDS
         group_fields = [r["field"] for r in group]
         # 取样类型不能叫 kind：那是事件账本的保留键（事件名），撞了会把事件名换掉
         _emit("ai_family", sample_kind=kind, fields=group_fields)
@@ -256,20 +241,10 @@ async def run_loop(html: str, structured: Dict[str, Any], source: Dict[str, Any]
                           pending_engine=bool(row.get("pending_engine")),
                           reason_code=str((row.get("try_result") or {}).get("reason_code") or ""))
                     continue
-            # 都取不到。先分清两件事（AGENTS #4：归因不能说反）：
-            #   not_verifiable  这一族**本来就验不了**（页面脚本 / 列表规则 / 材料不匹配）
-            #                   → 模型给的第一条就是我们要的，落盘、交重调本步验收；
-            #   no_candidates   真验了但都没选中 → 不出规则文本（宁空着）。
-            if cands and not_verifiable:
-                first = str(cands[0].get("rule") or "")
-                if first:
-                    _accept(row, first, str(cands[0].get("why") or ""),
-                            {"ok": False, "unfaithful": True,
-                             "reason_code": "field_not_verifiable",
-                             "count": 0, "values": [], "error": ""})
-                    _emit("ai_accepted", field=field, rule=first, count=0,
-                          pending_engine=True, reason_code="field_not_verifiable")
-                    continue
+            # 都取不到：**不出规则文本**（宁空着），只留原因——落在输入框旁边的
+            # 已知不可用规则正是「不如不填」的那个噪音。页面脚本那一路现在**真验**
+            # （`fast_verify` 把 `page_vars` 合成 `params` 注入规则环境），所以「验不了」
+            # 不再走这里：它由 `refusal_code` 给出码，候选照落、标 `pending_engine`。
             # 原因是**码**不是句子：消费侧要按它决定「让你改材料 / 改规则 / 就是模型没答上」
             # （同一套规矩见 `core.material` 的下一步码；文案在消费侧取，AGENTS #24④）。
             row.pop("ai", None)
@@ -287,6 +262,15 @@ async def run_loop(html: str, structured: Dict[str, Any], source: Dict[str, Any]
             row["try_result"] = await _try(str(row["rule"]), str(row["field"]))
 
     out["budget"] = budget
+    # 段结论：整段一起补时，调用方要知道「这一段还差什么」——逐行状态散在
+    # `fields[]` 里，而界面/任务讲的是段。三种去向互斥，顺序即优先级。
+    out["segment"] = {
+        "field_count": len(rows),
+        "ready": [r["field"] for r in rows if r.get("rule")],
+        "need_engine": [r["field"] for r in rows if r.get("pending_engine")],
+        "need_material": [r["field"] for r in rows if r.get("needs_material")],
+        "failed": [r["field"] for r in rows if r.get("ai_failed")],
+    }
     return out
 
 
@@ -316,7 +300,7 @@ async def _propose_group(html: str, structured: Dict[str, Any], step: str,
 
     ``FIELD_LABELS`` 在这里是**给人看的标签**（提示词里的「要的是哪个字段」），
     权威词表在前端 RULE_FIELD_DEFS / Kotlin BOOKINFO_FIELD_LABELS；取样类型
-    取自 FILL_SPECS（:func:`core.autofill._field_kind`），不另存一份。
+    取自 FILL_SPECS（:func:`core.autofill.field_kind`），不另存一份。
 
     ``on_llm`` 收这一次调用的**输入输出原文**（提示词 / 模型原样输出 / 解析结论 /
     usage）——调用方负责落账本；抛异常不拦这次运行。
@@ -336,7 +320,7 @@ async def _propose_group(html: str, structured: Dict[str, Any], step: str,
              "want_label": FIELD_LABELS.get(r["field"], r["field"]),
              # 取样类型也要进提示词：`script` 那一族要写成页面脚本（判据在 FILL_SPECS），
              # 只说字段名的话模型会给出取值规则
-             "kind": _field_kind(step, r["field"]),
+             "kind": field_kind(step, r["field"]),
              "app_values": _engine_values(structured, r["field"], step=step)}
             for r in group
         ],
@@ -357,6 +341,11 @@ async def _propose_group(html: str, structured: Dict[str, Any], step: str,
             total_dropped = dropped + int(((runtime or {}).get("globals_dropped") or 0))
             if total_dropped > 0:
                 proposal_ctx["runtime_dropped"] = total_dropped
+    # 页面变量各键装的是什么（类型 / 条数 / 首项样例）：光有键名时所有键看起来一样，
+    # 模型只能盲选；而选错了事后也验不出来（都能「跑出内容」）。判据在 `runtime_map`。
+    page_vars = (runtime or {}).get("page_vars")
+    if isinstance(page_vars, dict) and page_vars:
+        proposal_ctx["page_vars"] = page_vars
     webjs = str(((source or {}).get("ruleContent") or {}).get("webJs") or "").strip()
     if webjs:
         proposal_ctx["known_webjs"] = webjs

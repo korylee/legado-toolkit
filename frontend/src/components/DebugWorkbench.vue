@@ -1022,12 +1022,13 @@ function scheduleQuickVerify(field) {
   }, QUICK_VERIFY_IDLE_MS);
 }
 
-//: 这一行能不能行内「验证」：**判据全在后端**（`core.material.can_fast_verify` 管材料 ×
-//: 规则形态、`NO_FAST_VERIFY_KINDS` 管字段族）。前端只镜像前一张小表，用来灰掉按钮；
-//: 字段族那半边由请求里的 `field` 交给后端判。
+//: 这一行能不能行内「验证」，两半：**这一行有没有快验口径**（`def.verify`，如分页取一组
+//: 链接）+ **材料与规则形态对得上**（`canFastVerify` 镜像后端 `core.material`）。
+//: 字段族那半边（页面脚本要不要 `page_vars`）由请求里的 `field` 交给后端判。
 function verifyAllowed(field) {
   const def = stepFields.value.find((d) => d.field === field);
-  return !!def && canFastVerify((currentPage.value || {}).material_kind, flatRuleOf(field));
+  if (!def || def.verify === "none") return false;
+  return canFastVerify((currentPage.value || {}).material_kind, flatRuleOf(field));
 }
 
 //: 快验（rule_try）：验的是**这行草稿规则**，结论贴在它自己的行上。
