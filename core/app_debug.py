@@ -8,7 +8,7 @@
 App 自己的引擎执行。而 App 内建了一个**给 PC 用的调试 WebSocket**：Rhino JS、cookie、
 webView、正文分页全都在。我们只当客户端——**App 一行源码都不用改**。
 
-协议（已实测，探测工具见 tools/probe_app_debug.py）
+协议（已实测）
 ---------------------------------------------------
 - 连接 ``ws://<手机IP>:1123/bookSourceDebug``（**WS 端口 = App 的 HTTP 端口 + 1**）
 - 请求 ``{"tag": <书源导入原文>, "key": <调试目标>}``
@@ -29,9 +29,6 @@ webView、正文分页全都在。我们只当客户端——**App 一行源码�
    ``core/jvm_debug`` 那条链的结果，供前端抽屉直接消费。
 2. **App 的 HTTP 接口**（见下方「HTTP 接口」一节）：问 App 有没有某个源、
    把源推过去。用来把「调试 WS 对未知 tag 静默无响应」这个坑变成可判定的状态。
-
-**纯标准库实现**（不装 websockets）：项目不为这一个用途加依赖，
-WS 客户端代码在 tools/probe_app_debug.py 里已实测跑通，原样搬过来。
 """
 
 from __future__ import annotations
@@ -338,8 +335,6 @@ def preflight(host: str, source: Any, ws_port: Optional[int] = None,
 
 
 # ------------------------------------------------------------------ WS 客户端
-# 以下四个函数是从 tools/probe_app_debug.py 的实测版本**原样搬过来**的
-# （那个 CLI 现在反过来调本模块）。**不要顺手「优化」握手/分帧细节**——
 # 它们对上的是 App 里那个 WebSocket 服务端，改错了本地验证不出来。
 
 

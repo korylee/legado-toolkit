@@ -49,7 +49,7 @@ _inspect*.py
 data/config/
 # 实测产物目录（设备探针 + JVM 调试/批量校验 + 常驻日志）。**仍在写**：
 # core/jvm_debug.py、core/jvm_daemon.py、backend/api/jvm.py、
-# scripts/jvm_debug_run.py、scripts/jvm_debug_direct.py、tools/probe_app_debug.py。
+# scripts/jvm_debug_run.py、scripts/jvm_debug_direct.py
 data/app_probe
 
 # 启动器的参数文件：批量校验/调试自己那份现在写在 **data/app_probe/** 下（data/ 已被忽略），

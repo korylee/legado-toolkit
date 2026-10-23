@@ -122,7 +122,7 @@ def _write_args(src_file: str, key: str, out_file: str, timeout: int, cookie: st
 
     **必须 `newline="\\n"`**：这是 git 跟踪的文件，而 `write_text` 在 Windows 上把 `\\n`
     翻成 `\\r\\n`——跑一次就把工作区弄脏（内容与 HEAD 逐字节相同，只差行尾，
-    `git diff` 连内容都不显示）。同 `agent-write-safety` §三。
+    `git diff` 连内容都不显示）。
     """
     pairs: List[Tuple[str, str]] = [
         ("file", pathlib.Path(src_file).as_posix()),

@@ -236,7 +236,7 @@ def _write_args(keyword: str, timeout: int, concurrency: int,
     ]
     # newline="\n" 是必须的：这是 **git 跟踪的文件**，而 write_text 在 Windows 上
     # 把 \n 翻成 \r\n——跑一次批工作区就脏一次（内容与 HEAD 逐字节相同，只差行尾，
-    # git diff 连内容都不显示，只在 git add 时冒一句 warning）。同 agent-write-safety §三。
+    # git diff 连内容都不显示，只在 git add 时冒一句 warning）。
     target = args_path or _args_file()
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(

@@ -59,7 +59,7 @@ class WriteArgsTests(_ArgsCase):
         for k in ("file=", "key=", "out=", "timeout="):
             self.assertIn(k, t)
         self.assertNotIn("cookie=", t, "没给 cookie 就不该写这一行")
-        self.assertNotIn("\r\n", t, "行尾必须是 LF——这是 git 跟踪的文件（同 agent-write-safety §三）")
+        self.assertNotIn("\r\n", t, "行尾必须是 LF——这是 git 跟踪的文件")
 
     def test_cookie_line_when_given(self) -> None:
         jvm_debug._write_args("D:/x/src.json", "我", "D:/x/out.ndjson", 60, cookie="a=1; b=2")

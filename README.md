@@ -37,7 +37,7 @@ services/    应用编排层：串起多个 core 模块完成一件业务动作�
 frontend/    Vue 3 管理台（构建产物 dist 由后端托管）
 appservice/  App 侧：Robolectric 里跑「阅读」的真源码，校验与调试共用
 scripts/     手工脚本（jvm_debug_run / jvm_login…）
-tests/       Python 测试；tools/ 开发与 agent 工具（**不是运行时依赖**）
+tests/       Python 测试；
 skills/      Agent / 开发技能文档；deploy/fnos/ 飞牛 NAS 部署示例
 data/        运行时数据（已 gitignore）
 ```

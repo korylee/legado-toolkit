@@ -2,11 +2,6 @@
 
 本仓库是一个 Legado（阅读）书源管理工具链。给 agent 的核心约定如下。
 
-## 先读这些
-
-**技能索引与「什么时候用哪个」在 [`skills/README.md`](skills/README.md)**——动手改文件前先读
-`agent-write-safety`。
-
 ## 硬性约定
 
 1. **运行时数据都在 `data/`，不进版本库**（已 gitignore）。
@@ -40,12 +35,6 @@
    必须 bump 一版：库里新旧口径的结论行长存（每源留最近一条），没有版本轴就分不出
    哪行是哪个口径判的，界面上看着一切正常。`checks.search_probed` 是先例：那根轴
    记的是「这一轮实际跑没跑搜索」。
-6. **改代码前确保 `git status` 干净**，改完立刻跑
-   `python -c "import 模块"` 与 `python -m unittest discover -s tests -t .`。
-   **受限沙箱下的大面积 `EPERM` / `PermissionError` / 超时不是结论**：先按
-   `skills/agent-write-safety` §四 判归属——那是 harness 拦了子进程与工作区外路径，不是代码坏了。
-   对策是用**同一条命令**申请一次更宽权限重跑；只有重跑后仍失败才算代码问题。不许据此删测试、
-   改判据，或换个写法绕过。
 7. **系统标签枚举只在后端定义**（`core/tags.py`、`core/models.py`），
    前端经 `GET /api/sources/tags/meta` 获取，不得再硬编码一份。
    两边各存一份必然漂移——历史上书源类型就曾把 3 当成视频、还编出过
@@ -257,10 +246,3 @@
 | 书源表结构 | `data/dao/BookSourceDao.kt` |
 | Web 服务 HTTP 接口 | `web/KtorServer.kt`、`api/controller/BookSourceController.kt` |
 | 调试 WebSocket | `web/socket/BookSourceDebugWebSocket.kt` |
-
-## 改文件的正确姿势
-
-修改仓库文件必须先读取当前内容，使用 `edit` 或 `tools/apply_edits.py`。
-`old_string` 不匹配、重复匹配或文件版本变化时必须停止、重新读取并重新定位；不得改用
-PowerShell / shell 直接写回，也不得整文件重写。详细写入纪律见
-`skills/agent-write-safety/SKILL.md`。
