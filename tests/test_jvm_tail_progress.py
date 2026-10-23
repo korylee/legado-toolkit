@@ -19,33 +19,45 @@ from backend.jobs import jvm_exec
 
 
 class TailProgressCapTests(unittest.TestCase):
-    def _run_tail(self, lines: int, cap: int, base: int) -> list:
-        """起尾随线程跑几个轮询周期，收回它上报的进度值。"""
-        seen = []
+    def _run_tail(self, lines: int, cap: int, base: int,
+                  append: int = 0) -> tuple:
+        """起尾随线程跑几个轮询周期，收回 (进度值, 追加前的相位, 全部相位)。
+
+        ``lines`` 是**启动前就有**的行（重试复用 run 目录），``append`` 是启动后
+        追加的行。**追加前那一份相位必须为空**——这才是判据不是「文件存在」的证词。
+        """
+        seen, phases, before = [], [], []
         with tempfile.TemporaryDirectory() as td:
             out = Path(td) / "results.jsonl"
             out.write_text("\n" * lines, encoding="utf-8")
             stop = threading.Event()
             with mock.patch("backend.jobs.runner.update_progress",
-                            side_effect=lambda jid, n: seen.append(n)):
+                            side_effect=lambda jid, n: seen.append(n)), \
+                 mock.patch("backend.jobs.runner.update_phase",
+                            side_effect=lambda jid, phase: phases.append(phase)):
                 t = threading.Thread(target=jvm_exec._tail_progress,
                                      args=("job", out, stop, 0.01, cap, base),
                                      daemon=True)
                 t.start()
-                time.sleep(0.15)
+                time.sleep(0.05)
+                before = list(phases)
+                if append:
+                    with open(out, "a", encoding="utf-8") as fh:
+                        fh.write("\n" * append)
+                    time.sleep(0.1)
                 stop.set()
                 t.join(5)
-        return seen
+        return seen, before, phases
 
     def test_cap_limits_chunk_count_not_total(self):
-        seen = self._run_tail(lines=30, cap=25, base=25)
+        seen, _, _ = self._run_tail(lines=30, cap=25, base=25)
         self.assertTrue(seen, "尾随线程没有上报任何进度")
         # 本块 30 行被钳到 25：全局 = 25 + 25 = 50，而不是被压回 25
         self.assertEqual(max(seen), 50)
         self.assertEqual(seen[-1], 50)
 
     def test_within_cap_reports_global_count(self):
-        seen = self._run_tail(lines=10, cap=25, base=25)
+        seen, _, _ = self._run_tail(lines=10, cap=25, base=25)
         self.assertTrue(seen)
         self.assertEqual(max(seen), 35)
 
@@ -55,25 +67,8 @@ class TailProgressCapTests(unittest.TestCase):
         判据只能是**启动后新增的行**：重试复用 run 目录，启动前就有旧结果文件，
         拿「文件存在」当判据会在任务还没跑时就把相位推成「执行校验」。
         """
-        phases = []
-        with tempfile.TemporaryDirectory() as td:
-            out = Path(td) / "results.jsonl"
-            out.write_text("\n" * 3, encoding="utf-8")      # 重试遗留的旧行
-            stop = threading.Event()
-            with mock.patch("backend.jobs.runner.update_progress",
-                            side_effect=lambda *a: None), \
-                 mock.patch("backend.jobs.runner.update_phase",
-                            side_effect=lambda jid, phase: phases.append(phase)):
-                t = threading.Thread(target=jvm_exec._tail_progress,
-                                     args=("job", out, stop, 0.01), daemon=True)
-                t.start()
-                time.sleep(0.05)
-                self.assertEqual(phases, [], "启动前的旧行不许推进相位")
-                with open(out, "a", encoding="utf-8") as fh:
-                    fh.write("\n")
-                time.sleep(0.1)
-                stop.set()
-                t.join(5)
+        _, before, phases = self._run_tail(lines=3, cap=0, base=0, append=1)
+        self.assertEqual(before, [], "启动前的旧行不许推进相位")
         self.assertEqual(phases, ["running_validate"])
 
 
