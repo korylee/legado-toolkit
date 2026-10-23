@@ -11,7 +11,7 @@
 // 材料是**取证**不是验证：句子只说观测到了什么，不说「通过」。
 
 /** 层码 → 一句话。层码本身的取值域在 `core/agent_context.LAYERS`。 */
-export const LAYER_LABELS = {
+const LAYER_LABELS = {
   L1: "原文里就有目标",
   L2: "容器在、内容要渲染",
   L3: "要解密或读运行时对象",
@@ -59,7 +59,7 @@ export function preferredMaterial(tabs) {
 }
 
 /** 一条证据行 → 一句话（`why` + `note` + 出处）。出处要能指回去复核（AGENTS #4）。 */
-export function evidenceLine(item) {
+function evidenceLine(item) {
   if (!item || typeof item !== "object") return "";
   const where = [];
   if (item.source) where.push(String(item.source));
@@ -244,7 +244,7 @@ export const UNFAITHFUL_PAIRS = [
 ];
 
 /** 规则形态（与后端 `core.rule_try.rule_shape` 同构）：容器 / 选择器 / 读 result / 其他。 */
-export function ruleShape(rule) {
+function ruleShape(rule) {
   const text = String(rule || "").trim();
   if (!text) return "empty";
   if (text.startsWith("@js:")) return text.includes("result") ? "js_result" : "js_other";

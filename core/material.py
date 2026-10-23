@@ -95,6 +95,13 @@ def blocked_next(kind: str) -> str:
     return _material(kind).next_step
 
 
+#: 字段族里**不能行内快验**的那些（原因在字段本身，与材料无关）：
+#:   script  页面脚本跑在页面环境里，`rule_try` 在规则环境求值——验不出「这段脚本对不对」；
+#:   list    列表规则取的是**一组**链接，快验走单值口径，会说反。
+#: 与 AGENTS #21 的 `getElements` / `getValue` 之分是同一件事。
+NO_FAST_VERIFY_KINDS: FrozenSet[str] = frozenset({"script", "list"})
+
+
 def check_table() -> None:
     """启动期完整性校验：`core.jvm_debug` 的每种材料都必须在 `MATERIALS` 里。
 

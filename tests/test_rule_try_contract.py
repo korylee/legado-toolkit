@@ -105,10 +105,10 @@ class UnfaithfulReasonTests(unittest.TestCase):
                              "%r × %r 判据变了" % (material_kind, rule))
 
     def test_unknown_material_stays_permissive(self):
-        """认不出的材料种类（对端升级 / 空串）：不阻塞、选择器照验。
+        """认不出的种类（对端升级 / 空串）不阻塞：宁可多试一次。
 
-        宁可多试一次，也不要把「对端多了一种材料」变成「这一步什么都做不了」——
-        这条兜底的方向是判据的一部分，不是实现细节。
+        这条兜底的方向是判据的一部分，不是实现细节——反过来会让「对端多了一种材料」
+        变成「这一步什么都做不了」。
         """
         from core.jvm_debug import MATERIAL_FETCHED, MATERIAL_WEBJS_OUTPUT
         from core.material import blocked_next, can_fast_verify, can_fill_dom
@@ -120,6 +120,22 @@ class UnfaithfulReasonTests(unittest.TestCase):
         # 反方向：材料事实明确时不许再「宽松」——脚本输出拦选择器、另抓的静态页要渲染
         self.assertFalse(can_fast_verify(MATERIAL_WEBJS_OUTPUT, "selector"))
         self.assertEqual(blocked_next(MATERIAL_FETCHED), "render_first")
+
+    def test_field_kind_gates_fast_verify(self):
+        """字段族也能否掉快验（与材料无关）：页面脚本不走单值口径。
+
+        判据在 `NO_FAST_VERIFY_KINDS`，消费方是 `/rule-try` 端点；这里钉「按字段算出来的
+        族」对得上这张表——只钉表里那两个字面量的话，改坏 `FILL_SPECS` 的 `kind` 也不会红。
+        """
+        from core.autofill import _field_kind
+        from core.material import NO_FAST_VERIFY_KINDS
+
+        for step, field, kind in (("content", "webJs", "script"),
+                                  ("content", "content", "text"),
+                                  ("content", "nextContentUrl", "text"),
+                                  ("bookUrl", "name", "text")):
+            self.assertEqual(_field_kind(step, field), kind, (step, field))
+        self.assertIn(_field_kind("content", "webJs"), NO_FAST_VERIFY_KINDS)
 
 
 if __name__ == "__main__":

@@ -66,6 +66,7 @@ FILL_SPECS = {
     #: `content` 是取值规则——材料是脚本输出时，它读的 `result` 就是 webJs 的产出。
     "content": {
         "webJs": {"kind": "script"},
+        # 正文取的是**一段内容**，不是一组链接：`content` 走单值口径，可快验
         "content": {"kind": "text"},
     },
 }

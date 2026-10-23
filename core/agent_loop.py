@@ -101,21 +101,35 @@ async def run_loop(html: str, structured: Dict[str, Any], source: Dict[str, Any]
     budget = {"model_calls": 0, "rule_tries": 0, "model_limit_reached": False,
               "try_limit_reached": False, "model_stop": ""}
 
-    async def _try(rule: str) -> Optional[Dict[str, Any]]:
+    async def _try(rule: str, field: str = "") -> Optional[Dict[str, Any]]:
         """rule_try 一次（预算内），返回结果或 None（预算尽）。
 
         ``rule_try`` 是同步的（socket，最坏回落 ``subprocess.run`` 十分钟），而任务体
         跑在唯一的事件循环里：直接调会把 `/api/jobs/*` 与所有界面请求一起冻住，
         而「没有在跑的任务」正是别的请求要读的事实。放到线程池里。
+
+        **两道闸都在调引擎之前**（都不花 rule_tries 预算）：
+          1. 字段族根本不适合快验（页面脚本跑在页面环境、列表规则取一组链接）；
+          2. 材料种类 × 规则形态对不上。
+        原先只有第 2 道，且只在 HTTP 端点里——内部这条链照常把页面脚本送进引擎，
+        验不过之后再丢候选，结论写成「模型提议的都没选中」，**把「不该验」说成了「验不过」**
+        （2026-10-23 实测：`result = params.chapter_images.join('\\n')` 是对的，
+        因为它是页面脚本被判了「没选中」）。
         """
+        from core.autofill import _field_kind
+        from core.material import NO_FAST_VERIFY_KINDS
+        from core.rule_try import unfaithful_reason
+
+        if field and _field_kind(step, field) in NO_FAST_VERIFY_KINDS:
+            # 不是失败，是**验不了**：规则照落，标 pending_engine 交重调本步
+            return {"ok": False, "unfaithful": True, "reason_code": "field_not_verifiable",
+                    "count": 0, "values": [], "error": ""}
         if budget["rule_tries"] >= agent_actions.RULE_TRY_PER_TURN:
             budget["try_limit_reached"] = True
             return None
         # 快验答不了这条（材料种类 × 规则形态不匹配）：**不跑引擎**——跑了只会给出方向
         # 相反的结论（材料是脚本输出却用选择器解、材料是 DOM 却把它当 result 用）。
         # 回一个「不忠实」标记：候选照落，但不给通过权（D1），仍待重调本步验收。
-        from core.rule_try import unfaithful_reason
-
         why = unfaithful_reason(material_kind, rule)
         if why:
             return {"ok": False, "unfaithful": True, "reason_code": why,
@@ -181,6 +195,12 @@ async def run_loop(html: str, structured: Dict[str, Any], source: Dict[str, Any]
         if budget["model_calls"] >= agent_actions.MODEL_CALLS_PER_TURN:
             budget["model_limit_reached"] = True
             continue
+        # 这一族**本来就不适合快验**（页面脚本 / 列表规则，判据 `NO_FAST_VERIFY_KINDS`）：
+        # `_try` 会给每条候选回「不忠实」，所以下面「都没选中」不等于「都不对」——
+        # 收第一条、标 pending_engine，验收交重调本步。在这里判一次，别每行重算。
+        from core.material import NO_FAST_VERIFY_KINDS
+
+        not_verifiable = kind in NO_FAST_VERIFY_KINDS
         group_fields = [r["field"] for r in group]
         # 取样类型不能叫 kind：那是事件账本的保留键（事件名），撞了会把事件名换掉
         _emit("ai_family", sample_kind=kind, fields=group_fields)
@@ -204,7 +224,7 @@ async def run_loop(html: str, structured: Dict[str, Any], source: Dict[str, Any]
             for cand in cands:
                 rule = str(cand.get("rule") or "")
                 why = str(cand.get("why") or "")
-                checked = await _try(rule)
+                checked = await _try(rule, field)
                 _emit("ai_try", field=field, rule=rule, ok=bool(checked and checked.get("ok")),
                       count=int((checked or {}).get("count") or 0),
                       error=str((checked or {}).get("error") or "")[:200])
@@ -223,7 +243,7 @@ async def run_loop(html: str, structured: Dict[str, Any], source: Dict[str, Any]
             alt = next((c for c in _candidates_for_ai(html, kind)
                         if str(c.get("rule") or "") and str(c["rule"]) not in tried), None)
             if alt:
-                checked2 = await _try(str(alt["rule"]))
+                checked2 = await _try(str(alt["rule"]), field)
                 _emit("ai_try", field=field, rule=str(alt["rule"]),
                       ok=bool(checked2 and checked2.get("ok")),
                       count=int((checked2 or {}).get("count") or 0),
@@ -236,8 +256,20 @@ async def run_loop(html: str, structured: Dict[str, Any], source: Dict[str, Any]
                           pending_engine=bool(row.get("pending_engine")),
                           reason_code=str((row.get("try_result") or {}).get("reason_code") or ""))
                     continue
-            # 都取不到：**不出规则文本**（宁空着），只留原因——落在输入框旁边的
-            # 已知不可用规则正是「不如不填」的那个噪音。
+            # 都取不到。先分清两件事（AGENTS #4：归因不能说反）：
+            #   not_verifiable  这一族**本来就验不了**（页面脚本 / 列表规则 / 材料不匹配）
+            #                   → 模型给的第一条就是我们要的，落盘、交重调本步验收；
+            #   no_candidates   真验了但都没选中 → 不出规则文本（宁空着）。
+            if cands and not_verifiable:
+                first = str(cands[0].get("rule") or "")
+                if first:
+                    _accept(row, first, str(cands[0].get("why") or ""),
+                            {"ok": False, "unfaithful": True,
+                             "reason_code": "field_not_verifiable",
+                             "count": 0, "values": [], "error": ""})
+                    _emit("ai_accepted", field=field, rule=first, count=0,
+                          pending_engine=True, reason_code="field_not_verifiable")
+                    continue
             # 原因是**码**不是句子：消费侧要按它决定「让你改材料 / 改规则 / 就是模型没答上」
             # （同一套规矩见 `core.material` 的下一步码；文案在消费侧取，AGENTS #24④）。
             row.pop("ai", None)
@@ -252,7 +284,7 @@ async def run_loop(html: str, structured: Dict[str, Any], source: Dict[str, Any]
     # ---- 免费段有把握的行：程序分数 + 引擎真跑双重确认（成本低、价值高）----
     for row in rows:
         if row.get("rule") and "try_result" not in row:
-            row["try_result"] = await _try(str(row["rule"]))
+            row["try_result"] = await _try(str(row["rule"]), str(row["field"]))
 
     out["budget"] = budget
     return out

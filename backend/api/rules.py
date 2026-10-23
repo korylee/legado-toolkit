@@ -382,12 +382,16 @@ async def rule_try(body: RuleTryRequest, st=Depends(get_store)):
         debug_materials.debug_step_material(job, body.job_id, body.step))
     if not (body.rule or "").strip():
         raise HTTPException(400, "规则为空：先填一条再试")
-    # 快验只对它**答得忠实**的规则给判决：材料是脚本输出时选择器解的是 URL 列表、
-    # 材料是 DOM 时 `@js:` 读的 `result` 是整页 HTML——两种都会给出方向相反的结论
-    # （AGENTS #4）。拒绝回**原因码**、不回 ok/count，消费侧按码取词。
-    why = unfaithful_reason(kind, body.rule)
-    if why:
-        return {"ok": False, "unfaithful": True, "reason_code": why,
+    # 快验只对它**答得忠实**的规则给判决，判据两半：字段族（列表规则 / 页面脚本走不了
+    # 单值口径，`NO_FAST_VERIFY_KINDS`）+ 材料 × 规则形态（`can_fast_verify`）。
+    from core.autofill import _field_kind
+    from core.material import NO_FAST_VERIFY_KINDS, can_fast_verify
+    from core.rule_try import rule_shape
+
+    if (_field_kind(body.step, body.field or "") in NO_FAST_VERIFY_KINDS
+            or not can_fast_verify(kind, rule_shape(body.rule))):
+        return {"ok": False, "unfaithful": True,
+                "reason_code": unfaithful_reason(kind, body.rule) or "field_not_verifiable",
                 "count": 0, "values": [], "error": ""}
     return await asyncio.to_thread(
         run_rule_try, source, body.step, html, base_url, body.rule)
