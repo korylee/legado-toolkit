@@ -198,7 +198,6 @@ class ScopeTests(_Base):
             "prep": {"started": True},
             "run_dir": str(run_dir),
             "single": True,
-            "allow_gradle_fallback": False,
         }
         with mock.patch.object(jvm_exec, "_run_gradle") as gradle:
             result = asyncio.run(jvm_exec.run_jvm_job(
@@ -234,8 +233,8 @@ class ScopeTests(_Base):
         args_file.write_text("file=%s\nout=%s\n" % (source_file, out_path), encoding="utf-8")
         manifest = jvm_exec._build_jvm_manifest(
             run_dir=run_dir, source_file=source_file, args_file=args_file,
-            out_path=out_path, single=False, execution_plan="daemon",
-            allow_gradle_fallback=False, runtime={"app_repo": "X:/repo"},
+            out_path=out_path, single=False,
+            runtime={"app_repo": "X:/repo"},
             readiness={"ok": True},
             readiness_fingerprint="", readiness_checked_at="", source_count=2,
             urls=["https://a.com", "https://b.com"], params={"keyword": "我", "check_timeout": 25, "concurrency": 8, "depth": "search"}, chunks=[2])
@@ -277,7 +276,6 @@ class ScopeTests(_Base):
         self.assertEqual(result["job_id"], "manifest-job")
         self.assertEqual(manifest["schema"], 4)
         self.assertEqual(manifest["source_count"], 1)
-        self.assertEqual(manifest["execution_plan"], "daemon")
         # 单条不分块，但大小序列同样冻结在 manifest 里
         self.assertEqual(manifest["chunks"], [1])
         # 归一化的范围与生效参数也是「提交即冻结」的输入（AGENTS #5：库里归一化

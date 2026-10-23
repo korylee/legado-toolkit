@@ -75,8 +75,8 @@ def _trim_run_dir(run_dir: Optional[Path]) -> None:
 
 
 def _build_jvm_manifest(*, run_dir: Path, source_file: Path, args_file: Path,
-                        out_path: Path, single: bool, execution_plan: str,
-                        allow_gradle_fallback: bool, runtime: Dict[str, Any],
+                        out_path: Path, single: bool,
+                        runtime: Dict[str, Any],
                         readiness: Dict[str, Any],
                         readiness_fingerprint: str,
                         readiness_checked_at: str, source_count: int,
@@ -98,8 +98,6 @@ def _build_jvm_manifest(*, run_dir: Path, source_file: Path, args_file: Path,
         "out_path": str(out_path),
         "source_count": int(source_count),
         "single": bool(single),
-        "execution_plan": str(execution_plan),
-        "allow_gradle_fallback": bool(allow_gradle_fallback),
         "runtime": dict(runtime or {}),
         "readiness": dict(readiness or {}),
         "readiness_fingerprint": str(readiness_fingerprint or ""),
@@ -166,7 +164,7 @@ def _manifest_error(manifest: Any) -> str:
         return "JVM 任务缺少不可变 manifest"
     required = {
         "schema", "run_dir", "source_file", "args_file", "out_path",
-        "source_count", "single", "execution_plan", "allow_gradle_fallback",
+        "source_count", "single",
         "runtime", "readiness",
         "readiness_fingerprint", "readiness_checked_at", "urls", "params",
         "chunks",
@@ -196,8 +194,6 @@ def _manifest_error(manifest: Any) -> str:
                               - set(manifest["params"]))
     if missing_params:
         return "JVM 任务 manifest 缺少执行参数：%s" % ", ".join(missing_params)
-    if manifest.get("execution_plan") not in ("daemon", "gradle"):
-        return "JVM 任务 manifest 结构不受支持：execution_plan 无效"
     expected = str(manifest.get("sha256") or "")
     if not expected:
         return "JVM 任务 manifest 缺少 sha256"
@@ -327,9 +323,7 @@ def _tail_process_output(value: Any, limit: int = 4000) -> str:
 
 
 def _run_gradle(timeout_min: int = 90, args_path: Optional[Path] = None,
-                runtime: Optional[Dict[str, str]] = None,
-                stall_watch: Optional[Tuple[Path, float]] = None,
-                job_id: str = "") -> Dict[str, Any]:
+                runtime: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     """调启动器批量校验（阻塞直到 Gradle 退出）。保留退出码和输出尾部。
 
     以前这里只返回整数。Gradle 在测试 JVM 启动前失败时，调用方只能知道结果文件
@@ -354,31 +348,13 @@ def _run_gradle(timeout_min: int = 90, args_path: Optional[Path] = None,
         cwd=str(_AGSVC), env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         text=True, errors="replace",
     )
-    stop_watch = threading.Event()
-    watch_hit = {"stalled": False}
-    if stall_watch is not None:
-        watch_path, stall_sec = stall_watch
-
-        def _abort() -> None:
-            # cmd 只是壳：Gradle/JVM 是孙进程，/T 才杀得掉整棵树——
-            # 树一死管道 EOF，communicate 立刻返回
-            watch_hit["stalled"] = True
-            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                           capture_output=True)
-
-        threading.Thread(target=_watch_output_stall, daemon=True,
-                         args=(watch_path, stall_sec, stop_watch, _abort,
-                               _STALL_POLL_SEC)).start()
     timed_out = False
     try:
-        try:
-            stdout, stderr = proc.communicate(timeout=timeout_min * 60)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            stdout, stderr = proc.communicate()
-            timed_out = True
-    finally:
-        stop_watch.set()
+        stdout, stderr = proc.communicate(timeout=timeout_min * 60)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        stdout, stderr = proc.communicate()
+        timed_out = True
     _write_run_logs(args_path, stdout, stderr)
     if timed_out:
         return {
@@ -392,8 +368,6 @@ def _run_gradle(timeout_min: int = 90, args_path: Optional[Path] = None,
         "stdout": _tail_process_output(stdout),
         "stderr": _tail_process_output(stderr),
     }
-    if watch_hit["stalled"]:
-        result["stalled"] = True
     return result
 
 
@@ -643,7 +617,6 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
                              "execution_mode": "unknown"})
 
     single = bool(manifest.get("single"))
-    allow_gradle_fallback = bool(manifest.get("allow_gradle_fallback", True))
     runtime = dict(manifest.get("runtime") or {})
     readiness_snapshot = manifest.get("readiness")
     source_file_value = str(manifest.get("source_file") or "").strip()
@@ -740,29 +713,17 @@ async def run_jvm_job(job_id: str, st: Store, payload: Dict[str, Any]) -> Dict[s
                 except OSError:
                     pass
 
-                if not allow_gradle_fallback:
-                    return dict(prep, **{
-                        "ok": False,
-                        "exit": None,
-                        "reason": (daemon_failure + "；完整 Gradle 准备态未通过，"
-                                   "本次不回退 Gradle，避免再次触发冷启动/缺 SDK"),
-                        "execution_mode": "daemon",
-                        "execution_note": "单条执行态失败，未使用 Gradle fallback",
-                        "readiness": readiness_snapshot or {},
-                    })
-
         if execution_mode != "daemon":
             job_runner.update_phase(job_id, "starting_gradle")
             gradle = _normalize_gradle_result(
-                _run_gradle(args_path=args_path, runtime=runtime, job_id=job_id)
-                if args_path is not None else _run_gradle(runtime=runtime, job_id=job_id))
+                _run_gradle(args_path=args_path, runtime=runtime)
+                if args_path is not None else _run_gradle(runtime=runtime))
             code = gradle.get("exit")
             execution_note = (daemon_failure + "；已使用 Gradle 完成本次校验"
                               if daemon_failure else execution_note)
         else:
             code = daemon_response.get("code")
 
-        snapshot_reason = ""
         if not out_path.exists():
             return dict(prep, **{"ok": False, "exit": code,
                                 "reason": (_gradle_failure_reason(gradle)

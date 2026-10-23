@@ -330,7 +330,6 @@ async def jvm_run(body: Optional[JvmRunRequest] = None):
     st_conf = readiness(conf.get("app_repo", ""), conf.get("android_sdk_dir", ""))
     single = len(rows) == 1
     preparation_ready = bool(st_conf.get("ok"))
-    allow_gradle_fallback = preparation_ready
     if not preparation_ready:
         _cleanup_run_dir(run_dir)
         bad = next((c for c in (st_conf.get("checks") or []) if not c.get("ok")), {})
@@ -356,20 +355,17 @@ async def jvm_run(body: Optional[JvmRunRequest] = None):
         "started": True,
         "count": len(rows),
         "skipped_rule_incomplete": skipped_rule_incomplete,
-        "execution_plan": "daemon",
         **({"requested_urls": match_report["requested"],
            "matched_urls": match_report["matched"],
            "missing_urls": match_report["missing"]} if want_urls else {}),
     }
-    execution_plan = "daemon"
     # 分块大小（提交即冻结）：settings 的 jvm.chunk_size，越界值已被 coerce 收敛
     cs = chunk_size
     n = len(rows)
     chunk_sizes = [cs] * (n // cs) + ([n % cs] if n % cs else []) or [n]
     manifest = _build_jvm_manifest(
         run_dir=run_dir, source_file=src_file, args_file=args_path,
-        out_path=out_path, single=single, execution_plan=execution_plan,
-        allow_gradle_fallback=(allow_gradle_fallback if single else False),
+        out_path=out_path, single=single,
         runtime=dict(st_conf.get("runtime") or {}),
         readiness=st_conf,
         readiness_fingerprint=st_conf.get("fingerprint", ""),
@@ -388,7 +384,6 @@ async def jvm_run(body: Optional[JvmRunRequest] = None):
           "source_file": str(src_file), "args_file": str(args_path),
           "out_path": str(out_path), "runtime": dict(st_conf.get("runtime") or {}),
           "single": single,
-          "allow_gradle_fallback": allow_gradle_fallback,
           "readiness": st_conf,
           "readiness_fingerprint": st_conf.get("fingerprint", ""),
           "readiness_checked_at": st_conf.get("checked_at", "")},

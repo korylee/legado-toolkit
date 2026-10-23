@@ -48,8 +48,8 @@ class JvmRunProgressTests(unittest.TestCase):
                              encoding="utf-8")
         manifest = jvm_exec._build_jvm_manifest(
             run_dir=run_dir, source_file=source_file, args_file=args_file,
-            out_path=out_path, single=single, execution_plan="daemon",
-            allow_gradle_fallback=False, runtime={}, readiness={},
+            out_path=out_path, single=single,
+            runtime={}, readiness={},
             readiness_fingerprint="",
             readiness_checked_at="", source_count=(1 if single else 2),
             urls=(["https://a.com"] if single else
@@ -66,7 +66,6 @@ class JvmRunProgressTests(unittest.TestCase):
             "args_file": str(args_file),
             "out_path": str(out_path),
             "single": single,
-            "allow_gradle_fallback": True,
         }
 
     def _create_job(self, total: int) -> None:
@@ -148,19 +147,6 @@ class JvmRunProgressTests(unittest.TestCase):
             raise RuntimeError("daemon unavailable")
 
         result = self._run(payload, daemon=failing_daemon)
-        self.assertFalse(result["ok"])
-        self.assertEqual(self._job()["progress"], 0)
-
-    def test_daemon_failure_without_fallback_keeps_progress_at_zero(self) -> None:
-        """single + 不许回退：任务 done 但一条没跑成，进度必须是 0 不是 1/1。"""
-        payload = self._payload(single=True)
-        payload["allow_gradle_fallback"] = False
-        self._create_job(1)
-
-        def broken_daemon(args_file):
-            raise RuntimeError("端口不可用")
-
-        result = self._run(payload, daemon=broken_daemon)
         self.assertFalse(result["ok"])
         self.assertEqual(self._job()["progress"], 0)
 
