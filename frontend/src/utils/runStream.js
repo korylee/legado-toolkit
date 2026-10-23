@@ -27,7 +27,7 @@ const JOB_KEYS = [
   "lane_holder", "lane_waiting", "elapsed_ms", "phase_ms",
 ];
 
-export function jobFromFrame(frame) {
+function jobFromFrame(frame) {
   const out = {};
   if (!frame || typeof frame !== "object") return out;
   JOB_KEYS.forEach((key) => {

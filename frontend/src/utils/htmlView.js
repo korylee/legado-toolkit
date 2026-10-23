@@ -13,7 +13,7 @@
 //   - **`<` 后面不是字母就不是标签**（`1 < 2 > 0` 当文本），否则正文里的数学式会被切散。
 
 /** HTML 具名实体：只收页面上真会出现的那些（其余照原样留着，别猜）。 */
-export const NAMED_ENTITIES = {
+const NAMED_ENTITIES = {
   amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: "\u00a0",
   copy: "\u00a9", reg: "\u00ae", trade: "\u2122", deg: "\u00b0", plusmn: "\u00b1",
   times: "\u00d7", divide: "\u00f7", frac12: "\u00bd", sup2: "\u00b2", sup3: "\u00b3",

@@ -400,10 +400,6 @@ class Store:
         self.close()
 
     # ------------------------------------------------------------ meta
-    def get_meta(self, key: str, default: str = "") -> str:
-        row = self.conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
-        return row["value"] if row else default
-
     def set_meta(self, key: str, value: str) -> None:
         self.conn.execute(
             "INSERT INTO meta(key, value) VALUES (?, ?) "
@@ -1255,9 +1251,6 @@ class Store:
             d["search_probed"] = bool(d.get("search_probed"))
             out[d["url"]] = d
         return out
-
-    def count_checks(self) -> int:
-        return self.conn.execute("SELECT COUNT(*) AS c FROM checks").fetchone()["c"]
 
     # ---------------------------------------------------------------- jobs
     def fail_orphan_jobs(self) -> List[str]:

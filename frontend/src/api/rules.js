@@ -76,10 +76,6 @@ export const jvmDebug = ({
 export const appPreflight = (source, host, port) =>
   api.post("/rules/app-preflight", { source, host, port });
 
-// 把源推送到 App（幂等）。改动 App 数据，需用户显式触发。
-export const appPush = (source, host, port) =>
-  api.post("/rules/app-push", { source, host, port });
-
 // 规则域的结构事实（规则组 → 求值步骤）。判据的唯一一份在 core/verify.py，
 // 前端抄一份的话后端改了求值位置就静默判错新鲜度。
 export const rulesMeta = () => api.get("/rules/meta");

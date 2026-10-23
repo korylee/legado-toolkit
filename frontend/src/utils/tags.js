@@ -22,7 +22,7 @@ const healthNames = ref([]);
 // 就是安静地少报一批
 const healthNeedsAction = ref([]);
 
-export { sourceTypes, statusTags, qualityTags, userTagAliases, healthNames, healthNeedsAction };
+export { sourceTypes, statusTags, qualityTags, healthNames, healthNeedsAction };
 
 let metaPromise = null;
 
@@ -92,7 +92,7 @@ export function typeKeyOf(value) {
 
 const _has = (list, tag) => list.some((t) => t === String(tag || "").trim());
 
-export function isTypeTag(tag) {
+function isTypeTag(tag) {
   return sourceTypes.value.some((t) => t.tag === String(tag || "").trim());
 }
 
@@ -104,7 +104,7 @@ export function isQualityTag(tag) {
   return _has(qualityTags.value, tag);
 }
 
-export function isSystemTag(tag) {
+function isSystemTag(tag) {
   return isTypeTag(tag) || isStatusTag(tag) || isQualityTag(tag);
 }
 

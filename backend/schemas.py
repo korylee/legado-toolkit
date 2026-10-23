@@ -63,11 +63,6 @@ class SourcePage(BaseModel):
     items: List[SourceOut]
 
 
-class GroupPatch(BaseModel):
-    url: str
-    group: str
-
-
 class TagPatch(BaseModel):
     urls: List[str] = Field(default_factory=list)
     add: List[str] = Field(default_factory=list)
@@ -373,17 +368,6 @@ class JobCreate(BaseModel):
     payload: Dict[str, Any] = Field(default_factory=dict)
 
 
-class JobOut(BaseModel):
-    id: str
-    kind: str = ""
-    status: str = ""
-    progress: int = 0
-    total: int = 0
-    created_at: str = ""
-    updated_at: str = ""
-    result_json: str = ""
-
-
 class NameRule(BaseModel):
     id: str = Field(default="", max_length=80)
     name: str = Field(min_length=1, max_length=120)
@@ -501,4 +485,7 @@ class RuleTryRequest(BaseModel):
 
     job_id: str = ""
     step: str = "bookUrl"
+    #: 哪一行（`FILL_SPECS` 的蛇形键）。字段族决定「能不能快验」——列表规则与页面脚本
+    #: 走不了单值口径，判据在 `core.material.NO_FAST_VERIFY_KINDS`，不填按可验处理。
+    field: str = ""
     rule: str = ""

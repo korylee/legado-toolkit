@@ -8,10 +8,10 @@
 // 没有用 `utils/jobs.js` 的 `jobCategoryOf` 做判据：那里是**任务中心的页签**分类
 // （校验/调试/AI），这里是**渲染器**的选择——将来新增 kind 落进「其他」页签时，
 // 它该用哪个弹窗是另一件事，不该被页签分类绑死。
-export const AGENT_JOB_KIND = "agent_loop";
+const AGENT_JOB_KIND = "agent_loop";
 
 /** 这个任务该用 AI 补全弹窗吗？ */
-export function usesAgentDialog(kind) {
+function usesAgentDialog(kind) {
   return String(kind || "") === AGENT_JOB_KIND;
 }
 

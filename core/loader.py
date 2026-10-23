@@ -11,28 +11,7 @@ from __future__ import annotations
 import hashlib
 from typing import Any, Dict
 
-try:
-    import orjson
-except ImportError:  # pragma: no cover
-    import json as _json
-
-    class orjson:  # type: ignore
-        OPT_INDENT_2 = 1
-        OPT_NON_STR_KEYS = 2
-        OPT_SORT_KEYS = 4
-
-        @staticmethod
-        def loads(b):
-            return _json.loads(b)
-
-        @staticmethod
-        def dumps(o, option=0):
-            return _json.dumps(
-                o,
-                ensure_ascii=False,
-                indent=2 if option & orjson.OPT_INDENT_2 else None,
-                sort_keys=bool(option & orjson.OPT_SORT_KEYS),
-            ).encode("utf-8")
+import orjson
 
 
 def dump_json_file(path: str, data: Any, indent: int = 2) -> None:

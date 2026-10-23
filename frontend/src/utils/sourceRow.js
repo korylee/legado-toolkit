@@ -45,13 +45,13 @@ export function lockedStatus(row) {
   return splitTags(row.group_name || "").find((t) => isStatusTag(t)) || "";
 }
 
-export function userTagsOf(row) {
+function userTagsOf(row) {
   return splitTags(row.user_tags || "");
 }
 
 // group_name 是系统标签的逗号拼接串。类型和健康状态表格里已各自单独成列展示，
 // 这里只取不重复的规则质量标签（规则不完整），避免同一信息渲染两遍。
-export function qualityTagsOf(row) {
+function qualityTagsOf(row) {
   return splitTags(row.group_name || "").filter((t) => isQualityTag(t));
 }
 
@@ -98,7 +98,7 @@ export const isDisabled = (row) => row?.enabled === 0 || row?.enabled === false;
 //: 实测结果——depth≥3 里约一半是「验了但没过」（实测：depth 3 有 118 条目录不完整，
 //: depth 4 有 8 条正文不可用）。取**最深的那个有结论的**：正文优先、其次目录；
 //: 两者都没结论就不标——不能把「没验到」说成「没过」。
-export function depthVerdict(row) {
+function depthVerdict(row) {
   if (row.content_ok != null) return { label: "正文", ok: row.content_ok === 1 };
   if (row.toc_complete != null) return { label: "目录", ok: row.toc_complete === 1 };
   return null;
@@ -124,7 +124,7 @@ export function depthClass(row) {
 
 //: 本机引擎逐段结论的**状态名**（`checks.jvm_state` 的下发值）。
 //: 认不出的取值原样返回：宁可显示 "xxx" 也不要显示 undefined。
-export const JVM_STATE_LABELS = {
+const JVM_STATE_LABELS = {
   ok: "搜索通过", no_result: "跑了但没出结果", empty_js_shell: "JS 规则是空壳",
   login_wall: "页面要求登录（不是源坏了）",
   human_check: "页面要人工过验证（本机过不去）",

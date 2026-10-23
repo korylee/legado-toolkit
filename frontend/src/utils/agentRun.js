@@ -8,9 +8,6 @@
 // ESM 解析不补扩展名（Vite 两种都认）——省掉它，测试会死在 import 解析而不是断言。
 import { RULE_FIELD_DEFS, AUTOFILL_RULE_FIELDS, STEP_LABELS } from "./steps.js";
 
-//: 状态码（渲染与「再补哪些字段」都只认这几个值，不认文案）
-export const AGENT_STATES = ["proposed", "accepted", "failed", "pending"];
-
 /** 后端字段键（FILL_SPECS 蛇形键）→ 中文名：「书名」。
  *
  * 词表只有 `RULE_FIELD_DEFS` 一份：按它的 `key`（= FILL_SPECS 的蛇形键）认，取标签

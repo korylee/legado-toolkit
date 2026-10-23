@@ -109,14 +109,6 @@ def anti_bot_marker_of(text: str) -> str:
     return ""
 
 
-def login_marker_of(text: str) -> str:
-    """命中的登录特征词（没有则空串）。同上，给留痕用。"""
-    low = str(text or "").lower()
-    for m in LOGIN_MARKERS:
-        if m in low:
-            return m
-    return ""
-
 #: 内置优质度检测测试集：按书源类型选择使用的作品名
 #: 小说源/听书源使用 NOVEL_TEST_KEYWORDS，漫画源使用 MANGA_TEST_KEYWORDS
 NOVEL_TEST_KEYWORDS: List[str] = [
