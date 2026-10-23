@@ -281,4 +281,42 @@ StructuredResult.kt，core/app_debug.py
 指针：core/jvm_debug.py（_annotate_render），appservice/test/io/legado/app/service/DebugService.kt，
 tests/test_jvm_debug_contract.py
 
+### 条目：image-probe-is-not-a-verdict · 图片可看性不是判据（D2 的实测证据）
+状态：todo
+依赖：无
+优先级：P2
+背景：2026-10-23 实测口袋漫画正文页：`params.chapter_images` 有 131 条结构正确的签名 URL
+  （3 个 CDN host、无重复），而浏览器请求全部 403 `ERROR: ACCESS DENIED`（CDN 层拒）。
+  **穷举过六种请求头组合**（裸 / 只 UA / UA+Referer=站点 / Referer 空 / Referer=图片域 /
+  UA+Origin）全部 403；**现抓**（不走缓存）拿到的签名同样指向 `x-expires`=2026-09-26（过期
+  27 天）；**用户在浏览器里也打不开**——是站点自己下发过期签名，与源规则、与请求头都无关。
+  也就是说「探活失败」分辨不出「源坏了 / CDN 只放行 App / 站点自己坏」。把它当判据，
+  就会把好源判成坏源（AGENTS #4 归因说反）。
+约束：探活结论**不得**进 `verdict` / `health` / AI 提议的否决——三者都按「规则取到了什么」
+  判，不按「我们能不能打开」；要呈现只能作为**取证**（五格里的取证位），并写明「打不开
+  不等于源坏了」。不做批量探活（耗时 + 403 不稳定）；单条用户点开的按需探测可以有。
+  **图片可达性也不是 `header` 提议的触发条件**：那条只认「页面被反爬拦住」
+  （`core.quality.interstitial_marker` / `step_health`）。
+验收：结果体里找不到任何「因为图片 403 而判失败」的路径；若做了按需探测，失败文案
+  必须同时给出「已取到 N 条地址，其中这一条打不开」而不是「源失效」。
+指针：core/jvm_debug.py（材料与 verdict），core/quality.py（健康归因），
+AGENTS.md #4（归因不能说反）
+
+### 条目：source-header-has-no-landing · `header` 是源级字段，工作台里没有它的落点
+状态：todo
+依赖：无
+优先级：P2
+背景：`header`（上游 `BookSource.header` / `BaseSource.getHeaderMap`）是源级请求头，反爬
+  常只拦某一段——它是「这个站要带特定头才放行」的唯一可靠事实。但工作台的字段词表
+  `RULE_FIELD_DEFS` 与后端的 `FILL_SPECS` 里都没有它：提示词里教模型写 `header`，模型
+  也没有可落的行，写完读不回来。
+约束：三件一起做才作数——前端加字段行、写入落到 `BookSource.header`、结果里能读回；
+  已有过一版只加提示词段落（`_sec_header`），因为无落点已撤掉。触发它的事实要用
+  `core.quality.interstitial_marker`（一份判据），**不是**图片探活（见
+  `image-probe-is-not-a-verdict`）。「哪一步被拦」这个事实已经在 `core.app_debug` 的
+  `page_layer` 上判过，别再判第二遍。
+验收：工作台能看到 `header` 行、AI 能提议、写入与读回都通；拦截页那一格给的是动作。
+指针：frontend/src/utils/steps.js（RULE_FIELD_DEFS），core/autofill.py（FILL_SPECS），
+core/app_debug.py（page_layer）
+
 ---

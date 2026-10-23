@@ -610,6 +610,20 @@ object BrowserBridge {
                   try { if (typeof v[ks[j2]] === 'function') fn++; } catch (e3) {}
                 }
                 rec.fn = fn;
+                // **函数签名**：`[{name, arity}]`，最多 8 条。
+                // 为什么：解密站的解密函数通常挂在页面全局（`CMS.chapter.decrypt`），
+                // 结果不挂在变量上——这时 AI 必须**调用**它，而调用要知道参数个数。
+                // 只采名字与形参个数（`fn.length`），不采函数体、不执行它。
+                var fnames = [];
+                for (var j3 = 0; j3 < ks.length && fnames.length < 8; j3++) {
+                  try {
+                    if (typeof v[ks[j3]] === 'function') {
+                      fnames.push({name: String(ks[j3]).slice(0, 40),
+                                   arity: v[ks[j3]].length || 0});
+                    }
+                  } catch (e8) {}
+                }
+                if (fnames.length) rec.functions = fnames;
               } catch (e2) { rec.keys = []; rec.fn = 0; }
             }
             cands.push(rec);
@@ -623,6 +637,40 @@ object BrowserBridge {
           out.params_type = pt;
           if (pt === '[object Object]' || pt === '[object Array]') {
             try { out.keys = Object.keys(params).slice(0, KEY_MAX); } catch (e) { out.keys = []; }
+            // **键值形状**（`page_vars`）：每个键给「类型 / 长度 / 首项前 80 字符」。
+            // 为什么要有：只给键名时 AI 只能盲选——实测同一页 `chapter_images` 是 131 条
+            // 真地址、`chapter_local_images` 是空数组、`images_base64` 是 `false`，
+            // 三个键都在，选错也「能跑出内容」，事后验证分不出来（2026-10-23）。
+            // 只采**首项**：整份体积实测约 +1.3KB（全量会到几十 KB）。
+            // 不采值意味着**这不是真值快照**，消费方用到它时必须标「样例」。
+            try {
+              var pv = {};
+              var pks = Object.keys(params).slice(0, KEY_MAX);
+              for (var q = 0; q < pks.length; q++) {
+                var pk = pks[q], pval;
+                try { pval = params[pk]; } catch (e4) { continue; }
+                var pvt = Object.prototype.toString.call(pval);
+                var prec = {type: pvt};
+                if (pvt === '[object Array]') {
+                  prec.n = pval.length;
+                  if (pval.length) {
+                    var pf = String(pval[0] == null ? '' : pval[0]);
+                    prec.first = pf.slice(0, 80);
+                    prec.first_len = pf.length;
+                  }
+                } else if (pvt === '[object String]') {
+                  var ps = String(pval);
+                  prec.n = ps.length;
+                  prec.first = ps.slice(0, 80);
+                } else if (pvt === '[object Number]' || pvt === '[object Boolean]') {
+                  prec.first = String(pval);
+                } else if (pvt === '[object Object]') {
+                  try { prec.n = Object.keys(pval).length; } catch (e5) {}
+                }
+                pv[pk] = prec;
+              }
+              out.page_vars = pv;
+            } catch (e6) {}
             var imgs;
             try { imgs = params.chapter_images; } catch (e) { imgs = undefined; }
             if (imgs !== undefined && imgs !== null) {
@@ -674,12 +722,37 @@ object BrowserBridge {
                         ks.optString(j).takeIf { it.isNotEmpty() }
                     }
                 }
+                // 函数签名（名字 + 形参个数）：解密站的解法是**调用**页面上的解密函数，
+                // 而调用要知道参数个数；只采签名，不采函数体、不执行。
+                rec.optJSONArray("functions")?.let { arr2 ->
+                    item["functions"] = (0 until arr2.length()).mapNotNull { j ->
+                        val f = arr2.optJSONObject(j) ?: return@mapNotNull null
+                        val fname = f.optString("name")
+                        if (fname.isEmpty()) return@mapNotNull null
+                        linkedMapOf<String, Any?>("name" to fname,
+                                                  "arity" to f.optInt("arity"))
+                    }
+                }
                 item
             }
             if (items.isNotEmpty()) out["globals"] = items
         }
         if (o.has("globals_total")) out["globals_total"] = o.optInt("globals_total")
         if (o.has("globals_dropped")) out["globals_dropped"] = o.optInt("globals_dropped")
+        // 页面变量的**键值形状**：类型 / 长度 / 首项前 80 字符（不采全量值）。
+        // 消费方两处：提示词（让模型选对键）、快验（注入成 params 验语法）。
+        o.optJSONObject("page_vars")?.let { pv ->
+            val vars = LinkedHashMap<String, Any?>()
+            for (k in pv.keys()) {
+                val rec = pv.optJSONObject(k) ?: continue
+                val one = linkedMapOf<String, Any?>("type" to rec.optString("type"))
+                if (rec.has("n")) one["n"] = rec.optInt("n")
+                if (rec.has("first")) one["first"] = rec.optString("first").take(80)
+                if (rec.has("first_len")) one["first_len"] = rec.optInt("first_len")
+                vars[k] = one
+            }
+            if (vars.isNotEmpty()) out["page_vars"] = vars
+        }
         o.optJSONObject("chapter_images")?.let { ci ->
             out["chapter_images"] = linkedMapOf(
                 "type" to ci.optString("type"),

@@ -922,6 +922,25 @@ def runtime_map(raw: Any) -> Dict[str, Any]:
             if isinstance(ks, list):
                 item["keys"] = [str(k)[:60] for k in ks[:RUNTIME_KEYS_MAX]
                                 if str(k).strip() and not SECRET_KEY_RE.search(str(k))]
+            # 函数签名（名字 + 形参个数）：解密站的解法是**调用**页面上的解密函数，
+            # 而调用要知道参数个数。只采签名——不采函数体、不执行（`SECRET_KEY_RE`
+            # 同一条判据：像密钥/口令的函数名不进提示词）。
+            fns = rec.get("functions")
+            if isinstance(fns, list):
+                kept_fns = []
+                for f in fns[:RUNTIME_KEYS_MAX]:
+                    if not isinstance(f, dict):
+                        continue
+                    fname = str(f.get("name") or "").strip()
+                    if not fname or SECRET_KEY_RE.search(fname):
+                        continue
+                    arity = f.get("arity")
+                    kept_fns.append({"name": fname[:40],
+                                     "arity": (max(0, arity)
+                                               if isinstance(arity, int)
+                                               and not isinstance(arity, bool) else 0)})
+                if kept_fns:
+                    item["functions"] = kept_fns
             items.append(item)
         if items:
             out["globals"] = items
@@ -937,6 +956,28 @@ def runtime_map(raw: Any) -> Dict[str, Any]:
                 kept_ci[key] = ci[key]
         if kept_ci:
             out["chapter_images"] = kept_ci
+    # 页面变量的**键值形状**（类型 / 长度 / 首项前 80 字符）。两个消费方：
+    # 提示词（让模型选对键）与快验（注入成 params 验语法）。
+    # 含密钥的键照样丢（`SECRET_KEY_RE`，与 keys 同一条判据）。
+    pv = raw.get("page_vars")
+    if isinstance(pv, dict):
+        vars_out: Dict[str, Any] = {}
+        for name, rec in list(pv.items())[:RUNTIME_KEYS_MAX]:
+            if not isinstance(rec, dict) or SECRET_KEY_RE.search(str(name)):
+                continue
+            one: Dict[str, Any] = {"type": str(rec.get("type") or "")[:40]}
+            n = rec.get("n")
+            if isinstance(n, int) and not isinstance(n, bool):
+                one["n"] = max(0, n)
+            first = rec.get("first")
+            if isinstance(first, str) and first:
+                one["first"] = first[:80]
+            fl = rec.get("first_len")
+            if isinstance(fl, int) and not isinstance(fl, bool):
+                one["first_len"] = max(0, fl)
+            vars_out[str(name)[:60]] = one
+        if vars_out:
+            out["page_vars"] = vars_out
     # 失败原因要走到用户眼前（AGENTS #4）：Kotlin 侧记的采集失败随键带出
     fails = raw.get("fails")
     if isinstance(fails, list) and fails:

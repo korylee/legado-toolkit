@@ -36,6 +36,11 @@ RUNTIME_PROMPT_KEYS = 20
 #: 源里已有 webJs 时，提示词里带多长（超了要自报截断）。脚本本身可能很长，
 #: 而它只是**线索**不是材料——600 字符足够看清它用了哪个变量/键。
 KNOWN_WEBJS_MAX = 600
+#: 页面函数名的「像解密/编码」判据：命中才把它当解密函数列给模型。
+#: 只认自证是这类用途的词（与 `core.page_layer.PAGE_MARKERS` 收 CryptoJS 同一立场）——
+#: 宽判据（如含 `get` / `parse`）会把一堆取数函数也说成解密。
+DECRYPT_NAME_RE = re.compile(r"decrypt|encrypt|decode|decodeURI|base64|aes|des|rc4|rsa",
+                             re.IGNORECASE)
 #: 「图片不在 DOM 里」的两道门槛：图片总数够多、带 src 的占比够低。
 #: 实测（2026-10-22 口袋漫画正文页）：139 个 img、只有 1 个带 src、图片地址全在页面脚本里
 #: ——这种页面的 DOM 大纲对「取正文」没有可用信息。
@@ -614,7 +619,32 @@ def _runtime_line(rt: Dict[str, Any]) -> str:
     keys = (rt or {}).get("keys")
     if isinstance(keys, list) and keys:
         line += "，键：%s" % "、".join(str(k) for k in keys[:RUNTIME_PROMPT_KEYS])
+    # 函数签名：解密站要**调用**页面上的解密函数，参数个数决定怎么写
+    fns = (rt or {}).get("functions")
+    if isinstance(fns, list) and fns:
+        sigs = ["%s(%d 参)" % (f.get("name"), int(f.get("arity") or 0))
+                for f in fns[:8] if isinstance(f, dict) and f.get("name")]
+        if sigs:
+            line += "，函数：%s" % "、".join(sigs)
     return line + "）"
+
+
+def _var_line(name: str, rec: Dict[str, Any]) -> str:
+    """`params` 的一个键 → 一行：**它装的是什么**（类型 / 条数 / 首项样例）。
+
+    为什么必须有它（2026-10-23 实测）：同一页 `chapter_images` 是 131 条真地址、
+    `chapter_local_images` 是空数组、`images_base64` 是 `false`——只给键名时三个看起来
+    一样，模型只能盲选；而选错了**事后也验不出来**（都能「跑出内容」）。
+    """
+    type_name = str(rec.get("type") or "").replace("[object ", "").rstrip("]")
+    line = "  - %s：%s" % (name, type_name or "?")
+    n = rec.get("n")
+    if isinstance(n, int) and not isinstance(n, bool):
+        line += "，%d 条" % n if type_name.lower() in ("array", "object") else "，%d 字符" % n
+    first = str(rec.get("first") or "")
+    if first:
+        line += "，样例：%r" % first[:70]
+    return line
 
 
 # ---------------------------------------------------------------- 提示词段落
@@ -692,6 +722,32 @@ def _sec_js_globals(ctx: Dict[str, Any]) -> Optional[List[str]]:
          "不要给一条在 content 里引用页面变量、必然取不到的候选。"]
     for rt in runtimes:
         L.append("- %s" % _runtime_line(rt))
+    # `params` 的**键值形状**：光有键名时所有键看起来一样，模型只能盲选
+    page_vars = ctx.get("page_vars")
+    if isinstance(page_vars, dict) and page_vars:
+        L.append("")
+        L.append("其中页面变量里各键装的是什么（样例只是形状，不是完整值）：")
+        for name, rec in list(page_vars.items())[:RUNTIME_PROMPT_KEYS]:
+            if isinstance(rec, dict):
+                L.append(_var_line(str(name), rec))
+        L.append("**按样例挑键**：空数组 / `false` / 空串的那些键在这一页没有内容；"
+                 "要的是「有内容且像地址或正文」的那一个。")
+    # 解密站的第三种情况：结果没挂在变量上，但**解密函数在页面上**。
+    # 只有真的采到函数签名时才出这段——没有函数时谈「调用它」是误导。
+    decrypt_fns = [f for rt in runtimes if isinstance(rt, dict)
+                   for f in (rt.get("functions") or [])
+                   if isinstance(f, dict) and DECRYPT_NAME_RE.search(str(f.get("name") or ""))]
+    if decrypt_fns:
+        L.append("")
+        L.append("【页面里有解密/编码函数（要调用，不是重写）】")
+        for f in decrypt_fns[:8]:
+            L.append("- %s（%d 个参数）" % (f.get("name"), int(f.get("arity") or 0)))
+        L.append("这些函数**页面自己已经加载好了**：webJs 里直接调用它们，"
+                 "把参数从页面变量或 DOM 里取出来传进去。"
+                 "**不要自己重写解密算法**——写错了不会报错，只会解出乱码，"
+                 "而那时你分不清是算法错还是密钥错。")
+        L.append("若看不出该传什么参数，就直说「看不出解密函数的入参」——"
+                 "不要猜一个，猜错会解出乱码且同样看起来「跑通了」。")
     dropped = int(ctx.get("runtime_dropped") or 0)
     if dropped > 0:
         L.append("（另有 %d 个更小的候选未列出）" % dropped)
@@ -772,6 +828,48 @@ def _sec_diagnosis(ctx: Dict[str, Any]) -> Optional[List[str]]:
     return L
 
 
+def _sec_header(ctx: Dict[str, Any]) -> Optional[List[str]]:
+    """请求头（源级）——**只在有「请求被拒」的事实**时出。
+
+    触发条件（两个都来自已有判据，不新增探测）：
+      - 本段材料是拦截页（`core.quality.interstitial_marker`）；
+      - 或**别的段**被拦（`ctx["step_health"]`）——`header` 是源级字段，反爬常只拦某一段。
+
+    **不拿图片可达性当判据**（实测 2026-10-23）：口袋漫画 131 条图片 URL，六种请求头
+    组合（裸/UA/Referer/Origin…）全部 403，而用户在浏览器里也打不开——站点自己下发的
+    签名已过期（`x-expires` 早于当天）。因此「图片打不开」不能推出「要加 header」，
+    见 TODO `image-probe-is-not-a-verdict`。
+    """
+    from core.quality import interstitial_marker
+
+    html = str(ctx.get("html") or "")
+    step_name = str(ctx.get("step") or "")
+    hit = interstitial_marker(html)
+    health = ctx.get("step_health")
+    blocked = ([name for name, code in health.items()
+                if code in ("interstitial", "browser_error")]
+               if isinstance(health, dict) else [])
+    # 本段在体检里也被标成被拦时，以体检为准：两份事实都指向「材料不是站点」。
+    # 只说「这一步正常」会把「别按这份材料写规则」这个关键提醒吞掉。
+    if not hit and str(step_name) in blocked:
+        hit = "（体检）"
+    if not hit and not blocked:
+        return None
+    L = [""]
+    if hit:
+        L.append("【这段材料是反爬拦截页（命中「%s」）——不是站点本身】" % hit)
+        L.append("先别写给这一步的取值规则：手里这份不是站点，按它写出来的规则会在 App 里取空。")
+    else:
+        L.append("【这一步正常，但**别的步骤**被拦了】")
+    if blocked:
+        L.append("被拦的步骤：%s。" % "、".join(blocked))
+    L.extend(["",
+              "`header` 是**源级**请求头，写 JSON："
+              '`{"Referer": "https://站点首页/", "User-Agent": "..."}`；'
+              "要动态算（带 Cookie / 签名）就写 `@js:` 或 `<js>`，表达式返回 JSON 字符串。"])
+    return L
+
+
 #: 段落顺序 = **前缀缓存约束的落点**：稳定段（字段/大纲/全局数据/已有脚本/实测值）在前，
 #: 易变段（`_sec_diagnosis`：改一次规则就变）恒在最后。重排前先读 `build_prompt` 的 docstring
 #: ——顺序错了不会报错，只会让每次提问都全量计费。
@@ -783,6 +881,7 @@ SECTIONS: Tuple[Callable[[Dict[str, Any]], Optional[List[str]]], ...] = (
     _sec_fields,
     # 顺序段紧跟字段段：「先写哪个」依赖「这一步有哪些字段」，读者（模型）按顺序读
     _sec_script_step,
+    _sec_header,
     _outline_section,
     _sec_js_globals,
     _sec_known_webjs,

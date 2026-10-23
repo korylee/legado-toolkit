@@ -31,6 +31,40 @@ def job_source(job: Any) -> Dict[str, Any]:
     return source
 
 
+def step_health(result: Any) -> Dict[str, str]:
+    """**每步的材料体检**：``{步名: 码}``，码 ∈ ``ok`` / ``interstitial`` / ``browser_error``。
+
+    为什么要有它：调试结果里四段的材料都在，而 AI 补全一次只看**当前段**
+    （`debug_step_material` 按 step 取）。反爬往往只拦某一段（搜索页被拦、正文页正常），
+    只看本段就回答不了「这个源到底哪一步没法写规则」。
+
+    判据**复用** `core.quality` 的两个标记函数（一份判据，AGENTS #10）：
+    拦截页与浏览器错误页的下一步动作不同，所以是两个码、不是一句笼统的「异常」。
+    """
+    from core.quality import browser_error_marker, interstitial_marker
+
+    steps = (result or {}).get("steps") if isinstance(result, dict) else None
+    pages = (result or {}).get("pages") if isinstance(result, dict) else None
+    by_id = {str(p.get("id") or ""): p for p in (pages or []) if isinstance(p, dict)}
+    out: Dict[str, str] = {}
+    for step in (steps or []):
+        if not isinstance(step, dict):
+            continue
+        name = str(step.get("name") or "")
+        if not name or name in out:
+            continue
+        html = str((by_id.get(str(step.get("page_id") or "")) or {}).get("html") or "")
+        if not html:
+            continue                      # 没材料不判（读不到 ≠ 材料坏了）
+        if interstitial_marker(html):
+            out[name] = "interstitial"
+        elif browser_error_marker(html):
+            out[name] = "browser_error"
+        else:
+            out[name] = "ok"
+    return out
+
+
 def debug_step_material(job: Any, job_id: str,
                         step_name: str) -> Tuple[str, str, Dict[str, Any], str,
                                                  Dict[str, Any], Dict[str, Any]]:

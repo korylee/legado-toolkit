@@ -246,6 +246,11 @@ object AppServiceDaemon {
         }
         val started = System.currentTimeMillis()
         val (code, result) = try {
+            // 规则环境里的 `@js:` 走 Rhino，而 Rhino 要 appCtx / Koin（选择器路径是
+            // 纯 Jsoup、不需要——所以这个坑以前没暴露）。不启动会拿到
+            // `appCtx has not been initialized`，而那看起来像「规则写错了」。
+            // `ensureStarted` 幂等，调试与校验 op 也都在调。
+            ValidateService.ensureStarted()
             val source = RuleTry.readSource(sourcePath)
             val body = java.io.File(bodyPath).readText(Charsets.UTF_8)
             DebugService.OK to RuleTry.run(source, body, baseUrl, step, rule)
