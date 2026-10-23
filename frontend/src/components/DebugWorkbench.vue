@@ -23,6 +23,8 @@ import {
 } from "../utils/steps";
 import { useDebugSession } from "../composables/useDebugSession";
 import { compareRuns, statusLabel } from "../utils/debugCompare";
+// 语法速查（唯一一份，编辑弹框与工作台共用）：规则输入区旁的折叠块
+import GrammarList from "./GrammarList.vue";
 import { stepResult, structuredList } from "../utils/debugStepResult";
 // 源码的显示层（折行缩进 + 实体展开，纯函数）：好看的和能抄的是两份东西，见 htmlView
 import { formatMaterial } from "../utils/htmlView";
@@ -1020,12 +1022,12 @@ function scheduleQuickVerify(field) {
   }, QUICK_VERIFY_IDLE_MS);
 }
 
-//: 这一行能不能行内「验证」：口径位（`utils/steps` 的 `def.verify`）+ **材料与规则形态对得上**
-//: （判据在后端 `core.rule_try`）。对不上就不给按钮，也不解释——点了才知道答不了才是噪音
+//: 这一行能不能行内「验证」：**判据全在后端**（`core.material.can_fast_verify` 管材料 ×
+//: 规则形态、`NO_FAST_VERIFY_KINDS` 管字段族）。前端只镜像前一张小表，用来灰掉按钮；
+//: 字段族那半边由请求里的 `field` 交给后端判。
 function verifyAllowed(field) {
   const def = stepFields.value.find((d) => d.field === field);
-  if (!def || def.verify === "none") return false;
-  return canFastVerify((currentPage.value || {}).material_kind, flatRuleOf(field));
+  return !!def && canFastVerify((currentPage.value || {}).material_kind, flatRuleOf(field));
 }
 
 //: 快验（rule_try）：验的是**这行草稿规则**，结论贴在它自己的行上。
@@ -1051,6 +1053,7 @@ async function verifyField(field) {
     const out = await ruleTry({
       job_id: runId.value,
       step: (current.value || {}).name || "bookUrl",
+      field: autofillKeyOf((current.value || {}).name || "bookUrl", field),
       rule,
     });
     if (gen !== quickGen[field]) return; // 期间又改了：这次结论已经过期
@@ -1489,6 +1492,11 @@ async function copyRaw(text, okMsg) {
                 </div>
               </div>
             </div>
+            <!-- 语法速查：默认收起，写规则时展开对照（GrammarList 唯一一份） -->
+            <details class="grammar-details">
+              <summary class="muted">规则语法速查</summary>
+              <GrammarList />
+            </details>
           </div>
           <el-empty
             v-if="!stepFields.length"
@@ -1814,6 +1822,14 @@ async function copyRaw(text, okMsg) {
   display: inline-flex;
   align-items: center;
   gap: 4px;
+}
+/* 语法速查折叠块：写规则时展开对照，默认收起不占版面 */
+.grammar-details {
+  margin-top: 8px;
+}
+.grammar-details summary {
+  cursor: pointer;
+  font-size: 12px;
 }
 /* 建议底纹：值来自建议且未被用户改过；一改即消失（判据是纯派生的相等比较）。
    el-input 的内层元素是子组件的 DOM，scoped 够不到，必须 :deep() */

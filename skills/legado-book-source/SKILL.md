@@ -150,6 +150,15 @@
 }
 ```
 
+**首页没有页码参数的站**（带 `page=1` 会 404 或重复返回第一页）有两种写法：
+
+```json
+"searchUrl": "/search?q={{key}}<,{{page}}>"
+```
+
+或算页式：`{{page - 1 == 0 ? "" : page}}`。`<,{{page}}>` 的语义是「从第二页起，
+参数前带逗号」——优先用它，比在 js 里算页码直白。
+
 ### 发现 / 分类页
 
 ```json
@@ -178,7 +187,9 @@
 | 图片能开 App 不显示 | 防盗链 | 加 `Referer` 头 |
 | 内容为空但 webJs 执行了 | 返回值格式不对 | `webJs` 返回换行分隔地址，`content` 用 `@js` 转 `<img>` |
 | JS 执行超时 | 轮询 DOM 或页面脚本阻塞 | **没有 `sleep` 可等**：直接读数据源头，或用 `java.webView` 自己在 `js` 里控制时机 |
-| `webJs` 报语法错误 | 用了 ES6+ 语法 | 改写成 ES5（见 §五） |
+| `webJs` 报语法错误 | 用了 ES6+ 语法 | 改写成 ES5（见 §六） |
+| 源里用的是 `###` 结尾的正则 | OnlyOne 形态（只取第一处替换），与 `##`（循环替换）语义不同 | 别混写；工具判不出 `###`，这条源要用 App 实测 |
+| 源的规则以 `:` 开头（AllInOne）或 `//`、`@css:`、`@XPath:` 开头 | 换了一族规则语言 | 本工具的候选/命中/自动填充只对 Default 简写成立，这类源**交给引擎验收**，工具不判（见 §五） |
 
 → 按现象索引；调试时「key 的形态决定走哪条链路」是 App 自己的分派规则（`Debug.kt` 的 when，落点见 `core/app_debug.py`）——工具里的「调试目标」只是前缀构造器，改不了它。
 
@@ -236,7 +247,57 @@
 → 判据只有一条：**数据在哪就读哪**——DOM 里有就读 DOM，在 JS 对象里就 `webJs` 读对象，
 在接口里就走 JSONPath；**别自己实现站点的加密**（密钥会轮换、混淆会变）。
 
-## 五、Legado JS 引擎兼容性（重要）
+## 五、规则语法边界（本工具能判什么）
+
+**权威是上游两份源码**：`上游:model/analyzeRule/AnalyzeRule.kt`（规则语言与解析）、
+`上游:model/analyzeRule/AnalyzeUrl.kt`（URL 选项）。人读的完整教程：
+[书源规则：从入门到入土](https://mgz0227.github.io/The-tutorial-of-Legado/Rule/source.html)。
+本节只收**与工具判定相关**的子集——工具（候选 / 命中回填 / 一键填充）只对
+**Default 简写**成立；其它族的源一律「交给引擎验收、工具不判」，这不是缺陷是边界。
+
+### 四族规则语言
+
+| 前缀 | 语言 | 本工具 |
+| :--- | :--- | :--- |
+| （无前缀） | Default 简写（jsoup） | **产与判都支持**（candidates / matched / autofill） |
+| `@css:` | CSS 选择器 | 不判——引擎验收 |
+| `@XPath:` 或 `//` | XPath | 不判——引擎验收 |
+| `@json:` 或 `$.` | JSONPath | 模板支持（§二 接口站），候选不产 |
+
+### Default 简写全表（写与读都要认得）
+
+- `@` 分段，每段三截：**类型.名称.位置**——`class.odd.0`（第 0 个）、`tag.a.-1`（倒数
+  第一个）；不加位置取全部；`!` 排除指定位置（`tag.a!0`）。
+- 列表倒序：整个规则最前面加 `-`（倒序目录站用）。
+- 数组写法：`[0,2,4]` 取多个、`[!0]` 排除、`[start:end:step]` 区间（都支持负数）；
+  索引可直接作段首（`head@[1]@text` 等价 `children[1]`）。
+- **连接符**（同族规则间）：`&&` 合并全部、`||` 取第一个命中（**备用选择器最常见写法**）、
+  `%%` 轮流逐条取。js 与正则不参与连接。
+- **正则三形态**：`##正则##替换`（净化，循环替换，跟在规则后）；
+  `##正则##替换###`（OnlyOne，只取第一处，独立使用）；
+  `:正则` 开头（AllInOne，列表整页正则，只能用于搜索/发现/目录列表）。
+- 取值末段：`text` / `textNodes` / `ownText` / `html` / `all` / 属性名（`href`、`src`…）。
+
+### 变量系统（复杂源靠它跨段传值）
+
+- 非 js 规则里：`@put:{bid:"选择器"}` 存、`@get:{bid}` 取。
+- js 里：`java.put("bid", v)` 存、`java.get("bid")` 取（js 里用不了 `@get:`）。
+- `{{}}`：搜索/发现 URL 里**只能用 js**（`{{java.base64Encode(key)}}`）；其余位置的
+  `{{}}` 默认 js，用其它规则要带前缀（`{{@@class.x@text}}`、`{{$.data.x}}`）。
+- `{}`（单花括号）：阅读 2.0 遗留，只认 JSONPath——别在新源里用。
+
+### URL 选项全字段（`url,{...}` 里的 `{...}`）
+
+`method` / `charset` / `headers` / `body`（POST）/ `webView` / `type` / `js`
+（请求前执行，可改 `java.url`、`java.headerMap`）/ `retry`（重试次数）。
+**请求头里可写代理**：`{"proxy":"socks5://127.0.0.1:1080@用户名@密码"}`（http 同形）——
+这个键不是请求头，会被上游单独解析。完整定义 `上游:model/analyzeRule/AnalyzeUrl.kt`。
+
+→ **写新源只用 Default 简写 + `{{key}}`/`{{page}}` + 本节的 URL 选项**——工具能判，
+链路全程有材料；读别人的源遇到其它族，别改写成简写再验（改写可能引入新错），
+直接交引擎。
+
+## 六、Legado JS 引擎兼容性（重要）
 
 Legado 的 JS 引擎是 **Rhino**，只支持 ES5，不支持以下语法：
 
@@ -253,18 +314,22 @@ Legado 的 JS 引擎是 **Rhino**，只支持 ES5，不支持以下语法：
 → JS 只当 ES5 写：**箭头函数、`let`/`const`、模板串、展开、`async` 一个都别用**
 （`Object.keys` / `JSON.parse` / `JSON.stringify` 可用）。
 
-## 六、调试与常用 API
+## 七、调试与常用 API
 
 ### 看解密后的字段名
 
 `result = JSON.stringify(Object.keys(params));`（在 `webJs` 里跑，看 `params` 到底有哪些键）
 
-### 常用 API
+### 常用 API 与 js 变量
 
 要记的只有这几个：`java.ajax(url[, timeout])`（第二参数是**超时毫秒**，不是请求头）、
 `java.get(url, headers[, timeout])` / `java.post(url, body, headers)`（`headers` 是**必填**的
 Map）、`java.connect(url, header)`、`java.log` / `java.toast`、`baseUrl`、`result`
 （`webJs` 的返回值）。**完整清单以 `上游:help/JsExtensions.kt` 为准**，别在这里维护第二份。
+
+js 里可用的**变量**（教程列的常用集）：`book`（书籍类）、`chapter`（当前章节类）、
+`cookie`（CookieStore）、`cache`（CacheManager）、`title`（当前标题）、`src`（页面源码）——
+方法签名看上游对应类，不在这里抄第二份。跨段传值用 `java.put` / `java.get`（见 §五）。
 
 ### 独立浏览器环境（`webView`）
 
@@ -283,7 +348,7 @@ Map）、`java.connect(url, header)`、`java.log` / `java.toast`、`baseUrl`、`
 → 要用哪个 `java.*` 先查 `上游:help/JsExtensions.kt`；**没有 `sleep`、没有 `browser`** 这两条
 最容易写错（写了不报错、只是拿不到东西）。
 
-## 七、书源元数据与配置
+## 八、书源元数据与配置
 
 | 字段 | 说明 |
 | :--- | :--- |
@@ -292,8 +357,12 @@ Map）、`java.connect(url, header)`、`java.log` / `java.toast`、`baseUrl`、`
 （`AppPattern.splitGroupRegex`）。`&&` 是 **`exploreUrl` 多项之间**的分隔，不是分组分隔符 |
 | `enabledExplore` | 是否启用发现。**不要手写**：有 `exploreUrl` / `ruleExplore` 才算数，
 由配置推导（AGENTS #13——2026-09 实测漂了 885 条），缺这个键时导入链路会自己对齐 |
-| `header` | 全局请求头，JSON 字符串 |
+| `bookUrlPattern` | 书籍详情页 URL 的正则——**加网址时识别用哪个源**，可选但建议写 |
+| `header` | 全局请求头，JSON 字符串（代理写法见 §五 URL 选项） |
 | `charset` | GBK 页面需指定，如 `gbk` |
+
+详情组的两个非选择器字段：`canReName`（用规则取到的书名重命名书籍，默认关）、
+`replaceRegex`（正文**全文替换**——净化 `##` 只作用于规则取值，整章级的清洗写这里）。
 
 → 元数据里**能推导的别手写**（`enabledExplore` 由配置推导，见 AGENTS #13）；写完的源先用
 「本机引擎」调试一次——与设备无关的那部分结论它就能给。

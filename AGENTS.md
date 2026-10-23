@@ -251,3 +251,9 @@
 | 书源表结构 | `data/dao/BookSourceDao.kt` |
 | Web 服务 HTTP 接口 | `web/KtorServer.kt`、`api/controller/BookSourceController.kt` |
 | 调试 WebSocket | `web/socket/BookSourceDebugWebSocket.kt` |
+
+## 技能文档（先读哪个）
+
+写/改书源规则前先读 `skills/legado-book-source/SKILL.md`——工作流、规则模板、
+坑表、语法边界（本工具只判 Default 简写，其它族交引擎）都在那里；
+它引用的上游源码就是上表那几份。别在别处再抄一份规则语法。
