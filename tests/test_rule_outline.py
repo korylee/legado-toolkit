@@ -41,14 +41,20 @@ class RuleOutlineTests(unittest.TestCase):
         self.assertFalse(out["truncated"])
 
     def test_long_page_reports_truncation(self):
-        """超预算要自报不全：界面据此说「只到前 N 行」，不能当全部。"""
+        """超预算要自报不全：界面据此说「只到前 N 行」，不能当全部。
+
+        构造上要**避开同构折叠**：一串同形状的兄弟会被折成一行 `×N`（`dom_outline`
+        的既有行为），页数再多也不超预算。所以这里每层都换标签与 class，保证每行独立。
+        """
+        tags = ("div", "section", "article", "aside", "nav", "main", "header", "footer")
         html = "<html><body>" + "".join(
-            '<div class="row"><span class="c%d">值%d</span></div>' % (i, i)
+            '<%s class="c%d"><span class="s%d">值%d</span></%s>' % (
+                tags[i % len(tags)], i, i, i, tags[i % len(tags)])
             for i in range(DISPLAY_OUTLINE_LINES * 3)
         ) + "</body></html>"
         out = _call(_store(html=html))
         self.assertTrue(out["truncated"])
-        self.assertEqual(len(out["text"].split("\n")), DISPLAY_OUTLINE_LINES)
+        self.assertEqual(len(out["text"].split(chr(10))), DISPLAY_OUTLINE_LINES)
 
     def test_missing_page_gives_a_reason(self):
         """页面没材料：报原因（404/400），不返回空大纲冒充「这页没有结构」。"""

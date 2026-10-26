@@ -87,12 +87,14 @@ class PromptTests(unittest.TestCase):
 class OutlineFocusTests(unittest.TestCase):
     """大纲的起点：从**命中的容器**起，而不是从 `<html>` 起。
 
-    两条理由都是实测出来的：① `dom_outline` 的 max_depth=6，真实站点的列表容器常在
-    `#app > .container > .row > .col > ul` 这种深度，从根走**到不了它**（外层多包
-    4 层就完全看不见）；② 从容器起那 90 行全是相关内容（页面框架实测占掉三成）。
+    理由仍是实测的：从容器起那 90 行全是相关内容（页面框架实测占掉三成）。
+
+    **深度不再是问题**：`dom_outline` 会把「只有唯一子元素」的包装链折成一行
+    （`a > b > c` 按一层算、标出真实层级），所以 8 层深处的容器从根也够得到
+    （2026-10-23 起；在此之前这条限制是 focus 的主要理由）。
     """
 
-    #: 目标容器在 8 层深处 —— 从根出大纲够不到
+    #: 目标容器在 8 层深处 —— 折叠后从根也够得到
     DEEP = ("<html><body><div class='a'><div class='b'><div class='c'><div class='d'>"
             "<ul class='book-list'><li class='item'><a href='/b/1'>书名一</a></li>"
             "<li class='item'><a href='/b/2'>书名二</a></li></ul>"
@@ -103,10 +105,16 @@ class OutlineFocusTests(unittest.TestCase):
         self.assertIn("book-list", p)
         self.assertIn("书名一", p)
 
-    def test_without_focus_a_deep_container_is_missing(self):
-        """反向保护：不带 focus 时**确实**看不到目标——这条守着上面那条的意义。"""
+    def test_single_child_chains_no_longer_hide_deep_containers(self):
+        """不带 focus 也能看到深层容器：单链折叠把包装层压成一行。
+
+        这条替换了原来那条「不带 focus 就看不到」的反向断言——那条钉的是
+        `max_depth=6` 的限制，而折叠已经把这个限制移除了（它的价值现在只剩
+        「从目标起出大纲更省行数」，不再承担「够不够得到」）。
+        """
         p = S.build_prompt({"step": "search", "html": self.DEEP})
-        self.assertNotIn("book-list", p)
+        self.assertIn("book-list", p)
+        self.assertIn("书名一", p)
 
     def test_focus_accepts_legado_shorthand(self):
         """`class.x` / `id.x` / `tag.a` 是 Legado 简写不是 CSS，必须转。
