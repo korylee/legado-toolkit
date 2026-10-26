@@ -447,6 +447,32 @@ def material_kind(page: Any) -> str:
     return MATERIAL_WEBJS_OUTPUT if js else MATERIAL_RENDERED_DOM
 
 
+def _reject_full_page_content(steps: Any, pages: Any) -> None:
+    """正文步「取到整页」时改判：**pass 不许留在那里**。
+
+    判据在 `app_debug.looks_like_full_page`（材料自己的页头文字出现在正文里）。
+    放在这里而不是 `build_steps` 里，因为**材料是这一步之后才补上的**——判据要拿
+    同一份材料当锚。实测（2026-10-23 发发漫画）：`body@html` 取到 2534 字符、
+    含「大家都在搜/首页/排行/分类」，引擎照样打「正文页解析完成」。
+    """
+    from core.app_debug import (FULL_PAGE_CONTENT_REASON, content_output,
+                                looks_like_full_page)
+
+    by_id = {str(p.get("id") or ""): p for p in (pages or []) if isinstance(p, dict)}
+    for step in (steps or []):
+        if not isinstance(step, dict) or step.get("name") != "content":
+            continue
+        if step.get("verdict") != "pass":
+            continue
+        material = str((by_id.get(str(step.get("page_id") or "")) or {}).get("html") or "")
+        if not material:
+            continue                      # 没有材料当锚就不判（读不到 ≠ 规则坏了）
+        if looks_like_full_page(content_output(step.get("values") or []), material):
+            step["verdict"] = "fail"
+            step["reason"] = FULL_PAGE_CONTENT_REASON
+            step["detail"] = FULL_PAGE_CONTENT_REASON
+
+
 def _annotate_render(pages: Any, out: Dict[str, Any]) -> None:
     """把「这一页走没走渲染」判到**页**上（前端只读事实，不再自己比地址）。
 
@@ -723,6 +749,7 @@ def run_jvm_debug(source: Dict[str, Any],
         out["pages"] = fetch_debug_pages(steps, src, proxy=proxy, cache=cache,
                                          engine_html=engine_pages(meta.get("engine_html")))
         _annotate_render(out["pages"], out)
+        _reject_full_page_content(steps, out["pages"])
     except Exception as e:
         # 补证据失败绝不能把已经拿到的判定丢掉（与设备通道同一立场）
         if steps:

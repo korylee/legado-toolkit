@@ -128,6 +128,86 @@ _STAT_MARK = "◇"
 #: 别两处各写一份字符串
 EMPTY_CONTENT_REASON = ("正文规则为空：App 拿章节链接当正文，没验证任何取值，"
                         "补上规则再重新调试本步")
+#: 正文取到整页 HTML（选择器写成了 `body@html` 之类）时的原因文案
+FULL_PAGE_CONTENT_REASON = ("正文取到的是整页 HTML——选择器选中了文档本身"
+                            "（如 body@html），不是正文；换成指向正文容器的规则")
+
+
+def content_output(values: List[str]) -> str:
+    """正文段「取到的正文」= `┌获取正文内容` 之后那条 `└` 行起的后续内容。
+
+    上游 `BookContent` 的记账（`needSave=false` 这条调试路径）：
+    ``Debug.log("┌获取正文内容")`` 然后 ``Debug.log("└\\n$contentStr")``——
+    正文全文就在这一段里，直到下一个事件记号为止。**别去读 pages[].html**：
+    那是材料（页面本身），不是规则产出（实测同页两者一个 19KB 一个 1.5KB）。
+    """
+    marker = "┌获取正文内容"
+    for i, line in enumerate(values):
+        if str(line).strip() != marker:
+            continue
+        if i + 1 >= len(values):
+            return ""
+        first = str(values[i + 1])
+        if not first.startswith("└"):
+            return ""
+        out = [first[1:]]
+        for nxt in values[i + 2:]:
+            if str(nxt)[:1] in "┌◇≡⇒︾︽":
+                break
+            out.append(str(nxt))
+        return "\n".join(out).strip()
+    return ""
+
+
+def _content_is_full_page_placeholder(values: List[str]) -> bool:
+    """`html@html` 那种**开头就是文档声明**的取法——材料没到也能认出来。
+
+    真正的「取到整页」判定要拿材料当锚（见 `looks_like_full_page` 与
+    `jvm_debug._reject_full_page_content`）；这里只是**不依赖材料**的那一小半。
+    """
+    head = str(content_output(values) or "").lstrip()[:200].lower()
+    return head.startswith("<!doctype") or head.startswith("<html")
+
+
+def nav_texts(material: str, limit: int = 8) -> List[str]:
+    """材料里**页面框架**的链接文字（页头导航那几条）。
+
+    做法：取文档前段（页头/导航通常在最前）里 `<a>` 的可见文本，短的才算
+    （「首页」「排行」「分类」这种）。**不背词表**——换站点也成立，判据来自同一份材料。
+    """
+    from bs4 import BeautifulSoup
+
+    try:
+        soup = BeautifulSoup(str(material or "")[:20000], "html.parser")
+    except Exception:
+        return []
+    out: List[str] = []
+    for a in soup.find_all("a"):
+        text = " ".join((a.get_text() or "").split())
+        if 1 <= len(text) <= 8 and text not in out:
+            out.append(text)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def looks_like_full_page(text: str, material: str = "") -> bool:
+    """这段「正文」取到的其实是**整页**（选择器写成了 `body@html` 之类）。
+
+    判据：**材料里页头导航那几条文字出现在正文里**。实测（2026-10-23 发发漫画正文页）：
+
+    - `body@html` → 正文 2534 字符，含「大家都在搜 / 首页 / 排行 / 分类 / 观看记录」；
+    - 正确规则 → 1761 字符，一条导航文字都没有。
+
+    **不按长度比例判**（两组比值 0.12 vs 0.09，没有区分度），**不按标签判**
+    （`@html` 已经把 `<a>`/`<div>` 剥成纯文本，两组都是 0），**不背导航词表**
+    （换站点失效）——只拿材料自己的页头文字当锚。
+    """
+    body = str(text or "")
+    if not body:
+        return False
+    hits = sum(1 for t in nav_texts(material) if t and t in body)
+    return hits >= 3
 #: webView 渲染失败段的可执行下一步（只指向动作，不解释机制）
 RENDER_FAIL_TODO = "先试最新章节；不行就跑 scripts/jvm_login.py 人工过一次验证"
 
@@ -539,11 +619,15 @@ def engine_pages(raw: Any) -> Dict[str, str]:
     两处上限不同是有意的（一个是传输、一个是展示）。
 
     **顺手剥掉 App 的 ``[mm:ss.SSS]`` 前缀**：payload 那一条是**事件消息**，App 给每条消息
-    都加了耗时前缀，而这里存的是「整页 HTML」——不剥的话，抽屉里的「整页源码」以及生成链
-    拿到的材料都以一个时间戳开头（实测 2026-09-21：
-    ``[00:09.530] <html lang="en-US"…>``）。``matched_html`` 没有这个问题（它过 jsoup）。
-    前缀的正则只有``_PREFIX_RE``这一份，就在本模块里，别在 Kotlin 侧再写一遍
-    （AGENTS #22⑤：跨语言复制常量要配逐词比对）。
+    都加了耗时前缀（上游 ``Debug.kt`` 的 ``SimpleDateFormat("[mm:ss.SSS]")``），而这里
+    存的是「整页 HTML」——不剥的话，抽屉里的「整页源码」以及生成链拿到的材料都以一个
+    时间戳开头（实测 2026-09-21：``[00:09.530] <html lang="en-US"…>``）。
+    ``matched_html`` 没有这个问题（它过 jsoup）。
+
+    **这是第二道**：Kotlin 落侧车前已经剥过一次（``DebugService.EngineHtmlCollector`` 用
+    ``EVENT_TIME_PREFIX_RE``，那道更严——只认 2 位分:2 位秒.3 位毫秒，与上游格式一致）。
+    留着这一道是兜底，**别看到 Kotlin 剥过就删**。两侧形态与上游的对齐钉在
+    ``tests/test_jvm_debug_contract.py``（AGENTS #22⑤）。
     """
     if not isinstance(raw, dict):
         if raw:
@@ -731,6 +815,14 @@ def build_steps(events: Sequence[Any], matched: Optional[Dict[str, Dict[str, str
             # 原判据下这是一次 0.1 秒的「通过」，但整页没抓、什么都没验。
             # unknown + 说清原因与下一步（AGENTS #4：原因要一路走到用户眼前）
             j = Q.Judgement(Q.VERDICT_UNKNOWN, EMPTY_CONTENT_REASON,
+                            Q.SHAPE_TEXT, notes, evidence)
+        elif name == "content" and _content_is_full_page_placeholder(values):
+            # **取到整页 HTML 也不许判 pass**：`body@html` 这类规则「选中」了文档本身，
+            # 引擎照样报「正文页解析完成」。这是**规则错误**（不是无法判断），判 fail。
+            # 判据要拿材料当锚，而材料在这一步之后才有——所以真正的判定在
+            # `jvm_debug._reject_full_page_content`；这里只兜住**开头就是文档声明**那种
+            # （`html@html`：材料还没到也能认出来）。
+            j = Q.Judgement(Q.VERDICT_FAIL, FULL_PAGE_CONTENT_REASON,
                             Q.SHAPE_TEXT, notes, evidence)
         elif done:
             j = Q.Judgement(Q.VERDICT_PASS, "", Q.SHAPE_TEXT, notes, evidence)

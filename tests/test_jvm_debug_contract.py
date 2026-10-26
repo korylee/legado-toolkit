@@ -13,6 +13,7 @@ fixture 是**真实产出**（不是手写的）：2026-09-20 在 JVM 里跑 52s
 """
 
 import json
+import os
 import pathlib
 import re
 import unittest
@@ -20,6 +21,21 @@ import unittest
 from core.app_debug import build_steps, _split_segments, _strip_prefix, _PREFIX_RE
 
 FIXTURE = pathlib.Path(__file__).parent / "fixtures" / "appservice_debug_52shuku.ndjson"
+
+#: 上游 App 源码在检出里的相对路径（`AGENTS.md` 那张表的路径前缀）。
+APP_SRC_REL = "app/src/main/java/io/legado/app"
+
+
+def upstream_app_root() -> str:
+    """上游 App 源码根目录：**只认配置**（`jvm.app_repo`），没配就返回空串。
+
+    环境变量 `LEGADO_REPO` 是等价的覆盖口（`scripts/prepare_gradle.py` 认同一个）。
+    路径写死等于把配置抄成第二份事实：换台机器要么找错地方、要么静默跳过——
+    而这类闸门跳过就等于不存在（AGENTS #4）。
+    """
+    from core import settings_store
+    configured = (settings_store.load().get("jvm") or {}).get("app_repo", "")
+    return str(configured or os.environ.get("LEGADO_REPO", "") or "").strip()
 
 #: App 的事件 kind（`Debug.EventKind`）。**payload 那四个必须不在**——
 #: App 的调试 WS 就是这个过滤（`if (!event.kind.isSourcePayload) session.send(...)`），
@@ -565,12 +581,14 @@ class TestRuntimeParity(unittest.TestCase):
     def test_content_start_mark_matches_upstream(self):
         """武装锚事件与上游 `Debug.kt` 逐词一致：上游改措辞采集会静默失效。
 
-        上游不在场（部署机没有那份检出）就跳过——本地开发机的检出路径见 AGENTS.md。
+        上游不在场（部署机没配 `jvm.app_repo`）就跳过——路径只认配置，不写死。
         """
-        upstream = (pathlib.Path("D:/Documents/GitHub/legado-with-MD3") /
-                    "app/src/main/java/io/legado/app/model/Debug.kt")
+        root = upstream_app_root()
+        if not root:
+            self.skipTest("没配 App 源码目录（设置里的 jvm.app_repo）")
+        upstream = pathlib.Path(root) / APP_SRC_REL / "model/Debug.kt"
         if not upstream.exists():
-            self.skipTest("上游 App 源码不在场")
+            self.skipTest("配置的 App 源码目录里没有 model/Debug.kt：%s" % root)
         kt = self.DEBUG.read_text(encoding="utf-8")
         block = kt.split('internal const val CONTENT_START_MARK = "', 1)
         self.assertEqual(len(block), 2, "DebugService.kt 里找不到 CONTENT_START_MARK")
@@ -579,6 +597,99 @@ class TestRuntimeParity(unittest.TestCase):
         self.assertIn('log(debugSource, "%s")' % mark,
                       upstream.read_text(encoding="utf-8"),
                       "上游 Debug.kt 里没有这个锚事件（改措辞了？两侧要一起改）")
+
+
+class TestUpstreamDebugMarkersParity(unittest.TestCase):
+    """Python 解析用的那套 App 调试记号，上游今天还打不打。
+
+    为什么要有这条：`⇒ / ︾ / ︽ / ≡ / ◇ / ┌ / └` 与 `[mm:ss.SSS]` 是**上游 App 的调试
+    输出格式**（`Debug.kt` / `WebBook.kt` / `BookContent.kt`），而我们的产物链整条建在
+    它上面：段划分、页 URL（补抓入口）、统计行、正文全文、空规则短路、相对耗时。
+    此前只有 `︾开始解析正文页` 一条与上游对过（见 `TestRuntimeParity`），其余只被手写
+    样本与一份 2026-09-20 的冻结 fixture 覆盖——那只证明「那一天 Python 能解析」，
+    **拦不住上游改文案**：改了以后段分不出、`≡获取成功` 拿不到页址，界面上只是「读不到」
+    （AGENTS #4；跨语言/跨仓库的文本常量要配逐字比对，#22⑤）。
+
+    上游不在场（部署机没配 `jvm.app_repo`）就跳过——路径只认配置，不写死。
+    """
+
+    DEBUG = (pathlib.Path(__file__).parent.parent /
+             "appservice/test/io/legado/app/service/DebugService.kt")
+
+    #: 上游源码全文（三条用例共用，读一遍约 1 秒）
+    _APP_SOURCE = ""
+
+    def _app_source(self) -> str:
+        root = upstream_app_root()
+        if not root:
+            self.skipTest("没配 App 源码目录（设置里的 jvm.app_repo）")
+        src = pathlib.Path(root) / APP_SRC_REL
+        if not src.is_dir():
+            self.skipTest("配置的 App 源码目录里没有 %s：%s" % (APP_SRC_REL, root))
+        if not TestUpstreamDebugMarkersParity._APP_SOURCE:
+            TestUpstreamDebugMarkersParity._APP_SOURCE = "\n".join(
+                p.read_text(encoding="utf-8", errors="replace") for p in src.rglob("*.kt"))
+        return TestUpstreamDebugMarkersParity._APP_SOURCE
+
+    def _assert_all_present(self, pairs) -> None:
+        text = self._app_source()
+        missing = ["%s（%s）" % pair for pair in pairs if pair[0] not in text]
+        self.assertEqual(
+            missing, [],
+            "上游不再打这些记号了：%s——我们按它们取产物，改文案必须两侧一起改" % missing)
+
+    def test_segment_markers_cover_every_segment_python_accepts(self):
+        """`_START_RE` / `_DONE_RE` 认的五个段名，上游逐个都还要在打。"""
+        names = ("搜索", "发现", "详情", "目录", "正文")
+        self._assert_all_present(
+            [("︾开始解析%s页" % n, "_START_RE 段起始") for n in names] +
+            [("︽%s页解析完成" % n, "_DONE_RE 段完成") for n in names])
+
+    def test_entry_url_stat_content_and_shortcut_markers_still_exist(self):
+        """入口 / 页 URL / 统计行 / 正文全文 / 空规则短路：各正则依赖的字面量。"""
+        self._assert_all_present([
+            ("⇒开始搜索关键字", "_ENTRY_RE 的搜索入口"),
+            ("⇒开始访", "_ENTRY_RE 的目录/发现入口（访 / 访问）"),
+            ("≡获取成功", "_URL_RE：段内页 URL 的唯一来源，补抓也靠它"),
+            ("◇", "_STAT_MARK：统计行；App 自己也按这组符号分类"),
+            ("[⇒◇┌└≡]", "App 自己的调试符号集（AppPattern.debugMessageSymbolRegex）"),
+            ("┌获取正文内容", "content_output：正文全文的起记号（配 `└`）"),
+            ("⇒正文规则为空", "_EMPTY_CONTENT_RE：空 content 规则的短路"),
+        ])
+
+    def test_time_prefix_format_matches_both_sides(self):
+        """时间前缀：上游那个格式，两侧正则都得认（AGENTS #22⑤）。
+
+        上游 `Debug.kt` 用 `SimpleDateFormat("[mm:ss.SSS]")` 打前缀。Kotlin 的
+        `EVENT_TIME_PREFIX_RE` 剥它（为的是在正文取数**之前**认出武装锚），Python 的
+        `_PREFIX_RE` 也剥它（产物的相对耗时、侧车里那份整页 HTML）。两侧不要求逐字相同，
+        但**认不出上游形态的那一侧会静默失效**：Kotlin 侧形状采集不武装、`runtime` 恒空；
+        Python 侧整页源码以时间戳开头。
+        """
+        root = upstream_app_root()
+        if not root:
+            self.skipTest("没配 App 源码目录（设置里的 jvm.app_repo）")
+        upstream = pathlib.Path(root) / APP_SRC_REL / "model/Debug.kt"
+        if not upstream.exists():
+            self.skipTest("配置的 App 源码目录里没有 model/Debug.kt：%s" % root)
+        self.assertIn('SimpleDateFormat("[mm:ss.SSS]"', upstream.read_text(encoding="utf-8"),
+                      "上游换了时间前缀格式（debugTimeFormat）——两侧正则都要跟着改")
+        sample = "[00:12.345] ︾开始解析正文页"          # 该格式的产出
+        self.assertTrue(_PREFIX_RE.match(sample), "Python _PREFIX_RE 不认上游前缀")
+        self.assertEqual(_strip_prefix(sample), "︾开始解析正文页")
+        block = self.DEBUG.read_text(encoding="utf-8").split(
+            "EVENT_TIME_PREFIX_RE = Regex(", 1)
+        self.assertEqual(len(block), 2, "DebugService.kt 里找不到 EVENT_TIME_PREFIX_RE")
+        # Kotlin 源里是转义过的字符串字面量（`\\[`），还原成正则本身再用 Python 引擎跑
+        pattern = block[1].split('"', 1)[1].split('"', 1)[0].replace("\\\\", "\\")
+        try:
+            kotlin_re = re.compile(pattern)
+        except re.error as exc:
+            # 不 skip：解析不出对端就静默跳过，等于这条闸门不存在（AGENTS #4）
+            self.fail("Kotlin 正则用了 Python 不认的语法，需人工核对：%s（模式 %r）"
+                      % (exc, pattern))
+        self.assertTrue(kotlin_re.match(sample),
+                        "Kotlin 的 EVENT_TIME_PREFIX_RE 不认上游前缀（模式 %r）" % pattern)
 
 
 class TestAutofillFieldMapParity(unittest.TestCase):
