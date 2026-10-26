@@ -131,6 +131,13 @@ EMPTY_CONTENT_REASON = ("正文规则为空：App 拿章节链接当正文，没
 #: 正文取到整页 HTML（选择器写成了 `body@html` 之类）时的原因文案
 FULL_PAGE_CONTENT_REASON = ("正文取到的是整页 HTML——选择器选中了文档本身"
                             "（如 body@html），不是正文；换成指向正文容器的规则")
+#: 目录条目取不到链接时的原因文案（上游 `BookChapterList` 拿 baseUrl 顶上）
+CHAPTER_URL_FALLBACK_REASON = ("章节链接没取到：App 用目录页地址顶上了，"
+                               "点进去看到的是目录而不是正文；检查 chapterUrl")
+#: 上游目录段的兜底记号（`⇒目录N未获取到url,使用baseUrl替代`）——它出现就说明
+#: `chapterUrl` 一条都没取到。**这不是错误行**，所以不会被 `_is_error` 抓到：
+#: 上游照常往下走、章节照样建出来，只是每条 url 都指向目录页本身。
+_CHAPTER_URL_FALLBACK_RE = re.compile(r"^⇒(?:目录|一级目录)\d+未获取到url")
 
 
 def content_output(values: List[str]) -> str:
@@ -809,6 +816,12 @@ def build_steps(events: Sequence[Any], matched: Optional[Dict[str, Dict[str, str
                 # （与生成链 strengthen-hint 同一纪律：只指向动作，不解释机制）
                 j = Q.Judgement(j.verdict, j.reason, j.shape,
                                 notes + [RENDER_FAIL_TODO], j.evidence)
+        elif any(_CHAPTER_URL_FALLBACK_RE.match(v) for v in values):
+            # **章节链接兜底不许判 pass**：`chapterUrl` 取不到时上游拿目录页地址顶上
+            # （`BookChapterList`），条目照样建出来、段照样报「解析完成」——真去读就是
+            # 拿目录页当正文。这是**规则错误**（chapterUrl 没选中任何链接），判 fail。
+            j = Q.Judgement(Q.VERDICT_FAIL, CHAPTER_URL_FALLBACK_REASON,
+                            Q.SHAPE_TEXT, notes, evidence)
         elif any(_EMPTY_CONTENT_RE.match(v) for v in values):
             # **空 content 规则的短路不许判 pass**：App 会直接拿章节链接当正文
             # （上游 WebBook.getContentAwait），事件里照样有「︽正文页解析完成」——

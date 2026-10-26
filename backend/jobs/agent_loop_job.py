@@ -63,6 +63,13 @@ async def run_agent_loop_job(job_id: str, st: Any, payload: Dict[str, Any],
                  if isinstance(p, dict) and p.get("id") == step_row.get("page_id")), {})
     page_stats = (page.get("page_layer") or {}).get("stats")
     page_stats = page_stats if isinstance(page_stats, dict) else None
+    if not wants:
+        # 整段补全：**按材料事实裁字段**，不把用不上的字段也列给模型。
+        # 正文段最典型：DOM 里已有图时 `content` 一条就够，把 `webJs` 也列上
+        # 会让模型多写一条用不上的脚本（判据在 `core.autofill.propose_fields`）。
+        from core.autofill import propose_fields
+
+        wants = propose_fields(step, material_kind, page_stats) or None
 
     run_events.append_event(run_dir, "ai_started", step=step,
                             debug_job_id=debug_job_id,

@@ -50,6 +50,20 @@ ACTION_BUDGET = {
 #: 不是拒绝执行）。5 = 一次提议（≤3 条候选）加复查的余量。
 RULE_TRY_PER_TURN = 5
 
+#: 每个字段的候选上限——预算要**按字段数**算，不能按轮固定。
+#: 段级补全一次问整段（搜索段 3 个字段、正文段 2 个），固定 5 会在最后一个字段上
+#: 耗尽：那个字段明明有正确候选，却被写成「模型提议的都没选中」——**原因说反**
+#: （实测 2026-10-26：搜索段 name 就这样被丢，落规则时缺它，引擎 `items=0`）。
+RULE_TRY_PER_FIELD = 3
+
+
+def rule_try_budget(field_count: int) -> int:
+    """这一轮的 rule_try 预算：按**要提议的字段数**给，下限是 ``RULE_TRY_PER_TURN``。
+
+    单字段场景与原先一致；整段补全时够每个字段试完候选加一次复查。
+    """
+    return max(RULE_TRY_PER_TURN, int(field_count or 0) * RULE_TRY_PER_FIELD)
+
 #: 每轮模型调用上限（agent-evidence-budget 的判据位：超限转用户动作）。
 #: **口径是「一族一次」**：提议按取样类型分族（text / media / link），一族一次调用，
 #: 所以 3 = 详情组三族各提一次。写死成 1 的后果是「点一次 AI 补全只有 text 那族被

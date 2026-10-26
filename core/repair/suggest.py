@@ -669,6 +669,15 @@ def _sec_fields(ctx: Dict[str, Any]) -> Optional[List[str]]:
             # 不写清「跑在哪、结果去哪」，模型给出的往往是取值规则或一段注释
             L.append("  （页面脚本：跑在页面环境里，能读页面变量；它的结果成为这一步的响应体，"
                      "由取值规则通过 `result` 读）")
+    # 这一段有列表容器时（`kind == "list"`），其余字段是**条目内规则**——这是
+    # `BookList` 的两段式语义（先按容器切条目、再逐条目取名/取链接）。不说明的话
+    # 模型一律给从整页起的完整链，而那条链在每个条目里又去找一次容器，取不到东西
+    # （实测 2026-10-26：快验给完整链「通过」，落源后引擎报「列表为空」）。
+    if any(f.get("kind") == "list" for f in fields if isinstance(f, dict)):
+        L.extend(["",
+                  "**列表容器之外的字段都是「条目内规则」**：相对容器选中的那个条目元素取"
+                  "（如 `tag.a@href`），**不要**再写容器那一段前缀；"
+                  "写成从整页起的完整链，引擎会在每个条目里重新找一遍容器，取不到东西。"])
     return L
 
 
@@ -765,6 +774,30 @@ def _sec_known_webjs(ctx: Dict[str, Any]) -> Optional[List[str]]:
     L.append("说明：这段脚本是源作者写的，执行结果会成为本步的响应体。"
              "若它已经取到了要的内容，优先沿用它里面的变量名/键名；"
              "若它引用的键在本页并不存在，直接指出来。")
+    return L
+
+
+def _sec_known_container(ctx: Dict[str, Any]) -> Optional[List[str]]:
+    """本段**已定的列表容器**：其余字段是相对它取的条目内规则。
+
+    给出去的理由不是「约束模型」而是**补事实**：模型看不到源里刚生成的那一格
+    （`_propose_group` 的 `source` 是调用时的快照），它只能从大纲猜「从哪起」。
+    猜对时给出 `tag.a@href`，猜偏时给出 `#chapterList_ul_1 li a@href`——后者在条目
+    元素里重找一个祖先，引擎直接取空（实测 2026-10-26 目录页）。
+    """
+    known = ctx.get("known_container")
+    if not isinstance(known, dict) or not known:
+        return None
+    L = ["", "【本段已定的列表容器】"]
+    for path, rule in known.items():
+        text = str(rule or "").strip()
+        if text:
+            L.append("- `%s` = `%s`" % (path, text[:120]))
+    if len(L) <= 2:
+        return None
+    L.append("列表容器就是「一个条目一条」的那条规则。**其余字段都相对条目元素取**："
+             "直接写条目里面的东西（如 `tag.a@href`、`.title@text`），**不要**再写"
+             "容器那一段或任何祖先定位——那些在条目里找不到，引擎会取到空。")
     return L
 
 
@@ -885,6 +918,7 @@ SECTIONS: Tuple[Callable[[Dict[str, Any]], Optional[List[str]]], ...] = (
     _outline_section,
     _sec_js_globals,
     _sec_known_webjs,
+    _sec_known_container,
     _sec_app_values,
     _sec_diagnosis,
 )

@@ -35,6 +35,8 @@ FIELD_LABELS = {
     "name": "书名", "author": "作者", "kind": "分类",
     "word_count": "字数", "last_chapter": "最新章节", "intro": "简介",
     "cover_url": "封面", "toc_url": "目录链接",
+    "book_list": "书籍列表容器", "book_url": "书籍链接",
+    "chapter_list": "章节列表容器", "chapter_name": "章节名", "chapter_url": "章节链接",
 }
 
 # ---------------------------------------------------------------- FILL_SPECS
@@ -59,8 +61,22 @@ FILL_SPECS = {
         "toc_url": {"kind": "link"},
     },
     "search": {
+        # 列表容器：引擎 `BookList.analyzeBookList` 是**两段式**——先用它取条目元素，
+        # 再在**每个条目里**取 name/bookUrl。没有它就是「列表为空」（实测 2026-10-26：
+        # 只有合并链 `.imgBox@tag.li@tag.a@href` 时引擎 total=0，补上容器后 total=1）。
+        # `list` 这个 kind 让候选取样走「一组同形元素」，与容器规则的形态对得上
+        # （`rule_shape` 判 `container`，`can_fast_verify` 放行）。
+        "book_list": {"kind": "list"},
+        # 下面是**条目内规则**（相对条目元素），不是从整页起的完整链
         "book_url": {"kind": "link", "anchor": ("items", "book_url")},
         "name": {"kind": "text", "anchor": ("items", "name")},
+    },
+    #: 目录段：与搜索段同构——`chapterList` 是**条目容器**，另两个是条目内规则
+    #: （上游 `BookChapterList` 先按 `chapterList` 切条目、再逐条目取名称与链接）。
+    "toc": {
+        "chapter_list": {"kind": "list"},
+        "chapter_name": {"kind": "text"},
+        "chapter_url": {"kind": "link"},
     },
     #: 正文步：`webJs` 是页面脚本（跑在页面环境里，它的结果成为这一步的响应体），
     #: `content` 是取值规则——材料是脚本输出时，它读的 `result` 就是 webJs 的产出。
@@ -89,6 +105,61 @@ def segment_fields(step: str) -> List[str]:
     「按 kind 分组」——这里只回答「这一段有哪些字段」）。
     """
     return list((FILL_SPECS.get(step) or {}).keys())
+
+
+def container_field(step: str) -> str:
+    """这一段的列表容器字段名（`kind == "list"` 的那个）；没有就是空串。
+
+    有容器时其余字段是**条目内规则**（相对条目元素）——`BookList` / `Toc` 都是两段式。
+    它决定快验怎么跑：单跑一条条目内规则验的是「整页第一个元素」，答案与引擎相反。
+    """
+    for name in segment_fields(step):
+        if field_kind(step, name) == "list":
+            return str(name)
+    return ""
+
+
+#: 容器字段 → (源里的组, 规则名)。**只有这两个字段带容器**（搜索/目录各一个），
+#: 所以不必再维护「段 → 组」与「字段 → 驼峰名」两张表——那两张表只是为了拼出这一行。
+_CONTAINER_PATHS = {"book_list": ("ruleSearch", "bookList"),
+                    "chapter_list": ("ruleToc", "chapterList")}
+
+
+def container_rule(source: Dict[str, Any], step: str) -> str:
+    """本段列表容器在源里的当前值（搜索段 `bookList`、目录段 `chapterList`）。
+
+    容器**从源里读，不要调用方传**：它一直在源配置里，而 `fast_verify` 本来就手持整份源。
+    让前端补参数等于要求用户「先填容器才能验下一行」——顺序一乱就验不了。
+    """
+    group, rule_name = _CONTAINER_PATHS.get(container_field(step), ("", ""))
+    if not group:
+        return ""
+    return str((source.get(group) or {}).get(rule_name) or "").strip()
+
+
+def propose_fields(step: str, material_kind: str = "",
+                   page_stats: Optional[Dict[str, Any]] = None) -> List[str]:
+    """这一段**该提议哪些字段**——按材料事实裁，不靠模型自觉。
+
+    正文段有两个字段，但**只有一种情况要两个**：内容在页面变量里时，`webJs` 才是
+    必需的（把变量取出来），`content` 只负责包装。DOM 里已经有目标时，`content`
+    一条就够——这时把 `webJs` 也列给模型，它会**多写一条用不上的脚本**
+    （实测 2026-10-23 发发漫画：content 一条就取到 18 张图，模型还额外给了
+    `G_zc.contents()` 的 webJs）。
+
+    判据复用「图在不在 DOM 里」那一份（`suggest.outline_plan` 的 stats 档同一个比例）：
+    带 `src` 的图占比够高 = DOM 里有目标 → 不给 `webJs`。
+    """
+    fields = segment_fields(step)
+    if "webJs" not in fields:
+        return fields
+    from core.repair.suggest import outline_plan
+
+    plan = outline_plan({"material_kind": material_kind, "page_stats": page_stats})
+    if plan.get("mode") in ("stats", "skip"):
+        # 图不在 DOM 里（或材料不是 DOM）：内容只能在页面变量里 → 两个字段都要
+        return fields
+    return [f for f in fields if f != "webJs"]
 
 
 #: **源级字段**（不属于任何段，整个源共用）。与 `FILL_SPECS` 分开是因为落点不同：

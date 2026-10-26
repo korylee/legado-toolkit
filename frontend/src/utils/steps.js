@@ -40,6 +40,8 @@ export const RULE_FIELD_DEFS = [
   { step: "bookUrl", field: "ruleBookInfo.coverUrl", group: "ruleBookInfo", key: "cover_url", label: "详情 · 封面链接", placeholder: "class.cover img@src" },
   { step: "bookUrl", field: "ruleBookInfo.tocUrl", group: "ruleBookInfo", key: "toc_url", label: "详情 · 目录链接", placeholder: "class.list a@href" },
   { step: "toc", field: "ruleToc.chapterList", group: "ruleToc", key: "chapterList", label: "目录 · chapterList", placeholder: "class.chapter@tag.a" },
+  { step: "toc", field: "ruleToc.chapterName", group: "ruleToc", key: "chapterName", label: "目录 · 章节名", placeholder: "tag.a@text" },
+  { step: "toc", field: "ruleToc.chapterUrl", group: "ruleToc", key: "chapterUrl", label: "目录 · 章节链接", placeholder: "tag.a@href" },
   // 正文**给行内快验**（D6：按事实判，不是一刀切）：材料与规则形态对不上时按钮根本不出现
   // （判据在后端 `core.rule_try`，前端 `canFastVerify` 只为显隐）；快验只回答取没取到，
   // 正文可用性一律以「重调本步」的 verdict 为准。
@@ -82,8 +84,14 @@ const BOOKINFO_STRUCTURED_TO_RULE = Object.fromEntries(
 export const AUTOFILL_RULE_FIELDS = {
   bookUrl: BOOKINFO_STRUCTURED_TO_RULE,
   search: {
+    book_list: "ruleSearch.bookList",
     book_url: "ruleSearch.bookUrl",
     name: "ruleSearch.name",
+  },
+  toc: {
+    chapter_list: "ruleToc.chapterList",
+    chapter_name: "ruleToc.chapterName",
+    chapter_url: "ruleToc.chapterUrl",
   },
   // 正文步手写：两个字段同在 ruleContent 组（`key` 是 FILL_SPECS 的蛇形键，落点是驼峰路径）
   content: {

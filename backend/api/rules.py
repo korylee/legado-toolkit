@@ -385,7 +385,7 @@ async def rule_try(body: RuleTryRequest, st=Depends(get_store)):
     # 里的 `page_vars`（侧车采的形状），没有它就给「答不了」而不是跑出一句假的取不到。
     from core.rule_try import fast_verify, refusal_code, refusal_result
 
-    why = refusal_code(body.step, body.field or "", kind, body.rule, runtime)
+    why = refusal_code(body.step, body.field or "", kind, body.rule, runtime, source)
     if why:
         return refusal_result(why)
     return await asyncio.to_thread(

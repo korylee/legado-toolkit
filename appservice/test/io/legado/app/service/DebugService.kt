@@ -148,6 +148,7 @@ object DebugService {
         var tryBody = ""
         var tryStep = ""
         var tryRule = ""
+        var tryItem = ""
         var tryBase = ""
         var file: String? = null
         var key = ""
@@ -161,6 +162,7 @@ object DebugService {
                 "--try-body" -> { tryBody = args[++i] }
                 "--try-step" -> { tryStep = args[++i] }
                 "--try-rule" -> { tryRule = args[++i] }
+                "--try-item" -> { tryItem = args[++i] }
                 "--try-base" -> { tryBase = args[++i] }
                 "--file" -> { file = args[++i] }
                 "--key" -> { key = args[++i] }
@@ -181,7 +183,7 @@ object DebugService {
                 System.err.println("[appservice] --try 缺参数：file/try-body/try-step/out 都要给")
                 return BAD_INPUT
             }
-            return runTry(file, tryBody, tryStep, tryRule, tryBase, outPath)
+            return runTry(file, tryBody, tryStep, tryRule, tryBase, outPath, tryItem)
         }
         if (file.isNullOrBlank() || key.isBlank() || outPath.isBlank()) {
             System.err.println("[appservice] 缺参数：file/key/out 都要给（timeout 可选）")
@@ -201,12 +203,13 @@ object DebugService {
      * 4=入参/IO 错误。
      */
     private fun runTry(file: String, bodyPath: String, step: String,
-                       rule: String, baseUrl: String, outPath: String): Int {
+                       rule: String, baseUrl: String, outPath: String,
+                       itemRule: String = ""): Int {
         ValidateService.ensureStarted()
         return try {
             val source = io.legado.app.service.RuleTry.readSource(file)
             val body = java.io.File(bodyPath).readText(Charsets.UTF_8)
-            val result = RuleTry.run(source, body, baseUrl, step, rule)
+            val result = RuleTry.run(source, body, baseUrl, step, rule, itemRule)
             java.io.File(outPath).writeText(
                 ServiceJson.toJsonObject(result).toString(), Charsets.UTF_8)
             OK

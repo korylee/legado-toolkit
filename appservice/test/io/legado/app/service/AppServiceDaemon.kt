@@ -238,6 +238,7 @@ object AppServiceDaemon {
         val step = req.str("step")
         val rule = req.str("rule")
         val baseUrl = req.str("base_url")
+        val itemRule = req.str("item_rule")
         if (sourcePath.isBlank() || bodyPath.isBlank() || step.isBlank()) {
             out.println(respond(id, DebugService.BAD_INPUT, 0,
                 "缺参数：file（源 JSON）/ body_path（页面 HTML）/ step 都要给"))
@@ -253,7 +254,7 @@ object AppServiceDaemon {
             ValidateService.ensureStarted()
             val source = RuleTry.readSource(sourcePath)
             val body = java.io.File(bodyPath).readText(Charsets.UTF_8)
-            DebugService.OK to RuleTry.run(source, body, baseUrl, step, rule)
+            DebugService.OK to RuleTry.run(source, body, baseUrl, step, rule, itemRule)
         } catch (e: Throwable) {
             System.err.println("[appservice] daemon rule_try 异常: ${e.stackTraceStr()}")
             DebugService.BAD_INPUT to mapOf<String, Any>(

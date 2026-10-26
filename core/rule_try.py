@@ -38,8 +38,18 @@ UNFAITHFUL_RESULT_ABSENT = "result_absent"
 #: 页面脚本要验得动，得先有**页面变量的形状**（`page_vars`，侧车采集）：老侧车 / 设备
 #: 通道没采到它时，注进 `params` 的是空对象，脚本必然取不到东西——那结论是假的。
 UNFAITHFUL_PAGE_VARS_ABSENT = "page_vars_absent"
+#: 条目内规则缺容器：搜索段的 `book_url` / `name` 是**相对条目元素**的规则，引擎
+#: 先按 `book_list` 切条目再逐条目取。单跑一条完整链验的是「整页第一个元素」，
+#: 答案与引擎不一致——那正是「快验说通过、落源后列表为空」（2026-10-26 实测）。
+UNFAITHFUL_NEEDS_CONTAINER = "needs_container"
+#: 容器只选中 1 条：列表容器该是「一个条目一条」，选中 1 条通常意味着规则写成了
+#: **整块容器**（`#chapterList_ul_1` 而不是 `#chapterList_ul_1 li`），引擎会把整块
+#: 当一个条目、把所有章节名挤进一条（实测 2026-10-26 发发漫画目录页：整块 count=1，
+#: 按条目 count=233）。**只提醒、不否决**：真实存在只有一条结果的页面。
+UNFAITHFUL_SINGLE_ITEM = "single_item"
 UNFAITHFUL_CODES = (UNFAITHFUL_RULE_EMPTY, UNFAITHFUL_MATERIAL_IS_SCRIPT,
-                    UNFAITHFUL_RESULT_ABSENT, UNFAITHFUL_PAGE_VARS_ABSENT)
+                    UNFAITHFUL_RESULT_ABSENT, UNFAITHFUL_PAGE_VARS_ABSENT,
+                    UNFAITHFUL_NEEDS_CONTAINER, UNFAITHFUL_SINGLE_ITEM)
 
 
 def rule_shape(rule: str) -> str:
@@ -85,25 +95,33 @@ def refusal_result(reason_code: str) -> Dict[str, Any]:
 
 
 def refusal_code(step: str, field: str, material_kind: str, rule: str,
-                 runtime: Optional[Dict[str, Any]] = None) -> str:
+                 runtime: Optional[Dict[str, Any]] = None,
+                 source: Optional[Dict[str, Any]] = None) -> str:
     """这条快验**跑不跑得了**：返回原因码，空串 = 可以跑。**不跑引擎、不发请求。**
 
-    两半判据都收在这里（原先 HTTP 端点与 `agent_loop` 各写一遍，两处还会给出相反结论）：
-      - 字段族：页面脚本（`webJs`）跑在页面环境，靠 `page_vars` 合成 `params` 才能验
-        （合成在 :func:`webjs_check`）——没有那份事实就验不了；
-      - 材料 × 规则形态：交给 :func:`unfaithful_reason`。
+    三半判据（原先 HTTP 端点与 `agent_loop` 各写一遍，两处还会给出相反结论）：
+      - 字段族：页面脚本靠 `page_vars` 合成 `params` 才验得动（:func:`webjs_check`）；
+      - 容器：本段有条目内规则时，源里得有容器才按两段式验（见 :func:`fast_verify`）；
+      - 材料 × 规则形态：:func:`unfaithful_reason`。
     """
-    from core.autofill import field_kind
+    from core.autofill import container_field, container_rule, field_kind
 
-    if field and field_kind(step, field) == "script":
+    kind = field_kind(step, field) if field else "text"
+    if kind == "script":
         return "" if (runtime or {}).get("page_vars") else UNFAITHFUL_PAGE_VARS_ABSENT
+    if kind != "list" and container_field(step) and not container_rule(source or {}, step):
+        return UNFAITHFUL_NEEDS_CONTAINER
     return unfaithful_reason(material_kind, rule)
-
 
 def rule_try(source: Dict[str, Any], step: str, body: str, base_url: str,
              rule: str, daemon_info: Optional[Dict[str, Any]] = None,
+             item_rule: str = "",
              ) -> Dict[str, Any]:
     """跑一条规则。返回引擎的 ``{ok, values, count, error}``（形状闸门后）。
+
+    ``item_rule`` 是**条目内规则**（相对条目元素，如 ``tag.a@href``）：引擎对
+    search/toc 是两段式（先按 ``bookList``/``chapterList`` 取条目、再逐条目取值），
+    只跑一条完整链验不到这种形态——必须把容器和条目内取法一起给。
 
     ``daemon_info`` 给了就直接用那个端口（调用方已经 ensure 过）；没给就自己
     ensure 一次。daemon 走不通时**回落 Gradle 一次性跑**（``--try`` 分派），
@@ -117,7 +135,7 @@ def rule_try(source: Dict[str, Any], step: str, body: str, base_url: str,
             daemon_info = ensure()
         except DaemonError as e:
             return _gradle_fallback(src_path, body_path, step, rule, base_url,
-                                    "常驻引擎没就绪（%s）" % e)
+                                    "常驻引擎没就绪（%s）" % e, item_rule)
     try:
         payload = {
             "id": int(uuid.uuid4().int % 1_000_000_000),
@@ -126,12 +144,13 @@ def rule_try(source: Dict[str, Any], step: str, body: str, base_url: str,
             "body_path": body_path,
             "step": str(step or ""),
             "rule": str(rule or ""),
+            "item_rule": str(item_rule or ""),
             "base_url": str(base_url or ""),
         }
         r = _exchange(payload, int(daemon_info["port"]), _DAEMON_TIMEOUT_SEC)
     except DaemonError as e:
         return _gradle_fallback(src_path, body_path, step, rule, base_url,
-                                "常驻引擎没应答（%s）" % e)
+                                "常驻引擎没应答（%s）" % e, item_rule)
     finally:
         _cleanup(body_path, src_path)
     result = _gate(r.get("result"))
@@ -145,7 +164,7 @@ def rule_try(source: Dict[str, Any], step: str, body: str, base_url: str,
 
 
 def _gradle_fallback(src_path: str, body_path: str, step: str, rule: str,
-                     base_url: str, note: str) -> Dict[str, Any]:
+                     base_url: str, note: str, item_rule: str = "") -> Dict[str, Any]:
     """一次性 Gradle 路径（`--try` 分派）：先编译再跑，慢但一定跑得对。
 
     参数文件写独立路径（不碰批量校验共用的 args.properties——那会被正在跑的
@@ -166,6 +185,7 @@ def _gradle_fallback(src_path: str, body_path: str, step: str, rule: str,
         extra=[("try_body", pathlib.Path(body_path).as_posix()),
                ("try_step", step),
                ("try_rule", rule),
+               ("try_item", item_rule),
                ("try_base", base_url)])
     try:
         env = {**os.environ, "LEGADO_APPSERVICE_ARGS": str(args_path)}
@@ -274,11 +294,14 @@ def fast_verify(source: Dict[str, Any], step: str, field: str, body: str, base_u
                 runtime: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """快验的**唯一执行入口**：HTTP `/rule-try` 与 `agent_loop._try` 都调它。
 
-    调用方应先问 :func:`refusal_code`（那里不跑引擎，因此不受试次预算约束），拿到空串
-    再来这里。页面脚本那一路**在入口再判一次**同一道闸：少一个 `page_vars` 就退回
-    「答不了」，不拿空 `params` 跑出一句假的「取不到」（AGENTS #22②：闸口放边界）。
+    调用方应先问 :func:`refusal_code`（不跑引擎、不受试次预算约束）。页面脚本那一路
+    在入口**再判一次**同一道闸（AGENTS #22②）：少一个 `page_vars` 就退回「答不了」，
+    不拿空 `params` 跑出一句假的「取不到」。
+
+    条目内规则（搜索段 `bookUrl` / `name`）自动带上源里的本段容器：引擎是两段式，
+    单跑一条验的是「整页第一个元素」，答案会与引擎相反。
     """
-    from core.autofill import field_kind
+    from core.autofill import container_rule, field_kind
 
     if field and field_kind(step, field) == "script":
         page_vars = (runtime or {}).get("page_vars") or {}
@@ -288,7 +311,37 @@ def fast_verify(source: Dict[str, Any], step: str, field: str, body: str, base_u
     why = unfaithful_reason(material_kind, rule)
     if why:
         return refusal_result(why)
+    container = container_rule(source or {}, step)
+    if container and field_kind(step, field) != "list":
+        item = _entry_rule(rule, container)
+        checked = rule_try(source, step, body, base_url, container, item_rule=item)
+        checked["rule"] = item          # 落规则用实际验过的那条（已剥掉重复前缀）
+        return checked
     return rule_try(source, step, body, base_url, rule)
+
+
+def untag(rule: str) -> str:
+    """去掉开头的裸标签限定：`div.imgBox` → `.imgBox`；`division` 不动。
+
+    别用 `str.lstrip("div ")`——它剥的是字符集，`division@tag.a` 会变成 `sion@tag.a`。
+    """
+    m = re.match(r"^[A-Za-z][A-Za-z0-9]*(?=[.#\[])", str(rule or ""))
+    return str(rule or "")[m.end():] if m else str(rule or "")
+
+
+def _entry_rule(rule: str, container: str) -> str:
+    """剥掉条目内规则里重复的容器链：`.imgBox@tag.li@tag.a@href` → `tag.a@href`。
+
+    引擎按容器切到条目后仍会在这条链里重找一遍容器，取空；容器已由本段定下，
+    剥前缀是确定性的。两种写法都试（`div.imgBox@tag.li` 与 `.imgBox@tag.li`）。
+    """
+    text = str(rule or "")
+    if not container:
+        return text
+    for head in (container, untag(container)):
+        if head and text.startswith(head + "@"):
+            return text[len(head) + 1:]
+    return text
 
 
 def _write_body(body: str) -> str:

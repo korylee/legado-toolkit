@@ -98,41 +98,57 @@ async def run_loop(html: str, structured: Dict[str, Any], source: Dict[str, Any]
         out["fields"] = rows
     budget = {"model_calls": 0, "rule_tries": 0, "model_limit_reached": False,
               "try_limit_reached": False, "model_stop": ""}
+    # 快验预算按**要提议的字段数**给：整段补全一次问好几个字段，固定 5 次会在最后一个
+    # 字段上耗尽，把「没来得及验」写成「模型提议的都没选中」（判据在
+    # `core.agent_actions.rule_try_budget`）。
+    try_budget = agent_actions.rule_try_budget(len(rows))
+
+
 
     async def _try(rule: str, field: str = "") -> Optional[Dict[str, Any]]:
         """rule_try 一次（预算内），返回结果或 None（预算尽）。
 
-        ``rule_try`` 是同步的（socket，最坏回落 ``subprocess.run`` 十分钟），而任务体
-        跑在唯一的事件循环里：直接调会把 `/api/jobs/*` 与所有界面请求一起冻住，
-        而「没有在跑的任务」正是别的请求要读的事实。放到线程池里。
-
-        **闸都在 `core.rule_try` 里**（`refusal_code` 不跑引擎、`fast_verify` 才跑）：
-        HTTP 端点与这里共用同一份，别在调用点再抄一遍。
-        原先只有第 2 道，且只在 HTTP 端点里——内部这条链照常把页面脚本送进引擎，
-        验不过之后再丢候选，结论写成「模型提议的都没选中」，**把「不该验」说成了「验不过」**
-        （2026-10-23 实测：`result = params.chapter_images.join('\\n')` 是对的，
-        因为它是页面脚本被判了「没选中」）。
+        放线程池：`rule_try` 是同步的（最坏回落 `subprocess.run` 十分钟），而任务体跑在
+        唯一的事件循环里，直调会把所有界面请求一起冻住。闸都在 `core.rule_try`。
         """
         from core.rule_try import fast_verify, refusal_code, refusal_result
 
-        why = refusal_code(step, field, material_kind, rule, runtime)
+        src = _container_source(step, rows, source)
+        why = refusal_code(step, field, material_kind, rule, runtime, src)
         if why:
             # 不是失败，是**验不了**：规则照落、标 pending_engine，验收交重调本步
             return refusal_result(why)
-        if budget["rule_tries"] >= agent_actions.RULE_TRY_PER_TURN:
+        if budget["rule_tries"] >= try_budget:
             budget["try_limit_reached"] = True
             return None
         budget["rule_tries"] += 1
-        return await asyncio.to_thread(fast_verify, source, step, field, html, base_url,
+        return await asyncio.to_thread(fast_verify, src, step, field, html, base_url,
                                        rule, material_kind, runtime)
 
-    def _usable(checked: Optional[Dict[str, Any]]) -> bool:
+    def _single_item(checked: Dict[str, Any], field: str) -> bool:
+        """这条候选是**列表容器且只选中 1 条**吗（判据在 `core.rule_try`）。
+
+        容器该是「一个条目一条」：只选中 1 条说明规则写成了**整块容器**，引擎会把整块
+        当一个条目、把几百章挤进一条（实测 2026-10-26 发目目录页：整块 count=1，
+        按条目 count=233）。这种候选**不收**——收下比空着更坏：它会让后面「重调验收」
+        看起来通过，而目录只有一章。
+        """
+        from core.autofill import field_kind
+
+        return (field_kind(step, field) == "list"
+                and int(checked.get("count") or 0) == 1)
+
+    def _usable(checked: Optional[Dict[str, Any]], field: str = "") -> bool:
         """这条候选能不能收下。
 
         **快验答不忠实（`unfaithful`）时也收**：它只有否决权——收下但不升格
         （`_accept` 里标 `pending_engine`，验收仍看重调本步）。
+        例外是列表容器只选中 1 条（`:func:`_single_item`）：那不是「验不了」，
+        是**验出来了、结果是错的形态**，收下会让验收看起来通过。
         """
         if not checked:
+            return False
+        if field and _single_item(checked, field):
             return False
         if checked.get("unfaithful"):
             return True
@@ -189,11 +205,9 @@ async def run_loop(html: str, structured: Dict[str, Any], source: Dict[str, Any]
         group_fields = [r["field"] for r in group]
         # 取样类型不能叫 kind：那是事件账本的保留键（事件名），撞了会把事件名换掉
         _emit("ai_family", sample_kind=kind, fields=group_fields)
-        proposals, stop = await _propose_group(html, structured, step, kind, group,
-                                               on_llm=on_llm,
-                                               runtime=runtime, source=source,
-                                               material_kind=material_kind,
-                                               page_stats=page_stats)
+        proposals, stop = await _propose_group(
+            _proposal_env(html, step, runtime, source, material_kind, page_stats, rows),
+            structured, kind, group, on_llm=on_llm)
         if proposals is None:
             # llm 未配置 / 调用失败 / 输出不是 JSON：停整段 AI（同因，逐行报是噪音），
             # 但原因**原样带出**（AGENTS #4）——不冒充「次数已用完」
@@ -213,8 +227,9 @@ async def run_loop(html: str, structured: Dict[str, Any], source: Dict[str, Any]
                 _emit("ai_try", field=field, rule=rule, ok=bool(checked and checked.get("ok")),
                       count=int((checked or {}).get("count") or 0),
                       error=str((checked or {}).get("error") or "")[:200])
-                if _usable(checked):
-                    _accept(row, rule, why, checked)
+                if _usable(checked, field):
+                    # 落的是**实际验过的那条**（`_try` 可能剥掉了重复的容器前缀）
+                    _accept(row, str(checked.get("rule") or rule), why, checked)
                     accepted = True
                     break
             if accepted:
@@ -233,8 +248,8 @@ async def run_loop(html: str, structured: Dict[str, Any], source: Dict[str, Any]
                       ok=bool(checked2 and checked2.get("ok")),
                       count=int((checked2 or {}).get("count") or 0),
                       error=str((checked2 or {}).get("error") or "")[:200])
-                if _usable(checked2):
-                    _accept(row, str(alt["rule"]),
+                if _usable(checked2, field):
+                    _accept(row, str(checked2.get("rule") or alt["rule"]),
                             "模型提议未选中，改用候选头名（轻量验证取到值）", checked2)
                     _emit("ai_accepted", field=field, rule=str(row.get("rule") or ""),
                           count=int((row.get("try_result") or {}).get("count") or 0),
@@ -287,16 +302,94 @@ def run_loop_sync(html: str, structured: Dict[str, Any], source: Dict[str, Any],
                                 page_stats=page_stats))
 
 
-async def _propose_group(html: str, structured: Dict[str, Any], step: str,
+def _accepted_container(step: str, rows: List[Dict[str, Any]]) -> Tuple[str, str]:
+    """本轮**已接受**的列表容器：`(源里的路径, 规则值)`；还没定就是两个空串。
+
+    两处都要它：提示词要把容器当事实交给模型（`proposal_ctx.known_container`），
+    快验要把容器并进源（`container_rule` 靠它做两段式）。
+    """
+    from core.autofill import _CONTAINER_PATHS, container_field
+
+    name = container_field(step)
+    group, rule_name = _CONTAINER_PATHS.get(name, ("", ""))
+    if not (group and rule_name):
+        return "", ""
+    row = next((r for r in rows if r.get("field") == name and r.get("rule")), None)
+    return ("%s.%s" % (group, rule_name), str(row["rule"])) if row else ("", "")
+
+
+def _container_source(step: str, rows: List[Dict[str, Any]],
+                      source: Dict[str, Any]) -> Dict[str, Any]:
+    """把本轮已接受的容器并进源——`fast_verify` 靠它做两段式。
+
+    补全整段时容器是这一轮才生成的，`source`（调用方给的）里还是空的。不并进去，
+    验条目内规则时 `container_rule` 读到空 → 走单条路径 → 验的是「整页第一个匹配」，
+    与引擎的「逐条目取」不是一回事（实测 2026-10-26：目录页 `chapterUrl` 就这样在
+    整页上「通过」，落源后 233 条全部回落成目录页地址）。
+    """
+    path, value = _accepted_container(step, rows)
+    if not path:
+        return source
+    group, rule_name = path.split(".", 1)
+    return {**source, group: {**(source.get(group) or {}), rule_name: value}}
+
+
+def _proposal_env(html: str, step: str, runtime: Optional[Dict[str, Any]],
+                  source: Optional[Dict[str, Any]], material_kind: str,
+                  page_stats: Optional[Dict[str, Any]],
+                  rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """一次提议的**基础上下文**：与具体是哪一族字段无关的那些键。
+
+    原先这些值作为 7 个参数交给 `_propose_group`、它再逐个挑进 ctx，同一次运行里
+    每个字段族都重复挑一遍。收在这里之后 `_propose_group` 只补「本族是哪几个字段」。
+    """
+    env: Dict[str, Any] = {"html": html, "step": step}
+    # 页面里的候选数据源（渲染后枚举的全局对象/数组，只有形状）。正文的地址常常不在
+    # DOM 里而在某个全局变量上，而**变量名不能猜**——所以把清单原样交给模型判。
+    globals_ = (runtime or {}).get("globals")
+    if isinstance(globals_, list) and globals_:
+        # **降权不删**：按「像不像数据」排序取前 N，并把「还有几条没列」带出去——只列
+        # 前 N 条不说剩下的，模型会把「没列出来」读成「不存在」（AGENTS #12）。
+        from core.app_debug import rank_globals
+
+        kept, dropped = rank_globals(globals_, RUNTIME_PROMPT_ITEMS)
+        if kept:
+            env["runtimes"] = kept
+            total_dropped = dropped + int(((runtime or {}).get("globals_dropped") or 0))
+            if total_dropped > 0:
+                env["runtime_dropped"] = total_dropped
+    # 页面变量各键装的是什么（类型 / 条数 / 首项样例）：光有键名时所有键看起来一样，
+    # 模型只能盲选；而选错了事后也验不出来（都能「跑出内容」）。
+    page_vars = (runtime or {}).get("page_vars")
+    if isinstance(page_vars, dict) and page_vars:
+        env["page_vars"] = page_vars
+    # 源里已有的 webJs：比枚举全局更准的「数据在哪」线索（变量名是源作者选的）。
+    webjs = str(((source or {}).get("ruleContent") or {}).get("webJs") or "").strip()
+    if webjs:
+        env["known_webjs"] = webjs
+    # 本段已定的容器：模型看不到源里刚生成的那一格，不给它就只能从大纲猜
+    # 「条目内规则从哪起」，猜偏时带上容器祖先（引擎取空）。
+    path, value = _accepted_container(step, rows)
+    if path:
+        env["known_container"] = {path: value}
+    # 材料种类与页面统计：**判据在 `core.repair.suggest.outline_plan`**，这里只转交事实。
+    # 少了这两项，材料不是 DOM 时也会硬压大纲（喂一堆 URL 给模型当结构）。
+    if material_kind:
+        env["material_kind"] = material_kind
+    if isinstance(page_stats, dict):
+        env["page_stats"] = page_stats
+    return env
+
+
+async def _propose_group(env: Dict[str, Any], structured: Dict[str, Any],
                          kind: str, group: List[Dict[str, Any]],
                          on_llm: Optional[Callable[[Dict[str, Any]], None]] = None,
-                         runtime: Optional[Dict[str, Any]] = None,
-                         source: Optional[Dict[str, Any]] = None,
-                         material_kind: str = "",
-                         page_stats: Optional[Dict[str, Any]] = None,
                          ) -> Tuple[Optional[Dict[str, List[Dict[str, str]]]], str]:
     """一族字段（同取样类型）的模型提议。返回 ``({field: [candidates]}, "")`` 或
     ``(None, 终止原因)``。
+
+    ``env`` 是 :func:`_proposal_env` 组好的基础上下文（与哪一族无关的部分）；
+    这里只补「本族是哪几个字段」。
 
     ``FIELD_LABELS`` 在这里是**给人看的标签**（提示词里的「要的是哪个字段」），
     权威词表在前端 RULE_FIELD_DEFS / Kotlin BOOKINFO_FIELD_LABELS；取样类型
@@ -310,11 +403,10 @@ async def _propose_group(html: str, structured: Dict[str, Any], step: str,
     """
     from core.repair.suggest import suggest_many
 
+    step = str(env.get("step") or "")
     proposal_ctx: Dict[str, Any] = {
-        "html": html,
-        "step": step,
-        "step_label": "、".join(FIELD_LABELS.get(r["field"], r["field"])
-                                for r in group),
+        **env,
+        "step_label": "、".join(FIELD_LABELS.get(r["field"], r["field"]) for r in group),
         "fields": [
             {"field": r["field"],
              "want_label": FIELD_LABELS.get(r["field"], r["field"]),
@@ -325,36 +417,6 @@ async def _propose_group(html: str, structured: Dict[str, Any], step: str,
             for r in group
         ],
     }
-    # 页面里的候选数据源（渲染后枚举的全局对象/数组，只有形状）。正文的地址常常不在
-    # DOM 里而在某个全局变量上，而**变量名不能猜**——所以把清单原样交给模型判。
-    # 已有 `webJs` 的源（期 B）把那条规则当线索一并给出去：它本身就是「数据在哪」的答案。
-    globals_ = (runtime or {}).get("globals")
-    if isinstance(globals_, list) and globals_:
-        # **降权不删**：按「像不像数据」排序取前 N（数组优先、方法袋靠后），并把
-        # 「还有几条没列」带出去——只列前 N 条不说剩下的，模型会把「没列出来」读成
-        # 「不存在」（AGENTS #12）。排序判据在 `core.app_debug.data_likeness`。
-        from core.app_debug import rank_globals
-
-        kept, dropped = rank_globals(globals_, RUNTIME_PROMPT_ITEMS)
-        if kept:
-            proposal_ctx["runtimes"] = kept
-            total_dropped = dropped + int(((runtime or {}).get("globals_dropped") or 0))
-            if total_dropped > 0:
-                proposal_ctx["runtime_dropped"] = total_dropped
-    # 页面变量各键装的是什么（类型 / 条数 / 首项样例）：光有键名时所有键看起来一样，
-    # 模型只能盲选；而选错了事后也验不出来（都能「跑出内容」）。判据在 `runtime_map`。
-    page_vars = (runtime or {}).get("page_vars")
-    if isinstance(page_vars, dict) and page_vars:
-        proposal_ctx["page_vars"] = page_vars
-    webjs = str(((source or {}).get("ruleContent") or {}).get("webJs") or "").strip()
-    if webjs:
-        proposal_ctx["known_webjs"] = webjs
-    # 材料种类与页面统计：**判据在 `core.repair.suggest.outline_plan`**，这里只转交事实。
-    # 少了这两项，材料不是 DOM 时也会硬压大纲（喂一堆 URL 给模型当结构）。
-    if material_kind:
-        proposal_ctx["material_kind"] = material_kind
-    if isinstance(page_stats, dict):
-        proposal_ctx["page_stats"] = page_stats
     try:
         proposals = await suggest_many(proposal_ctx)
     except Exception as e:

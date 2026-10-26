@@ -49,6 +49,7 @@ class DebugServiceLauncher {
         if (!tryBody.isNullOrBlank()) {
             val tryStep = props.getProperty("try_step") ?: ""
             val tryRule = props.getProperty("try_rule") ?: ""
+            val tryItem = props.getProperty("try_item") ?: ""
             val tryBase = props.getProperty("try_base") ?: ""
             val tryFile = props.getProperty("file") ?: ""
             val tryOut = props.getProperty("out") ?: ""
@@ -56,6 +57,7 @@ class DebugServiceLauncher {
             val code = DebugService.main(listOf(
                 "--file", tryFile, "--try", "--try-body", tryBody,
                 "--try-step", tryStep, "--try-rule", tryRule,
+                "--try-item", tryItem,
                 "--try-base", tryBase, "--out", tryOut).toTypedArray())
             println("APPSERVICE-LAUNCHER(rule_try): done, code=$code")
             if (code != DebugService.OK) {

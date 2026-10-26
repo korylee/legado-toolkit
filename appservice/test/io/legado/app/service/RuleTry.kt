@@ -46,6 +46,7 @@ internal object RuleTry {
         baseUrl: String,
         step: String,
         rule: String,
+        itemRule: String = "",
     ): Map<String, Any> = runBlocking {
         val ruleText = rule.trim()
         if (ruleText.isBlank()) {
@@ -57,9 +58,9 @@ internal object RuleTry {
         try {
             when (step) {
                 "bookUrl" -> single(source, body, baseUrl, ruleText)
-                "toc" -> list(source, body, baseUrl, ruleText)
+                "toc" -> list(source, body, baseUrl, ruleText, itemRule)
                 "content" -> single(source, body, baseUrl, ruleText)
-                "search", "explore" -> list(source, body, baseUrl, ruleText)
+                "search", "explore" -> list(source, body, baseUrl, ruleText, itemRule)
                 else -> fail("未知步骤：%s（支持 search / explore / bookUrl / toc / content）".format(step))
             }
         } catch (e: Throwable) {
@@ -87,12 +88,18 @@ internal object RuleTry {
         }
     }
 
-    /** 列表规则（search/explore/toc 同一口径）：getElements 取条目，条目上取文本。 */
+    /** 列表规则（search/explore/toc 同一口径）：getElements 取条目，条目上取值。
+     *
+     *  ``itemRule`` 是**条目内规则**（相对条目元素，如 `tag.a@href`）：引擎是两段式
+     *  （`BookList.analyzeBookList` 先按 bookList 取条目、再逐条目取 name/bookUrl），
+     *  只有先切条目才连得上。不给它就取条目文本（旧的单条列表口径）。
+     */
     private suspend fun list(
         source: BookSource,
         body: String,
         baseUrl: String,
         rule: String,
+        itemRule: String = "",
     ): Map<String, Any> {
         val analyzer = AnalyzeRule(RuleData(), source).setContent(body, baseUrl)
         analyzer.setCoroutineContext(coroutineContext)
@@ -100,11 +107,18 @@ internal object RuleTry {
         if (elements.isEmpty()) {
             return fail("取到 0 条（选择器没选中任何条目）")
         }
-        // 条目内取文本用「text」兜底：rule_try 的规则是外部给的整条列表规则，
-        // 没有单独的 chapterName 可依——条目文本就是用户要看的东西。
+        val inner = itemRule.trim().ifBlank { "text" }
         val values = elements.take(VALUES_MAX).map { el ->
             val item = AnalyzeRule(RuleData(), source).setContent(el)
-            item.getString("text").take(VALUE_MAX)
+            item.getString(inner).take(VALUE_MAX)
+        }
+        // 「选中了条目」与「从条目里取到了值」是两件事：条目内规则找的是条目里的
+        // 某个子节点或属性，取不到时每条都是空串，而元素数是够的。只报条数会把
+        // 「这条规则取不到东西」说成通过（实测 2026-10-26：`.txtA@href` 取空——那个
+        // `a` 没有 href——却因为 `li` 选中 1 条判 ok，落源后 bookUrl 回落成搜索页
+        // 地址，引擎照样 pass）。判据与 single 的 `value.isBlank()` 对齐。
+        if (values.all { it.isBlank() }) {
+            return fail("选中 %d 条，但条目内规则没取到值".format(elements.size))
         }
         return ok(values, elements.size)
     }

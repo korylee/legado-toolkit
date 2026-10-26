@@ -38,7 +38,10 @@ class AgentLoopTests(unittest.TestCase):
         self.assertTrue(rows["name"]["try_result"]["ok"])
         self.assertGreater(out["budget"]["model_calls"], 0)
         self.assertFalse(out["budget"]["model_limit_reached"], "三族各一次，没超预算")
-        self.assertTrue(out["budget"]["try_limit_reached"])
+        # 预算按字段数给（详情段 8 个字段 ≥ 每字段 3 次），每个字段第一条候选就中
+        # 的正常路径**不该触顶**——触顶会把「没来得及验」写成「没选中」（判据在
+        # `core.agent_actions.rule_try_budget`）。
+        self.assertFalse(out["budget"]["try_limit_reached"])
 
     def test_model_stop_reason_reaches_the_caller(self):
         """模型没配/失败：原因在 budget.model_stop 里，**不冒充「次数已用完」**
@@ -102,11 +105,15 @@ class AgentLoopTests(unittest.TestCase):
         self.assertIn("候选头名", rows["name"]["ai"]["why"])
 
     def test_try_budget_stops_and_flags(self):
-        """rule_try 预算尽：剩余行标未自查（try_result=None），budget 说触顶。"""
+        """rule_try 预算尽：剩余行标未自查（try_result=None），budget 说触顶。
+
+        预算按**要提议的字段数**算（`core.agent_actions.rule_try_budget`），所以这里
+        钉的是那个函数而不是常量——patch 常量已经不改预算了。
+        """
         results = [{"ok": True, "values": ["v"], "count": 1, "error": ""}]
         with mock.patch("core.repair.suggest.suggest_many", _patch_suggest()), \
              mock.patch("core.rule_try.rule_try", _patch_try(results)):
-            with mock.patch.object(agent_actions, "RULE_TRY_PER_TURN", 0):
+            with mock.patch.object(agent_actions, "rule_try_budget", lambda n: 0):
                 out = agent_loop.run_loop_sync(HTML, {}, SOURCE, "http://x",
                                                "bookUrl")
         self.assertTrue(out["budget"]["try_limit_reached"])
