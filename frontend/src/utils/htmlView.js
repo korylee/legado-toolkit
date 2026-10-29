@@ -216,6 +216,13 @@ export function formatHtml(html, options = {}) {
   return out.join("\n");
 }
 
+/**
+ * 一次放进 DOM 的材料字符数上限。整页可达数十万字符（页面原文上限 40 万），
+ * 全量渲染会卡顿；分块 + 「加载更多」的步长**只有这一个数**——工作台与证据面板共用，
+ * 各写一份的话两块材料的长短会不一样，读的人以为其中一块被截了。
+ */
+export const MATERIAL_CHUNK = 20000;
+
 /** Display-only formatting; original bytes remain the source for copy and search. */
 export function formatMaterial(raw) {
   const text = String(raw == null ? "" : raw);

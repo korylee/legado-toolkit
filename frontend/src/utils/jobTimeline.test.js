@@ -100,3 +100,16 @@ test("归组对空输入与脏输入不抛", () => {
   assert.deepEqual(groupTimelineLines(null), []);
   assert.deepEqual(groupTimelineLines([null, undefined]), []);
 });
+
+test("一键生成的事件说人话：段名在前，动作在后", () => {
+  // 段名走 STEP_LABELS（唯一那份），事件文本由本文件取词——面板只显示"当前在做什么"，
+  // 那句必须能读（落 default 会在界面上打出 `stage_ai_started` 这种裸码）
+  assert.equal(
+    formatTimelineEvent({ kind: "stage_debug_done", stage: "search", cost_sec: 41.5 }).text,
+    "搜索 · 调试完成（41.5 秒）");
+  assert.equal(
+    formatTimelineEvent({ kind: "stage_ai_started", stage: "bookUrl", fields: ["name"] }).text,
+    "详情 · AI 补全 1 个字段");
+  assert.equal(
+    formatTimelineEvent({ kind: "stage_verified", stage: "toc" }).text, "目录 · 通过");
+});

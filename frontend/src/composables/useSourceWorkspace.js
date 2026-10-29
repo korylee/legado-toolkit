@@ -27,6 +27,10 @@ export function createSourceWorkspace() {
     //: 另存为入口、保存前的 exists 探测、编辑态「源地址可否改」都以它为基准
     savedUrl: "",
     loading: false,
+    //: **调试材料**：最近一次调试的页面与各步地址。编辑页的快验 / AI 补全 / 「从正文
+    //: 起跑」都要它——那些动作的材料挂在调试任务行上，而编辑页从来没有任务号。
+    //: 由壳在打开时查一次（`/rules/last-debug`），调试跑完时由工作台写入。
+    debug: { jobId: "", at: "", pages: [], steps: [] },
   });
 
   const dirty = computed(() => state.draftRevision !== state.savedRevision);
@@ -134,6 +138,27 @@ export function createSourceWorkspace() {
     state.mode = "debug";
   }
 
+  /** 记下「最近一次调试」的材料。跑完调试由工作台写，打开工作区由壳查。 */
+  function setDebugMaterial({ jobId, at, pages, steps } = {}) {
+    state.debug = {
+      jobId: String(jobId || ""),
+      at: String(at || ""),
+      pages: Array.isArray(pages) ? pages : [],
+      steps: Array.isArray(steps) ? steps : [],
+    };
+  }
+
+  /** 该步的页面材料（`page_id` 相同即同一页）。没有给 null，调用方据此提示。 */
+  function pageOfStep(stepName) {
+    const step = (state.debug.steps || []).find((s) => s && s.name === stepName);
+    if (!step) return null;
+    return (state.debug.pages || []).find((p) => p && p.page_id === step.page_id) || null;
+  }
+
+  //: 有没有材料可用（快验 / AI 补全的前提）。**不看新鲜度**：材料是当时抓的事实，
+  //: 快验只是粗判；过旧要在界面上写明来源，不用闸门替用户做决定。
+  const hasDebugMaterial = computed(() => !!state.debug.jobId);
+
   function setMode(mode) {
     state.mode = mode === "edit" ? "edit" : "debug";
   }
@@ -195,6 +220,9 @@ export function createSourceWorkspace() {
     cancelSaveAs,
     enterDebug,
     setMode,
+    setDebugMaterial,
+    pageOfStep,
+    hasDebugMaterial,
     discard,
     requestClose,
     close,

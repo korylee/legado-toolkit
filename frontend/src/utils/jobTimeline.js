@@ -1,3 +1,4 @@
+import { STEP_LABELS } from "./steps.js";
 // 执行时间线的事件文案（jvm-batch-timeline）——**唯一的一份**。
 //
 // 后端给的是骨架事件（ts + kind + 字段），这里负责说成人话：主行只展示必要的执行方式
@@ -24,13 +25,86 @@ function aiLine(ev) {
   return agentEventLine(ev);
 }
 
+const RENDER_UPGRADE_KINDS = new Set([
+  "ai_render_upgraded", "ai_render_unsettled", "ai_render_skipped",
+  "source_webview_applied", "source_webview_rejected", "source_webview_skipped",
+]);
+function isRenderUpgrade(kind) {
+  return RENDER_UPGRADE_KINDS.has(String(kind || ""));
+}
+
+/** 渲染升级那三条的取词（材料层动作，不是一轮补全的逐字段过程）。 */
+function renderUpgradeLine(ev) {
+  const sec = (v) => (v != null ? `${v} 秒` : "");
+  switch (ev.kind) {
+    case "ai_render_upgraded": {
+      // 耗时是这次升级花的；`settled` 是「页面填数据填完了没」——这份材料能不能当
+      // 内容看的关键事实（实测 25 张图里 22 张还是 loading 图的那一份）。
+      const cost = ev.cost_sec != null ? `（${sec(ev.cost_sec)}）` : "";
+      if (ev.settled === false) {
+        return { text: `这一页要渲染，渲染后数据还在填${cost}——交回的可能是半成品`, tone: "warn" };
+      }
+      return { text: `这一页要渲染，已自动渲染${cost}`, tone: "info" };
+    }
+    case "source_webview_applied":
+      return { text: `已自动给 ${ev.path || "URL 规则"} 加上 webView 选项（复核通过）`, tone: "info" };
+    case "source_webview_rejected":
+      return { text: `试过给 ${ev.path || "URL 规则"} 加 webView，复核没过，已退回：${ev.reason || "原因未记录"}`, tone: "warn" };
+    case "source_webview_skipped":
+      return { text: `没有自动改源：${ev.reason || "没有可挂的位置"}`, tone: "info" };
+    case "ai_render_unsettled":
+      return { text: String(ev.reason || "页面没稳定，材料可能是半成品"), tone: "warn" };
+    default:
+      return { text: `没法自动渲染：${ev.reason || "未知原因"}`, tone: "warn" };
+  }
+}
+
 export function formatTimelineEvent(ev) {
   if (!ev || !ev.kind) return { text: "", tone: "info" };
   // AI 补全那一轮（agent_loop）：字段名与原因在 agentRun 取词，这里不落 default
+  // 渲染升级那条**也**是 `ai_` 前缀，但它不是「一轮补全的逐字段过程」——它是任务在
+  // 材料层做的一个动作，取词在本文件。先认这三个，别掉进 agentEventLine 的 default。
+  if (isRenderUpgrade(ev.kind)) return renderUpgradeLine(ev);
   if (String(ev.kind).startsWith("ai_")) return aiLine(ev);
   const n = ev.index != null ? Number(ev.index) + 1 : null;
   const at = (suffix) => (n != null ? `第 ${n} 块` + suffix : suffix);
   const sec = (v) => (v != null ? `${v} 秒` : "");
+  // 一键生成（generate_source）：四段流水线，每段是「调试 → AI 补全 → 验收」三个动作。
+  // 段名取 `STEP_LABELS`（唯一那份），不在这里再抄一张。
+  if (String(ev.kind).startsWith("stage_") || ev.kind === "generate_started"
+      || ev.kind === "generate_done" || ev.kind === "stage_skipped") {
+    const stage = ev.stage ? STEP_LABELS[ev.stage] || ev.stage : "";
+    const head = stage ? stage + " · " : "";
+    switch (ev.kind) {
+      case "generate_started":
+        return { text: `开始生成：${ev.keyword ? "关键词「" + ev.keyword + "」" : ev.url || ""}`, tone: "info" };
+      case "stage_started":
+        return { text: `${head}开始`, tone: "info" };
+      case "stage_debug_started":
+        return { text: `${head}调试页面`, tone: "info" };
+      case "stage_debug_done":
+        return { text: `${head}调试完成${ev.cost_sec != null ? "（" + sec(ev.cost_sec) + "）" : ""}`, tone: "info" };
+      case "stage_ai_started":
+        return { text: `${head}AI 补全 ${(ev.fields || []).length} 个字段`, tone: "info" };
+      case "stage_ai_done":
+        return { text: `${head}补全完成${ev.written != null ? "（写入 " + ev.written + " 条）" : ""}`, tone: "info" };
+      case "stage_rules_applied":
+        return { text: `${head}规则已写入，准备验收`, tone: "info" };
+      case "stage_verified":
+        return { text: `${head}通过`, tone: "info" };
+      case "stage_failed":
+        return { text: `${head}没过${ev.reason ? "：" + ev.reason : ""}`, tone: "error" };
+      case "stage_retry":
+        return { text: `${head}第 ${ev.round || 1} 轮重试${ev.reason ? "：" + ev.reason : ""}`, tone: "warn" };
+      case "stage_skipped":
+        return { text: `${head}跳过${ev.reason ? "：" + ev.reason : ""}`, tone: "warn" };
+      case "generate_done":
+        return { text: ev.passed ? "生成完成：四段全部通过" : `生成中止${ev.stop ? "：" + ev.stop : ""}`,
+                 tone: ev.passed ? "info" : "error" };
+      default:
+        break;
+    }
+  }
   switch (ev.kind) {
     case "batch_started":
       return { text: `开始校验：${ev.sources ?? "?"} 条源，分 ${ev.chunks ?? "?"} 块`, tone: "info" };
@@ -54,6 +128,18 @@ export function formatTimelineEvent(ev) {
       if (ev.outcome === "started") return { text: `校验引擎已就绪（首次启动 ${sec(ev.cost_sec)}）`, tone: "info" };
       if (ev.outcome === "busy") return { text: `校验引擎忙，本批未准备${ev.reason ? "：" + ev.reason : ""}`, tone: "warn" };
       return { text: `校验引擎启动失败${ev.reason ? "：" + ev.reason : ""}`, tone: "error" };
+    }
+    case "engine_preparing":
+      return { text: "准备校验引擎（冷启动约 40 秒，之后就绪）", tone: "info" };
+    case "engine_prepared": {
+      // 四档与 `jvm_daemon.prepare` 一致：ready 秒回、started 是这次真点火
+      const cost = ev.cost_sec != null ? `（${sec(ev.cost_sec)}）` : "";
+      if (ev.outcome === "ready") return { text: `校验引擎已就绪${cost}`, tone: "info" };
+      if (ev.outcome === "started") return { text: `校验引擎已启动${cost}`, tone: "info" };
+      if (ev.outcome === "busy") {
+        return { text: `校验引擎忙，本次未预热${ev.reason ? "：" + ev.reason : ""}`, tone: "warn" };
+      }
+      return { text: `校验引擎准备失败${ev.reason ? "：" + ev.reason : ""}`, tone: "error" };
     }
     case "waiting_engine":
       return { text: `等待校验引擎空闲：已等 ${sec(ev.elapsed_sec) || "?"}`, tone: "warn" };

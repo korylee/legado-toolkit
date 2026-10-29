@@ -6,6 +6,7 @@ import { computed, defineAsyncComponent, inject, ref, watch } from "vue";
 import { Close } from "@element-plus/icons-vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { getDetail, saveSource, sourceExists } from "../api/sources";
+import { lastDebug } from "../api/rules";
 import { ensureTagMeta, splitSystemUser } from "../utils/tags";
 import { normalizeForSave } from "../utils/sourceSave";
 import { useDebugSession } from "../composables/useDebugSession";
@@ -18,7 +19,7 @@ const DebugWorkbenchView = defineAsyncComponent(
 const workspace = inject(SOURCE_WORKSPACE_KEY);
 if (!workspace)
   throw new Error("SourceWorkspaceDrawer must be mounted under MainLayout");
-const { resetDebugState, loadEnvironment } = useDebugSession();
+const { resetDebugState, loadEnvironment, result: debugResult, runId } = useDebugSession();
 
 const state = workspace.state;
 const canDebug = workspace.canDebug;
@@ -51,6 +52,7 @@ watch(
     resetDebugState();
     void loadEnvironment();
     void ensureLoaded();
+    void loadDebugMaterial();
   },
 );
 
@@ -58,9 +60,49 @@ watch(
 watch(
   () => state.sourceUrl,
   (url, old) => {
-    if (state.visible && url !== old) void ensureLoaded();
+    if (state.visible && url !== old) {
+      void ensureLoaded();
+      void loadDebugMaterial();
+    }
   },
 );
+
+// 调试跑完 → 把材料留给编辑页。**在这一层做**：工作台只关心自己那一屏，
+// 而「这份材料之后要被编辑页的快验/AI 用」是工作区级的事（谁拥有状态谁负责写）。
+watch([debugResult, runId], ([r, id]) => {
+  if (!r || !id) return;
+  workspace.setDebugMaterial({
+    jobId: String(id),
+    at: nowStamp(),
+    pages: r.pages || [],
+    steps: r.steps || [],
+  });
+});
+
+/** `YYYY-MM-DD HH:MM:SS`，与任务行的 `updated_at` 同形（`last-debug` 回的就是那个） */
+function nowStamp() {
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} `
+    + `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
+/**
+ * 取这个源**最近一次调试的材料**。编辑页的快验 / AI 补全 / 「从正文起跑」都靠它。
+ *
+ * **查不到不是错误**：说明这个源还没调过，编辑页据此提示「先跑一次调试」——
+ * 弹一个红色错误只会让用户以为坏了。
+ */
+async function loadDebugMaterial() {
+  const url = String(state.sourceUrl || "").trim();
+  if (!url) return;
+  try {
+    const got = await lastDebug(url);
+    workspace.setDebugMaterial(got || {});
+  } catch (e) {
+    workspace.setDebugMaterial({});
+  }
+}
 
 //: 详情只加载一次：草稿里已是同一条 URL（编辑器交接的生成草稿）就跳过，
 //: 否则会把正在编辑的草稿静默覆盖掉。打开时 visible 与 sourceUrl 两个 watch

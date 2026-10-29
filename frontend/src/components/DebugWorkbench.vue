@@ -25,9 +25,10 @@ import { useDebugSession } from "../composables/useDebugSession";
 import { compareRuns, statusLabel } from "../utils/debugCompare";
 // 语法速查（唯一一份，编辑弹框与工作台共用）：规则输入区旁的折叠块
 import GrammarList from "./GrammarList.vue";
+// 材料文本查看器（**唯一一份**，编辑页的证据面板用的是同一个）：
+// 格式化/分块/页内搜索/高亮/复制都在它里面，这里只把「取哪一份材料」交给它
+import MaterialViewer from "./MaterialViewer.vue";
 import { stepResult, structuredList } from "../utils/debugStepResult";
-// 源码的显示层（折行缩进 + 实体展开，纯函数）：好看的和能抄的是两份东西，见 htmlView
-import { formatMaterial } from "../utils/htmlView";
 // WebView 能力边界是**运行级事实**：这里只渲染告警条
 import {
   unsupportedForStep,
@@ -43,14 +44,16 @@ import {
   networkText,
   preferredMaterial,
   runtimeText,
-  UNFAITHFUL_TEXT,
   canFastVerify,
   verifyAction,
 } from "../utils/debugMaterial";
-import { agentPlan, ruleTry, ruleOutline } from "../api/rules";
+import { agentPlan, ruleOutline } from "../api/rules";
+import { verifyFieldRule } from "../utils/ruleVerify";
+import { autofillKeyOf } from "../utils/agentRun";
 // 一轮 AI 补全的观测与收尾（**唯一一份**）：提交、逐字段事件、结果体、重挂
 import { useAgentRun } from "../composables/useAgentRun";
 import AgentRunDialog from "./AgentRunDialog.vue";
+import AgentLiveStrip from "./AgentLiveStrip.vue";
 // 在途调试的相位码 → 中文（唯一一份；后端只给码与事实）
 import { debugRunState } from "../utils/debugRun";
 // 「下一步做什么」的取词与事实组装（判据在后端 core/agent_plan，前端只送事实）
@@ -93,6 +96,9 @@ const emit = defineEmits([
   "update:modelValue",
   "rerunFrom",
   "applyRule",
+  // 后端**改了源本身**（如自动给 URL 规则加 webView）时，把整份源交回宿主：
+  // 逐个字段 patch 会漏掉「规则之外」的改动，而这里改的正是规则文本里的一段。
+  "replaceSource",
 ]);
 
 //: 运行条上那一行字。相位码与事实来自后端（`runStatus` 轮询），**词在这里出**
@@ -124,11 +130,6 @@ const finishedInBackground = computed(
 //: 算得出的不传）——历史上它们是两个独立 props，靠宿主记得传齐；现在由覆盖层
 //: 统一传 source。再要加派生输入，从这里出，别加 props。
 // explore 是发现链路的产出步（key 带 `发现::` 时后端才产出它）
-//: 每次渲染的字符数。整页 HTML 可能 100 万字符，全量进 DOM 会卡
-const RENDER_CHUNK = 20000;
-//: 搜索最多索引的命中数。整页 HTML 里搜 div / class 必然远超此数，
-//: 超限时必须显式告知，否则计数器会把「前 200 处」说成全部
-const HIT_LIMIT = 200;
 //: 空闲自动快验的等待：停止输入这么久之后才花引擎验一次（编辑期间不断重置）
 const QUICK_VERIFY_IDLE_MS = 800;
 
@@ -141,10 +142,8 @@ const materialKind = ref("outline");
 //: 用户在同一步里手选过的材料（步名 → 材料）：换步时默认材料跟着换，但**不抢用户
 //: 自己挑的那一份**；换任务清空——那是另一份材料了
 const materialPickedFor = ref({});
-//: 渲染窗口（原文字符数）：先截断再格式化，见 headRaw
-const renderLimit = ref(RENDER_CHUNK);
-const searchKey = ref("");
-const activeHit = ref(0);
+//: 查看器的句柄：规则框获得焦点时要用它把选择器灌进搜索框（`MaterialViewer.focusOn`）
+const materialViewer = ref(null);
 
 const steps = computed(() => result.value?.steps || []);
 const pages = computed(() => result.value?.pages || []);
@@ -351,7 +350,7 @@ function endMaterialDrag() {
 onUnmounted(endMaterialDrag);
 
 // —— 只读材料查看器（大纲 / 命中片段 / 整页源码 共用一套）——
-// 材料就是引擎带回或补抓的原文；格式化只改显示（formatMaterial），复制永远是原文。
+// 材料就是引擎带回或补抓的原文；格式化只改显示（MaterialViewer），复制永远是原文。
 // 大纲来自后端（`/rules/outline`，与 AI 提示词同一份实现），前端不解析 HTML。
 const outlineText = ref("");
 const outlineLoading = ref(false);
@@ -509,12 +508,7 @@ const pageOriginNote = computed(() => {
 function pickMaterial(value) {
   const step = (current.value || {}).name || "";
   materialKind.value = value;
-  renderLimit.value = RENDER_CHUNK;
   materialPickedFor.value = { ...materialPickedFor.value, [step]: value };
-}
-
-function copyMaterial() {
-  return copyRaw(materialRaw.value, "已复制材料原文");
 }
 
 // 三态圆点：fail 红 / unknown 灰 / pass 且有附注 黄 / 纯 pass 绿
@@ -548,91 +542,8 @@ function verdictLabel(verdict) {
 function verdictTagType(verdict) {
   return ({ pass: "success", fail: "danger" }[verdict]) || "info";
 }
-// 搜索在**完整原文**上做（纯字符串扫描，结果不进 DOM），最多记 HIT_LIMIT 处
-const hitOffsets = computed(() => {
-  const key = searchKey.value.trim();
-  const html = materialRaw.value;
-  if (!key || !html) return [];
-  const out = [];
-  let from = 0;
-  while (out.length < HIT_LIMIT) {
-    const i = html.indexOf(key, from);
-    if (i < 0) break;
-    out.push(i);
-    from = i + Math.max(1, key.length);
-  }
-  return out;
-});
-
-// 命中是否被 HIT_LIMIT 截断：索引已占满，且最后一处之后还能再找到
-// （只看长度不够——恰好 200 处时不该提示「命中过多」）
-const hitsTruncated = computed(() => {
-  const offsets = hitOffsets.value;
-  if (offsets.length < HIT_LIMIT) return false;
-  const key = searchKey.value.trim();
-  const html = materialRaw.value;
-  if (!key || !html) return false;
-  const last = offsets[offsets.length - 1];
-  return html.indexOf(key, last + Math.max(1, key.length)) >= 0;
-});
-
-//: 渲染窗口（按**原文**字符数算）：先截断再格式化——30 万字符整份格式化再截前
-//: 20000，等于每次重算都为看不见的部分付一遍钱（原先只在开「格式化」时付）
-const headRaw = computed(() => materialRaw.value.slice(0, renderLimit.value));
-const hasMore = computed(() => renderLimit.value < materialRaw.value.length);
-//: 屏幕上真正显示的那份：**总是格式化后的**（原文只用于复制与搜索计数）
-const headText = computed(() => formatMaterial(headRaw.value));
-
-//: 命中在**显示文本**里的位置（模板按它画高亮）：格式化会改字符偏移，原文偏移
-//: 直接拿去切片必然错位。按顺序找，第 i 处对应原文第 i 处——顺序在格式化下不变
-//: （去空白/展开实体/缩进都不会打乱命中的先后）。
-const displayHitOffsets = computed(() => {
-  const key = searchKey.value.trim();
-  const head = headText.value;
-  if (!key || !head) return [];
-  const out = [];
-  let from = 0;
-  while (out.length < HIT_LIMIT) {
-    const i = head.indexOf(key, from);
-    if (i < 0) break;
-    out.push(i);
-    from = i + Math.max(1, key.length);
-  }
-  return out;
-});
-//: 渲染窗口里应有多少处（原文口径）。与显示口径不等时说明高亮位置不全——如实说，
-//: 不假装对齐（AGENTS #12：读不到/对不上都不许当成「就是这些」）
-const hitsInWindow = computed(() => {
-  const limit = headRaw.value.length;
-  return hitOffsets.value.filter((off) => off < limit).length;
-});
-const hitsMisaligned = computed(
-  () => !!searchKey.value.trim()
-    && hitsInWindow.value !== displayHitOffsets.value.length,
-);
-
-// 把已渲染的片段按命中位置切成 [普通, 高亮, 普通, ...]
-const segments = computed(() => {
-  const head = headText.value;
-  const key = searchKey.value.trim();
-  if (!key) return [{ text: head, hit: false, index: -1 }];
-  const segs = [];
-  let cursor = 0;
-  displayHitOffsets.value.forEach((off, hitIndex) => {
-    if (off < cursor) return;
-    if (off > cursor)
-      segs.push({ text: head.slice(cursor, off), hit: false, index: -1 });
-    segs.push({
-      text: head.slice(off, off + key.length),
-      hit: true,
-      index: hitIndex,
-    });
-    cursor = off + key.length;
-  });
-  if (cursor < head.length)
-    segs.push({ text: head.slice(cursor), hit: false, index: -1 });
-  return segs;
-});
+// 搜索与分块渲染都归 `MaterialViewer`（判据在 `utils/materialView`）：这里不再自己
+// 数命中、自己切窗口——两处各写一份，长度与高亮位置迟早不一致。
 
 onMounted(() => {
   if (result.value) {
@@ -658,9 +569,6 @@ watch(result, (show) => {
       props.initialStep || (steps.value[0] && steps.value[0].name) || "";
   // 新结果 = 这一步的材料可能换了（比如这次才采到运行时形状）
   applyDefaultMaterial();
-  renderLimit.value = RENDER_CHUNK;
-  searchKey.value = "";
-  activeHit.value = 0;
 });
 
 // 「从此步重跑」完成后父组件会更新 initialStep 想定位到重跑的那一步。
@@ -681,25 +589,8 @@ const canRerun = computed(() => {
   return !!String(s.url || "").trim();
 });
 
-// 跳到第 i 处命中（i 为负则向前），必要时先扩大渲染范围
-function gotoHit(i) {
-  const total = hitOffsets.value.length;
-  if (!total) return;
-  activeHit.value = ((i % total) + total) % total;
-  const off = hitOffsets.value[activeHit.value];
-  if (off + RENDER_CHUNK > renderLimit.value)
-    renderLimit.value = off + RENDER_CHUNK;
-  nextTick(() => {
-    const el = document.getElementById("debug-hit-" + activeHit.value);
-    if (el) el.scrollIntoView({ block: "center", behavior: "smooth" });
-  });
-}
-
 function selectStep(name) {
   activeStep.value = name;
-  renderLimit.value = RENDER_CHUNK;
-  searchKey.value = "";
-  activeHit.value = 0;
 }
 
 //: 搜索跟焦点走：字段的输入框获得焦点时，把该字段规则的首段选择器灌进
@@ -714,16 +605,13 @@ function onFieldFocus(def) {
   if (!isSelector) return;
   // 焦点进规则框 = 要写选择器：材料那栏切回大纲（默认那份是「取到了什么」，不是结构）
   if (materialKind.value !== "outline") pickMaterial("outline");
-  searchKey.value = first;
-  activeHit.value = 0;
+  const focus = () => materialViewer.value?.focusOn(first);
   // 大纲还没拉过：拉回来再定位（拉取与报错都在 loadOutline 里，这里只补一次触发）
   if (!materialRaw.value) {
-    void loadOutline().then(() => {
-      if (hitOffsets.value.length) gotoHit(0);
-    });
+    void loadOutline().then(() => nextTick(focus));
     return;
   }
-  if (hitOffsets.value.length) gotoHit(0);
+  nextTick(focus);
 }
 
 //: 内联规则编辑：当前步骤的全部可编辑字段（RULE_FIELD_DEFS 同一词表），**一律平铺**
@@ -939,14 +827,15 @@ async function fieldAi(field) {
 async function runAiJob(onlyField) {
   const step = (current.value || {}).name || "bookUrl";
   const only = onlyField ? [autofillKeyOf(step, onlyField)].filter(Boolean) : [];
-  // 拿到任务号就开弹窗：过程要看现场，跑完再开等于什么也没看到
+  // 拿到任务号**不再弹遮罩**：过程就在规则区下方那条内联过程条里（
+  // `AgentLiveStrip`），等的时候照样能改规则。要翻每次调用的提示词与回答，
+  // 点过程条上的「看每次调用」——那是深入视图，不该是必经之路。
   const { jobId, done } = await agent.submit({
     debugJobId: runId.value,
     step,
     only,
     allFields: aiAllFields.value,
   });
-  if (agentDialog.value) agentDialog.value.openRun();
   if (!jobId) return;
   const result = await done;
   if (result) applyAiResult(result, { fill: true });
@@ -967,6 +856,13 @@ async function rerunAgentFields(fields) {
 
 /** 结果体兜底：过程行漏了（流接晚了）也要把验过的规则落进输入框。 */
 function applyAiResult(result, { fill } = {}) {
+  const nextSource = result && result.source;
+  if (nextSource && typeof nextSource === "object") {
+    // 后端这一轮**改了源本身**（自动加了 webView 选项）：整份替换草稿。
+    // 不这么做的话，界面上只会多出「AI 补全的规则」，而那条 URL 规则悄悄没变——
+    // 用户下次在 App 里读还是占位图，且完全看不出差在哪。
+    emit("replaceSource", nextSource);
+  }
   const step = (current.value || {}).name || "bookUrl";
   const map = AUTOFILL_RULE_FIELDS[step] || {};
   const rows = (result && result.fields) || [];
@@ -994,12 +890,6 @@ function applyAiResult(result, { fill } = {}) {
       },
     };
   }
-}
-
-/** 反查：规则字段路径 → 后端 FILL_SPECS 的蛇形键（AI 任务按它认字段）。 */
-function autofillKeyOf(step, field) {
-  const map = AUTOFILL_RULE_FIELDS[step] || {};
-  return Object.keys(map).find((k) => map[k] === field) || "";
 }
 
 //: 快验的在途代次与空闲计时器（迟到的旧请求不许覆盖新结论）
@@ -1036,85 +926,27 @@ function verifyAllowed(field) {
 async function verifyField(field) {
   // 连 App 调试没有任务行（材料在后端），行内验证只在本机引擎通道可用
   if (!runId.value || !field) return;
+  // 空规则的原因由 `verifyFieldRule` 给（同一份 `UNFAITHFUL_TEXT.rule_empty`）：
+  // 判据只留一处，这里不再重复一遍
   const rule = String(flatRuleOf(field) || "").trim();
-  if (!rule) {
-    // 空规则点下去什么都不跑：不给原因的话就是静默失败（AGENTS #4）
-    fieldValues.value = {
-      ...fieldValues.value,
-      [field]: { count: 0, values: [], error: UNFAITHFUL_TEXT.rule_empty },
-    };
-    return;
-  }
   const gen = (quickGen[field] = (quickGen[field] || 0) + 1);
   fieldValues.value = {
     ...fieldValues.value,
     [field]: { loading: true },
   };
-  try {
-    const out = await ruleTry({
-      job_id: runId.value,
-      step: (current.value || {}).name || "bookUrl",
-      field: autofillKeyOf((current.value || {}).name || "bookUrl", field),
-      rule,
-    });
-    if (gen !== quickGen[field]) return; // 期间又改了：这次结论已经过期
-    const ok = !!(out && out.ok);
-    // 快验答不了这条（材料种类 × 规则形态不匹配）：说清是「快验测不了」，
-    // 不冒充「这条规则取不到」——方向相反的结论比没有结论更坏（AGENTS #4）
-    if (out && out.unfaithful) {
-      fieldValues.value = {
-        ...fieldValues.value,
-        [field]: {
-          count: 0,
-          values: [],
-          error: UNFAITHFUL_TEXT[out.reason_code] || String(out.reason_code || "快验测不了这条规则"),
-        },
-      };
-      return;
-    }
-    // 应答带值（values ≤5 条）：原样收下，标签/悬停/展开都从它取
-    fieldValues.value = {
-      ...fieldValues.value,
-      [field]: {
-        count: Number((out && out.count) || 0),
-        values: ((out && out.values) || []).map((v) => String(v)),
-        error: ok ? "" : String((out && out.error) || "未知原因"),
-      },
-    };
-  } catch (e) {
-    if (gen !== quickGen[field]) return;
-    fieldValues.value = {
-      ...fieldValues.value,
-      [field]: {
-        count: 0,
-        values: [],
-        error: String((e && e.message) || e),
-      },
-    };
-  }
+  // 调用与事实成形走 `utils/ruleVerify`（唯一一份，编辑页那份也用它）：
+  // 「快验测不了」与「这条规则取不到」的分辨只在这里实现一次。
+  const fact = await verifyFieldRule({
+    jobId: runId.value,
+    step: (current.value || {}).name || "bookUrl",
+    field,
+    rule,
+  });
+  if (gen !== quickGen[field]) return; // 期间又改了：这次结论已经过期
+  fieldValues.value = { ...fieldValues.value, [field]: fact };
 }
 
 
-//: autofill 行的 field（FILL_SPECS 蛇形键）→ 写入草稿的规则字段路径：**唯一一份**在
-//: `utils/steps`（AI 补全弹窗也要按同一份把字段名说成人话）。这里只留反查。
-function loadMore() {
-  renderLimit.value += RENDER_CHUNK;
-}
-
-//: 复制一律走这里，且**只复制原文**：格式化视图里换行是加的、实体是展开的，
-//: 拿它去写规则/正则就会以为页面上真是那样（原来那句「复制出来的就是原文」照旧成立）
-async function copyRaw(text, okMsg) {
-  try {
-    // navigator.clipboard 只在安全上下文（https / localhost）存在。
-    // 本前端开了 server.host，用户会从局域网 IP 用 http 打开——
-    // 那里它是 undefined，直接调用会同步抛 TypeError，界面毫无反应。
-    // 必须包在 try 里，并给出明确反馈。
-    await navigator.clipboard.writeText(text);
-    ElMessage.success(okMsg);
-  } catch (e) {
-    ElMessage.warning("复制失败，请手动选中文本");
-  }
-}
 </script>
 
 <template>
@@ -1276,8 +1108,7 @@ async function copyRaw(text, okMsg) {
             {{ note }}
           </p>
 
-          <!-- 下一步做什么：**判据只有一处**（后端 core/agent_plan 按事实给一条缺口），
-               这里只渲染那一句。同一现象不在这里再说第二遍——其余缺口在 title 里备查 -->
+          <!-- 下一步做什么：判据在 core/agent_plan，这里只渲染后端给的那一句 -->
           <p v-if="planLine" class="debug-plan">{{ planLine.text }}</p>
           <p v-else-if="planError" class="debug-plan muted">{{ planError }}</p>
 
@@ -1337,6 +1168,8 @@ async function copyRaw(text, okMsg) {
                 </el-tooltip>
               </span>
             </div>
+            <!-- AI 过程就地展开：跑的时候看得见，不挡手 -->
+            <AgentLiveStrip :debug-job-id="runId" @detail="agentDialog && agentDialog.openRun()" />
             <!-- 失败原因：走到用户眼前（AGENTS #4）。逐字段过程与调用明细在弹窗里
                  （点「全部补全」就打开了）；这里只留这一轮起不来的原因——那时没有
                  任务号，弹窗里没有内容可显示 -->
@@ -1634,40 +1467,7 @@ async function copyRaw(text, okMsg) {
                 >{{ tab.label }}</el-radio-button
               >
             </el-radio-group>
-            <el-input
-              v-model="searchKey"
-              size="small"
-              style="width: 200px"
-              placeholder="搜索（如 content）"
-              clearable
-            />
-            <template v-if="hitOffsets.length">
-              <el-button size="small" @click="gotoHit(activeHit - 1)"
-                >上一处</el-button
-              >
-              <el-button size="small" @click="gotoHit(activeHit + 1)"
-                >下一处</el-button
-              >
-              <span class="muted">
-                第 {{ activeHit + 1 }} / {{ hitOffsets.length
-                }}{{ hitsTruncated ? "+" : "" }} 处
-              </span>
-            </template>
-            <span v-else-if="searchKey.trim()" class="muted">未找到</span>
-            <el-button
-              size="small"
-              :disabled="!materialRaw"
-              @click="copyMaterial"
-            >
-              复制原文
-            </el-button>
-          </div>
-          <!-- 高亮的定位口径：位置按**显示文本**找，处数按**原文**数。两者不等时
-               如实说——不假装对齐（AGENTS #12） -->
-          <p v-if="hitsMisaligned" class="muted" style="margin: 0 0 8px; font-size: 12px">
-            已渲染的这段里有 {{ displayHitOffsets.length }} 处标出来了，按原文数应为
-            {{ hitsInWindow }} 处（格式化会改字符位置）：点「加载更多」或换关键词再看。
-          </p>
+            </div>
           <p v-if="pageOriginNote" class="muted" style="margin: 0 0 8px">
             <span v-if="currentPage && currentPage.fetched_at">
               页面抓取于 {{ currentPage.fetched_at }} · </span
@@ -1681,23 +1481,13 @@ async function copyRaw(text, okMsg) {
             style="margin-bottom: 8px"
             :title="materialTruncatedNote"
           />
-          <template v-if="materialRaw">
-            <pre class="debug-pre debug-pre-wrap"><template
-              v-for="(seg, i) in segments" :key="i"><span
-              v-if="!seg.hit">{{ seg.text }}</span><mark
-              v-else :id="'debug-hit-' + seg.index"
-              :class="{ 'debug-hit-active': seg.index === activeHit }">{{ seg.text }}</mark></template></pre>
-            <div v-if="hasMore" class="toolbar" style="margin-top: 8px">
-              <el-button size="small" @click="loadMore">
-                加载更多（已渲染 {{ renderLimit }} /
-                {{ materialRaw.length }} 字符）
-              </el-button>
-            </div>
-          </template>
-          <el-empty
-            v-else
-            :description="materialEmptyHint"
-            :image-size="60"
+          <!-- 材料文本查看器：**与编辑页的证据面板是同一个**（格式化/分块/页内搜索/
+               高亮/复制都在它里面）。这里只把「这一步取哪一份材料」交给它 -->
+          <MaterialViewer
+            ref="materialViewer"
+            :raw="materialRaw"
+            search-placeholder="搜索（如 content）"
+            :empty-text="materialEmptyHint"
           />
         </aside>
         </div>
@@ -2124,21 +1914,6 @@ async function copyRaw(text, okMsg) {
   color: var(--app-text-muted);
   font-size: 12px;
   margin-bottom: 2px;
-}
-.debug-pre {
-  font-family: Consolas, Monaco, monospace;
-  font-size: 12px;
-  background: var(--app-bg);
-  padding: var(--app-space-2);
-  border-radius: var(--app-radius-sm);
-  margin: 0;
-}
-.debug-pre-wrap {
-  white-space: pre-wrap;
-  word-break: break-all;
-}
-.debug-hit-active {
-  outline: 2px solid var(--app-status-fail);
 }
 
 /* 窄容器回落成**单页滚动**：工作区自己滚（一次性替代外层），主列/材料不再各自滚，

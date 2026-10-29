@@ -16,7 +16,7 @@ import { ElMessage } from "element-plus";
 
 import { useAgentRun } from "../composables/useAgentRun";
 import { jobLlmCallDetail, jobLlmCalls } from "../api/rules";
-import { agentBudgetNotes, fieldLabelOf, retryFields } from "../utils/agentRun";
+import { STATE_TEXT, STATE_TONE, agentBudgetNotes, fieldLabelOf, retryFields } from "../utils/agentRun";
 import { STEP_LABELS } from "../utils/steps";
 import { jobStatusLabel, jobStatusType } from "../utils/jobs";
 
@@ -40,28 +40,6 @@ const status = computed(() => String(run.job.value.status || ""));
 const rows = computed(() => run.rows.value);
 const pending = computed(() => retryFields(rows.value));
 const notes = computed(() => agentBudgetNotes(run.result.value));
-
-const STATE_TEXT = {
-  accepted: "已写入",
-  pending_engine: "待引擎验收",
-  need_material: "先取材料",
-  failed: "取不到",
-  proposed: "验证中",
-  pending: "还没轮到",
-};
-//: Element Plus 的 el-tag 只认 primary|success|info|warning|danger 五档；
-//: 传空串是**未定义行为**（渲染成默认色还是原样写到 class 上，看版本）。
-//: 「验证中」没有语义词，落 info（中性）——它既不是成功也不是失败。
-//: 「待引擎验收」用 warning：规则落了，但结论还没出，别让人以为验过了。
-//: 「先取材料」也用 warning：它不是失败，是下一步动作。
-const STATE_TONE = {
-  accepted: "success",
-  pending_engine: "warning",
-  need_material: "warning",
-  failed: "danger",
-  proposed: "info",
-  pending: "info",
-};
 
 /** 打开**这一轮**（调用方刚提交或刚拿回结果时用它）。 */
 async function openRun() {

@@ -19,6 +19,8 @@ import {
   STEP_TARGETS,
 } from "../composables/useDebugSession";
 import { SOURCE_WORKSPACE_KEY } from "../composables/useSourceWorkspace";
+// 「这一步上次跑到哪」的唯一来源：会话结果 → 工作区材料（刷新后只剩后者）
+import { stepUrlOf } from "../utils/debugSteps";
 
 const props = defineProps({
   initialSource: { type: Object, default: null },
@@ -122,6 +124,23 @@ onMounted(() => {
   if (props.initialQuery) query.value = String(props.initialQuery);
 });
 
+//: 目标对应的**步骤名**（「详情」那一步在结果里叫 `bookUrl`）。
+//: 选下游步却留空时，后端会**从搜索跑完整条链**（`core.debug_keys.build_key` 的回落，
+//: 那是界面承诺：留空 = 从搜索起步）。实测那一趟要 90 秒上下，而用户以为自己
+//: 只跑了一步——所以要在这里把代价说出来，并给一条「用上次那个页面地址」的近路。
+const TARGET_STEP = { info: "bookUrl", toc: "toc", content: "content" };
+const chainHint = computed(() => !!TARGET_STEP[target.value]);
+//: 上次调试记下的这一步页面地址（工作区级材料，`last-debug` 或刚跑完那次写入的）
+const materialUrl = computed(() => {
+  const step = TARGET_STEP[target.value];
+  if (!step) return "";
+  const page = workspace.pageOfStep(step);
+  return page ? String(page.url || "") : "";
+});
+function useMaterialUrl() {
+  if (materialUrl.value) query.value = materialUrl.value;
+}
+
 async function debugRun() {
   // 后端对同样的输入会 400 说同一件事；这里先挡是为了不发一次注定失败的请求
   if (
@@ -142,23 +161,20 @@ async function debugRun() {
 }
 
 function rerunFromStep(stepName) {
-  const step =
-    ((result.value || {}).steps || []).find((s) => s.name === stepName) || {};
   if (stepName === "search") return debugRun(); // 搜索段重跑 = 整链入口
-  if (!String(step.url || "").trim()) {
+  // 地址可能来自**会话结果**，也可能来自**工作区材料**（刷新后只剩后者）：
+  // 判据只有 utils/debugSteps 一份，别在这里挑其中一份
+  const url = stepUrlOf(stepName, { result: result.value, material: workspace.state.debug });
+  if (!url) {
     // 返回**标准结果体**而不是只弹提示：与 startRun 的失败体同构，
     // 调用方要能从返回值读出「这次没跑成」
-    ElMessage.warning(
-      "上一轮结果里没有这一步的链接。先跑一次完整调试，再重试这一步",
-    );
-    return Promise.resolve({
-      error: "上一轮结果里没有这一步的链接，先跑一次完整调试",
-    });
+    ElMessage.warning("这一步还没有可用的页面地址：先跑一次完整调试，再重试这一步");
+    return Promise.resolve({ error: "这一步还没有可用的页面地址，先跑一次完整调试" });
   }
   return startRun({
     source: source.value,
     target: STEP_TARGETS[stepName],
-    query: step.url,
+    query: url,
     confirmPush,
     draftRevision: workspace.state.draftRevision,
   });
@@ -172,6 +188,12 @@ function setRuleField(group, key, value) {
     ...source.value,
     [group]: { ...(source.value[group] || {}), [key]: value },
   });
+}
+
+/** 后端改了源本身（自动加 webView 之类）：整份替换草稿，与宿主同一个写入口。 */
+function onReplaceSource(nextSource) {
+  if (!nextSource || typeof nextSource !== "object") return;
+  workspace.updateDraft(nextSource);
 }
 
 function onApplyRule({ field, rule }) {
@@ -221,6 +243,12 @@ onUnmounted(() => {
         <el-button type="primary" :loading="running" @click="debugRun()"
           >调试</el-button
         >
+      </div>
+      <div v-if="chainHint && !query.trim()" class="wb-chain-hint muted">
+        <span>留空 = 从搜索跑完整条链（约 90 秒）</span>
+        <el-button v-if="materialUrl" link size="small" @click="useMaterialUrl">
+          用上次的这一步地址
+        </el-button>
       </div>
       <div class="wb-secondary-row" :class="{ 'is-hidden': entryCompact }">
         <span class="muted wb-option-label">通道</span
@@ -277,6 +305,7 @@ onUnmounted(() => {
       :draft-revision="workspace.state.draftRevision"
       @apply-rule="onApplyRule"
       @rerun-from="rerunFromStep"
+      @replace-source="onReplaceSource"
     />
   </div>
 </template>
@@ -402,5 +431,13 @@ onUnmounted(() => {
   .wb-host {
     width: 100%;
   }
+}
+
+.wb-chain-hint {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  margin: -2px 0 6px;
 }
 </style>

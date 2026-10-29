@@ -17,6 +17,10 @@ export const listJobs = (params = {}) => {
 export const getJobDetail = (id, { raw = false } = {}) =>
   api.get("/jobs/" + id + "/detail" + (raw ? "?raw=1" : ""));
 export const submitJob = (kind, payload = {}) => api.post("/jobs", { kind, payload });
+//: 事件账本的**拉**形态（`/stream` 是推形态，同一帧）。给「只要当前在做什么」的调用方用：
+//: 按 `after` 取新增，不必订阅整条流。行号即游标。
+export const jobTimeline = (id, after = 0) =>
+  api.get("/jobs/" + id + "/timeline?after=" + Number(after || 0));
 export const cancelJob = (id) => api.post("/jobs/" + id + "/cancel", {});
 export const retryJob = (id) => api.post("/jobs/" + id + "/retry", {});
 export const deleteJob = (id) => api.del("/jobs/" + id);

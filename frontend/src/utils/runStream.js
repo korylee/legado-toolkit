@@ -21,7 +21,8 @@ export function emptyRun() {
 //: 帧里属于「任务行」的键。**白名单而不是整帧拷贝**：帧上还有 events/failures/cursor
 //: 这些通道状态，混进任务行之后，"这个任务是什么状态"就得在两处判断。
 const JOB_KEYS = [
-  "id", "kind", "status", "phase", "progress", "total", "retry_of", "expires_at",
+  "id", "kind", "status", "phase", "progress_kind", "progress", "total",
+  "retry_of", "expires_at",
   "created_at", "updated_at", "error", "summary",
   // 引擎争用的两条本机事实（调试侧原本靠 /rules/debug-status 拿）
   "lane_holder", "lane_waiting", "elapsed_ms", "phase_ms",

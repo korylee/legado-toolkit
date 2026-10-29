@@ -30,6 +30,9 @@ export const STEP_LABELS = {
 export const RULE_FIELD_DEFS = [
   { step: "search", field: "ruleSearch.bookList", group: "ruleSearch", key: "bookList", label: "搜索 · bookList", placeholder: "class.book-list@tag.li" },
   { step: "search", field: "ruleSearch.name", group: "ruleSearch", key: "name", label: "搜索 · 书名", placeholder: "class.title@text" },
+  { step: "search", field: "ruleSearch.coverUrl", group: "ruleSearch", key: "cover_url", label: "搜索 · 封面链接", placeholder: "class.cover img@data-original" },
+  { step: "search", field: "ruleSearch.author", group: "ruleSearch", key: "author", label: "搜索 · 作者", placeholder: "class.author@text" },
+  { step: "search", field: "ruleSearch.intro", group: "ruleSearch", key: "intro", label: "搜索 · 简介", placeholder: "class.intro@text" },
   { step: "bookUrl", field: "ruleSearch.bookUrl", group: "ruleSearch", key: "book_url", label: "搜索 · bookUrl", placeholder: "tag.a@href" },
   { step: "bookUrl", field: "ruleBookInfo.name", group: "ruleBookInfo", key: "name", label: "详情 · 书名", placeholder: "class.title@text" },
   { step: "bookUrl", field: "ruleBookInfo.author", group: "ruleBookInfo", key: "author", label: "详情 · 作者", placeholder: "class.author@text" },
@@ -87,6 +90,9 @@ export const AUTOFILL_RULE_FIELDS = {
     book_list: "ruleSearch.bookList",
     book_url: "ruleSearch.bookUrl",
     name: "ruleSearch.name",
+    cover_url: "ruleSearch.coverUrl",
+    author: "ruleSearch.author",
+    intro: "ruleSearch.intro",
   },
   toc: {
     chapter_list: "ruleToc.chapterList",

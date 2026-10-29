@@ -231,7 +231,7 @@ export const UNFAITHFUL_TEXT = {
   result_absent: "这一步的材料里没有脚本产出",
   page_vars_absent: "这一步没采到页面变量，快验跑不了这段脚本——重调整步让引擎采一次",
   needs_container: "这是条目内规则，要连着本段的列表容器一起验（补全整段时会自动带上）",
-  single_item: "这条只选中 1 个元素——列表容器应当一个条目一条，检查是否写成了整块容器",
+  target_in_runtime: "这一页的目标由运行时对象或接口给出，这份材料里读不到它——不是规则没选中。要看它，去连 App 调试或让本机引擎渲染这一页",
 };
 
 //: 快验答不忠实的组合（材料种类 × 规则形态）。**判据在后端**：`core.material.MATERIALS`

@@ -5,10 +5,12 @@ import test from "node:test";
 import { gapLine, planSnapshot } from "./agentPlan.js";
 
 test("gapLine speaks one sentence per gap code, unknown codes show raw", () => {
-  // 渲染这一档要把**要加的那串**写出来——写成「加 webView」用户不知道写在哪儿
+  // 渲染这一档指向**能替人做的动作**（AI 补全会落成源改动并复核）；语法字面
+  // （`,{"webView":true}`）不进给用户看的那句话——落源是程序的事，不是让人照抄的作业
   const line = gapLine({ gap: { code: "render_missing" } });
   assert.equal(line.code, "render_missing");
-  assert.match(line.text, /\{"webView":true\}/);
+  assert.match(line.text, /AI 补全/);
+  assert.doesNotMatch(line.text, /webView/);
   // 没有缺口 → 不说话
   assert.equal(gapLine({ gap: null }), null);
   assert.equal(gapLine({}), null);

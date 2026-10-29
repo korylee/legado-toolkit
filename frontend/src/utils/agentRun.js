@@ -109,6 +109,28 @@ export function agentEventLine(ev = {}) {
  * 没有事件的字段不编状态：`fields` 由调用方给（首屏要显示全部字段），没人提过就是
  * pending，而不是从「没有失败」推出来的 accepted。
  */
+//: 逐字段四态的取词与配色（**唯一一份**）：明细弹窗与工作台里的内联过程条都读它。
+//: 状态码由 `foldAgentFields` 产出，这里是给用户看的那一层。
+export const STATE_TEXT = {
+  accepted: "已写入",
+  pending_engine: "待引擎验收",
+  need_material: "先取材料",
+  failed: "取不到",
+  proposed: "验证中",
+  pending: "还没轮到",
+};
+//: Element Plus 的 el-tag 只认 primary|success|info|warning|danger 五档；
+//: 「验证中」没有语义词，落 info（中性）；「待引擎验收」与「先取材料」用 warning——
+//: 前者规则落了但结论没出，后者不是失败而是下一步动作。
+export const STATE_TONE = {
+  accepted: "success",
+  pending_engine: "warning",
+  need_material: "warning",
+  failed: "danger",
+  proposed: "info",
+  pending: "info",
+};
+
 export function foldAgentFields(events, fields) {
   const wanted = (Array.isArray(fields) ? fields : []).map(String);
   const order = wanted.length ? wanted : [];

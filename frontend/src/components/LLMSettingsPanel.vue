@@ -2,6 +2,9 @@
 // 「设置」抽屉的「模型」页签。原 LLMSettingsDrawer.vue 的内容原样搬过来，
 // 只去掉外层 el-drawer 与 modelValue 桥接——挂载时机交给 SettingsDrawer 的
 // 页签 lazy 控制，不再需要 watch(modelValue)。
+//
+// 表单只有五个参数：协议 / Base URL / API Key / 模型 / 超时。其余字段
+// （温度、max_tokens、启用、Key 环境变量）没有消费方，后端也不再存。
 import { ref, onMounted } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import {
@@ -9,14 +12,19 @@ import {
   createLLMProfile,
   deleteLLMProfile,
   getLLMStatus,
-  listLLMPresets,
   listLLMProfiles,
   testLLMProfile,
   updateLLMProfile,
 } from "../api/llm";
 
+const PROTOCOLS = [
+  { value: "openai", label: "OpenAI 兼容（/chat/completions）" },
+  { value: "responses", label: "OpenAI Responses（/responses）" },
+  { value: "anthropic", label: "Anthropic（/messages）" },
+];
+const PROTOCOL_LABEL = Object.fromEntries(PROTOCOLS.map((p) => [p.value, p.label]));
+
 const profiles = ref([]);
-const presets = ref([]);
 const status = ref(null);
 const loading = ref(false);
 const saving = ref(false);
@@ -26,23 +34,15 @@ const testingId = ref("");
 const lastTest = ref(null);
 
 function blankProfile() {
-  return {
-    id: "", name: "", provider: "openai-compatible", adapter: "openai-compatible",
-    base_url: "", api_key: "", api_key_env: "", model: "",
-    temperature: 0.2, timeout: 90, max_tokens: 0,
-    extra_headers: {}, extra_body: {}, enabled: true, sort_order: 0,
-  };
+  return { id: "", protocol: "openai", base_url: "", api_key: "", model: "", timeout: 90 };
 }
 const form = ref(blankProfile());
 
 async function load() {
   loading.value = true;
   try {
-    const [p, ps, s] = await Promise.all([
-      listLLMProfiles(), listLLMPresets(), getLLMStatus(),
-    ]);
+    const [p, s] = await Promise.all([listLLMProfiles(), getLLMStatus()]);
     profiles.value = p || [];
-    presets.value = ps || [];
     status.value = s || null;
   } catch (e) {
     ElMessage.error("加载模型配置失败: " + e.message);
@@ -65,21 +65,16 @@ function openEdit(row) {
   editVisible.value = true;
 }
 
-function applyPreset(name) {
-  const preset = presets.value.find((p) => p.name === name || p.provider === name);
-  if (!preset) return;
-  form.value.provider = preset.provider;
-  form.value.adapter = "openai-compatible";
-  form.value.base_url = preset.base_url;
-  form.value.model = preset.model;
-  if (!form.value.name) form.value.name = preset.name;
-}
-
 async function save() {
-  const payload = { ...form.value };
-  if (!payload.name) return ElMessage.warning("请填名称");
-  if (!payload.base_url) return ElMessage.warning("请填 Base URL");
-  if (!payload.model) return ElMessage.warning("请填模型名");
+  if (!form.value.base_url) return ElMessage.warning("请填 Base URL");
+  if (!form.value.model) return ElMessage.warning("请填模型名");
+  const payload = {
+    protocol: form.value.protocol,
+    base_url: form.value.base_url,
+    api_key: form.value.api_key,
+    model: form.value.model,
+    timeout: form.value.timeout,
+  };
   saving.value = true;
   try {
     if (editingId.value) {
@@ -100,7 +95,7 @@ async function save() {
 async function activate(row) {
   try {
     await activateLLMProfile(row.id);
-    ElMessage.success("已设为默认: " + row.name);
+    ElMessage.success("已设为默认: " + row.model);
     await load();
   } catch (e) {
     ElMessage.error(e.message);
@@ -112,7 +107,7 @@ async function doTest(row) {
   lastTest.value = null;
   try {
     const r = await testLLMProfile(row.id);
-    lastTest.value = { ...r, name: row.name };
+    lastTest.value = { ...r, model: row.model };
     if (r.ok) ElMessage.success("连接成功: " + r.latency_ms + "ms");
     else ElMessage.error("连接失败: " + (r.error || "unknown"));
   } catch (e) {
@@ -124,7 +119,7 @@ async function doTest(row) {
 
 async function remove(row) {
   try {
-    await ElMessageBox.confirm("删除模型配置 " + row.name + "？", "删除配置",
+    await ElMessageBox.confirm("删除模型配置 " + row.model + "？", "删除配置",
                                { type: "warning" });
     await deleteLLMProfile(row.id);
     ElMessage.success("已删除");
@@ -140,26 +135,26 @@ async function remove(row) {
       <el-button size="small" type="primary" @click="openNew">新增配置</el-button>
       <span class="grow" />
       <el-tag v-if="status && status.active" size="small" type="success">
-        默认: {{ status.active.name }}
+        默认: {{ status.active.model }}
       </el-tag>
     </div>
 
     <el-alert v-if="lastTest" :closable="false" show-icon style="margin-top: 10px"
               :type="lastTest.ok ? 'success' : 'error'"
-              :title="(lastTest.name || '') + (lastTest.ok ? ' 连接成功' : ' 连接失败')"
+              :title="(lastTest.model || '') + (lastTest.ok ? ' 连接成功' : ' 连接失败')"
               :description="lastTest.ok ? (lastTest.latency_ms + 'ms · ' + lastTest.reply) : lastTest.error" />
 
     <el-table :data="profiles" v-loading="loading" border size="small" style="margin-top: 12px">
-      <el-table-column prop="name" label="名称" min-width="120">
+      <el-table-column label="模型" min-width="180">
         <template #default="{ row }">
-          <b>{{ row.name }}</b>
+          <b>{{ row.model }}</b>
           <el-tag v-if="status && status.active && status.active.id === row.id"
                   size="small" type="success" style="margin-left: 6px">默认</el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="模型 / 地址" min-width="220">
+      <el-table-column label="接口 / 地址" min-width="220">
         <template #default="{ row }">
-          <div>{{ row.model }}</div>
+          <div>{{ PROTOCOL_LABEL[row.protocol] || row.protocol }}</div>
           <div class="muted mono">{{ row.base_url }}</div>
         </template>
       </el-table-column>
@@ -169,6 +164,9 @@ async function remove(row) {
             {{ row.api_key_set ? row.api_key_masked : '未设置' }}
           </el-tag>
         </template>
+      </el-table-column>
+      <el-table-column label="超时" width="80" align="center">
+        <template #default="{ row }">{{ row.timeout }}s</template>
       </el-table-column>
       <el-table-column label="操作" width="220" align="right">
         <template #default="{ row }">
@@ -188,34 +186,25 @@ async function remove(row) {
     <el-dialog v-model="editVisible" :title="editingId ? '编辑模型配置' : '新增模型配置'"
                width="520px" append-to-body>
       <el-form label-width="96px" size="small">
-        <el-form-item label="平台预设">
-          <el-select placeholder="选择后自动填 Base URL / Model" clearable style="width: 100%"
-                     @change="applyPreset">
-            <el-option v-for="p in presets" :key="p.provider" :value="p.name"
-                       :label="p.name + ' · ' + p.model" />
+        <el-form-item label="协议">
+          <el-select v-model="form.protocol" style="width: 100%">
+            <el-option v-for="p in PROTOCOLS" :key="p.value" :value="p.value"
+                       :label="p.label" />
           </el-select>
         </el-form-item>
-        <el-form-item label="名称"><el-input v-model="form.name" /></el-form-item>
-        <el-form-item label="Base URL"><el-input v-model="form.base_url" /></el-form-item>
+        <el-form-item label="Base URL">
+          <el-input v-model="form.base_url" placeholder="https://api.deepseek.com/v1" />
+        </el-form-item>
         <el-form-item label="API Key">
           <el-input v-model="form.api_key" type="password" show-password
                     :placeholder="editingId ? '留空表示不修改' : 'sk-...'" />
         </el-form-item>
-        <el-form-item label="Key 环境变量">
-          <el-input v-model="form.api_key_env" placeholder="可选，如 DEEPSEEK_API_KEY" />
-        </el-form-item>
-        <el-form-item label="模型"><el-input v-model="form.model" /></el-form-item>
-        <el-form-item label="温度">
-          <el-input-number v-model="form.temperature" :min="0" :max="2" :step="0.1"
-                           controls-position="right" />
+        <el-form-item label="模型">
+          <el-input v-model="form.model" placeholder="deepseek-chat" />
         </el-form-item>
         <el-form-item label="超时秒">
           <el-input-number v-model="form.timeout" :min="5" :max="600" controls-position="right" />
         </el-form-item>
-        <el-form-item label="max_tokens">
-          <el-input-number v-model="form.max_tokens" :min="0" controls-position="right" />
-        </el-form-item>
-        <el-form-item label="启用"><el-switch v-model="form.enabled" /></el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="editVisible = false">取消</el-button>

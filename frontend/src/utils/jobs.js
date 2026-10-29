@@ -55,6 +55,7 @@ const KIND_LABELS = {
   jvm_run: "本机引擎校验",
   jvm_debug: "本机引擎调试",
   agent_loop: "AI 补全",
+  generate_source: "一键生成源",
   add: "添加书源",
   ping: "连通性检查",
 };
@@ -68,7 +69,7 @@ const KIND_LABELS = {
 export const JOB_CATEGORIES = [
   { key: "check", label: "校验", kinds: ["jvm_run", "check"] },
   { key: "debug", label: "调试", kinds: ["jvm_debug"] },
-  { key: "ai", label: "AI", kinds: ["agent_loop"] },
+  { key: "ai", label: "AI", kinds: ["agent_loop", "generate_source"] },
 ];
 
 /** 某个 kind 属于哪个类目；没登记的返回 null（界面据此落「其他」，不藏起来）。 */

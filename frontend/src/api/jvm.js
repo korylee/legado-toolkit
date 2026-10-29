@@ -9,6 +9,9 @@ import { api } from "./client";
 export const jvmReadiness = () => api.get("/jvm/readiness");
 export const jvmDaemonStatus = () => api.get("/jvm/daemon/status");
 export const stopJvmDaemon = () => api.post("/jvm/daemon/stop");
+//: 预热引擎（后台跑，立即 202）。冷启动 41.5 秒，先点着能让用户填表的时间把它盖掉。
+//: 409 = 引擎正被别的任务用着（那时本来就是热的），调用方当「跳过」处理，不是错误。
+export const prepareJvmDaemon = () => api.post("/jvm/daemon/prepare");
 
 export const pickJvmAppRepo = () => api.post("/jvm/pick-app-repo");
 export const pickJvmAndroidSdk = () => api.post("/jvm/pick-android-sdk");

@@ -22,21 +22,20 @@ import {
 import { healthLabel } from "../utils/health";
 import {
   isWorseHealth,
-  jobAgoText,
   jobCanCancel,
   jobCancelHint,
   jobIsInFlight,
   jobIsTerminal,
   jobKindLabel,
   jobPhaseLabel,
-  jobProgressStatus,
-  jobSpentText,
   jobStatusLabel,
   jobStatusType,
 } from "../utils/jobs";
 import { useJobs } from "../composables/useJobs";
 import { healthNeedsAction } from "../utils/tags";
 import JobTimeline from "./JobTimeline.vue";
+import TaskProgress from "./TaskProgress.vue";
+import GenerateSourcePanel from "./GenerateSourcePanel.vue";
 
 const emit = defineEmits(["changed"]);
 
@@ -59,6 +58,14 @@ defineExpose({ open, close });
 const { watchJob, frameOf, jobById } = useJobs();
 
 const detail = ref(null);
+//: 一键生成的段名清单（详情接口的 `stages`）。其它任务为空，进度区自动走百分比。
+const stageNames = computed(() => (detail.value && detail.value.stages) || []);
+//: 跑完的段结论（`result.stages`）：进度卡片据此上色，不信 `progress`
+//: （它表示「正在跑第几段」，跑完不会等于段数）。
+const finalStages = computed(() => {
+  const r = (detail.value && detail.value.result) || {};
+  return r.stages || [];
+});
 const detailLoading = ref(false);
 const rawOpen = ref(false);
 //: 「此刻」的锚点：耗时与「多久没更新」都要跟着它走。**这是本地时钟，不是取数**：
@@ -78,6 +85,10 @@ const job = computed(() => {
     phase: l.phase || d.phase,
     progress: l.progress ?? d.progress,
     total: l.total ?? d.total,
+    // 进度语义与两个耗时：`TaskProgress` 要用（百分比 vs 第 N/M 段、本段已用）
+    progress_kind: l.progress_kind || d.progress_kind,
+    elapsed_ms: l.elapsed_ms ?? d.elapsed_ms,
+    phase_ms: l.phase_ms ?? d.phase_ms,
     kind: l.kind || d.kind,
     updated_at: l.updated_at || d.updated_at,
   };
@@ -96,25 +107,11 @@ const changedItems = computed(() => {
 });
 //: 耗时与「多久没更新」都是相对**此刻**的数，不是 detail 里的静态字段：每 2 秒的
 //: 轮询把 nowMs 顶一次，computed 才会跟着涨（Date.now() 自己不是响应式的）。
-const spentText = computed(() =>
-  jobSpentText(
-    job.value.created_at,
-    nowMs.value,
-    inFlight.value ? "" : job.value.updated_at,
-  ),
-);
-const agoText = computed(() => jobAgoText(job.value.updated_at, nowMs.value));
-const pct = computed(() => {
-  const total = Number(job.value.total || 0);
-  const progress = Number(job.value.progress || 0);
-  return total > 0 ? Math.min(100, Math.round((progress / total) * 100)) : 0;
-});
-const progressText = computed(() => {
-  const total = Number(job.value.total || 0);
-  const progress = Number(job.value.progress || 0);
-  if (!total && !progress) return "";
-  return total ? `${progress} / ${total}` : `${progress} 条`;
-});
+//: 一键生成的四段面板：默认展开（那几段就是这次任务的主要结果），点类型标签折叠
+const showGenerate = ref(true);
+//: 有没有**专属 body**（不走「通过/未通过 + 变化清单 + 时间线」那副通用骨架）。
+//: 有的话就不能说「没有可展示的结果」——那块 body 就是结果。
+const hasOwnBody = computed(() => job.value.kind === "generate_source");
 const title = computed(() => {
   const kind = jobKindLabel(job.value.kind);
   return inFlight.value ? kind + "进行中" : kind + "明细";
@@ -256,6 +253,12 @@ async function deleteJob() {
   >
     <div v-loading="detailLoading" class="td-body">
       <div class="td-head">
+        <!-- 一键生成：点类型标签展开四段面板（同一次生成的另一个视角，与新建对话框
+             共用 `GenerateSourcePanel`）。其它 kind 没有这层面板，不显示这个标签 -->
+        <el-tag v-if="job.kind === 'generate_source'" size="small" effect="plain"
+                class="td-kind-click" title="展开四段进度" @click="showGenerate = !showGenerate">
+          {{ jobKindLabel(job.kind) }}{{ showGenerate ? " ▴" : " ▾" }}
+        </el-tag>
         <el-tag size="small" :type="jobStatusType(job.status)">
           {{ jobStatusLabel(job.status) }}
         </el-tag>
@@ -281,28 +284,10 @@ async function deleteJob() {
         </el-button>
       </div>
 
-      <!-- 在跑：这一段就是「进度弹窗」；结束后同一位置换成结论 -->
-      <div class="td-progress">
-        <!-- 数字在前、百分比让位：12 / 40 才是信息，百分比只是它的换算 -->
-        <div class="td-progress-top">
-          <span v-if="progressText" class="td-progress-num">{{
-            progressText
-          }}</span>
-          <span v-if="spentText" class="muted td-progress-spent"
-            >已跑 {{ spentText }}</span
-          >
-        </div>
-        <el-progress
-          :percentage="pct"
-          :stroke-width="10"
-          :show-text="false"
-          :status="jobProgressStatus(job.status)"
-        />
-        <!-- 绝对时间对分钟级批量校验没用（还得自己减时钟）；这个数停住不动就是「卡住了」 -->
-        <p v-if="inFlight && agoText" class="muted td-progress-text">
-          {{ agoText }}更新
-        </p>
-      </div>
+      <!-- 进度区：与一键生成面板**共用一份**（`TaskProgress`）。它按
+           `progress_kind` 决定画百分比（批量校验：等量条数）还是四段卡片
+           （一键生成：各段时长不等，百分比是假的）。 -->
+      <TaskProgress :job="job" :stages="stageNames" :final-stages="finalStages" />
 
       <template v-if="summary">
         <div class="td-summary">
@@ -365,6 +350,10 @@ async function deleteJob() {
            `/api/jobs/{id}/timeline` 同一帧。执行方式交给时间线头部：
            它决定这次会不会慢，与逐块明细是同一件事。
            AI 补全的逐字段过程与模型调用账在 `AgentRunDialog`，不在这里 -->
+      <!-- 一键生成的四段：默认展开（这就是它的主要结果），可折叠 -->
+      <GenerateSourcePanel v-if="job.kind === 'generate_source' && showGenerate"
+                           :job-id="jobId" readonly />
+
       <JobTimeline
         v-if="['jvm_run', 'jvm_debug'].includes(job.kind)"
         :job-id="jobId"
@@ -374,7 +363,11 @@ async function deleteJob() {
         :chunk-reports="detail?.chunk_reports || []"
       />
 
-      <div v-if="!summary && !job.error && !inFlight" class="muted td-empty">
+      <!-- 「没有可展示的结果」只在**真没有**时说：`generate_source` 的 body 是上面那块
+           四段面板，它的任务行没有 summary（后端不填），照旧判据会在这句「没有结果」
+           正上方摆着一份结果——自相矛盾。判据改成「按 kind 有没有专属 body」。 -->
+      <div v-if="!summary && !job.error && !inFlight && !hasOwnBody"
+           class="muted td-empty">
         这次任务没有可展示的结果。
       </div>
 
@@ -413,38 +406,22 @@ async function deleteJob() {
   </el-dialog>
 </template>
 
-<style scoped>
-/* 弹窗骨架的下一层（上一层在文件末尾的无 scoped 块）：内容区自己也是 flex
+<style scoped>/* 弹窗骨架的下一层（上一层在文件末尾的无 scoped 块）：内容区自己也是 flex
    容器，才能把剩余高度交给时间线。`flex: 1 0 auto` 的 shrink=0 是刻意的——
-   结果态内容超长时不许缩，让它撑出外层的滚动条；有富余时才撑满（进行中态）。 */
-.td-body {
+   结果态内容超长时不许缩，让它撑出外层的滚动条；有富余时才撑满（进行中态）。 */.td-body {
   flex: 1 0 auto;
   min-height: 80px;
   display: flex;
   flex-direction: column;
-}
-/* 除时间线外都不参与伸缩：flex 的默认 shrink=1，漏了这条会把结果态的结论
-   胶囊与变化清单一起压扁——不报错，只是看着不对。 */
-.td-head,
-.td-progress,
-.td-summary,
-.td-warn,
-.td-changes,
-.td-empty,
-.td-fold {
-  flex: 0 0 auto;
-}
-.td-head {
+}/* 除时间线外都不参与伸缩：flex 的默认 shrink=1，漏了这条会把结果态的结论
+   胶囊与变化清单一起压扁——不报错，只是看着不对。 */.td-head {
   display: flex;
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
-}
-.td-head .grow {
+}.td-head .grow {
   flex: 1 1 auto;
-}
-/* 任务号：等宽、可整体选中（报障时要复制它）；窄屏靠省略号让位 */
-.td-jid {
+}/* 任务号：等宽、可整体选中（报障时要复制它）；窄屏靠省略号让位 */.td-jid {
   font-family: Consolas, Monaco, monospace;
   font-size: 12px;
   max-width: 160px;
@@ -452,16 +429,13 @@ async function deleteJob() {
   text-overflow: ellipsis;
   white-space: nowrap;
   user-select: all;
-}
-/* 一屏灰的进度里唯一的动静：它在动，就说明引擎还活着 */
-.td-pulse {
+}/* 一屏灰的进度里唯一的动静：它在动，就说明引擎还活着 */.td-pulse {
   width: 6px;
   height: 6px;
   border-radius: 50%;
   background: var(--el-color-primary);
   animation: td-pulse 1.4s ease-in-out infinite;
-}
-@keyframes td-pulse {
+}@keyframes td-pulse {
   0%,
   100% {
     opacity: 1;
@@ -469,44 +443,12 @@ async function deleteJob() {
   50% {
     opacity: 0.25;
   }
-}
-.td-progress {
-  margin-top: var(--app-space-3);
-  padding: 10px 12px;
-  background: var(--el-fill-color-lighter);
-  border: 1px solid var(--el-border-color-extra-light);
-  border-radius: var(--app-radius-md);
-}
-.td-progress-top {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  margin-bottom: 8px;
-}
-.td-progress-num {
-  font-size: 20px;
-  font-weight: 600;
-  line-height: 1.2;
-  /* 等宽数字：每 2 秒重算一次，不等宽整行会左右抖 */
-  font-variant-numeric: tabular-nums;
-}
-.td-progress-spent {
-  margin-left: auto;
-  white-space: nowrap;
-}
-.td-progress-text {
-  margin: 6px 0 0;
-  font-size: 12px;
-}
-/* 结论统计是全局 `.chip` 胶囊（任务抽屉、执行方式、统计条筛选都用同一个） */
-.td-summary {
+}/* 结论统计是全局 `.chip` 胶囊（任务抽屉、执行方式、统计条筛选都用同一个） */.td-summary {
   display: flex;
   gap: var(--app-space-2);
   flex-wrap: wrap;
   margin-top: var(--app-space-3);
-}
-/* 错误与告警从裸红字升级成警示容器：读得出来「这是一条消息」而不是普通文本 */
-.td-warn {
+}/* 错误与告警从裸红字升级成警示容器：读得出来「这是一条消息」而不是普通文本 */.td-warn {
   margin-top: 10px;
   padding: 8px 12px;
   line-height: 1.6;
@@ -516,17 +458,14 @@ async function deleteJob() {
   background: var(--el-color-danger-light-9, #fef0f0);
   border: 1px solid var(--el-color-danger-light-7, #fde2e2);
   border-radius: var(--app-radius-md);
-}
-.td-section-title {
+}.td-section-title {
   margin: 14px 0 6px;
   font-size: 12px;
-}
-.td-changes {
+}.td-changes {
   max-height: 40vh;
   overflow-y: auto;
   margin-top: 4px;
-}
-.td-change {
+}.td-change {
   display: flex;
   gap: 7px;
   align-items: baseline;
@@ -535,55 +474,41 @@ async function deleteJob() {
   /* 透明边占位：恶化行加红边时整行不会右移 */
   padding-left: 8px;
   border-left: 2px solid transparent;
-}
-.td-change + .td-change {
+}.td-change + .td-change {
   border-top: 1px solid var(--el-border-color-extra-light);
-}
-/* 变坏的先看：结果态真正的入口是「哪些源坏了」，不是「有几条变化」 */
-.td-change.is-worse {
+}/* 变坏的先看：结果态真正的入口是「哪些源坏了」，不是「有几条变化」 */.td-change.is-worse {
   border-left-color: var(--el-color-danger);
   background: var(--el-color-danger-light-9, #fef0f0);
-}
-.td-name {
+}.td-name {
   flex: 0 1 auto;
   max-width: 150px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-.td-url {
+}.td-url {
   flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-/* 配色与列表页的健康色同口径：同一个状态在两处该长一样 */
-.td-change .to-ok {
+}/* 配色与列表页的健康色同口径：同一个状态在两处该长一样 */.td-change .to-ok {
   color: var(--el-color-success);
-}
-.td-change .to-dead {
+}.td-change .to-dead {
   color: var(--el-color-danger);
-}
-.td-change .to-auth,
+}.td-change .to-auth,
 .td-change .to-cert {
   color: var(--el-color-warning);
-}
-.td-change .to-gfw,
+}.td-change .to-gfw,
 .td-change .to-pending {
   color: var(--el-color-info);
-}
-.td-empty {
+}.td-empty {
   padding: 20px 0;
   text-align: center;
   font-size: 13px;
-}
-.td-fold {
+}.td-fold {
   margin-top: 14px;
   font-size: 12px;
-}
-/* 折叠入口是按钮：键盘可达、有焦点环；原来是 span，只有鼠标能点 */
-.td-fold-toggle {
+}/* 折叠入口是按钮：键盘可达、有焦点环；原来是 span，只有鼠标能点 */.td-fold-toggle {
   display: inline-flex;
   align-items: center;
   gap: 4px;
@@ -595,17 +520,13 @@ async function deleteJob() {
   color: var(--el-color-primary);
   font: inherit;
   cursor: pointer;
-}
-.td-fold-toggle:hover {
+}.td-fold-toggle:hover {
   background: var(--el-fill-color-light);
-}
-.td-fold-chevron {
+}.td-fold-chevron {
   transition: transform 0.15s;
-}
-.td-fold-chevron.is-open {
+}.td-fold-chevron.is-open {
   transform: rotate(90deg);
-}
-.td-raw {
+}.td-raw {
   max-height: 300px;
   overflow: auto;
   margin-top: 8px;
@@ -614,8 +535,7 @@ async function deleteJob() {
   border-radius: 4px;
   white-space: pre-wrap;
   font-size: 12px;
-}
-</style>
+}</style>
 
 <style>
 /* el-dialog 会 teleport 到 body：内部结构够不到 scoped（AGENTS #15），按组件名前缀单开一块。
@@ -632,6 +552,10 @@ async function deleteJob() {
   margin-bottom: 0;
   display: flex;
   flex-direction: column;
+}
+.task-detail-dialog .td-kind-click {
+  cursor: pointer;
+  user-select: none;
 }
 .task-detail-overlay .task-detail-dialog .el-dialog__header {
   flex: 0 0 auto;

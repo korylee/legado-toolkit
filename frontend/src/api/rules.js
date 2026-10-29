@@ -83,6 +83,12 @@ export const rulesMeta = () => api.get("/rules/meta");
 // 轻量验证（rule_try）：拿这一步的整页 HTML 直跑一条建议规则（不跑调试链，
 // 秒级），返回 {ok, values, count, error, via}。只回答「选不选得中」，
 // 不替代整步验收（AGENTS #3）。只报引用 {job_id, step, rule}，材料在后端。
+//: 某个源**最近一次成功的调试**（页面材料 + 各步地址）。编辑页的快验 / AI 补全 /
+//: 「从正文起跑」都要它——那些动作的材料挂在调试任务行上，编辑页没有任务号。
+//: 没有就给空 `job_id`（**不是错误**）：调用方据此提示「先跑一次调试」。
+export const lastDebug = (sourceUrl) =>
+  api.get("/rules/last-debug?source_url=" + encodeURIComponent(sourceUrl || ""));
+
 export const ruleTry = (body) =>
   api.post("/rules/rule-try", body);
 
@@ -103,6 +109,15 @@ export const agentPlan = (body) =>
 // use_ai=false 时仍是免费段的同步返回（纯计算，秒级）。花钱动作，用户显式点击触发。
 export const agentLoop = (body) =>
   api.post("/rules/agent-loop", body);
+
+// **一键生成源**：给一个带关键词的搜索页地址，四段（搜索 → 详情 → 目录 → 正文）
+// 逐步 AI 补全、每段落规则后重调验收，任一段不过就停在那里。
+// 返回 {job_id}：四段串起来几十秒到几分钟，过程走那条观测流（事件里带 `stage`：
+// stage_started / stage_ai_started / stage_rules_applied / stage_verified /
+// stage_failed / stage_retry / generate_done），终态在 getJobDetail 的 result
+// （{passed, stop_reason, stages[], source}）。
+export const generateSource = (body) =>
+  api.post("/rules/generate-source", body);
 
 // 这次 AI 补全用过的模型调用（摘要列表；全文按 seq 单取 `/llm-calls/{seq}`）。
 export const jobLlmCalls = (jobId, after = 0) =>
