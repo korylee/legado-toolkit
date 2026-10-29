@@ -866,5 +866,40 @@ class TestPageVarsShapeParity(unittest.TestCase):
         self.assertEqual(out["globals"][0]["functions"], [{"name": "decryptAes", "arity": 2}])
 
 
+class TestSettleFactsParity(unittest.TestCase):
+    """`settled` / `settle_samples`：侧车判「页面填完数据没」，Python 读它。
+
+    为什么值得一条契约：这个键**缺了不会报错**——Python 侧只会拿到 `None`，那句
+    「材料是半成品」就永远不会出现，用户看到的是「AI 提不出规则」。
+    实测 2026-10-28 发发漫画正文页：一次渲染 25 张图里 22 张还是 `pic_loading.gif`，
+    两次张数都是 25——**计数类判据看不出来**，只有这个键能说明。
+
+    三态（True / False / 缺键→None）不许混：缺键补 True 会把「没报」写成「稳定了」，
+    补 False 会把老侧车写成「这次没稳定」，两个都是凭空多出来的结论（AGENTS #12）。
+    """
+
+    SERVICE = (pathlib.Path(__file__).parent.parent /
+               "appservice/test/io/legado/app/service")
+    JVM_DEBUG = pathlib.Path(__file__).parent.parent / "core/jvm_debug.py"
+
+    def test_producer_writes_the_keys_we_read(self):
+        debug = (self.SERVICE / "DebugService.kt").read_text(encoding="utf-8")
+        for key in ('"shadow_last_settled"', '"shadow_settle_samples"'):
+            self.assertIn(key, debug, "侧车没写 %s——Python 侧会静默读不到" % key)
+        shadow = (self.SERVICE / "ShadowBackstageWebView.kt").read_text(encoding="utf-8")
+        self.assertIn("lastSettled.set(", shadow)
+        bridge = (self.SERVICE / "BrowserBridge.kt").read_text(encoding="utf-8")
+        # 判据本身：只比**地址集合**（张数相同也分辨得出来），不背占位图词表
+        self.assertIn("PAGE_IMAGE_FINGERPRINT_EXPR", bridge)
+        self.assertIn("val settled: Boolean = true", bridge)
+
+    def test_consumer_keeps_the_three_states_apart(self):
+        """读侧：缺键必须落 `None`，不许补成 True/False。"""
+        text = self.JVM_DEBUG.read_text(encoding="utf-8")
+        self.assertIn('"shadow_last_settled" in meta', text,
+                      "读侧没有「键在不在」那道闸——缺键会被补成一个结论")
+        self.assertIn('out["settled"] = (bool(', text)
+
+
 if __name__ == "__main__":
     unittest.main()

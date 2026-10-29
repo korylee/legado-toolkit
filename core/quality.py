@@ -69,7 +69,8 @@ STEP_TOC = "toc"
 
 #: 结构性 HTML 标签。命中说明多半捞到了容器而不是正文（高精度信号）
 STRUCT_TAG_RE = re.compile(
-    r"<\s*(div|script|style|nav|header|footer|aside|table|ul|section|form)\b", re.I)
+    r"<\s*(div|script|style|nav|header|footer|aside|table|ul|section|form)\b", re.I
+)
 
 #: 块级分隔符（用于 evidence.block_seps，仅展示）
 _BLOCK_SEP_RE = re.compile(r"</?\s*(?:p|div|br|li|tr)\b", re.I)
@@ -90,23 +91,40 @@ _MEDIA_TAG: Dict[str, str] = {SHAPE_IMAGE: "<img", SHAPE_AUDIO: "<audio"}
 #: 错误页特征词。**仅当提取值总字符 < SHORT_CONTENT_CHARS 时启用**——
 #: 整页含「登录」太常见（导航栏就有），长正文里出现「404」也可能是巧合
 CONTENT_NOISE_MARKERS: List[str] = [
-    "验证码", "人机验证", "安全验证", "访问验证", "安全检测", "继续访问",
-    "页面不存在", "内容不存在", "章节不存在", "已下架", "正在审核",
-    "维护中", "站点维护", "请开启JavaScript", "请开启javascript",
-    "访问受限", "403 Forbidden", "Access Denied", "cloudflare", "captcha",
+    "验证码",
+    "人机验证",
+    "安全验证",
+    "访问验证",
+    "安全检测",
+    "继续访问",
+    "页面不存在",
+    "内容不存在",
+    "章节不存在",
+    "已下架",
+    "正在审核",
+    "维护中",
+    "站点维护",
+    "请开启JavaScript",
+    "请开启javascript",
+    "访问受限",
+    "403 Forbidden",
+    "Access Denied",
+    "cloudflare",
+    "captcha",
 ]
 
 
 # ------------------------------------------------------------------ 数据结构
+
 
 @dataclass
 class Judgement:
     """一次判定的结论。``verdict`` 只有 pass / fail / unknown 三种。"""
 
     verdict: str
-    reason: str = ""                      # fail / unknown 的原因；pass 时为空
-    shape: str = SHAPE_EMPTY              # 实测形态
-    notes: List[str] = field(default_factory=list)   # 启发式附注，不改 verdict
+    reason: str = ""  # fail / unknown 的原因；pass 时为空
+    shape: str = SHAPE_EMPTY  # 实测形态
+    notes: List[str] = field(default_factory=list)  # 启发式附注，不改 verdict
     evidence: Dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -169,6 +187,7 @@ class Judgement:
 
 # ------------------------------------------------------------------ 形态嗅探
 
+
 def _classify_value(text: str) -> str:
     """单条提取值属于哪种形态。扩展名与标签双通道，任一通道命中即归类。"""
     low = text.lower()
@@ -211,6 +230,7 @@ def sniff_shape(values: Sequence[str]) -> Tuple[str, Dict[str, int]]:
 
 # ------------------------------------------------------------------ 证据采集
 
+
 def _tag_ratio(text: str) -> float:
     """提取值中 HTML 标签字符的占比（仅展示，不参与判定）。"""
     if not text:
@@ -251,10 +271,18 @@ def build_evidence(values: Sequence[str], matched_html: str = "") -> Dict[str, A
 
 # ------------------------------------------------------------------ 证据页面登记
 
-def new_page(pages: Dict[str, Dict[str, Any]], page_id: str, url: str, html: str,
-             status: int = 200, charset: str = "",
-             fetched_at: str = "", cached: bool = False,
-             origin: str = "") -> str:
+
+def new_page(
+    pages: Dict[str, Dict[str, Any]],
+    page_id: str,
+    url: str,
+    html: str,
+    status: int = 200,
+    charset: str = "",
+    fetched_at: str = "",
+    cached: bool = False,
+    origin: str = "",
+) -> str:
     """把抓到的页面登记进 ``pages``（按 id 去重），返回实际可用的 page_id。
 
     原先这是 ``core/verify.py`` 的私有函数 ``_new_page``。提到这里是因为
@@ -299,8 +327,11 @@ def new_page(pages: Dict[str, Dict[str, Any]], page_id: str, url: str, html: str
 
 def _shape_label(shape: str) -> str:
     return {
-        SHAPE_TEXT: "文本", SHAPE_IMAGE: "图片", SHAPE_AUDIO: "音频",
-        SHAPE_MIXED: "多种形态混合", SHAPE_EMPTY: "空",
+        SHAPE_TEXT: "文本",
+        SHAPE_IMAGE: "图片",
+        SHAPE_AUDIO: "音频",
+        SHAPE_MIXED: "多种形态混合",
+        SHAPE_EMPTY: "空",
     }.get(shape, shape)
 
 
@@ -323,6 +354,38 @@ def safe_int(value: Any, default: int = 0) -> int:
 
 
 # ------------------------------------------------------------------ 材料判定
+
+
+def entries_point_home(items: Any, site_url: str) -> bool:
+    """这批条目是不是**把站点首页当成了详情页**（导航项被当成书/章节）。
+
+    判据只有一条：条目里的链接等于站点根。**详情页不可能是站点根**——点进去回到
+    首页，什么都不对。这条比「书名像不像书名」稳：那要词表，而这不需要。
+
+    实测（2026-10-27 发发漫画）：容器写成导航栏 `.nav .a1` 时引擎照样 `verdict=pass`、
+    `total=4`，而 `items[0]` 是 ``{"name": "首页", "book_url": "http://m.fafamh.com/"}``
+    ——条数还比正确容器的 1 条多，任何「看条数」的判据都抓不住它。
+    """
+    from urllib.parse import urlsplit
+
+    base = str(site_url or "").strip().rstrip("/")
+    if not base or not isinstance(items, list):
+        return False
+    want = urlsplit(base)
+    if not want.netloc:
+        return False
+    for row in items:
+        if not isinstance(row, dict):
+            continue
+        for key in ("book_url", "chapter_url", "url"):
+            got = str(row.get(key) or "").strip().rstrip("/")
+            if not got:
+                continue
+            parts = urlsplit(got)
+            if parts.netloc == want.netloc and parts.path in ("", "/"):
+                return True
+    return False
+
 
 def interstitial_marker(html: str) -> str:
     """手里这份**不是站点本身、而是反爬拦截页**时，返回命中的那个词（否则空串）。
@@ -368,6 +431,7 @@ def browser_error_marker(html: str) -> str:
 
 # ------------------------------------------------------------------ 正文判定
 
+
 def short_content_note(chars: int) -> str:
     """「正文短得可疑」的那句话。**只描述，不改判定**（与附注同一纪律）。
 
@@ -378,15 +442,18 @@ def short_content_note(chars: int) -> str:
     return "正文较短（%d 字符），建议看一眼全文确认不是错误页" % chars
 
 
-def _content_notes(source_type: int, shape: str, values: Sequence[str],
-                   evidence: Dict[str, Any]) -> List[str]:
+def _content_notes(
+    source_type: int, shape: str, values: Sequence[str], evidence: Dict[str, Any]
+) -> List[str]:
     """启发式附注。**只写 notes，绝不改 verdict。**"""
     notes: List[str] = []
     joined = "".join(str(v or "") for v in values)
 
     if STRUCT_TAG_RE.search(joined):
-        notes.append("提取值含结构性 HTML 标签（<div> 等），疑似选到容器而非正文；"
-                     "建议改用 @text，或加 ##<[^>]+>## 清洗")
+        notes.append(
+            "提取值含结构性 HTML 标签（<div> 等），疑似选到容器而非正文；"
+            "建议改用 @text，或加 ##<[^>]+>## 清洗"
+        )
 
     if evidence.get("chars", 0) < SHORT_CONTENT_CHARS:
         notes.append(short_content_note(evidence.get("chars", 0)))
@@ -396,9 +463,13 @@ def _content_notes(source_type: int, shape: str, values: Sequence[str],
 
     expected = EXPECTED_SHAPE.get(int(source_type or 0))
     if expected and shape not in (expected, SHAPE_EMPTY, SHAPE_MIXED):
-        notes.append("声明为%s，但提取结果像%s，建议核对 bookSourceType"
-                     % (BOOK_SOURCE_TYPE_NAMES.get(int(source_type or 0), source_type),
-                        _shape_label(shape)))
+        notes.append(
+            "声明为%s，但提取结果像%s，建议核对 bookSourceType"
+            % (
+                BOOK_SOURCE_TYPE_NAMES.get(int(source_type or 0), source_type),
+                _shape_label(shape),
+            )
+        )
     return notes
 
 
@@ -428,7 +499,10 @@ def judge_content(
             return Judgement(
                 VERDICT_FAIL,
                 "正文规则为空；Legado 会把章节链接当作正文，无法阅读",
-                shape, [], evidence)
+                shape,
+                [],
+                evidence,
+            )
         if st in (1, 2):
             # **豁免不是验证**：图片/音频源回退用章节链接是 Legado 的正常行为
             # （WebBook.kt:400-403），但这次没有验证任何取值。与引擎那条链同一口径
@@ -437,11 +511,17 @@ def judge_content(
             return Judgement(
                 VERDICT_UNKNOWN,
                 "正文规则为空；Legado 回退为使用章节链接本身，未验证取值",
-                shape, [], evidence)
+                shape,
+                [],
+                evidence,
+            )
         return Judgement(
             VERDICT_UNKNOWN,
             "正文规则为空，且类型未知，无法判断是否符合预期",
-            shape, [], evidence)
+            shape,
+            [],
+            evidence,
+        )
 
     # 3) 规则回放不了 —— 是工具的能力边界，不是源坏了
     if str(rule_error or "").strip():
@@ -452,11 +532,13 @@ def judge_content(
         return Judgement(VERDICT_FAIL, "正文提取为空", shape, [], evidence)
 
     # 5) 非空即通过。附注不妨碍这一点
-    return Judgement(VERDICT_PASS, "", shape,
-                     _content_notes(st, shape, clean, evidence), evidence)
+    return Judgement(
+        VERDICT_PASS, "", shape, _content_notes(st, shape, clean, evidence), evidence
+    )
 
 
 # ------------------------------------------------------------------ 列表步骤判定
+
 
 def judge_list_step(
     step: str,
@@ -489,7 +571,9 @@ def judge_list_step(
 
     # 规则为空：与 judge_content 的空规则分支对称，同样是**源的配置错误**
     if not str(rule or "").strip():
-        return Judgement(VERDICT_FAIL, "列表规则为空，Legado 无法解析", shape, [], evidence)
+        return Judgement(
+            VERDICT_FAIL, "列表规则为空，Legado 无法解析", shape, [], evidence
+        )
 
     # 规则回放不了：是工具的能力边界，不是源坏了
     if str(rule_error or "").strip():
@@ -559,13 +643,18 @@ def static_misconfig_notes(source: Dict[str, Any]) -> List[str]:
     notes: List[str] = []
 
     content = src.get("ruleContent") or {}
-    if str(content.get("webJs", "") or "").strip() and not _any_url_rule_uses_webview(src):
-        notes.append("ruleContent.webJs 已配置，但 URL 规则未开启 webView，"
-                     "该段 JS 在 Legado 中不会生效（AnalyzeUrl.kt:441）")
+    if str(content.get("webJs", "") or "").strip() and not _any_url_rule_uses_webview(
+        src
+    ):
+        notes.append(
+            "ruleContent.webJs 已配置，但 URL 规则未开启 webView，"
+            "该段 JS 在 Legado 中不会生效（AnalyzeUrl.kt:441）"
+        )
 
     if safe_int(src.get("bookSourceType", 0)) == 4:
-        notes.append("bookSourceType=4 是 Legado 不存在的取值，导出后行为未定义，"
-                     "建议改为 0~3")
+        notes.append(
+            "bookSourceType=4 是 Legado 不存在的取值，导出后行为未定义，建议改为 0~3"
+        )
 
     return notes
 
@@ -617,14 +706,79 @@ def rate_interval_ms(value: Any) -> int:
 
 
 __all__ = [
-    "Judgement", "VERDICT_PASS", "VERDICT_FAIL", "VERDICT_UNKNOWN",
-    "SHAPE_TEXT", "SHAPE_IMAGE", "SHAPE_AUDIO", "SHAPE_MIXED", "SHAPE_EMPTY",
-    "STEP_SEARCH", "STEP_BOOK_URL", "STEP_TOC",
-    "sniff_shape", "build_evidence", "judge_content", "judge_list_step",
-    "static_misconfig_notes", "new_page", "rate_interval_ms",
-    "EXPECTED_SHAPE", "STRUCT_TAG_RE", "CONTENT_NOISE_MARKERS",
-    "MAX_PAGE_HTML_CHARS", "MAX_MATCHED_HTML_CHARS", "MATCHED_NODES_LIMIT",
+    "Judgement",
+    "VERDICT_PASS",
+    "VERDICT_FAIL",
+    "VERDICT_UNKNOWN",
+    "SHAPE_TEXT",
+    "SHAPE_IMAGE",
+    "SHAPE_AUDIO",
+    "SHAPE_MIXED",
+    "SHAPE_EMPTY",
+    "STEP_SEARCH",
+    "STEP_BOOK_URL",
+    "STEP_TOC",
+    "sniff_shape",
+    "build_evidence",
+    "judge_content",
+    "judge_list_step",
+    "static_misconfig_notes",
+    "new_page",
+    "rate_interval_ms",
+    "EXPECTED_SHAPE",
+    "STRUCT_TAG_RE",
+    "CONTENT_NOISE_MARKERS",
+    "MAX_PAGE_HTML_CHARS",
+    "MAX_MATCHED_HTML_CHARS",
+    "MATCHED_NODES_LIMIT",
     "MAX_EVIDENCE_TOTAL_CHARS",
-    "SHORT_CONTENT_CHARS", "safe_int", "short_content_note", "interstitial_marker",
-    "browser_error_marker", "BROWSER_ERROR_MARKERS",
+    "SHORT_CONTENT_CHARS",
+    "safe_int",
+    "short_content_note",
+    "interstitial_marker",
+    "browser_error_marker",
+    "BROWSER_ERROR_MARKERS",
 ]
+
+#: 每段**必须产出**的那个下一步入口：`(结构化里的键, 没取到时的话)`。
+#: 顺序即「链的前进方向」——搜索给详情页地址、详情给目录页地址、目录给正文页地址。
+STAGE_ENTRY = {
+    "search": ("items", "搜索段没有解析出书籍（items 为空）"),
+    #: 详情段**不要求** `toc_url`：留空时 App 直接拿详情页当目录页（上游 `BookInfo`），
+    #: 而很多站的章节列表就内嵌在详情页里（实测 2026-10-27 发发漫画：留空 → 目录段
+    #: `total=233`；让 AI 猜一个「目录页链接」→ 抓到「下一章」地址 → 取到 0 章）。
+    #: 详情段的产出交给**目录段**验——那一段拿不到章节才说明真需要独立 `tocUrl`。
+    "bookUrl": ("name", "详情段没有取到书名（name 为空）"),
+    "toc": ("chapter_list", "目录段没有解析出章节（chapter_list 为空）"),
+}
+
+
+def segment_usable(stage: str, result: Any, site_url: str = "") -> Tuple[bool, str]:
+    """这一段**验收通过了吗**：返回 ``(通过, 原因)``。空串原因 = 通过。
+
+    判据全是引擎侧的现成事实（``steps[].verdict`` 与 ``structured``），不另设一套：
+
+      - ``verdict`` 必须是 ``pass``——``unknown``（规则为空 / 材料不够）不算通过；
+      - 每段再要它该产出的那个入口（:data:`STAGE_ENTRY`）。**空列表不算通过**：
+        规则可能对，但这页确实没结果，下一段无从开始；
+      - 列表段的条目**不能全指向站点首页**（:func:`entries_point_home`）：容器选成
+        导航栏时引擎照样 ``pass``，只是每条链接都回到首页。
+
+    放在这里而不是编排层：这是「这段结果可不可用」的判断，与 ``verdict`` 同族；
+    一键生成只是它目前唯一的调用方。
+    """
+    if not isinstance(result, dict):
+        return False, "没有拿到调试结果"
+    step = next((s for s in (result.get("steps") or [])
+                 if isinstance(s, dict) and s.get("name") == stage), {})
+    verdict = str(step.get("verdict") or "")
+    if verdict != "pass":
+        return False, str(step.get("detail")
+                          or "verdict=%s" % (verdict or "（没有这一步）"))
+    structured = step.get("structured") or {}
+    key, reason = STAGE_ENTRY.get(stage, ("", ""))
+    if key and not structured.get(key):
+        return False, reason
+    if site_url and entries_point_home(structured.get("items"), site_url):
+        return False, "解析出的条目指向站点首页——容器选到了导航栏，不是书/章节列表"
+    return True, ""

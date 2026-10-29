@@ -3,8 +3,8 @@
 
 from __future__ import annotations
 
+import json
 import os
-import shutil
 import unittest
 import uuid
 
@@ -27,24 +27,44 @@ class LLMStoreTests(unittest.TestCase):
 
     def test_create_activate_mask_and_update_key(self) -> None:
         p = llm_store.create_profile({
-            "id": "deepseek", "name": "DeepSeek",
-            "base_url": "https://api.deepseek.com/v1",
+            "id": "deepseek", "base_url": "https://api.deepseek.com/v1",
             "api_key": "sk-abcdefgh", "model": "deepseek-chat",
         })
         self.assertEqual(p["id"], "deepseek")
+        self.assertEqual(p["protocol"], "openai")
         self.assertEqual(llm_store.get_effective_profile()["id"], "deepseek")
         masked = llm_store.get_effective_profile(mask=True)
         self.assertNotIn("api_key", masked)
         self.assertTrue(masked["api_key_set"])
         self.assertTrue(masked["api_key_masked"].endswith("efgh"))
 
-        updated = llm_store.update_profile("deepseek", {"name": "DeepSeek 2", "api_key": ""})
-        self.assertEqual(updated["name"], "DeepSeek 2")
+        updated = llm_store.update_profile("deepseek", {"model": "deepseek-reasoner",
+                                                        "api_key": ""})
+        self.assertEqual(updated["model"], "deepseek-reasoner")
         self.assertEqual(updated["api_key"], "sk-abcdefgh")
 
+    def test_legacy_profile_fields_are_dropped(self) -> None:
+        with open(self.path, "w", encoding="utf-8") as f:
+            json.dump({
+                "schema_version": 2, "active_profile_id": "x",
+                "profiles": [{
+                    "id": "x", "name": "X", "provider": "openai",
+                    "adapter": "openai-compatible", "api_key": "k", "model": "m",
+                    "base_url": "https://api.deepseek.com/v1",
+                    "temperature": 0.5, "max_tokens": 100, "enabled": False,
+                    "sort_order": 3, "api_key_env": "X_KEY",
+                }],
+            }, f)
+        p = llm_store.load()["profiles"][0]
+        self.assertEqual(p["protocol"], "openai")
+        self.assertEqual(p["base_url"], "https://api.deepseek.com/v1")
+        self.assertEqual(
+            sorted(p), sorted(["id", "protocol", "base_url", "api_key", "model",
+                               "timeout", "created_at", "updated_at"]))
+
     def test_delete_reassigns_active(self) -> None:
-        llm_store.create_profile({"id": "a", "name": "A", "api_key": "x", "model": "m"})
-        llm_store.create_profile({"id": "b", "name": "B", "api_key": "y", "model": "m"})
+        llm_store.create_profile({"id": "a", "api_key": "x", "model": "m"})
+        llm_store.create_profile({"id": "b", "api_key": "y", "model": "m"})
         self.assertTrue(llm_store.set_active("b"))
         self.assertTrue(llm_store.delete_profile("b"))
         self.assertEqual(llm_store.get_effective_profile()["id"], "a")

@@ -945,7 +945,11 @@ class TestRunAppDebug(unittest.TestCase):
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
         s.close()
-        out = run_app_debug("127.0.0.1", "https://a.com", "我", port=port, timeout=2)
+        # 连接超时（`CONNECT_TIMEOUT`，外部边界）桩到 0.3s：本机对「刚关掉的端口」
+        # 要等约 2s 才由系统给出失败（2026-10-28 实测）；这条验的是错误文案，
+        # 不是等待时长——`timeout` 是收帧预算，与连接那一段无关
+        with patch("core.app_debug.CONNECT_TIMEOUT", 0.3):
+            out = run_app_debug("127.0.0.1", "https://a.com", "我", port=port, timeout=2)
         self.assertEqual(out["steps"], [])
         self.assertEqual(out["pages"], [])
         self.assertIn("连不上 App", out["error"])
@@ -1215,3 +1219,30 @@ class TestEmptyContentFallback(unittest.TestCase):
         steps, pages, _seen = self._run(sample)
         self.assertIsNone(step_of(steps, "content")["url"] or None)
         self.assertEqual([p["id"] for p in pages], ["detail"])
+
+class HomeEntriesTests(unittest.TestCase):
+    """条目全指向站点首页 = 容器选到了导航栏，判 fail。
+
+    为什么不靠条数：`.nav .a1` 在真实页面上选中 4 条、正确容器只选中 1 条（只搜到
+    一本书），错的还更多。为什么不靠书名词表：那要维护一份「首页/更新/排行」清单，
+    而「详情页链接等于站点根」是不需要词表的事实（2026-10-27 发发漫画实测）。
+    """
+
+    EVENTS = ["⇒开始搜索关键字:绍宋",
+              "≡获取成功:https://m.fafamh.com/statics/search.aspx?key=x",
+              "◇书籍总数:4", "︽搜索页解析完成"]
+
+    def _steps(self, items):
+        from core.app_debug import build_steps, structured_map
+
+        raw = {"steps": {"search": {"total": len(items), "items": items}}}
+        return build_steps(self.EVENTS, structured=structured_map(raw))
+
+    def test_navigation_container_is_not_pass(self):
+        steps = self._steps([
+            {"name": "首页", "book_url": "http://m.fafamh.com/"},
+            {"name": "更新", "book_url": "http://m.fafamh.com/new.html"},
+        ])
+        step = next(s for s in steps if s.get("name") == "search")
+        self.assertEqual(step["verdict"], "fail")
+        self.assertIn("站点首页", step["detail"])

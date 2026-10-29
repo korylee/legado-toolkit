@@ -227,7 +227,9 @@ class AppHttpTests(unittest.TestCase):
         # 端口不通要翻译成状态，不能让异常冒到接口层变成 500
         dead = _dead_ws_port(excluding=self.app.http_port)
         src = make_source()
-        result = preflight("127.0.0.1", src, dead)
+        # 预算给 0.3s：默认 HTTP_TIMEOUT=8 只是上限，本机对「刚关掉的端口」要等约
+        # 2.5s 才由系统给出失败（2026-10-28 实测）；这条验的是状态翻译，不是等待时长
+        result = preflight("127.0.0.1", src, dead, timeout=0.3)
         self.assertEqual(result["state"], "unreachable")
         self.assertTrue(result["error"])
         # 原始异常要留痕（detail），但**不能混进 error**——那是给用户看的动作指引，

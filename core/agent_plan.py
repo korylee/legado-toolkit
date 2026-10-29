@@ -11,31 +11,32 @@
 两条本地约定：`GAP_CODES` 的**元组顺序就是优先级**（只取第一个，其余进 `deferred_gaps`）；
 **没给的事实不当成假**（读不到 ≠ 没有，AGENTS #12），每条判据都先确认那个事实真的在上下文里。
 """
+
 from __future__ import annotations
 
 from collections.abc import Mapping
 from typing import Any, Dict, List, Optional
 
-from core.agent_actions import budget_class, fix_kinds, probe_kinds
+from core.agent_actions import fix_kinds, probe_kinds
 
 #: 缺口码：**元组顺序就是优先级**。前端按这些码取中文句子，契约测试逐码比对。
 #: `no_engine` 压过 `rule_missing`：下一步动作不同才分先后——还没跑时唯一能说的
 #: 是「先跑一次调试」（跑起来才拿得到页面证据，规则空也会被真实验证）；跑过之后
 #: 规则空才是主动作（#24③ 的「全局前置」语义是「换通道白费」，跑调试不是换通道）。
 GAP_CODES = (
-    "no_engine",          # 还没有真实引擎结果：后面的判断都无从谈起
-    "rule_missing",       # 规则为空：跑过之后它就是第一优先
-    "page_not_recorded",   # App 没为这一步记录页面
-    "no_url",              # App 没请求这一步的页面，也没有可用的章节链接
+    "no_engine",  # 还没有真实引擎结果：后面的判断都无从谈起
+    "rule_missing",  # 规则为空：跑过之后它就是第一优先
+    "page_not_recorded",  # App 没为这一步记录页面
+    "no_url",  # App 没请求这一步的页面，也没有可用的章节链接
     "page_fetch_missing",  # 页面没抓回来
-    "webview_unsupported", # 这一段走的 WebView 能力本机没覆盖：拿不到材料，不是规则错
-    "render_missing",      # 这一页没走渲染，而正文只在渲染后才取得到
-    "no_wanted_nodes",     # 这一页没有目标这类节点（改选择器没用）
-    "runtime_missing",     # 动态层 + 本机引擎，缺运行时材料
-    "no_hit",              # 规则在这份页面上一条都没选中
-    "fail_content",        # 取到了值但判定不达标
-    "stale",               # 规则改过，旧结论不作数
-    "unknown",             # 引擎暂时无法判定
+    "webview_unsupported",  # 这一段走的 WebView 能力本机没覆盖：拿不到材料，不是规则错
+    "render_missing",  # 这一页没走渲染，而正文只在渲染后才取得到
+    "no_wanted_nodes",  # 这一页没有目标这类节点（改选择器没用）
+    "runtime_missing",  # 动态层 + 本机引擎，缺运行时材料
+    "no_hit",  # 规则在这份页面上一条都没选中
+    "fail_content",  # 取到了值但判定不达标
+    "stale",  # 规则改过，旧结论不作数
+    "unknown",  # 引擎暂时无法判定
 )
 
 #: `fix` 的动作种类（前端据此映射到现成事件；不认识的一律不渲染）。
@@ -48,15 +49,24 @@ FIX_TARGETS = ("rule", "selector", "layer", "login")
 PROBE_KINDS = probe_kinds()
 #: AI 提议的材料形状：喂错材料等于让它在错的东西上生成
 MATERIAL_KINDS = {
-    "L1": "page_html", "L2": "runtime_dom", "L3": "runtime_object",
-    "L4": "network_shape", "L5": "session",
+    "L1": "page_html",
+    "L2": "runtime_dom",
+    "L3": "runtime_object",
+    "L4": "network_shape",
+    "L5": "session",
 }
 
 #: 需要换通道取材料的缺口：本机引擎拿不到运行时材料的那些
-_PROBE_GAPS = frozenset((
-    "no_url", "page_fetch_missing", "no_wanted_nodes",
-    "runtime_missing", "webview_unsupported", "unknown",
-))
+_PROBE_GAPS = frozenset(
+    (
+        "no_url",
+        "page_fetch_missing",
+        "no_wanted_nodes",
+        "runtime_missing",
+        "webview_unsupported",
+        "unknown",
+    )
+)
 
 #: 「改源就是声明这一层的取数方式」的层
 _LAYER_FIX_LAYERS = frozenset(("L2", "L3", "L4"))
@@ -102,8 +112,11 @@ def _decision_gaps(context: Mapping[str, Any]) -> List[Dict[str, Any]]:
         add("webview_unsupported")
     if context.get("has_wanted") is False:
         add("no_wanted_nodes")
-    if (channel == "jvm" and step.get("verdict") == "unknown"
-            and layer not in ("", "L1")):
+    if (
+        channel == "jvm"
+        and step.get("verdict") == "unknown"
+        and layer not in ("", "L1")
+    ):
         add("runtime_missing")
     # 正文页**要渲染才取得到**，而这次没走渲染：动作是「在 URL 规则上声明 webView」。
     # **必须排在 `no_wanted_nodes` / `runtime_missing` / `no_hit` 之前**：没渲染时那一页上
@@ -114,9 +127,13 @@ def _decision_gaps(context: Mapping[str, Any]) -> List[Dict[str, Any]]:
     # 那是「不知道」，不是「没渲染」（AGENTS #12）。
     # `render_reason` 非空 = 渲染试过但失败了（浏览器不可用等），那种情况另说：原因已经
     # 显示在材料行上，这里的判据只管「压根没走渲染」。
-    if (context.get("page_rendered") is False and not context.get("render_reason")
-            and target.get("step") == "content" and layer in ("L2", "L3")
-            and str(step.get("verdict") or "") != "pass"):
+    if (
+        context.get("page_rendered") is False
+        and not context.get("render_reason")
+        and target.get("step") == "content"
+        and layer in ("L2", "L3")
+        and str(step.get("verdict") or "") != "pass"
+    ):
         add("render_missing")
     if not rule_empty:
         # 取值类缺口只看引擎给的事实：取到 0 条 = 规则没选中任何节点；取到了但判不达标 =
@@ -154,7 +171,9 @@ def _layer_fix(layer: str) -> Dict[str, Any]:
     return {"kind": "edit_rule", "target": "selector"}
 
 
-def _fix_for(code: str, layer: str, context: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+def _fix_for(
+    code: str, layer: str, context: Mapping[str, Any]
+) -> Optional[Dict[str, Any]]:
     if code == "rule_missing":
         return {"kind": "edit_rule", "target": "rule"}
     if code == "no_engine":
@@ -218,14 +237,22 @@ def _route(context: Mapping[str, Any], model_available: bool) -> Mapping[str, An
         return route_agent_context(context, model_available=model_available)
     except Exception as exc:  # pragma: no cover - 只在路由自身出错时
         # 路由挂了不该带走整屏：把原因留下，让界面能说清楚（AGENTS #4）
-        return {"action": "ask_user", "reason_code": "insufficient_evidence",
-                "reason": "路由失败：%s：%s" % (type(exc).__name__, exc),
-                "mode": "deterministic", "requires_model": False, "fallback": ""}
+        return {
+            "action": "ask_user",
+            "reason_code": "insufficient_evidence",
+            "reason": "路由失败：%s：%s" % (type(exc).__name__, exc),
+            "mode": "deterministic",
+            "requires_model": False,
+            "fallback": "",
+        }
 
 
-def build_plan(context: Mapping[str, Any] | None, *,
-               model_available: bool = False,
-               routed: Mapping[str, Any] | None = None) -> Dict[str, Any]:
+def build_plan(
+    context: Mapping[str, Any] | None,
+    *,
+    model_available: bool = False,
+    routed: Mapping[str, Any] | None = None,
+) -> Dict[str, Any]:
     """五格决策：现状 / 解决 / 取证 / AI 补足。
 
     `routed` 可传已算好的 `route_agent_context` 结果——同一个上下文只路由一次。
@@ -239,8 +266,10 @@ def build_plan(context: Mapping[str, Any] | None, *,
     target = _mapping(context.get("target"))
     return {
         "layer": layer,
-        "target": {"step": str(target.get("step") or ""),
-                   "want": str(target.get("want") or "")},
+        "target": {
+            "step": str(target.get("step") or ""),
+            "want": str(target.get("want") or ""),
+        },
         "gap": gap,
         "deferred_gaps": gaps[1:],
         "fix": _fix_for(gap["code"], layer, context) if gap else None,
@@ -254,7 +283,9 @@ def build_plan(context: Mapping[str, Any] | None, *,
         "fallback": str(route.get("fallback") or ""),
         "verification": route.get("verification")
         or {"required": True, "method": "user"},
-        "evidence_refs": [str(item.get("id"))
-                          for item in (context.get("evidence_refs") or [])
-                          if isinstance(item, Mapping) and item.get("id")],
+        "evidence_refs": [
+            str(item.get("id"))
+            for item in (context.get("evidence_refs") or [])
+            if isinstance(item, Mapping) and item.get("id")
+        ],
     }

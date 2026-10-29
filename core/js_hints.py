@@ -16,10 +16,12 @@
   原因——证据行要能说清「这一页我们看了哪几份材料，没看哪几份、为什么」。
 - **判读不在这里**：这里不判层，只交材料（判据只有一份，在 `core/page_layer.py`）。
 """
+
 from __future__ import annotations
 
 import re
-from typing import Any, Callable, Dict, List, Optional
+from collections.abc import Callable
+from typing import Any, Dict, List, Optional
 
 from core.urls import abs_url
 
@@ -31,24 +33,67 @@ MAX_BYTES = 256 * 1024
 TIMEOUT = 10
 
 #: `<script src="...">`——引号有双有单，也有不带引号的写法。
-_SCRIPT_SRC_RE = re.compile(r"""<script[^>]*\bsrc\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s>]+))""",
-                            re.IGNORECASE)
+_SCRIPT_SRC_RE = re.compile(
+    r"""<script[^>]*\bsrc\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s>]+))""", re.IGNORECASE
+)
 
 #: 常见库 / 统计脚本：**自证是通用代码**，不含站点自己的取数逻辑。
 #: 判据是「换任何一个站都会引它」——别把 `cms-2.0.1.min.js` 这类站点自己的 bundle 加进来
 #: （名字里带 `.min` 不是判据）。
 LIB_HINTS = (
-    "jquery", "zepto", "lodash", "underscore", "bootstrap", "popper",
-    "vue.min", "vue.js", "react", "preact", "angular", "polyfill",
-    "crypto-js", "cryptojs", "jsencrypt", "sm-crypto", "md5.min", "sha256.min",
-    "moment", "dayjs", "swiper", "layui", "tailwind", "animate.min",
-    "analytics", "gtag", "ga.js", "tongji", "hm.js", "cnzz", "51.la",
+    "jquery",
+    "zepto",
+    "lodash",
+    "underscore",
+    "bootstrap",
+    "popper",
+    "vue.min",
+    "vue.js",
+    "react",
+    "preact",
+    "angular",
+    "polyfill",
+    "crypto-js",
+    "cryptojs",
+    "jsencrypt",
+    "sm-crypto",
+    "md5.min",
+    "sha256.min",
+    "moment",
+    "dayjs",
+    "swiper",
+    "layui",
+    "tailwind",
+    "animate.min",
+    "analytics",
+    "gtag",
+    "ga.js",
+    "tongji",
+    "hm.js",
+    "cnzz",
+    "51.la",
 )
 
 #: 文件名里带这些词的脚本**更可能**是站点的取数逻辑（排序用，不是过滤条件）。
 TITLE_HINTS = (
-    "cms", "chapter", "content", "comic", "book", "novel", "reader", "read",
-    "list", "detail", "view", "api", "data", "app", "site", "main", "global", "common",
+    "cms",
+    "chapter",
+    "content",
+    "comic",
+    "book",
+    "novel",
+    "reader",
+    "read",
+    "list",
+    "detail",
+    "view",
+    "api",
+    "data",
+    "app",
+    "site",
+    "main",
+    "global",
+    "common",
 )
 
 #: ``fetcher(url) -> html``：默认就是 ``core.fetch.fetch``（这里不 import，测试好替换）。
@@ -78,9 +123,14 @@ def script_srcs(html: str, base_url: str) -> List[str]:
     return out
 
 
-def collect_js_docs(html: str, base_url: str, fetcher: Optional[Fetcher] = None,
-                    max_docs: int = MAX_DOCS, max_bytes: int = MAX_BYTES,
-                    timeout: int = TIMEOUT) -> Dict[str, Any]:
+def collect_js_docs(
+    html: str,
+    base_url: str,
+    fetcher: Optional[Fetcher] = None,
+    max_docs: int = MAX_DOCS,
+    max_bytes: int = MAX_BYTES,
+    timeout: int = TIMEOUT,
+) -> Dict[str, Any]:
     """取回页面引用的那几份脚本。返回：
 
     - ``docs``：``[{"url", "text", "truncated"}]``——交给 ``page_layer.classify_page``
@@ -91,7 +141,9 @@ def collect_js_docs(html: str, base_url: str, fetcher: Optional[Fetcher] = None,
     处理，绝不能因为一个附属脚本抓不到就把整页判成「没目标」）。
     """
     urls = script_srcs(html, base_url)
-    base_host = re.sub(r":\d+$", "", (str(base_url or "").split("//")[-1].split("/")[0]))
+    base_host = re.sub(
+        r":\d+$", "", (str(base_url or "").split("//")[-1].split("/")[0])
+    )
     base_site = _site_key(base_host)
     docs: List[Dict[str, Any]] = []
     skipped: List[Dict[str, str]] = []
@@ -110,8 +162,9 @@ def collect_js_docs(html: str, base_url: str, fetcher: Optional[Fetcher] = None,
     candidates.sort(key=lambda u: -_rank(u))
     if fetcher is None:
         from core.fetch import fetch
+
         fetcher = lambda u: fetch(u, timeout=timeout)  # noqa: E731  取页器与全仓一致
-    for url in candidates[:max(0, max_docs)]:
+    for url in candidates[: max(0, max_docs)]:
         try:
             text = str(fetcher(url) or "")
         except Exception as e:
@@ -119,7 +172,7 @@ def collect_js_docs(html: str, base_url: str, fetcher: Optional[Fetcher] = None,
             continue
         cut = len(text) > max_bytes
         docs.append({"url": url, "text": text[:max_bytes], "truncated": cut})
-    for url in candidates[max(0, max_docs):]:
+    for url in candidates[max(0, max_docs) :]:
         skipped.append({"url": url, "why": "超过每次最多看 %d 份的上限" % max_docs})
     return {"docs": docs, "skipped": skipped, "considered": len(urls)}
 
@@ -133,8 +186,9 @@ def _short(err: Any, limit: int = 60) -> str:
 DEEP_LAYERS = ("L2", "")
 
 
-def classify_with_scripts(html: str, want: str, base_url: str,
-                          fetcher: Optional[Fetcher] = None) -> Dict[str, Any]:
+def classify_with_scripts(
+    html: str, want: str, base_url: str, fetcher: Optional[Fetcher] = None
+) -> Dict[str, Any]:
     """判层；**只在轻判落在 L2 / 判不了时**才取回页面引用的脚本再判一次。
 
     返回 ``{"verdict", "light_layer", "docs", "skipped", "considered"}``：
@@ -150,13 +204,23 @@ def classify_with_scripts(html: str, want: str, base_url: str,
     from core.page_layer import classify_page
 
     verdict = classify_page(html, want)
-    out: Dict[str, Any] = {"verdict": verdict, "light_layer": verdict.get("layer", ""),
-                           "docs": [], "skipped": [], "considered": 0}
+    out: Dict[str, Any] = {
+        "verdict": verdict,
+        "light_layer": verdict.get("layer", ""),
+        "docs": [],
+        "skipped": [],
+        "considered": 0,
+    }
     if verdict.get("layer") not in DEEP_LAYERS:
         return out
     got = collect_js_docs(html, base_url, fetcher=fetcher)
-    out.update({"docs": got["docs"], "skipped": got["skipped"],
-                "considered": got["considered"]})
+    out.update(
+        {
+            "docs": got["docs"],
+            "skipped": got["skipped"],
+            "considered": got["considered"],
+        }
+    )
     if got["docs"]:
         out["verdict"] = classify_page(html, want, js_docs=got["docs"])
     return out

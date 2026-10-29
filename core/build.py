@@ -28,7 +28,10 @@ def build_source(url: str, keyword: str, analysis: dict,
         "ruleSearch": rule_search,
         "ruleBookInfo": {},
         "ruleToc": {},
-        "ruleContent": {},
+        # 漫画源要满宽显示：上游 `ContentRule.imageStyle` 默认「居中」、`FULL` 才是最大宽度，
+        # 而条漫图窄一分就难读。这是**按类型可推导的配置**（不是规则，AI 不必提议），
+        # 所以在这里按 `bookSourceType` 补，不进 `FILL_SPECS`（AGENTS #13）。
+        "ruleContent": {"imageStyle": "FULL"} if source_type == 2 else {},
         "enabled": True,
         "enabledCookieJar": False,
         "enabledExplore": False,

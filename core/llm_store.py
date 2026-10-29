@@ -1,5 +1,15 @@
 # -*- coding: utf-8 -*-
-"""LLM 配置 JSON 存储（本地单用户，原子写）。"""
+"""LLM 配置 JSON 存储（本地单用户，原子写）。
+
+一套配置只有五个参数：``protocol`` / ``base_url`` / ``api_key`` / ``model`` /
+``timeout``。**别的字段都没有读取方**：``enabled`` 与 ``sort_order`` 存过但从未被用来
+过滤或排序，``temperature`` 没有界面之外的去处，``max_tokens=0`` 等于不传，
+``extra_headers`` / ``extra_body`` 没人填过。要加回来先指认谁消费它。
+
+``protocol`` 三值对应 ``core/repair/llm.py`` 的三条请求路径：
+``openai``（``/chat/completions``）、``responses``（``/responses``）、
+``anthropic``（``/messages``）。
+"""
 
 from __future__ import annotations
 
@@ -13,30 +23,9 @@ from typing import Any, Dict, List, Optional
 from core.paths import data_path
 
 CONFIG_NAME = "llm_profiles.json"
-VERSION = 2
+VERSION = 3
 
-PRESETS: List[Dict[str, Any]] = [
-    {"provider": "openai", "name": "OpenAI",
-     "base_url": "https://api.openai.com/v1", "model": "gpt-4o-mini"},
-    {"provider": "deepseek", "name": "DeepSeek",
-     "base_url": "https://api.deepseek.com/v1", "model": "deepseek-chat"},
-    {"provider": "moonshot", "name": "Moonshot / Kimi",
-     "base_url": "https://api.moonshot.cn/v1", "model": "moonshot-v1-8k"},
-    {"provider": "dashscope", "name": "阿里云百炼 / 通义",
-     "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1", "model": "qwen-plus"},
-    {"provider": "zhipu", "name": "智谱 GLM",
-     "base_url": "https://open.bigmodel.cn/api/paas/v4", "model": "glm-4-flash"},
-    {"provider": "openrouter", "name": "OpenRouter",
-     "base_url": "https://openrouter.ai/api/v1", "model": "openai/gpt-4o-mini"},
-    {"provider": "siliconflow", "name": "SiliconFlow",
-     "base_url": "https://api.siliconflow.cn/v1", "model": "Qwen/Qwen2.5-7B-Instruct"},
-    {"provider": "groq", "name": "Groq",
-     "base_url": "https://api.groq.com/openai/v1", "model": "llama-3.3-70b-versatile"},
-    {"provider": "ollama", "name": "Ollama 本地",
-     "base_url": "http://127.0.0.1:11434/v1", "model": "qwen2.5:7b"},
-    {"provider": "lmstudio", "name": "LM Studio 本地",
-     "base_url": "http://127.0.0.1:1234/v1", "model": "local-model"},
-]
+PROTOCOLS = ("openai", "responses", "anthropic")
 
 
 def config_path() -> str:
@@ -71,7 +60,9 @@ def load() -> Dict[str, Any]:
     if not isinstance(profiles, list):
         profiles = []
     out = _empty()
-    out["active_profile_id"] = str(data.get("active_profile_id") or data.get("active") or "")
+    out["active_profile_id"] = str(
+        data.get("active_profile_id") or data.get("active") or ""
+    )
     for item in profiles:
         if isinstance(item, dict):
             out["profiles"].append(_normalize(item))
@@ -87,6 +78,7 @@ def _atomic_save(data: Dict[str, Any]) -> None:
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
     os.replace(tmp, path)
+
 
 def _slug(name: str) -> str:
     s = re.sub(r"[^a-zA-Z0-9_-]+", "-", str(name or "").strip().lower()).strip("-")
@@ -104,55 +96,50 @@ def _unique_id(profiles: List[Dict[str, Any]], base: str) -> str:
 
 
 def _normalize(profile: Dict[str, Any]) -> Dict[str, Any]:
+    """把任意形状的一条配置收敛成规范形状——只留五个参数加元数据。
+
+    旧文件里多出来的字段（``adapter`` / ``name`` / ``temperature`` 等）在这里被丢掉，
+    下次保存即完成格式迁移；``protocol`` 缺省按 ``openai`` 判，老配置本来就是兼容端点。
+    """
     p = dict(profile or {})
-    if not str(p.get("id") or "").strip():
-        p["id"] = _slug(str(p.get("name") or "profile"))
-    p["id"] = str(p["id"])
-    if not str(p.get("name") or "").strip():
-        p["name"] = p["id"]
-    if not str(p.get("provider") or "").strip():
-        p["provider"] = "openai-compatible"
-    if not str(p.get("base_url") or "").strip():
-        p["base_url"] = "https://api.openai.com/v1"
-    p.setdefault("api_key", "")
-    p.setdefault("api_key_env", "")
-    p.setdefault("adapter", "openai-compatible")
-    if not str(p.get("model") or "").strip():
-        p["model"] = "gpt-4o-mini"
-    if not p.get("created_at"):
-        p["created_at"] = _now()
-    if not p.get("updated_at"):
-        p["updated_at"] = p["created_at"]
-    p.setdefault("temperature", 0.2)
-    p.setdefault("timeout", 90)
-    p.setdefault("max_tokens", 0)
-    p.setdefault("extra_headers", {})
-    p.setdefault("extra_body", {})
-    p.setdefault("enabled", True)
-    p.setdefault("sort_order", 0)
-    return p
+    protocol = str(p.get("protocol") or "").strip()
+    if protocol not in PROTOCOLS:
+        protocol = PROTOCOLS[0]
+    model = str(p.get("model") or "").strip()
+    return {
+        "id": str(p.get("id") or "").strip() or _slug(model),
+        "protocol": protocol,
+        "base_url": str(p.get("base_url") or "").strip(),
+        "api_key": str(p.get("api_key") or ""),
+        "model": model,
+        "timeout": p.get("timeout") or 90,
+        "created_at": p.get("created_at") or _now(),
+        "updated_at": p.get("updated_at") or "",
+    }
 
 
 def _env_profile() -> Optional[Dict[str, Any]]:
     key = os.getenv("LEGADO_LLM_API_KEY") or ""
     if not key:
         return None
-    return _normalize({
-        "id": "env",
-        "name": "环境变量",
-        "provider": "openai-compatible",
-        "base_url": os.getenv("LEGADO_LLM_BASE_URL") or "https://api.openai.com/v1",
-        "api_key": key,
-        "model": os.getenv("LEGADO_LLM_MODEL") or "gpt-4o-mini",
-        "sort_order": -1,
-    })
+    return _normalize(
+        {
+            "id": "env",
+            "protocol": "openai",
+            "base_url": os.getenv("LEGADO_LLM_BASE_URL") or "",
+            "api_key": key,
+            "model": os.getenv("LEGADO_LLM_MODEL") or "",
+        }
+    )
 
 
 def sanitize_profile(profile: Dict[str, Any]) -> Dict[str, Any]:
     out = dict(profile or {})
     key = str(out.get("api_key") or "")
     out["api_key_set"] = bool(key)
-    out["api_key_masked"] = ("****" + key[-4:]) if len(key) > 4 else ("****" if key else "")
+    out["api_key_masked"] = (
+        ("****" + key[-4:]) if len(key) > 4 else ("****" if key else "")
+    )
     out.pop("api_key", None)
     return out
 
@@ -169,7 +156,9 @@ def get_profile(profile_id: str, mask: bool = False) -> Optional[Dict[str, Any]]
     return None
 
 
-def get_effective_profile(profile_id: str = "", mask: bool = False) -> Optional[Dict[str, Any]]:
+def get_effective_profile(
+    profile_id: str = "", mask: bool = False
+) -> Optional[Dict[str, Any]]:
     data = load()
     target = None
     if profile_id:
@@ -185,11 +174,11 @@ def get_effective_profile(profile_id: str = "", mask: bool = False) -> Optional[
         return None
     return sanitize_profile(target) if mask else target
 
+
 def create_profile(payload: Dict[str, Any]) -> Dict[str, Any]:
     data = load()
     p = _normalize(payload)
     p["id"] = _unique_id(data["profiles"], p["id"])
-    p["created_at"] = p.get("created_at") or _now()
     p["updated_at"] = _now()
     data["profiles"].append(p)
     if not data.get("active_profile_id"):
@@ -223,7 +212,9 @@ def delete_profile(profile_id: str) -> bool:
     if len(data["profiles"]) == before:
         return False
     if data.get("active_profile_id") == profile_id:
-        data["active_profile_id"] = data["profiles"][0]["id"] if data["profiles"] else ""
+        data["active_profile_id"] = (
+            data["profiles"][0]["id"] if data["profiles"] else ""
+        )
     _atomic_save(data)
     return True
 

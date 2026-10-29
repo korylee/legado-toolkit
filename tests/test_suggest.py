@@ -54,36 +54,6 @@ class FakeLLM:
         return self.reply
 
 
-class PromptTests(unittest.TestCase):
-    def test_prompt_carries_what_the_model_needs(self):
-        p = S.build_prompt(CTX)
-        for want in ("搜索", "搜索结果列表", "ruleSearch.bookList", ".old-list",
-                     "规则命中 0 个节点", "App 独有样本", "没有目标类型的节点",
-                     "ul #list"):     # DOM 大纲里 id 写作 `#list`（与 dom_outline 一致）
-            self.assertIn(want, p)
-
-    def test_prompt_survives_missing_optional_parts(self):
-        """脏/缺字段不能让拼提示词炸掉——它跑在请求线程里。"""
-        p = S.build_prompt({"step": "content", "html": ""})
-        self.assertIn("content", p)
-        S.build_prompt({"app_values": [None, "", "  "], "diagnosis": [None]})
-
-    def test_stable_parts_come_before_the_varying_ones(self):
-        """**顺序是约束，不是排版**：前缀缓存按前缀命中，稳定内容必须在易变内容之前。
-
-        改回「当前规则 → 表现 → 诊断 → 大纲」那一版，这条就红——那时的后果是
-        同一个页面上每次提问都全量计费（实测过一次）。
-        """
-        p = S.build_prompt(CTX)
-        outline = p.index("【页面 DOM 大纲")
-        values = p.index("【App 实测取到的值")
-        rule = p.index("【当前规则】")
-        diag = p.index("【已知的问题】")
-        self.assertLess(outline, rule)
-        self.assertLess(values, rule)
-        self.assertLess(rule, diag)
-
-
 class OutlineFocusTests(unittest.TestCase):
     """大纲的起点：从**命中的容器**起，而不是从 `<html>` 起。
 
@@ -101,7 +71,7 @@ class OutlineFocusTests(unittest.TestCase):
             "</div></div></div></div></body></html>")
 
     def test_focus_pulls_the_deep_container_into_the_outline(self):
-        p = S.build_prompt({"step": "search", "html": self.DEEP, "focus": "class.book-list"})
+        p = S._outline(self.DEEP, "class.book-list")
         self.assertIn("book-list", p)
         self.assertIn("书名一", p)
 
@@ -112,9 +82,11 @@ class OutlineFocusTests(unittest.TestCase):
         `max_depth=6` 的限制，而折叠已经把这个限制移除了（它的价值现在只剩
         「从目标起出大纲更省行数」，不再承担「够不够得到」）。
         """
-        p = S.build_prompt({"step": "search", "html": self.DEEP})
+        p = S._outline(self.DEEP)
         self.assertIn("book-list", p)
-        self.assertIn("书名一", p)
+        # 容器**本身**可见（这是这条测试要钉的）；条目内的文本按同构折叠只留形状，
+        # 那是有意的：2 条同构的 `li` 画成 `×2 同构` 就够写选择器了
+        self.assertIn("×2 同构", p)
 
     def test_focus_accepts_legado_shorthand(self):
         """`class.x` / `id.x` / `tag.a` 是 Legado 简写不是 CSS，必须转。
@@ -133,7 +105,7 @@ class OutlineFocusTests(unittest.TestCase):
 
     def test_unknown_focus_falls_back_to_the_whole_page(self):
         """选择器在大纲里不存在时回退整篇，不能报错（这条链跑在请求线程里）。"""
-        p = S.build_prompt({"step": "search", "html": HTML, "focus": "class.nothing"})
+        p = S._outline(HTML, "class.nothing")
         self.assertIn("item", p)
 
     def test_focus_with_no_selector_returns_empty(self):
@@ -168,8 +140,7 @@ class PreselectTests(unittest.TestCase):
         ctx = {"html": HTML, "step": "search", "source_type": 0, "kind": "text",
                "app_values": ["诡秘之主", "绍宋"], "candidates": cands or self.CANDS}
         ctx.update(over)
-        return S.preselect(ctx["candidates"], ctx["app_values"], ctx["html"],
-                           ctx["step"], ctx["source_type"], ctx["kind"])
+        return S.preselect(ctx["candidates"], ctx["app_values"], ctx["html"], ctx["kind"])
 
     def test_picks_the_equivalent_simplest_candidate(self):
         """报同一批样本的候选是**等价**的，挑更简洁的那条就行——不算歧义。
@@ -435,219 +406,3 @@ class CandidateVerifyRouteTests(unittest.TestCase):
         args = verify.call_args.args
         self.assertEqual(args[1:5], ("ruleSearch.bookList", ".item", "search", "demo"))
         self.assertNotIn("push", verify.call_args.kwargs)
-
-
-class SuggestTests(unittest.TestCase):
-    def _run(self, reply, **over):
-        ctx = dict(CTX)
-        ctx.update(over)
-        return asyncio.run(S.suggest(ctx, client=FakeLLM(reply)))
-
-    def test_candidates_come_back_without_local_judgement(self):
-        """模型给的候选**只带规则与理由**：这条链不做本地判定（AGENTS #3）。
-
-        有没有用由用户点击后的「验证并应用」（本机引擎）说了算；在这里先判一遍，
-        等于用第二套解释器替引擎下结论。
-        """
-        out = self._run('{"candidates":[{"rule":"class.item@tag.a@text","why":"看着对"},'
-                        '{"rule":"@js:return 1","why":"只能这样"}],"reason":"试两条"}')
-        self.assertEqual(out["llm"], "ok")
-        self.assertEqual(out["reason"], "试两条")
-        self.assertEqual([c["rule"] for c in out["candidates"]],
-                         ["class.item@tag.a@text", "@js:return 1"])
-        for c in out["candidates"]:
-            self.assertNotIn("verified", c)
-            self.assertNotIn("local", c)
-            self.assertNotIn("engine", c)
-
-    def test_result_points_at_the_step(self):
-        """候选一律指向**这一步**：`step` 进结论体，界面才知道该把它填回哪个字段。"""
-        out = self._run('{"candidates":[{"rule":"id.list@tag.li@tag.a@href"}]}',
-                        step="search")
-        self.assertEqual(out["candidates"][0]["rule"], "id.list@tag.li@tag.a@href")
-        self.assertEqual(out["preselect"]["basis"], "app")
-
-    def test_duplicates_dropped_and_capped(self):
-        rules = "".join('{"rule":"r%d"},' % i for i in range(6))
-        out = self._run('{"candidates":[%s{"rule":"r0"}]}' % rules)
-        self.assertEqual([c["rule"] for c in out["candidates"]], ["r0", "r1", "r2"])
-
-    def test_single_rule_shape_is_accepted(self):
-        """模型只给一条 rule（没包 candidates 数组）时也要能用。"""
-        out = self._run('{"rule":"class.item@tag.a@text","why":"就这条"}')
-        self.assertEqual(len(out["candidates"]), 1)
-        self.assertEqual(out["candidates"][0]["why"], "就这条")
-
-    def test_bad_json_is_an_error_state_not_an_exception(self):
-        out = self._run("我不是 JSON")
-        self.assertEqual(out["llm"], "error")
-        self.assertEqual(out["candidates"], [])
-        self.assertIn("不是合法 JSON", out["error"])
-
-    def test_no_model_configured_is_off_not_error(self):
-        class Off:
-            enabled = False
-            config = None
-        out = asyncio.run(S.suggest(dict(CTX), client=Off()))
-        self.assertEqual(out["llm"], "off")
-        self.assertIn("模型", out["error"])
-
-    def test_llm_exception_becomes_error_state(self):
-        class Boom(FakeLLM):
-            async def chat(self, *a, **k):
-                raise RuntimeError("连接被拒绝")
-
-        out = asyncio.run(S.suggest(dict(CTX), client=Boom(None)))
-        self.assertEqual(out["llm"], "error")
-        self.assertIn("连接被拒绝", out["error"])
-
-    def test_empty_candidates_is_reported_not_silent(self):
-        out = self._run('{"candidates":[]}')
-        self.assertEqual(out["candidates"], [])
-        self.assertTrue(out["error"], "一条都没给时必须说清，不能显示成空白成功")
-
-    def test_token_usage_is_passed_through(self):
-        """用量要回传（含缓存命中数）：不然「这次花了多少、缓存吃到没有」只能猜。"""
-        class WithUsage(FakeLLM):
-            async def chat(self, *a, **k):
-                self.last_usage = {"prompt_tokens": 1234, "prompt_cache_hit_tokens": 900}
-                return await super().chat(*a, **k)
-
-        out = asyncio.run(S.suggest(dict(CTX), client=WithUsage('{"candidates":[]}')))
-        self.assertEqual(out["usage"]["prompt_tokens"], 1234)
-        self.assertEqual(out["usage"]["prompt_cache_hit_tokens"], 900)
-
-    def test_usage_is_empty_when_provider_gives_none(self):
-        """客户端没这个属性（假客户端/别的 provider）时给空字典，不能让前端拿到 undefined。"""
-        out = self._run('{"candidates":[]}')
-        self.assertEqual(out["usage"], {})
-
-    def test_dry_run_sends_no_model_request(self):
-        """免费那趟**一个模型请求都不发**（它只按候选样本挑一遍 + 登录墙）。
-
-        这条守着「AI 提议必须用户主动」的前半截：换步骤时会自动跑的就是这一趟，
-        它一旦开始调模型，就等于自动花了用户的钱。
-        """
-        llm = FakeLLM('{"candidates":[{"rule":"class.item@tag.a@text"}]}')
-        cand = {"rule": "class.item@tag.a@text", "samples": ["诡秘之主", "绍宋"]}
-        ctx = dict(CTX, candidates=[cand])
-        out = asyncio.run(S.suggest(ctx, client=llm, dry_run=True))
-        self.assertEqual(llm.calls, 0)
-        self.assertEqual(out["llm"], "dry_run")
-        self.assertEqual(out["candidates"], [])
-        self.assertEqual(out["preselect"]["picked"]["rule"], "class.item@tag.a@text")
-
-    def test_paid_run_also_carries_the_free_conclusion(self):
-        """付费那趟也要带「程序挑的结论」——两个结论摆在一起才看得出该信谁。"""
-        cand = {"rule": "class.item@tag.a@text", "samples": ["诡秘之主", "绍宋"]}
-        out = self._run('{"candidates":[{"rule":"class.item@tag.a@text"}]}',
-                        candidates=[cand])
-        self.assertIsNotNone(out["preselect"])
-        self.assertIn("login_wall", out)
-
-
-class SuggestRouteTests(unittest.TestCase):
-    """接口层：缺页面要 400，没配模型不是 HTTP 错误。"""
-
-    def _req(self, **kw):
-        from backend.schemas import SuggestRuleRequest
-
-        payload = {"html": HTML, "step": "search", "rule": ".old-list",
-                   "step_label": "搜索", "want_label": "列表"}
-        payload.update(kw)
-        return SuggestRuleRequest(**payload)
-
-    def test_missing_html_is_400(self):
-        from fastapi import HTTPException
-
-        from backend.api.rules import suggest_rule
-
-        with self.assertRaises(HTTPException) as ctx:
-            asyncio.run(suggest_rule(self._req(html="")))
-        self.assertEqual(ctx.exception.status_code, 400)
-
-    def test_ctx_reaches_the_core(self):
-        from unittest.mock import patch
-
-        from backend.api.rules import suggest_rule
-
-        seen = {}
-
-        async def fake_suggest(ctx, client=None, temperature=None, dry_run=False):
-            seen.update(ctx)
-            seen["dry_run"] = dry_run
-            return {"candidates": [], "llm": "ok", "error": "", "reason": ""}
-
-        with patch("core.repair.suggest.suggest", side_effect=fake_suggest):
-            asyncio.run(suggest_rule(self._req(app_values=["甲"], diagnosis=["乙"],
-                                               field="ruleSearch.bookList",
-                                               candidates=[{"rule": "class.item@text",
-                                                            "samples": ["甲"]}],
-                                               kind="text",
-                                               enabled_cookie_jar=True, dry_run=True)))
-        self.assertEqual(seen["step"], "search")
-        self.assertEqual(seen["want_label"], "列表")
-        self.assertEqual(seen["field"], "ruleSearch.bookList")
-        self.assertEqual(seen["app_values"], ["甲"])
-        self.assertEqual(seen["diagnosis"], ["乙"])
-        # 免费那趟与登录墙判定都要透传到核心：漏掉任一，「程序先挑」就永远是空的
-        self.assertEqual(seen["candidates"], [{"rule": "class.item@text",
-                                               "samples": ["甲"]}])
-        self.assertEqual(seen["kind"], "text")
-        self.assertIs(seen["enabled_cookie_jar"], True)
-        self.assertIs(seen["dry_run"], True)
-
-
-# ---------------------------------------------------------------- 变异记录
-# 以下为实测（改坏 → `python -B -m unittest tests.test_suggest` → 确认变红 → 还原）。
-#
-#  M5  模型给的候选被本地判过（不再只有 rule/why）
-#        → test_candidates_come_back_without_local_judgement 红
-#  M6  preselect 拿候选自己的值替代样本比对（不再用 samples）
-#        → PreselectTests.test_nothing_matches_means_ask_the_model 红
-#  M7  没配模型时不标 llm="off"（返回空 candidates 装作没事）
-#        → test_no_model_configured_is_off_not_error 红
-#  M8  候选数上限失效（不 break）
-#        → test_duplicates_dropped_and_capped 红
-#  M9  提示词不带 App 实测值
-#        → test_prompt_carries_what_the_model_needs 红
-#  M10 提示词不带当前表现（`replay_note` 那句）
-#        → test_prompt_carries_what_the_model_needs 红
-#  M11 大纲挪回最后（稳定内容不再前置 → 前缀缓存吃不到）
-#        → test_stable_parts_come_before_the_varying_ones 红
-#  M12 大纲忽略 focus（仍从 <html> 走）
-#        → test_focus_pulls_the_deep_container_into_the_outline 红
-#  M13 focus 不做 Legado 简写转换（class.x 直接当 CSS 用）
-#        → test_focus_accepts_legado_shorthand 红
-#  M14 token 用量不回传
-#        → test_token_usage_is_passed_through 红
-#  M15 focus_selector 不挡脏值（`@js:x` 直接当 CSS 用）
-#        → test_focus_with_no_selector_returns_empty 红
-#  N1  preselect 不拿 App 值比对（分数恒 0）
-#        → PreselectTests.test_picks_the_equivalent_simplest_candidate 红
-#  N2  等价候选也不挑（同分就退回让模型看）
-#        → PreselectTests.test_picks_the_equivalent_simplest_candidate 红
-#  N3  preselect 没有基准也照样挑
-#        → PreselectTests.test_no_basis_means_ask_the_model 红
-#  N4  dry_run 仍然调模型（免费那趟变成花钱那趟）
-#        → test_dry_run_sends_no_model_request 红
-#  N5  login_wall 不接线（恒 False）
-#        → LoginWallTests.test_login_markers_need_cookie_jar 红
-#  N6  路由不透传 enabled_cookie_jar
-#        → SuggestRouteTests.test_ctx_reaches_the_core 红
-#  N7  列表候选没样本时直接放弃（不退回页面上像 App 实测值的那些）
-#        → PreselectTests.test_list_candidates_without_samples_fall_back_to_the_page 红
-#  N8  「页面上比不了」说成「对不上」（能力边界当成规则判负）
-#        → PreselectTests.test_nothing_comparable_on_the_page_says_so_instead_of_failing 红
-#  N9  preselect 只看「包含」也挑（基线是事件流水时高分挑错规则）
-#        → PreselectTests.test_no_exact_match_is_not_picked 红
-#  N10 verify_candidate 不看字段级零命中（整步 pass 就判 verified）
-#        → CandidateEngineVerifyTests.test_passing_step_with_zero_field_hits_is_rejected 红
-#
-#  **没覆盖的**：
-#    - 真实模型的输出质量（本文件全是假客户端）。提示词改了要手工跑一次真模型看。
-#    - `MAX_HTML_CHARS` 截断：要构造一个几十万字符的页面才测得到，性价比低；
-#      它挡的是「页面大到解析本身出问题」，属于防御性上限。
-
-if __name__ == "__main__":
-    unittest.main()

@@ -614,10 +614,23 @@ class BootWatchdogTests(unittest.TestCase):
     """
 
     def test_hard_kill_reports_residue_when_port_still_held(self) -> None:
-        """杀完端口仍被占 → 诊断非空（残局可见的钉子）。"""
+        """杀完端口仍被占 → 诊断非空（残局可见的钉子）。
+
+        **必须把两样东西桩掉**（2026-10-28 实测：不桩的话这一条单独要 10.5s、
+        另一条要 10.1s，全量 56s 里有两成耗在这两条上）：
+        ① `_KILL_VERIFY_SEC`——它是**真实墙钟**预算（10s），而变化的是「端口还占着」，
+           验证循环会一路等到预算用尽；这条验的是决策（残局要说出来），不是那 10 秒；
+        ② `subprocess.run`——不桩就会对编造的 pid 真发一次 `taskkill`（外部副作用）。
+        """
+        killed = []
         with mock.patch.object(jvm_daemon, "_port_owner_pid", return_value=4242), \
-             mock.patch.object(jvm_daemon, "_kill_proc", return_value=True):
+             mock.patch.object(jvm_daemon, "_kill_proc", return_value=True), \
+             mock.patch.object(jvm_daemon, "_KILL_VERIFY_SEC", 0.05), \
+             mock.patch.object(jvm_daemon.time, "sleep"), \
+             mock.patch.object(jvm_daemon.subprocess, "run",
+                               side_effect=lambda cmd, **kw: killed.append(cmd)):
             residue = jvm_daemon._hard_kill_boot(49975, mock.Mock(pid=111))
+        self.assertTrue(any("4242" in " ".join(c) for c in killed), killed)
         self.assertIn("仍被", residue)
         self.assertIn("4242", residue)
 
@@ -635,10 +648,11 @@ class BootWatchdogTests(unittest.TestCase):
              mock.patch.object(jvm_daemon, "_kill_proc", return_value=True), \
              mock.patch.object(jvm_daemon.subprocess, "run",
                                side_effect=lambda cmd, **kw: killed.append(cmd)) , \
+             mock.patch.object(jvm_daemon, "_KILL_VERIFY_SEC", 0.05), \
              mock.patch.object(jvm_daemon.time, "sleep"):
             # 死循环防护：owner 恒为 999 且杀不掉 → 补杀一次后 time 到点退出；
-            # 用真实时间窗口兜底（_KILL_VERIFY_SEC），这里靠 subprocess.run 侧效
-            # 让第一次补杀后仍返回 999 —— 允许，验证点只是「999 被打过 taskkill」
+            # 时间窗口是**真实墙钟**（_KILL_VERIFY_SEC），这里压到 0.05s：本条的
+            # 验证点只是「999 被打过 taskkill」，不是等满那 10 秒
             residue = jvm_daemon._hard_kill_boot(49975, mock.Mock(pid=111))
         self.assertTrue(any("999" in " ".join(c) for c in killed), killed)
         self.assertIn("仍被", residue)

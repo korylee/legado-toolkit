@@ -83,6 +83,35 @@ class UnfaithfulReasonTests(unittest.TestCase):
     拿整页 HTML 当 result 用（看起来像成了）——两种都会把用户带向反的方向（AGENTS #4）。
     """
 
+    def test_empty_on_a_runtime_page_is_not_a_rule_verdict(self):
+        """层 L3/L4 上跑出「取到空」不许当成「规则没选中」。
+
+        钉的是**结论的方向**：静态材料里确实没有目标时，报「取到空」会让人去改一条
+        正确的规则（实测 2026-10-28 发发漫画正文页：层 L3「长 base64 负载」，快验说
+        「取到空」，而规则本身没错——真图由 JS 从那段负载里拼出来）。
+        """
+        from core.rule_try import (UNFAITHFUL_TARGET_IN_RUNTIME,
+                                   unfaithful_after_run)
+        from core.page_layer import (VERDICT_BLOCKED, VERDICT_NEEDS_RENDER,
+                                     VERDICT_READABLE, VERDICT_UNKNOWN)
+
+        empty = {"ok": False, "count": 0, "values": [], "error": "取到空"}
+        found = {"ok": True, "count": 3, "values": ["a"], "error": ""}
+        cases = (
+            # (材料答案, 引擎结果, 期望码)
+            (VERDICT_NEEDS_RENDER, empty, UNFAITHFUL_TARGET_IN_RUNTIME),
+            # **取到了就是取到了**：材料够不够读，不影响已经读到的值
+            (VERDICT_NEEDS_RENDER, found, ""),
+            # 材料里有目标：空就是空，照旧算「规则没选中」
+            (VERDICT_READABLE, empty, ""),
+            (VERDICT_BLOCKED, empty, ""),
+            (VERDICT_UNKNOWN, empty, ""),
+            ("", empty, ""),
+        )
+        for verdict, out, want in cases:
+            self.assertEqual(unfaithful_after_run(out, verdict), want,
+                             "答案=%s 结果=%s" % (verdict, out))
+
     def test_reason_follows_material_and_rule_shape(self):
         from core.rule_try import (UNFAITHFUL_MATERIAL_IS_SCRIPT,
                                    UNFAITHFUL_RESULT_ABSENT, UNFAITHFUL_RULE_EMPTY,

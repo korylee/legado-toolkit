@@ -46,8 +46,7 @@ import urllib.parse
 import urllib.request
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from core import js_hints
-from core import page_layer
+from core import js_hints, page_layer
 from core import quality as Q
 from core.fetch import CACHE_AUTO, CacheMiss, fetch_ex, parse_source_header
 from core.urls import abs_url, split_url_options
@@ -75,8 +74,13 @@ MAX_PAGES = 3
 #: App 的段名 → ``steps[].name``。抽屉的 STEP_LABELS 认的就是这 5 个名字
 #: （``explore`` 是本次新增的第 5 个），拼错会退化成显示原始 name
 #: （不影响功能，但没必要）
-SEGMENT_NAMES = {"搜索": "search", "发现": "explore", "详情": "bookUrl",
-                 "目录": "toc", "正文": "content"}
+SEGMENT_NAMES = {
+    "搜索": "search",
+    "发现": "explore",
+    "详情": "bookUrl",
+    "目录": "toc",
+    "正文": "content",
+}
 
 #: ``steps[].name`` → ``pages[].id``。**目录页与详情页共用 detail**：Legado 在
 #: ``ruleBookInfo.tocUrl`` 为空时复用 book URL 解析目录（Debug.kt:318-322），
@@ -87,12 +91,22 @@ SEGMENT_NAMES = {"搜索": "search", "发现": "explore", "详情": "bookUrl",
 #: 「先到先得」会让先抓到的发现页 HTML 顶掉详情页（或反过来），抽屉里两页都
 #: 失真——那正是「看源码改规则」失去地基。多出的这一个 id 不破 MAX_PAGES，
 #: 因为发现模式里没有搜索段（理由见 MAX_PAGES 的注释）。
-PAGE_IDS = {"search": "search", "explore": "explore", "bookUrl": "detail",
-            "toc": "detail", "content": "chapter"}
+PAGE_IDS = {
+    "search": "search",
+    "explore": "explore",
+    "bookUrl": "detail",
+    "toc": "detail",
+    "content": "chapter",
+}
 
 #: ``pages[].id`` → 「看这一页的时候要拿到什么」。与前端 `STEP_WANT` 是同一套语义，
 #: 但**层本身只有这一份判据**（`core/page_layer.py`）——前端只渲染 `pages[].page_layer`。
-WANT_OF_PAGE = {"search": "list", "explore": "list", "detail": "link", "chapter": "text"}
+WANT_OF_PAGE = {
+    "search": "list",
+    "explore": "list",
+    "detail": "link",
+    "chapter": "text",
+}
 
 
 def want_of_page(page_id: str, source_type: int = 0) -> str:
@@ -100,6 +114,7 @@ def want_of_page(page_id: str, source_type: int = 0) -> str:
     if page_id == "chapter" and source_type in (1, 2, 3):
         return "media"
     return WANT_OF_PAGE.get(page_id, "")
+
 
 # ------------------------------------------------------------------ 正则
 
@@ -126,14 +141,24 @@ _STAT_MARK = "◇"
 
 #: 空 content 规则短路的判定文案（`build_steps` 用）。收成常量：测试逐字断言，
 #: 别两处各写一份字符串
-EMPTY_CONTENT_REASON = ("正文规则为空：App 拿章节链接当正文，没验证任何取值，"
-                        "补上规则再重新调试本步")
+EMPTY_CONTENT_REASON = (
+    "正文规则为空：App 拿章节链接当正文，没验证任何取值，补上规则再重新调试本步"
+)
 #: 正文取到整页 HTML（选择器写成了 `body@html` 之类）时的原因文案
-FULL_PAGE_CONTENT_REASON = ("正文取到的是整页 HTML——选择器选中了文档本身"
-                            "（如 body@html），不是正文；换成指向正文容器的规则")
+FULL_PAGE_CONTENT_REASON = (
+    "正文取到的是整页 HTML——选择器选中了文档本身"
+    "（如 body@html），不是正文；换成指向正文容器的规则"
+)
 #: 目录条目取不到链接时的原因文案（上游 `BookChapterList` 拿 baseUrl 顶上）
-CHAPTER_URL_FALLBACK_REASON = ("章节链接没取到：App 用目录页地址顶上了，"
-                               "点进去看到的是目录而不是正文；检查 chapterUrl")
+CHAPTER_URL_FALLBACK_REASON = (
+    "章节链接没取到：App 用目录页地址顶上了，"
+    "点进去看到的是目录而不是正文；检查 chapterUrl"
+)
+#: 列表段条目全指向站点首页时的原因文案（容器选到了导航栏）
+HOME_ENTRY_REASON = (
+    "解析出的条目都指向站点首页——容器选到了导航栏/页脚，不是书/章节列表；"
+    "换成包住每条结果的那层"
+)
 #: 上游目录段的兜底记号（`⇒目录N未获取到url,使用baseUrl替代`）——它出现就说明
 #: `chapterUrl` 一条都没取到。**这不是错误行**，所以不会被 `_is_error` 抓到：
 #: 上游照常往下走、章节照样建出来，只是每条 url 都指向目录页本身。
@@ -158,7 +183,7 @@ def content_output(values: List[str]) -> str:
         if not first.startswith("└"):
             return ""
         out = [first[1:]]
-        for nxt in values[i + 2:]:
+        for nxt in values[i + 2 :]:
             if str(nxt)[:1] in "┌◇≡⇒︾︽":
                 break
             out.append(str(nxt))
@@ -215,6 +240,8 @@ def looks_like_full_page(text: str, material: str = "") -> bool:
         return False
     hits = sum(1 for t in nav_texts(material) if t and t in body)
     return hits >= 3
+
+
 #: webView 渲染失败段的可执行下一步（只指向动作，不解释机制）
 RENDER_FAIL_TODO = "先试最新章节；不行就跑 scripts/jvm_login.py 人工过一次验证"
 
@@ -225,14 +252,22 @@ RENDER_FAIL_TODO = "先试最新章节；不行就跑 scripts/jvm_login.py 人�
 #:     ``unknown``（= 我们的判定不了），而不是被误判成 ``fail``。按「不误杀」
 #:     的立场，这个方向的漏判是可接受的
 ERROR_PREFIXES = (
-    "✕", "✖", "❌", "×",
-    "异常", "错误", "失败",
-    "Error", "error", "Exception",
+    "✕",
+    "✖",
+    "❌",
+    "×",
+    "异常",
+    "错误",
+    "失败",
+    "Error",
+    "error",
+    "Exception",
     # Rhino 抛错时 App 会把异常栈打过来，首行是异常类全名（如
     # ``java.lang.NullPointerException``）。**只认 java./javax. 这两个包前缀**：
     # 再宽的 ``com.`` / ``org.`` 收益极小（栈里那些 ``at ...`` 行不是首行），
     # 却会凭空多出误判成 fail 的机会——按「不误杀」的立场不划算
-    "java.", "javax.",
+    "java.",
+    "javax.",
     # **App 自己的异常**：``io.legado.app.exception.ContentEmptyException`` 这类
     # 首行就是它，而上面那条「不加 com./org.」把自家包也漏在外面了。实测
     # 2026-09-20（S5-A1）：正文段真抛了 ContentEmptyException，段却判成
@@ -275,17 +310,24 @@ def http_port_for(ws_port: Optional[int]) -> int:
     return (port - 1) if port > 1 else DEFAULT_HTTP_PORT
 
 
-def _app_http(host: str, path_and_query: str, ws_port: Optional[int],
-              data: Optional[bytes] = None, timeout: int = HTTP_TIMEOUT) -> dict:
+def _app_http(
+    host: str,
+    path_and_query: str,
+    ws_port: Optional[int],
+    data: Optional[bytes] = None,
+    timeout: int = HTTP_TIMEOUT,
+) -> dict:
     """调一次 App 的 HTTP 接口，返回解析后的 ReturnData。
 
     连不上/超时/返回不是 JSON 都会抛——调用方决定怎么翻译成给用户的话。
     """
     base = "http://%s:%d" % (str(host or "").strip(), http_port_for(ws_port))
     req = urllib.request.Request(
-        base + path_and_query, data=data,
+        base + path_and_query,
+        data=data,
         headers={"Content-Type": "application/json"},
-        method="POST" if data is not None else "GET")
+        method="POST" if data is not None else "GET",
+    )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         raw = resp.read().decode("utf-8", "replace")
     parsed = json.loads(raw) if raw.strip() else {}
@@ -294,8 +336,9 @@ def _app_http(host: str, path_and_query: str, ws_port: Optional[int],
     return parsed
 
 
-def push_source(host: str, source: Dict[str, Any], ws_port: Optional[int] = None,
-                timeout: int = 15) -> Tuple[bool, str]:
+def push_source(
+    host: str, source: Dict[str, Any], ws_port: Optional[int] = None, timeout: int = 15
+) -> Tuple[bool, str]:
     """把书源推进 App 的库（幂等：App 侧 insert 是 REPLACE）。
 
     返回 ``(是否成功, 错误信息)``。名字或 URL 为空时 App 会拒绝，这里先拦一道，
@@ -319,8 +362,12 @@ def push_source(host: str, source: Dict[str, Any], ws_port: Optional[int] = None
     return ok, "" if ok else str(d.get("errorMsg") or "App 未接受该源")
 
 
-def app_get_source(host: str, source_url: str, ws_port: Optional[int] = None,
-                   timeout: int = HTTP_TIMEOUT) -> Optional[Dict[str, Any]]:
+def app_get_source(
+    host: str,
+    source_url: str,
+    ws_port: Optional[int] = None,
+    timeout: int = HTTP_TIMEOUT,
+) -> Optional[Dict[str, Any]]:
     """取 App 里那个源（按 ``bookSourceUrl`` 精确匹配）。没有则返回 None。
 
     连不上会抛异常——「连不上」和「连上了但没有这个源」是两件事，别合并。
@@ -333,8 +380,12 @@ def app_get_source(host: str, source_url: str, ws_port: Optional[int] = None,
     return data if isinstance(data, dict) else None
 
 
-def app_has_source(host: str, source_url: str, ws_port: Optional[int] = None,
-                   timeout: int = HTTP_TIMEOUT) -> bool:
+def app_has_source(
+    host: str,
+    source_url: str,
+    ws_port: Optional[int] = None,
+    timeout: int = HTTP_TIMEOUT,
+) -> bool:
     """问 App 里有没有这个源。"""
     return app_get_source(host, source_url, ws_port, timeout=timeout) is not None
 
@@ -375,12 +426,12 @@ def _rules_equal(ours: Any, theirs: Any) -> bool:
     """两边的规则字段是否一致。**误判方向偏保守**（见 preflight 的注释）。"""
     if not isinstance(ours, dict) or not isinstance(theirs, dict):
         return False
-    return all(_field_of(ours, p) == _field_of(theirs, p)
-               for p in _COMPARE_FIELDS)
+    return all(_field_of(ours, p) == _field_of(theirs, p) for p in _COMPARE_FIELDS)
 
 
-def preflight(host: str, source: Any, ws_port: Optional[int] = None,
-              timeout: int = HTTP_TIMEOUT) -> Dict[str, Any]:
+def preflight(
+    host: str, source: Any, ws_port: Optional[int] = None, timeout: int = HTTP_TIMEOUT
+) -> Dict[str, Any]:
     """连 App 调试前的预检：把「静默无响应」拆成能对症下药的状态。
 
     ``source`` 传**完整书源 dict**（不只是 URL）——要比对 App 里那份的规则，
@@ -400,20 +451,29 @@ def preflight(host: str, source: Any, ws_port: Optional[int] = None,
     """
     if not str(host or "").strip():
         return {"state": "unreachable", "error": "没有填 App 的 IP", "detail": ""}
-    source_url = str((source or {}).get("bookSourceUrl", "") or "").strip() \
-        if isinstance(source, dict) else ""
+    source_url = (
+        str((source or {}).get("bookSourceUrl", "") or "").strip()
+        if isinstance(source, dict)
+        else ""
+    )
     if not source_url:
-        return {"state": "unreachable", "error": "源没有 bookSourceUrl，无法调试",
-                "detail": ""}
+        return {
+            "state": "unreachable",
+            "error": "源没有 bookSourceUrl，无法调试",
+            "detail": "",
+        }
     try:
         theirs = app_get_source(host, source_url, ws_port, timeout=timeout)
     except Exception as e:
         # error 是给用户看的动作指引，detail 是原始异常。**别把异常类名混进
         # error**：那是开发者视角，前端只该展示「接下来做什么」。detail 留给
         # 前端记 console，异常不能无声无息地过去
-        return {"state": "unreachable", "detail": "%s: %s" % (type(e).__name__, e),
-                "error": "连不上 App。确认「Web 服务」已打开、手机与电脑在同一"
-                         "局域网、端口填的是 App 显示的 HTTP 端口。"}
+        return {
+            "state": "unreachable",
+            "detail": "%s: %s" % (type(e).__name__, e),
+            "error": "连不上 App。确认「Web 服务」已打开、手机与电脑在同一"
+            "局域网、端口填的是 App 显示的 HTTP 端口。",
+        }
     if theirs is None:
         return {"state": "missing", "error": "", "detail": ""}
     if not _rules_equal(source, theirs):
@@ -489,9 +549,9 @@ def _recv_frame(sock: socket.socket):
     return opcode, data
 
 
-def collect_debug_events(host: str, tag: str, key: str,
-                         port: Optional[int] = None,
-                         timeout: int = 60) -> List[Dict[str, Any]]:
+def collect_debug_events(
+    host: str, tag: str, key: str, port: Optional[int] = None, timeout: int = 60
+) -> List[Dict[str, Any]]:
     """连上 App 跑一次调试，返回事件列表 ``[{"t": 秒, "text": 原文}, ...]``。
 
     ``t`` 取 App 前缀里的相对耗时（与 App 日志时间轴一致）；没有前缀时退回本地
@@ -515,22 +575,23 @@ def collect_debug_events(host: str, tag: str, key: str,
     try:
         sock.settimeout(min(timeout, RECV_TIMEOUT))
         _handshake(sock, host, port, WS_PATH)
-        _send_text(sock, json.dumps({"tag": str(tag or ""), "key": key},
-                                    ensure_ascii=False))
+        _send_text(
+            sock, json.dumps({"tag": str(tag or ""), "key": key}, ensure_ascii=False)
+        )
         t0 = time.time()
         while time.time() - t0 < timeout:
             try:
                 opcode, data = _recv_frame(sock)
             except socket.timeout:
-                break               # 一段时间没动静：当作结束（正常是收到 close 帧）
+                break  # 一段时间没动静：当作结束（正常是收到 close 帧）
             except (ConnectionError, OSError):
-                break               # 对端硬关闭（没发 close 帧）
-            if opcode == 0x8:       # close：App 跑完主动关，正常路径
+                break  # 对端硬关闭（没发 close 帧）
+            if opcode == 0x8:  # close：App 跑完主动关，正常路径
                 break
-            if opcode == 0x9:       # ping → 必须回 pong，否则对端会判死
+            if opcode == 0x9:  # ping → 必须回 pong，否则对端会判死
                 sock.sendall(struct.pack("!BB", 0x8A, 0x80) + os.urandom(4))
                 continue
-            if opcode == 0xA:       # pong
+            if opcode == 0xA:  # pong
                 continue
             text = data.decode("utf-8", "replace")
             events.append(_make_event(text, time.time() - t0))
@@ -581,6 +642,7 @@ def _infer_entry_name(texts: Sequence[str]) -> str:
 
 # ------------------------------------------------------------------ 聚合（纯逻辑）
 
+
 def _split_segments(texts: Sequence[str]) -> List[Dict[str, Any]]:
     """按 ``︾开始解析X页`` / ``︽X页解析完成`` 把事件切成段。
 
@@ -592,7 +654,7 @@ def _split_segments(texts: Sequence[str]) -> List[Dict[str, Any]]:
       与实测抓到的文本块逐行对得上
     """
     segments: List[Dict[str, Any]] = []
-    pending: List[str] = []          # 首个 ︾ 之前的事件
+    pending: List[str] = []  # 首个 ︾ 之前的事件
     for raw in texts:
         text = _strip_prefix(raw)
         m = _START_RE.match(text)
@@ -638,8 +700,11 @@ def engine_pages(raw: Any) -> Dict[str, str]:
     """
     if not isinstance(raw, dict):
         if raw:
-            print("[app_debug] engine_html 形状不对（期望 {url: html}，实测 %s），已忽略"
-                  % type(raw).__name__, file=sys.stderr)
+            print(
+                "[app_debug] engine_html 形状不对（期望 {url: html}，实测 %s），已忽略"
+                % type(raw).__name__,
+                file=sys.stderr,
+            )
         return {}
     out: Dict[str, str] = {}
     for url, html in raw.items():
@@ -650,7 +715,7 @@ def engine_pages(raw: Any) -> Dict[str, str]:
             continue
         clean = _PREFIX_RE.sub("", html, count=1)
         if clean.strip():
-            out[key] = clean[:Q.MAX_PAGE_HTML_CHARS]
+            out[key] = clean[: Q.MAX_PAGE_HTML_CHARS]
     return out
 
 
@@ -662,9 +727,14 @@ MAX_MATCHED_CHARS = 20000
 #: `DebugService.MATCHED_INFO_FIELDS` 同一份词汇（逐词比对钉在
 #: ``TestMatchedStepNameParity``）；顺序即拼接顺序。
 BOOKINFO_FIELD_LABELS = (
-    ("name", "书名"), ("author", "作者"), ("kind", "分类"),
-    ("word_count", "字数"), ("last_chapter", "最新章节"),
-    ("intro", "简介"), ("cover_url", "封面"), ("toc_url", "目录链接"),
+    ("name", "书名"),
+    ("author", "作者"),
+    ("kind", "分类"),
+    ("word_count", "字数"),
+    ("last_chapter", "最新章节"),
+    ("intro", "简介"),
+    ("cover_url", "封面"),
+    ("toc_url", "目录链接"),
 )
 
 #: 详情段逐字段拼接后的总上限（与单段 ``MAX_MATCHED_CHARS`` 同量级——8 个字段
@@ -689,8 +759,9 @@ def _bookinfo_matched_html(per_step: Dict[str, str]) -> str:
         return ""
     out = "\n".join(parts)
     if len(out) > MAX_INFO_MATCHED_CHARS:
-        out = out[:MAX_INFO_MATCHED_CHARS] + \
-            "\n…（已截断：详情命中共 %d 字符）" % len(out)
+        out = out[:MAX_INFO_MATCHED_CHARS] + "\n…（已截断：详情命中共 %d 字符）" % len(
+            out
+        )
     return out
 
 
@@ -708,8 +779,11 @@ def network_entries(raw: Any) -> List[Dict[str, Any]]:
     """
     if not isinstance(raw, list):
         if raw:
-            print("[app_debug] network 形状不对（期望数组，实测 %s），已忽略" % type(raw).__name__,
-                  file=sys.stderr)
+            print(
+                "[app_debug] network 形状不对（期望数组，实测 %s），已忽略"
+                % type(raw).__name__,
+                file=sys.stderr,
+            )
         return []
     out: List[Dict[str, Any]] = []
     for item in raw:
@@ -719,14 +793,16 @@ def network_entries(raw: Any) -> List[Dict[str, Any]]:
         if not url:
             continue
         body = item.get("body")
-        out.append({
-            "url": url,
-            "method": str(item.get("method") or "GET").upper(),
-            "post_data": str(item.get("post_data") or ""),
-            "status": Q.safe_int(item.get("status"), 0),
-            "mime": str(item.get("mime") or ""),
-            "body": str(body)[:MAX_NET_BODY_CHARS] if isinstance(body, str) else "",
-        })
+        out.append(
+            {
+                "url": url,
+                "method": str(item.get("method") or "GET").upper(),
+                "post_data": str(item.get("post_data") or ""),
+                "status": Q.safe_int(item.get("status"), 0),
+                "mime": str(item.get("mime") or ""),
+                "body": str(body)[:MAX_NET_BODY_CHARS] if isinstance(body, str) else "",
+            }
+        )
     return out
 
 
@@ -740,8 +816,11 @@ def matched_map(raw: Any) -> Dict[str, Dict[str, str]]:
     """
     if not isinstance(raw, dict):
         if raw:
-            print("[app_debug] matched_html 形状不对（期望 {url: {step: html}}，实测 %s），"
-                  "已忽略" % type(raw).__name__, file=sys.stderr)
+            print(
+                "[app_debug] matched_html 形状不对（期望 {url: {step: html}}，实测 %s），"
+                "已忽略" % type(raw).__name__,
+                file=sys.stderr,
+            )
         return {}
     out: Dict[str, Dict[str, str]] = {}
     for url, per_step in raw.items():
@@ -753,17 +832,42 @@ def matched_map(raw: Any) -> Dict[str, Dict[str, str]]:
                 continue
             if len(html) > MAX_MATCHED_CHARS:
                 # 明确用 LF（`os.linesep` 在 Windows 上是 CRLF，而全仓统一 LF）
-                html = html[:MAX_MATCHED_CHARS] + chr(10) +                     "…（已截断：命中子树 %d 字符）" % len(html)
+                html = (
+                    html[:MAX_MATCHED_CHARS]
+                    + chr(10)
+                    + "…（已截断：命中子树 %d 字符）" % len(html)
+                )
             kept[str(step)] = html
         if kept:
             out[str(url)] = kept
     return out
 
 
-def build_steps(events: Sequence[Any], matched: Optional[Dict[str, Dict[str, str]]] = None,
-                structured: Optional[Dict[str, Any]] = None,
-                runtime: Optional[Dict[str, Any]] = None
-                ) -> List[Dict[str, Any]]:
+def _entries_point_home(seg_structured: Any, url: str) -> bool:
+    """这一段的结构化条目是不是全指向站点首页（判据在 `quality.entries_point_home`）。
+
+    「站点根」从这一段的 URL 取：引擎取回的页面地址就是判断基准，不必另传配置。
+    """
+    from core.quality import entries_point_home
+
+    if not isinstance(seg_structured, dict) or not seg_structured:
+        return False
+    items = seg_structured.get("items") or seg_structured.get("chapter_list") or []
+    if not isinstance(items, list) or not items:
+        return False
+    rows = [{"url": it} if not isinstance(it, dict) else it for it in items]
+    for row in rows:
+        if "book_url" not in row and "chapter_url" not in row:
+            row = {**row, "book_url": row.get("url", "")}
+    return entries_point_home(rows, url)
+
+
+def build_steps(
+    events: Sequence[Any],
+    matched: Optional[Dict[str, Dict[str, str]]] = None,
+    structured: Optional[Dict[str, Any]] = None,
+    runtime: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
     """**纯函数**：事件列表 → ``steps[]``（只做分段与判定，不抓页面）。
 
     ``matched``：``{url: {step: html}}``——**本机引擎**把每段规则命中的 DOM 记下来带回来
@@ -806,6 +910,11 @@ def build_steps(events: Sequence[Any], matched: Optional[Dict[str, Dict[str, str
                 error = line
         notes = [v for v in values if v.startswith(_STAT_MARK)]
         url = _first_url(values)
+        #: 调用方可能已过 `structured_map` 闸门（结果是 ``{段名: {字段: 值}}``），
+        #: 也可能直接给侧车的原样（``{steps: …}``）——两种都认，判据不靠调用约定
+        _st = structured or {}
+        seg_structured = (_st.get(name)
+                          or (_st.get("steps") or {}).get(name) or {})
         evidence = Q.build_evidence(values)
         if error:
             # reason 只取前 200 字符：完整的错误行仍在 values 里，
@@ -814,34 +923,54 @@ def build_steps(events: Sequence[Any], matched: Optional[Dict[str, Dict[str, str
             if "webview_render_failed" in error:
                 # 渲染失败只留一段 Java 栈 = 用户只知道「坏了」却不知道下一步
                 # （与生成链 strengthen-hint 同一纪律：只指向动作，不解释机制）
-                j = Q.Judgement(j.verdict, j.reason, j.shape,
-                                notes + [RENDER_FAIL_TODO], j.evidence)
+                j = Q.Judgement(
+                    j.verdict, j.reason, j.shape, notes + [RENDER_FAIL_TODO], j.evidence
+                )
         elif any(_CHAPTER_URL_FALLBACK_RE.match(v) for v in values):
             # **章节链接兜底不许判 pass**：`chapterUrl` 取不到时上游拿目录页地址顶上
             # （`BookChapterList`），条目照样建出来、段照样报「解析完成」——真去读就是
             # 拿目录页当正文。这是**规则错误**（chapterUrl 没选中任何链接），判 fail。
-            j = Q.Judgement(Q.VERDICT_FAIL, CHAPTER_URL_FALLBACK_REASON,
-                            Q.SHAPE_TEXT, notes, evidence)
+            j = Q.Judgement(
+                Q.VERDICT_FAIL,
+                CHAPTER_URL_FALLBACK_REASON,
+                Q.SHAPE_TEXT,
+                notes,
+                evidence,
+            )
         elif any(_EMPTY_CONTENT_RE.match(v) for v in values):
             # **空 content 规则的短路不许判 pass**：App 会直接拿章节链接当正文
             # （上游 WebBook.getContentAwait），事件里照样有「︽正文页解析完成」——
             # 原判据下这是一次 0.1 秒的「通过」，但整页没抓、什么都没验。
             # unknown + 说清原因与下一步（AGENTS #4：原因要一路走到用户眼前）
-            j = Q.Judgement(Q.VERDICT_UNKNOWN, EMPTY_CONTENT_REASON,
-                            Q.SHAPE_TEXT, notes, evidence)
+            j = Q.Judgement(
+                Q.VERDICT_UNKNOWN, EMPTY_CONTENT_REASON, Q.SHAPE_TEXT, notes, evidence
+            )
+        elif (
+            name in ("search", "explore", "toc")
+            and _entries_point_home(seg_structured, url)
+        ):
+            # **容器选到导航栏不许判 pass**：`.nav .a1` 这种规则语法完全成立，引擎
+            # 照样报「解析完成」，只是每条链接都是站点根——点进去回到首页。条数还
+            # 可能比正确容器更多（实测 2026-10-27：导航 4 条 vs 真结果 1 条），
+            # 所以「看条数」的判据抓不住，只能看链接指向哪里。
+            j = Q.Judgement(
+                Q.VERDICT_FAIL, HOME_ENTRY_REASON, Q.SHAPE_TEXT, notes, evidence
+            )
         elif name == "content" and _content_is_full_page_placeholder(values):
             # **取到整页 HTML 也不许判 pass**：`body@html` 这类规则「选中」了文档本身，
             # 引擎照样报「正文页解析完成」。这是**规则错误**（不是无法判断），判 fail。
             # 判据要拿材料当锚，而材料在这一步之后才有——所以真正的判定在
             # `jvm_debug._reject_full_page_content`；这里只兜住**开头就是文档声明**那种
             # （`html@html`：材料还没到也能认出来）。
-            j = Q.Judgement(Q.VERDICT_FAIL, FULL_PAGE_CONTENT_REASON,
-                            Q.SHAPE_TEXT, notes, evidence)
+            j = Q.Judgement(
+                Q.VERDICT_FAIL, FULL_PAGE_CONTENT_REASON, Q.SHAPE_TEXT, notes, evidence
+            )
         elif done:
             j = Q.Judgement(Q.VERDICT_PASS, "", Q.SHAPE_TEXT, notes, evidence)
         else:
-            j = Q.Judgement(Q.VERDICT_UNKNOWN, "该段没有解析完成信号",
-                            Q.SHAPE_TEXT, notes, evidence)
+            j = Q.Judgement(
+                Q.VERDICT_UNKNOWN, "该段没有解析完成信号", Q.SHAPE_TEXT, notes, evidence
+            )
         # 卡片上那行小字：优先失败原因，其次 ◇ 统计（比「20 条事件」有信息量）
         detail = j.reason or ("；".join(notes) if notes else "%d 条事件" % len(values))
         # 详情段命中是**字段子键**（`bookUrl.<字段>`，Kotlin 逐字段记）：
@@ -851,13 +980,17 @@ def build_steps(events: Sequence[Any], matched: Optional[Dict[str, Dict[str, str
             step_matched = _bookinfo_matched_html(per_step)
         else:
             step_matched = per_step.get(name, "")
-        steps.append(j.as_step_dict(
-            name, url=url, page_id=PAGE_IDS.get(name, ""),
-            values=values,
-            # 取不到就是空（设备通道、或引擎没回填）
-            matched_html=step_matched,
-            detail=detail,
-        ))
+        steps.append(
+            j.as_step_dict(
+                name,
+                url=url,
+                page_id=PAGE_IDS.get(name, ""),
+                values=values,
+                # 取不到就是空（设备通道、或引擎没回填）
+                matched_html=step_matched,
+                detail=detail,
+            )
+        )
         # 结构化结果按**段名**直接取（Kotlin 采集时就按段记）；没有就不设键——
         # 设备通道没有这份材料，消费方用 `step.get("structured")` 判存在，别信默认值
         step_structured = (structured or {}).get(name)
@@ -869,11 +1002,18 @@ def build_steps(events: Sequence[Any], matched: Optional[Dict[str, Dict[str, str
             # 要走到用户眼前，不静默（AGENTS #4）。步进顺序与 Kotlin 写入顺序一致。
             fails = [str(f) for f in ((structured or {}).get("_fails") or [])]
             mine = [f for f in fails if f.startswith(name + " ")]
-            if not mine and fails and not any(f.startswith(s + " ") for s in SEGMENT_NAMES.values() for f in fails):
-                mine = fails   # 整段失败：每段都该知道自己没采成
+            if (
+                not mine
+                and fails
+                and not any(
+                    f.startswith(s + " ") for s in SEGMENT_NAMES.values() for f in fails
+                )
+            ):
+                mine = fails  # 整段失败：每段都该知道自己没采成
             if mine:
                 steps[-1]["notes"] = list(steps[-1]["notes"]) + [
-                    "结构化采集没采成：" + f for f in mine]
+                    "结构化采集没采成：" + f for f in mine
+                ]
                 steps[-1]["has_notes"] = True
         # L3 运行时形状挂在**正文步**（采集只对正文页武装——形状是这次正文页上的
         # params 观测）。没有就不设键：设备通道没有这份材料，消费方用键存在性判断。
@@ -901,14 +1041,20 @@ def _structured_clip(value: Any) -> Any:
 def structured_map(raw: Any) -> Dict[str, Dict[str, Any]]:
     if not isinstance(raw, dict):
         if raw:
-            print("[app_debug] structured 形状不对（期望 {steps, v, fails}，实测 %s），已忽略"
-                  % type(raw).__name__, file=sys.stderr)
+            print(
+                "[app_debug] structured 形状不对（期望 {steps, v, fails}，实测 %s），已忽略"
+                % type(raw).__name__,
+                file=sys.stderr,
+            )
         return {}
     steps = raw.get("steps")
     if not isinstance(steps, dict):
         if steps:
-            print("[app_debug] structured.steps 形状不对（期望 {段名：{字段：值}}，实测 %s），"
-                  "已忽略" % type(steps).__name__, file=sys.stderr)
+            print(
+                "[app_debug] structured.steps 形状不对（期望 {段名：{字段：值}}，实测 %s），"
+                "已忽略" % type(steps).__name__,
+                file=sys.stderr,
+            )
         return {}
     out: Dict[str, Any] = {}
     for step, fields in steps.items():
@@ -919,7 +1065,8 @@ def structured_map(raw: Any) -> Dict[str, Dict[str, Any]]:
             if isinstance(value, list):
                 kept[str(key)] = [
                     {k: _structured_clip(v) for k, v in item.items()}
-                    if isinstance(item, dict) else _structured_clip(item)
+                    if isinstance(item, dict)
+                    else _structured_clip(item)
                     for item in value
                 ]
             else:
@@ -981,7 +1128,7 @@ def rank_globals(items: Any, limit: int) -> Tuple[List[Dict[str, Any]], int]:
         return [], 0
     rows = [i for i in items if isinstance(i, dict)]
     rows.sort(key=data_likeness)
-    return rows[:max(0, limit)], max(0, len(rows) - max(0, limit))
+    return rows[: max(0, limit)], max(0, len(rows) - max(0, limit))
 
 
 def runtime_map(raw: Any) -> Dict[str, Any]:
@@ -989,8 +1136,11 @@ def runtime_map(raw: Any) -> Dict[str, Any]:
 
     if not isinstance(raw, dict):
         if raw:
-            print("[app_debug] runtime 形状不对（期望 {params_type, keys, chapter_images}，"
-                  "实测 %s），已忽略" % type(raw).__name__, file=sys.stderr)
+            print(
+                "[app_debug] runtime 形状不对（期望 {params_type, keys, chapter_images}，"
+                "实测 %s），已忽略" % type(raw).__name__,
+                file=sys.stderr,
+            )
         return {}
     out: Dict[str, Any] = {}
     params_type = str(raw.get("params_type") or "").strip()
@@ -1000,8 +1150,11 @@ def runtime_map(raw: Any) -> Dict[str, Any]:
         out["params_type"] = params_type
     keys = raw.get("keys")
     if isinstance(keys, list):
-        out["keys"] = [str(k)[:60] for k in keys[:RUNTIME_KEYS_MAX]
-                       if str(k).strip() and not SECRET_KEY_RE.search(str(k))]
+        out["keys"] = [
+            str(k)[:60]
+            for k in keys[:RUNTIME_KEYS_MAX]
+            if str(k).strip() and not SECRET_KEY_RE.search(str(k))
+        ]
     # 全局候选数据源（页面里所有对象/数组值的**形状**，不采值）。存在的意义：
     # 变量名叫什么**不能猜**——`params` 只是某个站点自己挂的名字（上游只注入
     # cache/source/java）。这里只转发事实（名字 + 类型 + 长度/键名），「哪个是图片」
@@ -1015,8 +1168,10 @@ def runtime_map(raw: Any) -> Dict[str, Any]:
             name = str(rec.get("name") or "").strip()
             if not name or SECRET_KEY_RE.search(name):
                 continue
-            item: Dict[str, Any] = {"name": name[:60],
-                                    "type": str(rec.get("type") or "")[:40]}
+            item: Dict[str, Any] = {
+                "name": name[:60],
+                "type": str(rec.get("type") or "")[:40],
+            }
             count = rec.get("count")
             if isinstance(count, int) and not isinstance(count, bool):
                 item["count"] = max(0, count)
@@ -1025,8 +1180,11 @@ def runtime_map(raw: Any) -> Dict[str, Any]:
                 item["fn"] = max(0, fn)
             ks = rec.get("keys")
             if isinstance(ks, list):
-                item["keys"] = [str(k)[:60] for k in ks[:RUNTIME_KEYS_MAX]
-                                if str(k).strip() and not SECRET_KEY_RE.search(str(k))]
+                item["keys"] = [
+                    str(k)[:60]
+                    for k in ks[:RUNTIME_KEYS_MAX]
+                    if str(k).strip() and not SECRET_KEY_RE.search(str(k))
+                ]
             # 函数签名（名字 + 形参个数）：解密站的解法是**调用**页面上的解密函数，
             # 而调用要知道参数个数。只采签名——不采函数体、不执行（`SECRET_KEY_RE`
             # 同一条判据：像密钥/口令的函数名不进提示词）。
@@ -1040,10 +1198,17 @@ def runtime_map(raw: Any) -> Dict[str, Any]:
                     if not fname or SECRET_KEY_RE.search(fname):
                         continue
                     arity = f.get("arity")
-                    kept_fns.append({"name": fname[:40],
-                                     "arity": (max(0, arity)
-                                               if isinstance(arity, int)
-                                               and not isinstance(arity, bool) else 0)})
+                    kept_fns.append(
+                        {
+                            "name": fname[:40],
+                            "arity": (
+                                max(0, arity)
+                                if isinstance(arity, int)
+                                and not isinstance(arity, bool)
+                                else 0
+                            ),
+                        }
+                    )
                 if kept_fns:
                     item["functions"] = kept_fns
             items.append(item)
@@ -1108,6 +1273,7 @@ def _first_url(values: Sequence[str]) -> str:
 
 # ------------------------------------------------------------------ 页面抓取
 
+
 def _fallback_content_url(step: Dict[str, Any], seg_url: Dict[str, str]) -> str:
     """正文段没有 ``≡获取成功`` 时，从「⇒正文规则为空,使用章节链接:」行找章节 URL。
 
@@ -1135,15 +1301,19 @@ def _fallback_content_url(step: Dict[str, Any], seg_url: Dict[str, str]) -> str:
         absolute = abs_url(base, pure)
         if not absolute:
             continue
-        tail = raw[len(pure):] if _opts else ""
+        tail = raw[len(pure) :] if _opts else ""
         return absolute + tail
     return ""
 
 
-def fetch_debug_pages(steps: Sequence[Dict[str, Any]], source: Optional[Dict[str, Any]] = None,
-                      proxy: str = "", timeout: int = 15,
-                      cache: str = CACHE_AUTO,
-                      engine_html: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
+def fetch_debug_pages(
+    steps: Sequence[Dict[str, Any]],
+    source: Optional[Dict[str, Any]] = None,
+    proxy: str = "",
+    timeout: int = 15,
+    cache: str = CACHE_AUTO,
+    engine_html: Optional[Dict[str, str]] = None,
+) -> List[Dict[str, Any]]:
     """按 steps 抓页面，返回 ``pages[]``（与调试链同形状）。
 
     只抓「搜索页 / 详情页 / 正文页 / 发现页」各一个——按 ``page_id`` 去重后
@@ -1177,8 +1347,11 @@ def fetch_debug_pages(steps: Sequence[Dict[str, Any]], source: Optional[Dict[str
     # 各段已知的请求 URL。正文段的 fallback（规则为空）要拿目录段的 URL 当
     # 绝对化 base——App 侧 ``AnalyzeUrl`` 的 baseUrl 恰是 ``book.tocUrl``，同构；
     # 目录段自己没有 URL 时退详情段（多数站的相对章节链接相对详情页也能解析）。
-    seg_url = {str(s.get("name", "")): str(s.get("url", "") or "")
-               for s in steps if s.get("url")}
+    seg_url = {
+        str(s.get("name", "")): str(s.get("url", "") or "")
+        for s in steps
+        if s.get("url")
+    }
 
     # 去重看**已尝试过的 URL**，不是「已登记的 page_id」。
     # 只看 page_id 的话，第一次抓超时（没登记）会让后面共用同一 URL 的步
@@ -1197,7 +1370,7 @@ def fetch_debug_pages(steps: Sequence[Dict[str, Any]], source: Optional[Dict[str
                 step["url"] = url
         page_id = str(step.get("page_id", "") or "")
         if not url or not page_id or page_id in pages:
-            continue            # 没抓到 URL / 该页已登记（如目录页与详情页同 id）
+            continue  # 没抓到 URL / 该页已登记（如目录页与详情页同 id）
         if url in tried:
             # 同一个页面已经抓过（成功或失败），别重复抓——把结果共享给它
             for sid, p in pages.items():
@@ -1208,8 +1381,9 @@ def fetch_debug_pages(steps: Sequence[Dict[str, Any]], source: Optional[Dict[str
         tried.add(url)
         # 引擎已经交回来的那份：**一个请求都不发**（那是 App 手上的页面）
         if (engine_html or {}).get(url):
-            Q.new_page(pages, page_id, url, engine_html[url], charset=charset,
-                       origin="engine")
+            Q.new_page(
+                pages, page_id, url, engine_html[url], charset=charset, origin="engine"
+            )
             continue
         # URL 可能自带 ``,{...}`` 请求选项（method/headers/body）——与 App 同一
         # 套语法，抓取前拆出来应用，否则带选项的链接会被当成 GET 发出去，
@@ -1225,23 +1399,43 @@ def fetch_debug_pages(steps: Sequence[Dict[str, Any]], source: Optional[Dict[str
         if method == "POST" and ("{{" in body or "<js>" in body or "@js:" in body):
             # body 里的模板/JS 只有 App（Rhino）求得了值：本地硬抓发出去的是
             # 字面量，拿回来的多半是参数错误页——不如明说，让用户连 App 看
-            _note(step, "正文链接的 body 带未求值的模板/JS，本地抓不了这一页，"
-                        "请连 App 调试")
+            _note(
+                step,
+                "正文链接的 body 带未求值的模板/JS，本地抓不了这一页，请连 App 调试",
+            )
             continue
         try:
             # 传 source：最多补抓 3 页，也该遵守源声明的 concurrentRate
-            f = fetch_ex(fetch_url, headers=req_headers, charset=charset, proxy=proxy,
-                         source=source, cache=cache, method=method, body=body)
+            f = fetch_ex(
+                fetch_url,
+                headers=req_headers,
+                charset=charset,
+                proxy=proxy,
+                source=source,
+                cache=cache,
+                method=method,
+                body=body,
+            )
         except CacheMiss:
             # **不是「抓不到」**：这是我们按要求没去抓。混成一句「抓取失败」
             # 会让用户去查站点，而问题出在他自己刚选的模式下
-            _note(step, "只读缓存模式下这一页不在缓存里，本次没有抓它（%s）" % fetch_url)
+            _note(
+                step, "只读缓存模式下这一页不在缓存里，本次没有抓它（%s）" % fetch_url
+            )
             continue
         except Exception as e:
             _note(step, "页面抓取失败（%s），本步判定不受影响" % e)
             continue
-        Q.new_page(pages, page_id, url, f.html, charset=charset,
-                   fetched_at=f.fetched_at, cached=f.cached, origin="fetch")
+        Q.new_page(
+            pages,
+            page_id,
+            url,
+            f.html,
+            charset=charset,
+            fetched_at=f.fetched_at,
+            cached=f.cached,
+            origin="fetch",
+        )
     # **判层**（一份判据，两个消费者）：判完挂在 `pages[].page_layer` 上——
     # 前端只渲染它，生成链（`services/add_source`）判「这一段要不要引擎取」也读它。
     # 放在这里而不是两个消费者各判一遍：判据在两处必然漂（AGENTS #7/#8）。
@@ -1262,28 +1456,43 @@ def fetch_debug_pages(steps: Sequence[Dict[str, Any]], source: Optional[Dict[str
             # 反爬拦截页还有「渲染时再过一次」那条路，浏览器错误页连站点都没碰到。
             # 抽屉与生成链读的都是这一格，而「界面上看不出这份材料是什么」正是
             # 2026-09-21/22 两次实测暴露的同一个隐患。
-            why = ("拿到的是拦截页（%s）" % mark if mark
-                   else "拿到的是浏览器自己的错误页（%s）" % broken)
+            why = (
+                "拿到的是拦截页（%s）" % mark
+                if mark
+                else "拿到的是浏览器自己的错误页（%s）" % broken
+            )
             page["page_layer"] = {
-                "layer": "", "evidence": [], "stats": page_layer.page_stats(html),
-                "has_wanted": None, "login_marker": "",
-                "unsure": "这一页%s，不是站点本身——看源码与写规则都别用它" % why}
+                "layer": "",
+                "evidence": [],
+                "stats": page_layer.page_stats(html),
+                "has_wanted": None,
+                "login_marker": "",
+                "unsure": "这一页%s，不是站点本身——看源码与写规则都别用它" % why,
+            }
             continue
         deep = js_hints.classify_with_scripts(
-            html, want_of_page(str(page.get("id") or ""), src_type),
+            html,
+            want_of_page(str(page.get("id") or ""), src_type),
             str(page.get("url") or ""),
-            fetcher=lambda u: fetch_ex(u, proxy=proxy, cache=cache).html)
+            fetcher=lambda u: fetch_ex(u, proxy=proxy, cache=cache).html,
+        )
         page["page_layer"] = deep["verdict"]
     return list(pages.values())
 
 
 # ------------------------------------------------------------------ 对外入口
 
-def run_app_debug(host: str, source_url_raw: str, key: str,
-                  port: Optional[int] = None, timeout: int = 60,
-                  source: Optional[Dict[str, Any]] = None,
-                  proxy: str = "",
-                  cache: str = CACHE_AUTO) -> Dict[str, Any]:
+
+def run_app_debug(
+    host: str,
+    source_url_raw: str,
+    key: str,
+    port: Optional[int] = None,
+    timeout: int = 60,
+    source: Optional[Dict[str, Any]] = None,
+    proxy: str = "",
+    cache: str = CACHE_AUTO,
+) -> Dict[str, Any]:
     """连 App 跑一次调试，返回与设备通道同形状的结果，供前端抽屉直接消费。
 
     返回 ``{"source": "app", "steps": [...], "pages": [...], "all_ok": bool,
@@ -1306,8 +1515,9 @@ def run_app_debug(host: str, source_url_raw: str, key: str,
     }
     host = str(host or "").strip()
     try:
-        events = collect_debug_events(host, source_url_raw, key,
-                                      port=port, timeout=timeout)
+        events = collect_debug_events(
+            host, source_url_raw, key, port=port, timeout=timeout
+        )
     except Exception as e:
         # 连不上/超时**不是 500**：端口、局域网、App 的「Web 服务」开关都是
         # 用户侧能自己修的事，错误信息里要把排查方向说清楚
@@ -1315,8 +1525,8 @@ def run_app_debug(host: str, source_url_raw: str, key: str,
             "连不上 App 的调试端口 ws://%s:%s%s（%s: %s）。"
             "请确认：App 里已打开「Web 服务」、手机与电脑在同一局域网、"
             "端口填的是 App 显示的 HTTP 端口 + 1。"
-            % (host or "?", port or DEFAULT_DEBUG_PORT, WS_PATH,
-               type(e).__name__, e))
+            % (host or "?", port or DEFAULT_DEBUG_PORT, WS_PATH, type(e).__name__, e)
+        )
         return out
 
     out["events"] = events
@@ -1340,5 +1550,6 @@ def run_app_debug(host: str, source_url_raw: str, key: str,
     out["all_ok"] = all(s["ok"] for s in steps)
     # 详情组一键填充建议内嵌进结果（与本机引擎同一条纪律，core.autofill.attach_autofill）
     from core.autofill import attach_autofill
+
     attach_autofill(steps, pages)
     return out

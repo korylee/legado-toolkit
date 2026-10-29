@@ -75,7 +75,8 @@ import subprocess
 import threading
 import time
 import zlib
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from collections.abc import Callable
+from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
 
 from core.paths import data_dir, data_path

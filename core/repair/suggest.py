@@ -16,11 +16,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import re
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from collections.abc import Callable
+from typing import Any, Dict, List, Optional, Tuple
 
 from core import candidates as candidates_mod
+from core.page_layer import VERDICT_NEEDS_RENDER
 
 #: 最多让模型给几条。多了反而挑不动，而且每条都要用户点一次才验
 MAX_CANDIDATES = 3
@@ -39,8 +42,9 @@ KNOWN_WEBJS_MAX = 600
 #: 页面函数名的「像解密/编码」判据：命中才把它当解密函数列给模型。
 #: 只认自证是这类用途的词（与 `core.page_layer.PAGE_MARKERS` 收 CryptoJS 同一立场）——
 #: 宽判据（如含 `get` / `parse`）会把一堆取数函数也说成解密。
-DECRYPT_NAME_RE = re.compile(r"decrypt|encrypt|decode|decodeURI|base64|aes|des|rc4|rsa",
-                             re.IGNORECASE)
+DECRYPT_NAME_RE = re.compile(
+    r"decrypt|encrypt|decode|decodeURI|base64|aes|des|rc4|rsa", re.IGNORECASE
+)
 #: 「图片不在 DOM 里」的两道门槛：图片总数够多、带 src 的占比够低。
 #: 实测（2026-10-22 口袋漫画正文页）：139 个 img、只有 1 个带 src、图片地址全在页面脚本里
 #: ——这种页面的 DOM 大纲对「取正文」没有可用信息。
@@ -48,7 +52,13 @@ OUTLINE_IMAGE_MIN = 10
 OUTLINE_SRC_RATIO = 0.1
 
 #: 候选验收只允许触碰书源规则组，不能借这个入口改元数据或请求上下文。
-CANDIDATE_RULE_GROUPS = ("ruleSearch", "ruleToc", "ruleContent", "ruleExplore", "ruleBookInfo")
+CANDIDATE_RULE_GROUPS = (
+    "ruleSearch",
+    "ruleToc",
+    "ruleContent",
+    "ruleExplore",
+    "ruleBookInfo",
+)
 
 
 def patch_candidate(source: Dict[str, Any], field: str, rule: str) -> Dict[str, Any]:
@@ -88,9 +98,15 @@ _STEP_OF_TARGET = {
 }
 
 
-def verify_candidate(source: Dict[str, Any], field: str, rule: str,
-                     target: str, query: str, timeout: int = 60,
-                     runner: Any = None) -> Dict[str, Any]:
+def verify_candidate(
+    source: Dict[str, Any],
+    field: str,
+    rule: str,
+    target: str,
+    query: str,
+    timeout: int = 60,
+    runner: Any = None,
+) -> Dict[str, Any]:
     """用本机真实引擎验收一个候选规则，不保存或推送临时源。
 
     ``runner`` 是测试注入点，签名为 ``runner(source, key, timeout)``，生产默认使用
@@ -104,39 +120,61 @@ def verify_candidate(source: Dict[str, Any], field: str, rule: str,
 
     patched = patch_candidate(source, field, rule)
     from core.debug_keys import build_key
+
     key = build_key(target, query, keyword=query)
     if runner is None:
         from core.jvm_debug import run_jvm_debug
+
         runner = lambda src, run_key, run_timeout: run_jvm_debug(  # noqa: E731
-            src, key=run_key, timeout=run_timeout)
+            src, key=run_key, timeout=run_timeout
+        )
 
     try:
         result = runner(patched, key, timeout) or {}
     except Exception as exc:
         return {
             "status": "engine_unavailable",
-            "engine": {"status": "unavailable", "channel": "jvm",
-                        "reason": "%s: %s" % (type(exc).__name__, exc)},
-            "target": target, "step": _STEP_OF_TARGET[target], "key": key,
+            "engine": {
+                "status": "unavailable",
+                "channel": "jvm",
+                "reason": "%s: %s" % (type(exc).__name__, exc),
+            },
+            "target": target,
+            "step": _STEP_OF_TARGET[target],
+            "key": key,
         }
 
     if not isinstance(result, dict):
         return {
             "status": "engine_unavailable",
-            "engine": {"status": "unavailable", "channel": "jvm",
-                        "reason": "引擎返回不是对象"},
-            "target": target, "step": _STEP_OF_TARGET[target], "key": key,
+            "engine": {
+                "status": "unavailable",
+                "channel": "jvm",
+                "reason": "引擎返回不是对象",
+            },
+            "target": target,
+            "step": _STEP_OF_TARGET[target],
+            "key": key,
         }
     step_name = _STEP_OF_TARGET[target]
-    step = next((item for item in (result.get("steps") or [])
-                 if isinstance(item, dict) and item.get("name") == step_name), None)
+    step = next(
+        (
+            item
+            for item in (result.get("steps") or [])
+            if isinstance(item, dict) and item.get("name") == step_name
+        ),
+        None,
+    )
     if step is None:
-        reason = str(result.get("error") or result.get("code_text") or
-                     "引擎没有返回目标步骤")
+        reason = str(
+            result.get("error") or result.get("code_text") or "引擎没有返回目标步骤"
+        )
         return {
             "status": "engine_unavailable",
             "engine": {"status": "unavailable", "channel": "jvm", "reason": reason},
-            "target": target, "step": step_name, "key": key,
+            "target": target,
+            "step": step_name,
+            "key": key,
         }
 
     ok = bool(step.get("ok"))
@@ -145,20 +183,25 @@ def verify_candidate(source: Dict[str, Any], field: str, rule: str,
     out = {
         "status": "verified" if verified else "rejected",
         "engine": {
-            "status": "pass" if verified else "fail", "channel": "jvm",
-            "step": step_name, "detail": str(step.get("detail") or ""),
+            "status": "pass" if verified else "fail",
+            "channel": "jvm",
+            "step": step_name,
+            "detail": str(step.get("detail") or ""),
             "count": len(step.get("values") or []),
             "samples": [str(v) for v in (step.get("values") or [])[:3]],
         },
-        "target": target, "step": step_name, "key": key,
+        "target": target,
+        "step": step_name,
+        "key": key,
     }
     if empty_field:
         # **整步通过不等于这个字段取到了东西**：搜索步的 verdict 来自事件流
         # （`◇书籍总数:N` 与页解析完成）。把 `bookList` 换成一个不存在的 class，
         # 站点自己的搜索页照样出结果、步照样 pass——实测（2026-10-08，`去读书网`）
         # 「不存在的 class」拿到过 `verified`。所以补这条**字段级**的零命中判据。
-        out["engine"]["reason"] = ("整步跑通了，但这一个字段命中 0 条（%s）——它没取到东西"
-                                   % empty_field)
+        out["engine"]["reason"] = (
+            "整步跑通了，但这一个字段命中 0 条（%s）——它没取到东西" % empty_field
+        )
     return out
 
 
@@ -178,61 +221,14 @@ def _empty_hit_reason(step: Dict[str, Any]) -> str:
     （`◇书籍总数:N` + 页解析完成），换掉 `bookList` 之后站点自己的搜索页照样出结果。
     字段级的「命中 0 条」是唯一能一眼看出的反证，所以单独判一次。
     """
-    text = "；".join([str(step.get("detail") or "")]
-                    + [str(n) for n in (step.get("notes") or [])])
+    text = "；".join(
+        [str(step.get("detail") or "")] + [str(n) for n in (step.get("notes") or [])]
+    )
     for rx in _EMPTY_HIT_RES:
         m = rx.search(text)
         if m:
             return m.group(0)
     return ""
-
-
-SYSTEM_PROMPT = """你是 Legado（阅读 App）书源的规则专家。用户正在调试**一步**规则，你只给这一步的候选规则。只输出 JSON，不要解释。
-
-Legado 规则语法（`@` 分段，前面是选择器，最后一段是取值动作）：
-- 简写：class.xxx 等于 .xxx；id.xxx 等于 #xxx；tag.a 等于 a
-- 链式：class.book-list@tag.li@tag.a@href
-- 索引：.0 取第一个，.-1 取最后一个
-- 取值动作：text / textNodes / ownText / html，或任意属性名（href、src、data-original）
-- 正则后处理：规则##正则##替换（支持 $1 反向引用）
-- JSON 接口：$.data.list[*].name
-
-输出格式（严格 JSON，最多 3 条候选，按可能性从高到低）：
-{"candidates":[{"rule":"规则文本","why":"一句话说明为什么"}],"reason":"整体判断"}
-
-硬性要求：
-1. 规则里用到的 class / id 必须**真实存在于**我给的 DOM 大纲里，不许臆造。
-2. `@js:` / `<js>` / `@xpath:` 是允许的：候选会由本机 App 引擎验收。用它们时在 why 里
-   说明依赖什么（全局对象 / 登录态 / 接口），因为取不到材料的那次会判失败。
-3. 一条候选只写规则文本本身，不要带字段名、不要写 JSON 以外的内容。
-"""
-
-
-def build_prompt(ctx: Dict[str, Any]) -> str:
-    """组装提示词（纯函数，可离线测）。
-
-    ``ctx`` 里的 ``step_label`` / ``want_label`` / ``field`` 由前端给——步骤与字段的
-    对应关系只在 ``frontend/src/utils/ruleCandidates.js`` 定义，后端不再抄一份。
-
-    **段落顺序是有约束的，别按「读起来顺」重排**：DeepSeek 这类服务的上下文缓存
-    按**前缀**命中（缓存锚点是 system + 消息开头），所以稳定内容（这一步是什么、
-    DOM 大纲、App 实测值）必须在前，改一次规则就变的（当前规则、当前表现、诊断）
-    必须在后。原先大纲排在最后、前面全在变，等于每次点击都全量计费。
-
-    实测（2026-09-17，真实书源的搜索页，「问一次 → 改规则 → 再问一次」）：
-    新排法命中 **640 / 826** tokens，旧排法只命中 **128 / 817**（那 128 是 system
-    那一段）——同一个页面连问两次，差的是八成的输入钱。
-    """
-    L: List[str] = []
-    # —— 稳定前缀：同一步骤内重复提问（提议 → 用这条 → 改规则 → 再提议）都一样 ——
-    L.append("这一步：%s（要拿到「%s」）" % (ctx.get("step_label") or ctx.get("step"),
-                                          ctx.get("want_label") or "目标"))
-    if ctx.get("field"):
-        L.append("对应的规则字段：%s" % ctx["field"])
-    # 其余段落全走片段（与批量路径同一份实现）：这样单字段路径也能拿到
-    # 页面全局候选 / 已有 webJs / 按材料分档的大纲——此前它只有大纲与实测值。
-    L.extend(_sections(ctx))
-    return "\n".join(L)
 
 
 _FOCUS_SHORTHAND = {"class": ".", "id": "#"}
@@ -266,6 +262,8 @@ def outline_plan(ctx: Dict[str, Any]) -> Dict[str, Any]:
     """这次要不要给 DOM 大纲，给哪一种（纯函数，可离线测）。
 
     三档，判据全是**已有的材料事实**：
+      - ``json``：整页就是一份 JSON（接口站）。压 JSON 结构大纲，读选择器毫无意义——
+        `.html` 里只有一个 `<pre>`，模型看不到任何字段名。
       - ``skip``：材料根本不是 DOM（`material_kind == "webjs_output"`）。有 `webJs` 时
         引擎交回的「整页」是那段脚本的返回值（实测 27150 字节、137 行图片地址、无标签），
         压出来的大纲是垃圾——喂给模型等于让它在一堆 URL 上找选择器。
@@ -273,21 +271,42 @@ def outline_plan(ctx: Dict[str, Any]) -> Dict[str, Any]:
         实测该页 139 个 `img` 只有 1 个带 `src`，正文靠页面脚本填——这时 90 行大纲同样
         没有可用信息，但**统计数字本身是判据**（「图不在 DOM」），所以给一行代替。
       - ``full``：其余情况照旧压大纲（文本页正是这么用的）。
+      - ``skip``（「先渲染」那一支）：`material_verdict` 说目标不在**这一份**材料里时
+        不给——大纲只会让模型在不存在的东西里找。这一档优先于统计那一档。
     """
+    from core.jvm_debug import MATERIAL_JSON
     from core.material import can_fill_dom
 
+    if str(ctx.get("material_kind") or "") == MATERIAL_JSON:
+        return {"mode": "json"}
     if not can_fill_dom(str(ctx.get("material_kind") or "")):
         return {"mode": "skip"}
+    # 答案是「先渲染」时**不要再送大纲**：目标不在这一份材料里，大纲只会让模型在
+    # 不存在的东西里找（实测 2026-10-28 发发漫画正文页：送 2240 字符大纲 + 一节
+    # 「目标不在 DOM 里」自相矛盾，模型卡了 90 秒超时）。
+    # 判据只有一份，在这里问 `core.page_layer.material_verdict`——**不读层码**：
+    # 渲染后的材料层照旧是 L3（那段负载证据写在 `<script>` 里不会消失），
+    # 照层码判会把「已经有 34 张真图的 DOM」也砍掉大纲。
+    if str(ctx.get("material_verdict") or "") == VERDICT_NEEDS_RENDER:
+        return {"mode": "skip", "verdict": VERDICT_NEEDS_RENDER}
     stats = ctx.get("page_stats")
     if isinstance(stats, dict):
         images = stats.get("images")
         with_src = stats.get("images_with_src")
-        if (isinstance(images, int) and isinstance(with_src, int)
-                and not isinstance(images, bool) and not isinstance(with_src, bool)
-                and images >= OUTLINE_IMAGE_MIN
-                and with_src / images < OUTLINE_SRC_RATIO):
-            return {"mode": "stats", "images": images, "with_src": with_src,
-                    "links": stats.get("links")}
+        if (
+            isinstance(images, int)
+            and isinstance(with_src, int)
+            and not isinstance(images, bool)
+            and not isinstance(with_src, bool)
+            and images >= OUTLINE_IMAGE_MIN
+            and with_src / images < OUTLINE_SRC_RATIO
+        ):
+            return {
+                "mode": "stats",
+                "images": images,
+                "with_src": with_src,
+                "links": stats.get("links"),
+            }
     return {"mode": "full"}
 
 
@@ -299,18 +318,40 @@ def _outline_section(ctx: Dict[str, Any]) -> List[str]:
     """
     plan = outline_plan(ctx)
     mode = plan["mode"]
+    if mode == "json":
+        from core.repair.evidence import json_outline
+
+        return [
+            "",
+            "【响应体 JSON 形状（`$.` 路径 + 类型 + 样例）】",
+            json_outline(ctx.get("html") or ""),
+            "写 JSONPath：取这个字段所在的路径（如 `$.data.total`、`$.data.list[*]`），"
+            "**不要写 CSS 选择器**——这份材料没有 DOM。",
+        ]
     if mode == "skip":
-        return ["", "【页面材料说明】这一步的材料是页面脚本（webJs）的输出，不是 HTML——"
-                    "没有 DOM 结构可看，选择器类写法在这里不适用。"]
+        return [
+            "",
+            "【页面材料说明】这一步的材料是页面脚本（webJs）的输出，不是 HTML——"
+            "没有 DOM 结构可看，选择器类写法在这里不适用。",
+        ]
     if mode == "stats":
         links = plan.get("links")
-        return ["", "【页面统计（不给 DOM 大纲）】图片 %d 个，其中带 src 的只有 %d 个%s。"
-                    "图多而带地址的极少 = 图片地址不在 DOM 属性里，多半由页面脚本填，"
-                    "优先看下面的页面全局数据。"
-                % (plan["images"], plan["with_src"],
-                   "；链接 %d 个" % links if isinstance(links, int) else "")]
-    return ["", "【页面 DOM 大纲（缩进表示层级）】",
-            _outline(ctx.get("html") or "", ctx.get("focus") or "")]
+        return [
+            "",
+            "【页面统计（不给 DOM 大纲）】图片 %d 个，其中带 src 的只有 %d 个%s。"
+            "图多而带地址的极少 = 图片地址不在 DOM 属性里，多半由页面脚本填，"
+            "优先看下面的页面全局数据。"
+            % (
+                plan["images"],
+                plan["with_src"],
+                "；链接 %d 个" % links if isinstance(links, int) else "",
+            ),
+        ]
+    return [
+        "",
+        "【页面 DOM 大纲（缩进表示层级）】",
+        _outline(ctx.get("html") or "", ctx.get("focus") or ""),
+    ]
 
 
 def _outline(html: str, focus: str = "") -> str:
@@ -330,8 +371,11 @@ def _outline(html: str, focus: str = "") -> str:
     """
     from core.repair.evidence import dom_outline
 
-    return dom_outline(str(html or "")[:MAX_HTML_CHARS], MAX_OUTLINE_LINES,
-                       select=focus_selector(focus) if focus else "")
+    return dom_outline(
+        str(html or "")[:MAX_HTML_CHARS],
+        MAX_OUTLINE_LINES,
+        select=focus_selector(focus) if focus else "",
+    )
 
 
 def login_wall(html: str, enabled_cookie_jar: bool = False) -> bool:
@@ -399,8 +443,12 @@ def _samples_of(candidate: Any) -> List[str]:
     return out
 
 
-def preselect(candidates: List[Any], app_values: List[str], html: str,
-              step: str, source_type: int = 0, kind: str = "") -> Dict[str, Any]:
+def preselect(
+    candidates: List[Any],
+    app_values: List[str],
+    html: str,
+    kind: str = "",
+) -> Dict[str, Any]:
     """**先用程序挑一遍**：拿 App 实测到的值当基准，看哪条候选报的样本就是那批。
 
     为什么值得先来这一遍：AI 那条路要花钱，而「哪条候选对」多数时候**可判**——
@@ -417,26 +465,40 @@ def preselect(candidates: List[Any], app_values: List[str], html: str,
     挑不出来时如实说，不猜：没有基准（不是 App 实测的结果，或 App 那一步本来就取不到
     值）、候选报的样本都对不上、多条候选并列。
     """
-    rules = [c for c in (candidates or []) if str((c or {}).get("rule") if isinstance(c, dict)
-                                                  else c or "").strip()]
+    rules = [
+        c
+        for c in (candidates or [])
+        if str((c or {}).get("rule") if isinstance(c, dict) else c or "").strip()
+    ]
     basis = [x for x in (_norm(v) for v in (app_values or [])) if x]
-    out: Dict[str, Any] = {"picked": None, "ranked": [], "need_ai": True,
-                           "basis": "app" if basis else "", "reason": ""}
+    out: Dict[str, Any] = {
+        "picked": None,
+        "ranked": [],
+        "need_ai": True,
+        "basis": "app" if basis else "",
+        "reason": "",
+    }
     if not rules:
         out["reason"] = "没有候选可挑"
         return out
     if not basis:
-        out["reason"] = ("没有 App 实测值作基准。先连 App 或本机引擎把这一步跑一遍："
-                         "当前规则自己取到的值不能当基准（那是它的产物）")
+        out["reason"] = (
+            "没有 App 实测值作基准。先连 App 或本机引擎把这一步跑一遍："
+            "当前规则自己取到的值不能当基准（那是它的产物）"
+        )
         return out
 
     #: 页面上像 App 实测值的那几个，作为候选**没报样本**时的比对材料（列表步的候选
     #: 只给容器、不报样本，而 App 在列表步取到的正是条目里的书名）。拿不到就是拿不到，
     #: 调用方按「这一页上比不了」如实说。同样丢掉超长项：容器整块文本会与任何基线
     #: 「包含」得上（实测一次 1000+ 字，把分数抬到 76）。
-    on_page = [x for x in (_norm(v) for v in
-                           candidates_mod.sample_values(html or "", kind, basis))
-               if len(x) <= _MAX_SAMPLE_CHARS]
+    on_page = [
+        x
+        for x in (
+            _norm(v) for v in candidates_mod.sample_values(html or "", kind, basis)
+        )
+        if len(x) <= _MAX_SAMPLE_CHARS
+    ]
 
     ranked = []
     for item in rules:
@@ -446,12 +508,23 @@ def preselect(candidates: List[Any], app_values: List[str], html: str,
             # 候选自己没报样本（列表族）：退回「页面上像 App 实测值的那些」
             samples = on_page
         strong = sum(1 for a in basis for x in samples if a == x)
-        weak = sum(1 for a in basis for x in samples
-                   if a != x and len(a) >= 2 and (a in x or x in a))
-        ranked.append({"rule": rule, "score": strong * _STRONG + weak * _WEAK,
-                       "strong": strong, "weak": weak,
-                       "samples": list(samples[:3]), "count": len(samples),
-                       "sig": _sig(samples)})
+        weak = sum(
+            1
+            for a in basis
+            for x in samples
+            if a != x and len(a) >= 2 and (a in x or x in a)
+        )
+        ranked.append(
+            {
+                "rule": rule,
+                "score": strong * _STRONG + weak * _WEAK,
+                "strong": strong,
+                "weak": weak,
+                "samples": list(samples[:3]),
+                "count": len(samples),
+                "sig": _sig(samples),
+            }
+        )
     ranked.sort(key=lambda r: (-r["score"], r["rule"]))
     out["ranked"] = [{k: v for k, v in r.items() if k != "sig"} for r in ranked]
 
@@ -459,8 +532,10 @@ def preselect(candidates: List[Any], app_values: List[str], html: str,
     if not scored:
         if not on_page and not any(r["count"] for r in ranked):
             # 这一页上根本没有像 App 实测值的材料——这是「比不了」，不是「对不上」
-            out["reason"] = ("这一页上找不到 App 实测的那些值（材料可能不是同一份），"
-                             "没法按样本比：点一次 AI，或直接用引擎验")
+            out["reason"] = (
+                "这一页上找不到 App 实测的那些值（材料可能不是同一份），"
+                "没法按样本比：点一次 AI，或直接用引擎验"
+            )
             return out
         out["reason"] = "候选报的样本和 App 实测值都对不上"
         return out
@@ -468,8 +543,10 @@ def preselect(candidates: List[Any], app_values: List[str], html: str,
         # 只有「包含」没有「完全相等」→ 基线里没有真正的值，撑不起挑一条的结论。
         # App 那一步取到的是事件流水（带 ┌└◇≡ 的结构行、URL、导航文本）时就会这样：
         # 随便一条候选都能撞上几处，报「对上 N 条」等于把人引到错的规则上。
-        out["reason"] = ("App 这一步的值里没有和候选样本完全相等的（看着像事件流水或"
-                         "统计行，不是取到的值）——不替你猜，点一次 AI 或直接用引擎验")
+        out["reason"] = (
+            "App 这一步的值里没有和候选样本完全相等的（看着像事件流水或"
+            "统计行，不是取到的值）——不替你猜，点一次 AI 或直接用引擎验"
+        )
         return out
 
     top = scored[0]
@@ -479,104 +556,38 @@ def preselect(candidates: List[Any], app_values: List[str], html: str,
         # `.item@tag.h3@text`，a 就在 h3 里）——那不算歧义，挑更简洁的那条即可；
         # 否则「页面上有一堆等价写法」会让这一层形同虚设。
         if len({r["sig"] for r in tied}) == 1:
-            top = min(tied, key=lambda r: (str(r["rule"]).count("@"),
-                                           len(str(r["rule"])), str(r["rule"])))
+            top = min(
+                tied,
+                key=lambda r: (
+                    str(r["rule"]).count("@"),
+                    len(str(r["rule"])),
+                    str(r["rule"]),
+                ),
+            )
             out["picked"] = top
             out["need_ai"] = False
-            out["reason"] = ("%d 条候选报的是同一批样本（等价），取了更简洁的那条；"
-                             "App 取到的值就在它选中的 %d 条里"
-                             % (len(tied), top["strong"] + top["weak"]))
+            out["reason"] = (
+                "%d 条候选报的是同一批样本（等价），取了更简洁的那条；"
+                "App 取到的值就在它选中的 %d 条里"
+                % (len(tied), top["strong"] + top["weak"])
+            )
             return out
-        out["reason"] = ("多条候选都能对上、报的还不是同一批样本（%d 分 / %d 分），"
-                         "不替你猜" % (top["score"], tied[1]["score"]))
+        out["reason"] = (
+            "多条候选都能对上、报的还不是同一批样本（%d 分 / %d 分），"
+            "不替你猜" % (top["score"], tied[1]["score"])
+        )
         return out
     if len(scored) > 1 and scored[1]["score"] * _LEAD_RATIO > top["score"]:
-        out["reason"] = ("另一条候选也能对上（%d 分 / %d 分），不替你猜"
-                         % (top["score"], scored[1]["score"]))
+        out["reason"] = "另一条候选也能对上（%d 分 / %d 分），不替你猜" % (
+            top["score"],
+            scored[1]["score"],
+        )
         return out
     out["picked"] = top
     out["need_ai"] = False
-    out["reason"] = ("App 取到的值就在它报的样本里（对上 %d 条）"
-                     % (top["strong"] + top["weak"]))
-    return out
-
-
-async def suggest(ctx: Dict[str, Any], client: Any = None,
-                  temperature: Optional[float] = None,
-                  dry_run: bool = False) -> Dict[str, Any]:
-    """跑一轮提议，返回给前端直接渲染的结构。
-
-    ``client`` 可注入（离线测试用假客户端）。返回体恒有 ``candidates`` /
-    ``llm`` / ``error`` 三个键：``llm`` 用 ``ok`` / ``off``（没配模型）/
-    ``error`` 三态，前端据此给不同的话，**不能都显示成「没有候选」**。
-
-    ``dry_run=True`` 时**一个模型请求都不发**：只跑免费的 ``preselect``（外加
-    登录墙判断），``llm`` 记为 ``dry_run``。前端先来这一趟，挑得出来就不花钱。
-
-    模型给的候选**不带本地判定**（只有 ``rule`` / ``why``）：验收是引擎那一趟的事，
-    在界面上由用户点击触发（``/rules/verify-candidate``）。
-    """
-    from core.repair.llm import LLMClient, extract_json
-
-    client = client if client is not None else LLMClient()
-    out: Dict[str, Any] = {"candidates": [], "reason": "", "llm": "ok", "error": "",
-                           "model": getattr(getattr(client, "config", None), "model", ""),
-                           #: 本次调用的 token 用量（含 prompt_cache_hit_tokens）。
-                           #: 现在只有这条链会回传它——调试时据此看「花了多少、命中多少」
-                           "usage": {},
-                           #: 免费的「程序先挑」结论（见 preselect），两种模式都带
-                           "preselect": preselect(
-                               ctx.get("candidates") or [], ctx.get("app_values") or [],
-                               ctx.get("html") or "", str(ctx.get("step") or ""),
-                               int(ctx.get("source_type") or 0),
-                               str(ctx.get("kind") or "")),
-                           #: 这一页是不是登录墙——是的话模型看到的不是 App 那份，
-                           #: 前端先把话说在前面（别让用户花冤枉钱）
-                           "login_wall": login_wall(ctx.get("html") or "",
-                                                    bool(ctx.get("enabled_cookie_jar")))}
-    if dry_run:
-        out["llm"] = "dry_run"
-        return out
-    if not getattr(client, "enabled", False):
-        out["llm"] = "off"
-        out["error"] = "没有可用的模型：到「设置 → 模型」配置一个（或设 LEGADO_LLM_API_KEY）"
-        return out
-
-    try:
-        text = await client.chat(SYSTEM_PROMPT, build_prompt(ctx), temperature=temperature)
-    except Exception as e:
-        out["llm"] = "error"
-        out["error"] = "模型调用失败：%s: %s" % (type(e).__name__, e)
-        return out
-
-    out["usage"] = dict(getattr(client, "last_usage", None) or {})
-    data = extract_json(text)
-    if not isinstance(data, dict):
-        out["llm"] = "error"
-        out["error"] = "模型输出不是合法 JSON（原文前 200 字：%s）" % str(text)[:200]
-        return out
-
-    raw = data.get("candidates")
-    if not isinstance(raw, list):
-        raw = [data] if data.get("rule") else []
-    out["reason"] = str(data.get("reason") or "")[:300]
-
-    seen = set()
-    for item in raw:
-        if not isinstance(item, dict):
-            continue
-        rule = str(item.get("rule") or "").strip()
-        if not rule or rule in seen:
-            continue
-        seen.add(rule)
-        # 只带规则与理由：**这条链不做本地判定**。候选能不能用由用户点击后的
-        # 「验证并应用」（本机引擎）说了算（AGENTS #3）。
-        out["candidates"].append({"rule": rule,
-                                  "why": str(item.get("why") or "").strip()[:200]})
-        if len(out["candidates"]) >= MAX_CANDIDATES:
-            break
-    if not out["candidates"]:
-        out["error"] = "模型没有给出可用的规则（原文前 200 字：%s）" % str(text)[:200]
+    out["reason"] = "App 取到的值就在它报的样本里（对上 %d 条）" % (
+        top["strong"] + top["weak"]
+    )
     return out
 
 
@@ -622,8 +633,11 @@ def _runtime_line(rt: Dict[str, Any]) -> str:
     # 函数签名：解密站要**调用**页面上的解密函数，参数个数决定怎么写
     fns = (rt or {}).get("functions")
     if isinstance(fns, list) and fns:
-        sigs = ["%s(%d 参)" % (f.get("name"), int(f.get("arity") or 0))
-                for f in fns[:8] if isinstance(f, dict) and f.get("name")]
+        sigs = [
+            "%s(%d 参)" % (f.get("name"), int(f.get("arity") or 0))
+            for f in fns[:8]
+            if isinstance(f, dict) and f.get("name")
+        ]
         if sigs:
             line += "，函数：%s" % "、".join(sigs)
     return line + "）"
@@ -640,7 +654,11 @@ def _var_line(name: str, rec: Dict[str, Any]) -> str:
     line = "  - %s：%s" % (name, type_name or "?")
     n = rec.get("n")
     if isinstance(n, int) and not isinstance(n, bool):
-        line += "，%d 条" % n if type_name.lower() in ("array", "object") else "，%d 字符" % n
+        line += (
+            "，%d 条" % n
+            if type_name.lower() in ("array", "object")
+            else "，%d 字符" % n
+        )
     first = str(rec.get("first") or "")
     if first:
         line += "，样例：%r" % first[:70]
@@ -654,30 +672,73 @@ def _var_line(name: str, rec: Dict[str, Any]) -> str:
 # 加一种页面结构 / 解析方式 = 在 `SECTIONS` 里加一个函数，基础提示词与两个 builder 都不动。
 
 
+#: 字段 → 一句**取错就白取**的提示（SKILL.md 那些坑里与单格取值直接相关的那几条）。
+#: 只收这一种：判据是「不看这句，模型会写出一个语法对、值错的规则」。其它坑（防盗链、
+#: AJAX、加密）是**页面级**判断，不该塞进某一行的说明里。
+_FIELD_HINTS = {
+    "cover_url": "懒加载站的真地址在 `data-original` / `data-src`，`src` 常是占位图",
+    "content": "图片正文取 `data-original` 或把地址包成 `<img src=…>`；"
+    "`@js:` 里别用反斜杠转义，换行写 `String.fromCharCode(10)`",
+}
+
+
 def _sec_fields(ctx: Dict[str, Any]) -> Optional[List[str]]:
     """要的字段（批量形态）。单字段路径的标题行已点名字段，这段缺席。"""
     fields = ctx.get("fields")
     if not isinstance(fields, list) or not fields:
         return None
     L = ["", "【要的字段】"]
+    #: 这一段有没有列表容器：有的话其余字段是**条目内规则**（`BookList` 的两段式语义——
+    #: 先按容器切条目、再逐条目取名/取链接）。这句话贴在**容器那一行下面**说一次：
+    #: 逐行复制会让每行都长一截，而它是整段的规矩、不是某一格的特例。
+    has_container = any(f.get("kind") == "list" for f in fields if isinstance(f, dict))
+    #: 材料是整页 JSON 时，容器与取值规则都是 JSONPath——按材料分派，不按步分派
+    #: （同一步既可能是 DOM 也可能跳到接口，判据在材料上）。
+    from core.jvm_debug import MATERIAL_JSON
+
+    is_json = str(ctx.get("material_kind") or "") == MATERIAL_JSON
     for f in fields:
         if not isinstance(f, dict):
             continue
-        L.append("- %s：%s" % (f.get("field") or "", f.get("want_label") or ""))
+        name = str(f.get("field") or "")
+        L.append("- %s：%s" % (name, f.get("want_label") or ""))
         if f.get("kind") == "script":
             # 页面脚本这一族的**定义**（叶子成员见 `core.autofill.FILL_SPECS`）：
             # 不写清「跑在哪、结果去哪」，模型给出的往往是取值规则或一段注释
-            L.append("  （页面脚本：跑在页面环境里，能读页面变量；它的结果成为这一步的响应体，"
-                     "由取值规则通过 `result` 读）")
-    # 这一段有列表容器时（`kind == "list"`），其余字段是**条目内规则**——这是
-    # `BookList` 的两段式语义（先按容器切条目、再逐条目取名/取链接）。不说明的话
-    # 模型一律给从整页起的完整链，而那条链在每个条目里又去找一次容器，取不到东西
-    # （实测 2026-10-26：快验给完整链「通过」，落源后引擎报「列表为空」）。
-    if any(f.get("kind") == "list" for f in fields if isinstance(f, dict)):
-        L.extend(["",
-                  "**列表容器之外的字段都是「条目内规则」**：相对容器选中的那个条目元素取"
-                  "（如 `tag.a@href`），**不要**再写容器那一段前缀；"
-                  "写成从整页起的完整链，引擎会在每个条目里重新找一遍容器，取不到东西。"])
+            L.append(
+                "  （页面脚本：跑在页面环境里，能读页面变量；它的结果成为这一步的响应体，"
+                "由取值规则通过 `result` 读）"
+            )
+        elif f.get("kind") == "list" and has_container:
+            if is_json:
+                # JSON 材料没有 DOM：说「选 li / 卡片」会把模型引向不存在的选择器
+                L.append("  （JSON 数组：`$.data.list[*]` 这种指向**元素数组**的路径）")
+            else:
+                L.append(
+                    "  （选**一条一本**的那层：搜索结果里每本书、目录里每章各占一个的元素"
+                    "（`li` / 卡片 / 条目），不是把结果整块包起来的父级，也不是导航栏）"
+                )
+            L.append(
+                "  （其余字段都是**条目内规则**：相对它选中的元素取%s，不要写容器那一段）"
+                % (
+                    "（JSONPath 从数组元素起算，如 `$.name`）"
+                    if is_json
+                    else "，如 `tag.a@href`"
+                )
+            )
+            if len(fields) > 1:
+                # 同一份输出里既给容器又给条目内规则时，**说清它们是一对**：模型此时
+                # 知道容器是什么，写条目内规则会自然而然地相对它取。分开两问时就做不到
+                # ——它只能从大纲猜容器，猜偏了就给出带祖先的条目内规则
+                # （`#listbody .txtA` 在条目元素里找不到），而那与「容器选错」在快验里
+                # 表现完全一样（都是取到 0 条）。
+                L.append(
+                    "  （这一份里这几个字段是**一套**：先定容器，再让其余字段相对它取；"
+                    "它们会一起落进源、一起验收）"
+                )
+        hint = _FIELD_HINTS.get(name)
+        if hint:
+            L.append("  （%s）" % hint)
     return L
 
 
@@ -688,7 +749,8 @@ def _sec_fields(ctx: Dict[str, Any]) -> Optional[List[str]]:
 SCRIPT_ORDER_NOTE = (
     "**产出顺序**：这一步的内容在页面变量里，先写 `webJs` 把内容取出来"
     "（`result = params.<键>.join('\\n')`），再写 `content` 读 `result` 并包装。"
-    "没有 `webJs` 时不要给引用页面变量的 `content` 候选——那个环境里它们一律是 `undefined`。")
+    "没有 `webJs` 时不要给引用页面变量的 `content` 候选——那个环境里它们一律是 `undefined`。"
+)
 
 
 def _sec_script_step(ctx: Dict[str, Any]) -> Optional[List[str]]:
@@ -704,9 +766,11 @@ def _sec_script_step(ctx: Dict[str, Any]) -> Optional[List[str]]:
     L = ["", "【产出顺序】", SCRIPT_ORDER_NOTE]
     runtimes = ctx.get("runtimes")
     if isinstance(runtimes, list) and runtimes:
-        L.append("若内容是被加密的（页面里有长 base64 负载 / CryptoJS / 解密调用），"
-                 "**页面自己已经把解密写在脚本里了**：读你列出来的变量（如解密后的数组），"
-                 "不要在 webJs 里重写解密算法——重写必错，而错法看不出来（解出来是乱码）。")
+        L.append(
+            "若内容是被加密的（页面里有长 base64 负载 / CryptoJS / 解密调用），"
+            "**页面自己已经把解密写在脚本里了**：读你列出来的变量（如解密后的数组），"
+            "不要在 webJs 里重写解密算法——重写必错，而错法看不出来（解出来是乱码）。"
+        )
     return L
 
 
@@ -715,20 +779,23 @@ def _sec_js_globals(ctx: Dict[str, Any]) -> Optional[List[str]]:
     runtimes = ctx.get("runtimes")
     if not isinstance(runtimes, list) or not runtimes:
         return None
-    L = ["", "【页面里的全局数据（渲染后枚举，只有形状没有值）】",
-         "这些是页面脚本自己挂的变量。判断哪个键装的是要取的内容。",
-         "**作用域是本段的要害**：这些变量**只在页面脚本（webJs）里可读**——"
-         "取值规则（content）跑在另一个环境，那里它们一律是 `undefined`"
-         "（实测：`@js:typeof params` 在 content 里返回 `undefined`）。",
-         "所以要取这类内容，正确形态是两条规则分工：",
-         "  1) webJs：`result = params.<键>.join('\\n')`（把变量里的内容取出来）",
-         "  2) content：`@js:result.split('\\n')...`（只读 `result`，那是上一步的产出）",
-         "**地址列表要包成 `<img>`**：若取到的是图片地址逐行列表，content 必须把它们包起来"
-         "（`result.split('\\n').filter(...).map(x => '<img src=\"'+x+'\">').join('')`）——"
-         "只写 `@js:result` 的话正文是一串裸地址文本，阅读器里显示的是文字不是图"
-         "（实测两者 verdict 都是 pass，差别只在这层包装）。",
-         "若本步现在还没有 webJs，就直说「需要先写一条 webJs 把内容取出来」，"
-         "不要给一条在 content 里引用页面变量、必然取不到的候选。"]
+    L = [
+        "",
+        "【页面里的全局数据（渲染后枚举，只有形状没有值）】",
+        "这些是页面脚本自己挂的变量。判断哪个键装的是要取的内容。",
+        "**作用域是本段的要害**：这些变量**只在页面脚本（webJs）里可读**——"
+        "取值规则（content）跑在另一个环境，那里它们一律是 `undefined`"
+        "（实测：`@js:typeof params` 在 content 里返回 `undefined`）。",
+        "所以要取这类内容，正确形态是两条规则分工：",
+        "  1) webJs：`result = params.<键>.join('\\n')`（把变量里的内容取出来）",
+        "  2) content：`@js:result.split('\\n')...`（只读 `result`，那是上一步的产出）",
+        "**地址列表要包成 `<img>`**：若取到的是图片地址逐行列表，content 必须把它们包起来"
+        "（`result.split('\\n').filter(...).map(x => '<img src=\"'+x+'\">').join('')`）——"
+        "只写 `@js:result` 的话正文是一串裸地址文本，阅读器里显示的是文字不是图"
+        "（实测两者 verdict 都是 pass，差别只在这层包装）。",
+        "若本步现在还没有 webJs，就直说「需要先写一条 webJs 把内容取出来」，"
+        "不要给一条在 content 里引用页面变量、必然取不到的候选。",
+    ]
     for rt in runtimes:
         L.append("- %s" % _runtime_line(rt))
     # `params` 的**键值形状**：光有键名时所有键看起来一样，模型只能盲选
@@ -739,27 +806,64 @@ def _sec_js_globals(ctx: Dict[str, Any]) -> Optional[List[str]]:
         for name, rec in list(page_vars.items())[:RUNTIME_PROMPT_KEYS]:
             if isinstance(rec, dict):
                 L.append(_var_line(str(name), rec))
-        L.append("**按样例挑键**：空数组 / `false` / 空串的那些键在这一页没有内容；"
-                 "要的是「有内容且像地址或正文」的那一个。")
+        L.append(
+            "**按样例挑键**：空数组 / `false` / 空串的那些键在这一页没有内容；"
+            "要的是「有内容且像地址或正文」的那一个。"
+        )
     # 解密站的第三种情况：结果没挂在变量上，但**解密函数在页面上**。
     # 只有真的采到函数签名时才出这段——没有函数时谈「调用它」是误导。
-    decrypt_fns = [f for rt in runtimes if isinstance(rt, dict)
-                   for f in (rt.get("functions") or [])
-                   if isinstance(f, dict) and DECRYPT_NAME_RE.search(str(f.get("name") or ""))]
+    decrypt_fns = [
+        f
+        for rt in runtimes
+        if isinstance(rt, dict)
+        for f in (rt.get("functions") or [])
+        if isinstance(f, dict) and DECRYPT_NAME_RE.search(str(f.get("name") or ""))
+    ]
     if decrypt_fns:
         L.append("")
         L.append("【页面里有解密/编码函数（要调用，不是重写）】")
         for f in decrypt_fns[:8]:
             L.append("- %s（%d 个参数）" % (f.get("name"), int(f.get("arity") or 0)))
-        L.append("这些函数**页面自己已经加载好了**：webJs 里直接调用它们，"
-                 "把参数从页面变量或 DOM 里取出来传进去。"
-                 "**不要自己重写解密算法**——写错了不会报错，只会解出乱码，"
-                 "而那时你分不清是算法错还是密钥错。")
-        L.append("若看不出该传什么参数，就直说「看不出解密函数的入参」——"
-                 "不要猜一个，猜错会解出乱码且同样看起来「跑通了」。")
+        L.append(
+            "这些函数**页面自己已经加载好了**：webJs 里直接调用它们，"
+            "把参数从页面变量或 DOM 里取出来传进去。"
+            "**不要自己重写解密算法**——写错了不会报错，只会解出乱码，"
+            "而那时你分不清是算法错还是密钥错。"
+        )
+        L.append(
+            "若看不出该传什么参数，就直说「看不出解密函数的入参」——"
+            "不要猜一个，猜错会解出乱码且同样看起来「跑通了」。"
+        )
     dropped = int(ctx.get("runtime_dropped") or 0)
     if dropped > 0:
         L.append("（另有 %d 个更小的候选未列出）" % dropped)
+    return L
+
+
+#: 「先渲染」这一档给模型的**下一步**（判据在 `core.page_layer.material_verdict`，
+#: 这里只取词）。一条语法完全成立的取值规则在这份材料上照样能「选中」容器，取到的
+#: 却是占位物——模型不知道自己处境的话，会自信地给出这种规则。
+_LAYER_ACTION = ("这一页的目标由运行时对象或接口给出，**这一份材料读不到它**"
+                 "——先让页面渲染跑一次，再按渲染后的 DOM 写")
+
+
+def _sec_page_layer(ctx: Dict[str, Any]) -> Optional[List[str]]:
+    """这一页的目标**在不在 DOM 里**——只在「不在」的那几层出现。
+
+    它是**否定性线索**：告诉模型「别指望这里的选择器」，以及该往哪个方向走。
+    正向线索（DOM 大纲）已经在大纲那一段里了，这一节不复述。
+    """
+    if str(ctx.get("material_verdict") or "") != VERDICT_NEEDS_RENDER:
+        return None
+    L = ["", "【这一页的目标不在这一份材料里】"]
+    for item in ctx.get("page_layer_evidence") or []:
+        if isinstance(item, dict) and item.get("why"):
+            note = str(item.get("note") or "")
+            L.append("- %s%s" % (item["why"], "：%s" % note if note else ""))
+    L.append("说明：%s。这种情况下**语法正确的取值规则也会「选中」容器却只取到占位物**"
+             "（空 div、loading 图、页面框架），所以别按 DOM 选择器硬猜——"
+             "要么写成页面脚本（webJs，把运行时对象取出来），要么直接指出这段拿不到。"
+             % _LAYER_ACTION)
     return L
 
 
@@ -771,34 +875,33 @@ def _sec_known_webjs(ctx: Dict[str, Any]) -> Optional[List[str]]:
     L = ["", "【源里已有的页面脚本（webJs，不是本步的材料）】", known[:KNOWN_WEBJS_MAX]]
     if len(known) > KNOWN_WEBJS_MAX:
         L.append("（脚本已截断：只给了前 %d 个字符）" % KNOWN_WEBJS_MAX)
-    L.append("说明：这段脚本是源作者写的，执行结果会成为本步的响应体。"
-             "若它已经取到了要的内容，优先沿用它里面的变量名/键名；"
-             "若它引用的键在本页并不存在，直接指出来。")
+    L.append(
+        "说明：这段脚本是源作者写的，执行结果会成为本步的响应体。"
+        "若它已经取到了要的内容，优先沿用它里面的变量名/键名；"
+        "若它引用的键在本页并不存在，直接指出来。"
+    )
     return L
 
 
 def _sec_known_container(ctx: Dict[str, Any]) -> Optional[List[str]]:
-    """本段**已定的列表容器**：其余字段是相对它取的条目内规则。
+    """本段**已定的列表容器**：一个事实，其余字段相对它取（规矩在 `_sec_fields` 逐行说过）。
 
-    给出去的理由不是「约束模型」而是**补事实**：模型看不到源里刚生成的那一格
-    （`_propose_group` 的 `source` 是调用时的快照），它只能从大纲猜「从哪起」。
-    猜对时给出 `tag.a@href`，猜偏时给出 `#chapterList_ul_1 li a@href`——后者在条目
-    元素里重找一个祖先，引擎直接取空（实测 2026-10-26 目录页）。
+    给出去的理由不是「约束模型」而是**补事实**：模型看不到源里刚生成的那一格，
+    它只能从大纲猜「从哪起」。猜对时给出 `tag.a@href`，猜偏时给出
+    `#chapterList_ul_1 li a@href`——后者在条目元素里重找一个祖先，引擎直接取空。
     """
     known = ctx.get("known_container")
     if not isinstance(known, dict) or not known:
         return None
-    L = ["", "【本段已定的列表容器】"]
-    for path, rule in known.items():
-        text = str(rule or "").strip()
-        if text:
-            L.append("- `%s` = `%s`" % (path, text[:120]))
-    if len(L) <= 2:
+    values = [str(v).strip() for v in known.values() if str(v or "").strip()]
+    if not values:
         return None
-    L.append("列表容器就是「一个条目一条」的那条规则。**其余字段都相对条目元素取**："
-             "直接写条目里面的东西（如 `tag.a@href`、`.title@text`），**不要**再写"
-             "容器那一段或任何祖先定位——那些在条目里找不到，引擎会取到空。")
-    return L
+    return [
+        "",
+        "【本段列表容器已定】",
+        "`%s`" % values[0][:120],
+        "（其余字段相对它选中的条目元素取）",
+    ]
 
 
 def _clean_values(raw: Any) -> List[str]:
@@ -832,6 +935,39 @@ def _value_rows(ctx: Dict[str, Any]) -> List[Tuple[str, List[str]]]:
     return [("", vs)] if vs else []
 
 
+def _sec_rejected(ctx: Dict[str, Any]) -> Optional[List[str]]:
+    """**上一轮试过、结果不对**的规则，连带引擎实际取到了什么。
+
+    只在重试时出现。不带这一段，第二轮发出去的提示词与第一轮逐字相同——模型没有
+    任何新信息，只能再赌一次运气；带上「`.nav .a1` 取到的是首页/更新」这种事实，
+    它才知道该换方向。
+
+    只说**取到了什么**，不说「所以你应该选另一个」：判据留在模型那边，我们只给观测。
+    """
+    rows = ctx.get("rejected")
+    if not isinstance(rows, list) or not rows:
+        return None
+    lines = ["", "【上一轮试过的（引擎说不对）】"]
+    for row in rows[:4]:
+        if not isinstance(row, dict):
+            continue
+        rule = str(row.get("rule") or "").strip()
+        if not rule:
+            continue
+        count = row.get("count")
+        samples = [str(s) for s in (row.get("samples") or []) if str(s or "").strip()]
+        detail = []
+        if isinstance(count, int) and not isinstance(count, bool):
+            detail.append("选中 %d 条" % count)
+        if samples:
+            detail.append("取到的是「%s」" % "」「".join(s[:12] for s in samples[:4]))
+        lines.append("- `%s`%s" % (rule[:80], "：" + "，".join(detail) if detail else ""))
+    if len(lines) <= 2:
+        return None
+    lines.append("这些不是要的结果。换一个**不同的**定位思路，别在原规则上加后缀。")
+    return lines
+
+
 def _sec_app_values(ctx: Dict[str, Any]) -> Optional[List[str]]:
     rows = _value_rows(ctx)
     if not rows:
@@ -861,7 +997,7 @@ def _sec_diagnosis(ctx: Dict[str, Any]) -> Optional[List[str]]:
     return L
 
 
-def _sec_header(ctx: Dict[str, Any]) -> Optional[List[str]]:
+def _sec_header(ctx: dict[str, Any]) -> Optional[list[str]]:
     """请求头（源级）——**只在有「请求被拒」的事实**时出。
 
     触发条件（两个都来自已有判据，不新增探测）：
@@ -879,9 +1015,15 @@ def _sec_header(ctx: Dict[str, Any]) -> Optional[List[str]]:
     step_name = str(ctx.get("step") or "")
     hit = interstitial_marker(html)
     health = ctx.get("step_health")
-    blocked = ([name for name, code in health.items()
-                if code in ("interstitial", "browser_error")]
-               if isinstance(health, dict) else [])
+    blocked = (
+        [
+            name
+            for name, code in health.items()
+            if code in ("interstitial", "browser_error")
+        ]
+        if isinstance(health, dict)
+        else []
+    )
     # 本段在体检里也被标成被拦时，以体检为准：两份事实都指向「材料不是站点」。
     # 只说「这一步正常」会把「别按这份材料写规则」这个关键提醒吞掉。
     if not hit and str(step_name) in blocked:
@@ -891,15 +1033,21 @@ def _sec_header(ctx: Dict[str, Any]) -> Optional[List[str]]:
     L = [""]
     if hit:
         L.append("【这段材料是反爬拦截页（命中「%s」）——不是站点本身】" % hit)
-        L.append("先别写给这一步的取值规则：手里这份不是站点，按它写出来的规则会在 App 里取空。")
+        L.append(
+            "先别写给这一步的取值规则：手里这份不是站点，按它写出来的规则会在 App 里取空。"
+        )
     else:
         L.append("【这一步正常，但**别的步骤**被拦了】")
     if blocked:
         L.append("被拦的步骤：%s。" % "、".join(blocked))
-    L.extend(["",
-              "`header` 是**源级**请求头，写 JSON："
-              '`{"Referer": "https://站点首页/", "User-Agent": "..."}`；'
-              "要动态算（带 Cookie / 签名）就写 `@js:` 或 `<js>`，表达式返回 JSON 字符串。"])
+    L.extend(
+        [
+            "",
+            "`header` 是**源级**请求头，写 JSON："
+            '`{"Referer": "https://站点首页/", "User-Agent": "..."}`；'
+            "要动态算（带 Cookie / 签名）就写 `@js:` 或 `<js>`，表达式返回 JSON 字符串。",
+        ]
+    )
     return L
 
 
@@ -915,18 +1063,21 @@ SECTIONS: Tuple[Callable[[Dict[str, Any]], Optional[List[str]]], ...] = (
     # 顺序段紧跟字段段：「先写哪个」依赖「这一步有哪些字段」，读者（模型）按顺序读
     _sec_script_step,
     _sec_header,
+    _sec_page_layer,
     _outline_section,
     _sec_js_globals,
     _sec_known_webjs,
     _sec_known_container,
     _sec_app_values,
     _sec_diagnosis,
+    #: 上一轮试错的负样本：**只在重试时出现**，所以它也属于「易变」那一头，放最后
+    _sec_rejected,
 )
 
 
-def _sections(ctx: Dict[str, Any]) -> List[str]:
+def _sections(ctx: dict[str, Any]) -> list[str]:
     """按 `SECTIONS` 顺序把非缺席的段拼起来（每段自带段前空行）。"""
-    out: List[str] = []
+    out: list[str] = []
     for section in SECTIONS:
         out.extend(section(ctx) or [])
     return out
@@ -943,14 +1094,22 @@ def build_batch_prompt(ctx: Dict[str, Any]) -> str:
     大纲一段是共用的，批量把这份共用从 N 次调用压成 1 次。
     """
     L: List[str] = []
-    L.append("这一步：%s（一次给出下列字段的候选规则）"
-             % (ctx.get("step_label") or ctx.get("step") or ""))
+    L.append(
+        "这一步：%s（一次给出下列字段的候选规则）"
+        % (ctx.get("step_label") or ctx.get("step") or "")
+    )
     L.extend(_sections(ctx))
     return "\n".join(L)
 
 
-async def suggest_many(ctx: Dict[str, Any], client: Any = None,
-                       temperature: Optional[float] = None) -> Dict[str, Any]:
+#: 限流后的等待（秒）：429 立刻重发必然还是 429（provider 按窗口计数），
+#: 等一个窗口再发才叫重试。只等这一次，不做指数退避——整轮提议只重试一次。
+RETRY_RATE_LIMIT_WAIT_SEC = 1.0
+
+
+async def suggest(
+    ctx: Dict[str, Any], client: Any = None, temperature: Optional[float] = None
+) -> Dict[str, Any]:
     """一轮提议多个字段（同一步、同一取样类型的一族）：**一次调用共享 DOM 大纲**。
 
     逐字段问的代价不只是 N 倍 token：同一份 90 行大纲重复喂 N 遍，延迟也是 N 次
@@ -963,25 +1122,59 @@ async def suggest_many(ctx: Dict[str, Any], client: Any = None,
 
     返回体里带 ``prompt`` / ``response`` 原文（**排障要看的原件**）：调用方据此落
     ``llm.jsonl`` 账本。它们只描述刚刚这一次调用，不缓存、不跨调用复用。
+
+    调用方是 `core.agent_loop.run_loop`（免费段 + 提议 + 快验 + 落规则一整轮）。
+    **别把它当成对外门面**：单跑这一层只拿到「候选」，验收那一半不在——两半分开
+    两次调用时，调用方很容易漏掉验收（AGENTS #3）。
     """
-    from core.repair.llm import LLMClient, extract_json
+    from core.repair.llm import (LLMClient, error_is_rate_limited,
+                                 error_is_transient, extract_json)
 
     client = client if client is not None else LLMClient()
-    out: Dict[str, Any] = {"fields": {}, "llm": "ok", "error": "",
-                           "model": getattr(getattr(client, "config", None), "model", ""),
-                           "usage": {}, "prompt": "", "response": ""}
+    out: Dict[str, Any] = {
+        "fields": {},
+        "llm": "ok",
+        "error": "",
+        "model": getattr(getattr(client, "config", None), "model", ""),
+        "usage": {},
+        "prompt": "",
+        "response": "",
+    }
     if not getattr(client, "enabled", False):
         out["llm"] = "off"
-        out["error"] = "没有可用的模型：到「设置 → 模型」配置一个（或设 LEGADO_LLM_API_KEY）"
+        out["error"] = (
+            "没有可用的模型：到「设置 → 模型」配置一个（或设 LEGADO_LLM_API_KEY）"
+        )
         return out
     prompt = build_batch_prompt(ctx)
     out["prompt"] = prompt
-    try:
-        text = await client.chat(SYSTEM_PROMPT_MANY, prompt, temperature=temperature)
-    except Exception as e:
-        out["llm"] = "error"
-        out["error"] = "模型调用失败：%s: %s" % (type(e).__name__, e)
-        return out
+    #: 偶发失败重试一次：撞上一次长尾不该让整段 AI 停手（实测正常 4.8 秒中位、
+    #: 18 秒长尾，而超时设 90 秒——真撞上的概率低，撞上代价大）。
+    #: 判据在 `core.repair.llm.error_is_transient`（配置错误重发必然一样，不重试）。
+    #: **限流要等**：429 立刻重发必然还是 429，等一秒再发才叫重试。
+    attempts = 2
+    #: 重试的记录（`llm.jsonl` 账本照抄整个返回体）：重试过的调用慢一截，
+    #: 没有这一项就没法从账本上解释「为什么这次比别的时候久」。
+    retried: List[str] = []
+    for attempt in range(attempts):
+        try:
+            text = await client.chat(SYSTEM_PROMPT_MANY, prompt, temperature=temperature)
+            break
+        except Exception as e:
+            transient = error_is_transient(e)
+            out["llm"] = "error"
+            out["error"] = "模型调用失败：%s: %s" % (type(e).__name__, e)
+            if transient and attempt + 1 < attempts:
+                retried.append("%s: %s" % (type(e).__name__, str(e)[:60]))
+                out["retried"] = retried
+                if error_is_rate_limited(e):
+                    await asyncio.sleep(RETRY_RATE_LIMIT_WAIT_SEC)
+                continue
+            return out
+    # 重试成功：把上一次失败留下的 llm/error 复位，否则「调用成功」会带着
+    # 上一次的 error 文本回到调用方（`llm != "ok"` 被当成整段失败的判据）
+    out["llm"] = "ok"
+    out["error"] = ""
     out["response"] = str(text or "")
     out["usage"] = dict(getattr(client, "last_usage", None) or {})
     data = extract_json(text)

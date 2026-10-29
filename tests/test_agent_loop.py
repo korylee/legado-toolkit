@@ -25,7 +25,7 @@ class AgentLoopTests(unittest.TestCase):
     def test_good_proposal_keeps_try_result(self):
         """提议经自查取到值：**升格为普通建议**（rule 落位）并带 try_result——
         前端的写入只认 rule，AI 行不能另开一条路径。"""
-        with mock.patch("core.repair.suggest.suggest_many", _patch_suggest()), \
+        with mock.patch("core.repair.suggest.suggest", _patch_suggest()), \
              mock.patch("core.rule_try.rule_try",
                         _patch_try([{"ok": True, "values": ["甲书"], "count": 1,
                                      "error": ""}])):
@@ -50,7 +50,7 @@ class AgentLoopTests(unittest.TestCase):
             return {"llm": "off", "fields": {},
                     "error": "没有可用的模型：到「设置 → 模型」配置一个"}
 
-        with mock.patch("core.repair.suggest.suggest_many", fake):
+        with mock.patch("core.repair.suggest.suggest", fake):
             out = agent_loop.run_loop_sync(HTML, {}, SOURCE, "http://x", "bookUrl")
         self.assertIn("没有可用的模型", out["budget"]["model_stop"])
         self.assertFalse(out["budget"]["model_limit_reached"], "一次调用都没花，不是「用完」")
@@ -64,7 +64,7 @@ class AgentLoopTests(unittest.TestCase):
                     "fields": {f["field"]: [{"rule": "class.不存在@text", "why": "w"}]
                                for f in ctx.get("fields") or []}}
 
-        with mock.patch("core.repair.suggest.suggest_many", fake), \
+        with mock.patch("core.repair.suggest.suggest", fake), \
              mock.patch("core.rule_try.rule_try",
                         _patch_try([{"ok": False, "values": [], "count": 0,
                                      "error": "0 条"}])), \
@@ -78,7 +78,7 @@ class AgentLoopTests(unittest.TestCase):
 
     def test_fields_filter_limits_the_loop(self):
         """``fields`` 限制提议范围：单字段「AI 重议」只影响那一个字段。"""
-        with mock.patch("core.repair.suggest.suggest_many", _patch_suggest()), \
+        with mock.patch("core.repair.suggest.suggest", _patch_suggest()), \
              mock.patch("core.rule_try.rule_try",
                         _patch_try([{"ok": True, "values": ["甲书"], "count": 1,
                                      "error": ""}])):
@@ -94,7 +94,7 @@ class AgentLoopTests(unittest.TestCase):
             {"ok": False, "values": [], "count": 0, "error": "0 条"},
             {"ok": True, "values": ["甲书"], "count": 1, "error": ""},
         ]
-        with mock.patch("core.repair.suggest.suggest_many",
+        with mock.patch("core.repair.suggest.suggest",
                         _patch_suggest("class.不存在@text")), \
              mock.patch("core.rule_try.rule_try", _patch_try(results)), \
              mock.patch("core.agent_loop._candidates_for_ai",
@@ -111,7 +111,7 @@ class AgentLoopTests(unittest.TestCase):
         钉的是那个函数而不是常量——patch 常量已经不改预算了。
         """
         results = [{"ok": True, "values": ["v"], "count": 1, "error": ""}]
-        with mock.patch("core.repair.suggest.suggest_many", _patch_suggest()), \
+        with mock.patch("core.repair.suggest.suggest", _patch_suggest()), \
              mock.patch("core.rule_try.rule_try", _patch_try(results)):
             with mock.patch.object(agent_actions, "rule_try_budget", lambda n: 0):
                 out = agent_loop.run_loop_sync(HTML, {}, SOURCE, "http://x",
@@ -120,17 +120,20 @@ class AgentLoopTests(unittest.TestCase):
         self.assertTrue(all(r.get("try_result") is None
                             for r in out["fields"] if r.get("rule")))
 
-    def test_model_budget_limits_proposals(self):
-        """模型预算收紧到 1 次：第一族提议完，后面的族不再提议（保持免费段的行），
-        并把「触顶」如实标出来。"""
-        with mock.patch("core.repair.suggest.suggest_many", _patch_suggest()), \
-             mock.patch("core.rule_try.rule_try",
-                        _patch_try([{"ok": True, "values": ["v"], "count": 1,
-                                     "error": ""}])), \
-             mock.patch.object(agent_actions, "MODEL_CALLS_PER_TURN", 1):
-            out = agent_loop.run_loop_sync(HTML, {}, SOURCE, "http://x", "bookUrl")
-        self.assertEqual(out["budget"]["model_calls"], 1)
-        self.assertTrue(out["budget"]["model_limit_reached"])
+    def test_model_budget_never_drops_a_field_family(self):
+        """预算按**实际族数**给：写死成 3 会把第四族静默砍掉。
+
+        实测（2026-10-27 发发漫画）：搜索步有四族（list/link/text/media），预算 3 时
+        `text` 族（含 `name`）压根没被问到，而引擎的 `BookList` 没书名就不建条目
+        → `total=0` → 整段恒判失败。所以预算的下限是族数，不是那个常量。
+        """
+        self.assertEqual(agent_actions.model_calls_budget(["list", "link", "text", "media"]), 4)
+        # 族数少时仍守常量那个下限（一次点击至少能问几族）
+        self.assertEqual(agent_actions.model_calls_budget(["text"]),
+                         agent_actions.MODEL_CALLS_PER_TURN)
+        # 有容器的段并成一套问：组键是 entries，一次调用就够，不该被判预算不足
+        self.assertEqual(agent_actions.model_calls_budget(["entries"]),
+                         agent_actions.MODEL_CALLS_PER_TURN)
 
 
 class AgentLoopRouteTests(unittest.TestCase):
@@ -159,7 +162,7 @@ class AgentLoopRouteTests(unittest.TestCase):
             calls["submit"].append((kind, payload or {}))
             return "job-1"
 
-        with mock.patch("core.repair.suggest.suggest_many", fake_suggest), \
+        with mock.patch("core.repair.suggest.suggest", fake_suggest), \
                 mock.patch("core.rule_try.rule_try", fake_try), \
                 mock.patch("backend.api.rules.runner.submit", fake_submit):
             out = asyncio.run(agent_loop(

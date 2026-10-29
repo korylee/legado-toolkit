@@ -19,10 +19,11 @@
     用户实测反馈「填的几乎都不可用，不如不填」，这里按「宁可空着」处理：没有
     ``preselect`` 的结论就只有原因，没有 rule。
 """
+
 from __future__ import annotations
 
-from typing import Any, Dict, List, Tuple
 import re
+from typing import Any, Dict, List, Tuple
 
 from core import candidates as candidates_mod
 from core.candidates import _first_class
@@ -32,11 +33,19 @@ from core.repair.suggest import preselect
 #: 字段中文名（参考行的那句 reason 用）。权威词表在前端 RULE_FIELD_DEFS /
 #: Kotlin BOOKINFO_FIELD_LABELS；这里只要意思对，不参与任何判定。
 FIELD_LABELS = {
-    "name": "书名", "author": "作者", "kind": "分类",
-    "word_count": "字数", "last_chapter": "最新章节", "intro": "简介",
-    "cover_url": "封面", "toc_url": "目录链接",
-    "book_list": "书籍列表容器", "book_url": "书籍链接",
-    "chapter_list": "章节列表容器", "chapter_name": "章节名", "chapter_url": "章节链接",
+    "name": "书名",
+    "author": "作者",
+    "kind": "分类",
+    "word_count": "字数",
+    "last_chapter": "最新章节",
+    "intro": "简介",
+    "cover_url": "封面",
+    "toc_url": "目录链接",
+    "book_list": "书籍列表容器",
+    "book_url": "书籍链接",
+    "chapter_list": "章节列表容器",
+    "chapter_name": "章节名",
+    "chapter_url": "章节链接",
 }
 
 # ---------------------------------------------------------------- FILL_SPECS
@@ -70,6 +79,11 @@ FILL_SPECS = {
         # 下面是**条目内规则**（相对条目元素），不是从整页起的完整链
         "book_url": {"kind": "link", "anchor": ("items", "book_url")},
         "name": {"kind": "text", "anchor": ("items", "name")},
+        # 列表页常给封面与作者（SKILL.md 的搜索模板本来就有这三格）。封面值得单列：
+        # 它的值是 `src` 还是 `data-original` 决定规则对错，取错就白取。
+        "cover_url": {"kind": "media", "anchor": ("items", "cover_url")},
+        "author": {"kind": "text", "anchor": ("items", "author")},
+        "intro": {"kind": "text", "anchor": ("items", "intro")},
     },
     #: 目录段：与搜索段同构——`chapterList` 是**条目容器**，另两个是条目内规则
     #: （上游 `BookChapterList` 先按 `chapterList` 切条目、再逐条目取名称与链接）。
@@ -121,8 +135,107 @@ def container_field(step: str) -> str:
 
 #: 容器字段 → (源里的组, 规则名)。**只有这两个字段带容器**（搜索/目录各一个），
 #: 所以不必再维护「段 → 组」与「字段 → 驼峰名」两张表——那两张表只是为了拼出这一行。
-_CONTAINER_PATHS = {"book_list": ("ruleSearch", "bookList"),
-                    "chapter_list": ("ruleToc", "chapterList")}
+_CONTAINER_PATHS = {
+    "book_list": ("ruleSearch", "bookList"),
+    "chapter_list": ("ruleToc", "chapterList"),
+}
+
+#: **(段, 字段) → 源里的路径**。`FILL_SPECS` 说「补什么」，这张说「补到哪」——两者
+#: 是同一份字段清单的两个投影，但一个字段只有一种落法，所以只有这一张表。
+#:
+#: 为什么必须是唯一一份：前端 `frontend/src/utils/steps.js` 的 `AUTOFILL_RULE_FIELDS`
+#: 是它的镜像（界面按它把规则写回草稿），一键生成的编排层也需要它（`_apply_rules`）。
+#: 三处各写一份时漂起来不报错——某段规则会写到一个**存在但没人读**的键上，界面显示
+#: 「已生成」而引擎取不到（AGENTS #7 同一条纪律）。前端那份等接前端时改成从接口取。
+FIELD_RULE_PATH: Dict[Tuple[str, str], str] = {
+    ("search", "book_list"): "ruleSearch.bookList",
+    ("search", "book_url"): "ruleSearch.bookUrl",
+    ("search", "name"): "ruleSearch.name",
+    ("search", "cover_url"): "ruleSearch.coverUrl",
+    ("search", "author"): "ruleSearch.author",
+    ("search", "intro"): "ruleSearch.intro",
+    ("bookUrl", "name"): "ruleBookInfo.name",
+    ("bookUrl", "cover_url"): "ruleBookInfo.coverUrl",
+    ("bookUrl", "author"): "ruleBookInfo.author",
+    ("bookUrl", "intro"): "ruleBookInfo.intro",
+    ("bookUrl", "toc_url"): "ruleBookInfo.tocUrl",
+    ("bookUrl", "last_chapter"): "ruleBookInfo.lastChapter",
+    ("bookUrl", "kind"): "ruleBookInfo.kind",
+    ("bookUrl", "word_count"): "ruleBookInfo.wordCount",
+    ("toc", "chapter_list"): "ruleToc.chapterList",
+    ("toc", "chapter_name"): "ruleToc.chapterName",
+    ("toc", "chapter_url"): "ruleToc.chapterUrl",
+    ("content", "content"): "ruleContent.content",
+    ("content", "webJs"): "ruleContent.webJs",
+}
+
+
+#: **某一步要渲染时，该把 `webView` 选项挂到哪条规则上**（上游结构决定，不是猜）。
+#:
+#: 依据（上游 `BookChapterList.kt:238`）：正文页地址由 ``tocRule.chapterUrl`` 逐章取出来
+#: 写进 ``BookChapter.url``，而 ``contentDebug(...)`` 收的就是那个 ``BookChapter``——
+#: 所以正文页要渲染，选项只能挂 ``ruleToc.chapterUrl``；挂 ``ruleContent.content`` 无效
+#: （那是取值规则，不是 URL 规则）。
+#:
+#: ``None`` = 这一步的 URL 不由自己的规则产出（如 ``tocUrl`` 为空时目录页就是详情页的
+#: 产出），调用方据此**往上找**，不能盲写一条规则进源里。
+STEP_URL_RULE = {
+    "search": "searchUrl",
+    "bookUrl": "ruleSearch.bookUrl",
+    "toc": "ruleBookInfo.tocUrl",
+    "content": "ruleToc.chapterUrl",
+}
+
+#: 把 webView 追到每条 URL 尾巴用的替换式（上游 `AnalyzeRule.replaceRegex`：
+#: ``##匹配##替换`` 走 `result.replace(regex, replacement)`，``$`` 是行尾 —— 每条产出
+#: 都会被补上）。**不改选择器本身**，所以规则原本选中什么还选中什么。
+WEBVIEW_SUFFIX_REPLACEMENT = '##$##,{"webView":true}'
+
+
+def rule_path_value(source: Dict[str, Any], path: str) -> str:
+    """按 ``ruleSearch.bookUrl`` 这种点分路径取源里的规则原文（空串 = 没配）。"""
+    cur: Any = source or {}
+    for part in str(path or "").split("."):
+        if not isinstance(cur, dict):
+            return ""
+        cur = cur.get(part)
+    return "" if cur is None else str(cur)
+
+
+def set_rule_path_value(source: Dict[str, Any], path: str, value: str) -> None:
+    """按点分路径写回（缺的组补上）。``ruleSearch.bookUrl`` → ``source["ruleSearch"]["bookUrl"]``。"""
+    parts = [p for p in str(path or "").split(".") if p]
+    if not parts:
+        return
+    cur: Any = source
+    for part in parts[:-1]:
+        nxt = cur.get(part)
+        if not isinstance(nxt, dict):
+            nxt = {}
+            cur[part] = nxt
+        cur = nxt
+    cur[parts[-1]] = value
+
+
+def webview_rule_path(source: Dict[str, Any], step: str) -> str:
+    """这一步要渲染时，**应该改哪条规则**：返回规则路径，空串 = 没有可挂的地方。
+
+    ``STEP_URL_RULE[step]`` 那条规则为空时**往上找**（目录页 URL 常常就是详情页的产出）：
+    挂到一条不存在的规则上等于什么都没做，而且看不出来。
+    """
+    order = [STEP_URL_RULE.get(step)]
+    # 回落的顺序就是上游的取数顺序：目录页没写 → 用详情页的产出；详情页没写 → 没得挂
+    if step == "toc":
+        order.append(STEP_URL_RULE["bookUrl"])
+    for path in order:
+        if path and rule_path_value(source, path).strip():
+            return path
+    return ""
+
+
+def rule_path(step: str, field: str) -> str:
+    """这个字段的规则落在源里的哪一格（`"ruleSearch.bookList"`）；没有落点就是空串。"""
+    return FIELD_RULE_PATH.get((str(step or ""), str(field or "")), "")
 
 
 def container_rule(source: Dict[str, Any], step: str) -> str:
@@ -137,8 +250,27 @@ def container_rule(source: Dict[str, Any], step: str) -> str:
     return str((source.get(group) or {}).get(rule_name) or "").strip()
 
 
-def propose_fields(step: str, material_kind: str = "",
-                   page_stats: Optional[Dict[str, Any]] = None) -> List[str]:
+#: 每段**链路必需**的字段（其余是可选元数据）。判据是「缺了它下一步走不动」：
+#: 搜索段要有容器+书名+链接才建得出条目，详情段要有目录地址才进得去，
+#: 目录段要有章节名+链接，正文段要有 content。**可选字段一次问太多会把模型问垮**——
+#: 实测 2026-10-27：详情段一次问 8 个（text 组 6 个），模型一个都没给；只问
+#: `name` + `toc_url` 就都给了。
+#: **`bookUrl` 段只要 `name`**：`tocUrl` 不在里面——它留空时 App 直接拿详情页当目录页
+#: （上游 `BookInfo` 的行为），而这个站的章节列表本来就内嵌在详情页里（实测 2026-10-27：
+#: 留空 → `toc` 段 `total=233` 通过；让 AI 猜一个「目录页链接」→ 它抓到「下一章」的地址，
+#: 目录段取到 0 章）。真有独立目录页的站，等目录段失败时再单独补 `toc_url`。
+REQUIRED_FIELDS: Dict[str, Tuple[str, ...]] = {
+    "search": ("book_list", "book_url", "name"),
+    "bookUrl": ("name",),
+    "toc": ("chapter_list", "chapter_name", "chapter_url"),
+    "content": ("content",),
+}
+
+
+def propose_fields(
+    step: str, material_kind: str = "", page_stats: Optional[Dict[str, Any]] = None,
+    required_only: bool = False, material_verdict: str = "",
+) -> List[str]:
     """这一段**该提议哪些字段**——按材料事实裁，不靠模型自觉。
 
     正文段有两个字段，但**只有一种情况要两个**：内容在页面变量里时，`webJs` 才是
@@ -151,11 +283,17 @@ def propose_fields(step: str, material_kind: str = "",
     带 `src` 的图占比够高 = DOM 里有目标 → 不给 `webJs`。
     """
     fields = segment_fields(step)
+    if required_only:
+        # 只补**链路必需**的那几格：可选元数据（作者/简介/字数/分类…）一次塞进来会把
+        # 模型问垮，而它们缺了不影响下一步。要补时单独点那些字段。
+        want = REQUIRED_FIELDS.get(step) or ()
+        return [f for f in fields if f in want]
     if "webJs" not in fields:
         return fields
     from core.repair.suggest import outline_plan
 
-    plan = outline_plan({"material_kind": material_kind, "page_stats": page_stats})
+    plan = outline_plan({"material_kind": material_kind, "page_stats": page_stats,
+                         "material_verdict": material_verdict})
     if plan.get("mode") in ("stats", "skip"):
         # 图不在 DOM 里（或材料不是 DOM）：内容只能在页面变量里 → 两个字段都要
         return fields
@@ -187,8 +325,9 @@ def _no_rule_reason(preselect_reason: str, has_basis: bool) -> str:
     return preselect_reason or "这一页上比不出来"
 
 
-def _engine_values(structured: Dict[str, Any], field: str,
-                   step: str = "bookUrl") -> List[str]:
+def _engine_values(
+    structured: Dict[str, Any], field: str, step: str = "bookUrl"
+) -> List[str]:
     """某字段在这轮调试里的**引擎实测值**（锚点）。空值不给锚——空是「引擎取到空」，
     不是「页面没有」；拿空当基准会把所有候选都判成 strong（页面文本 ≠ 空串）。
 
@@ -228,15 +367,23 @@ def _head_text_candidates(html: str, limit: int = 3) -> List[Dict[str, Any]]:
         if rule in seen:
             continue
         seen.add(rule)
-        out.append({"rule": rule, "kind": "text", "count": 1,
-                    "samples": [text[:60]], "hits": 1, "uniq": 1, "ratio": 0.0})
+        out.append(
+            {
+                "rule": rule,
+                "kind": "text",
+                "count": 1,
+                "samples": [text[:60]],
+                "hits": 1,
+                "uniq": 1,
+                "ratio": 0.0,
+            }
+        )
         if len(out) >= limit:
             break
     return out
 
 
-def attach_autofill(steps: List[Dict[str, Any]],
-                    pages: List[Dict[str, Any]]) -> None:
+def attach_autofill(steps: List[Dict[str, Any]], pages: List[Dict[str, Any]]) -> None:
     """把详情组建议**内嵌**进调试结果（原地写 ``steps[].autofill``）。
 
     材料（页面整页）与锚点（引擎实测值）都在手上，调用点在两通道组装完
@@ -246,7 +393,7 @@ def attach_autofill(steps: List[Dict[str, Any]],
     """
     try:
         by_page = {str(p.get("id") or ""): p for p in (pages or [])}
-        for step in (steps or []):
+        for step in steps or []:
             name = str(step.get("name") or "")
             if name not in FILL_SPECS:
                 continue
@@ -256,20 +403,28 @@ def attach_autofill(steps: List[Dict[str, Any]],
             if not (html.strip() and isinstance(structured, dict)):
                 continue
             step["autofill"] = autofill_detail(
-                html, structured, step=name,
-                material_kind=str((page or {}).get("material_kind") or ""))
+                html,
+                structured,
+                step=name,
+                material_kind=str((page or {}).get("material_kind") or ""),
+            )
     except Exception as e:  # 建议是附赠品：炸了说一声，判定不动
-        for step in (steps or []):
+        for step in steps or []:
             if step.get("name") in FILL_SPECS:
                 step["notes"] = list(step.get("notes") or []) + [
-                    "一键填充建议生成失败：%s" % e]
+                    "一键填充建议生成失败：%s" % e
+                ]
                 step["has_notes"] = True
         return
 
 
-def autofill_detail(html: str, structured: Dict[str, Any],
-                    limit: int = 3, step: str = "bookUrl",
-                    material_kind: str = "") -> Dict[str, Any]:
+def autofill_detail(
+    html: str,
+    structured: Dict[str, Any],
+    limit: int = 3,
+    step: str = "bookUrl",
+    material_kind: str = "",
+) -> Dict[str, Any]:
     """逐字段出建议（按 FILL_SPECS 表展开）。返回 ``{fields: [...], free_ok: True}``：
     每行 ``{field, reason, ...}``，**只有 ``rule`` 是敢拍板的那一条**——没有 ``rule``
     就是不产出规则（``need_ai`` = 比不出结论 / ``no_anchor`` = 没有实测值可比），
@@ -307,15 +462,17 @@ def autofill_detail(html: str, structured: Dict[str, Any],
             # 材料**不是 DOM**（页面脚本的输出）：在它上面找候选会拍出「把地址列表当正文」
             # 那种假通过（同一页实测：不写 webJs 时整页 HTML 逐行包成 <img> 也 pass）。
             # 取值规则得读 result，按材料交 AI 写——判据是引擎事实，不读源配置。
-            row["reason"] = ("这一步的材料是页面脚本的输出，取值规则要读 result"
-                             "——交给 AI 按材料写")
+            row["reason"] = (
+                "这一步的材料是页面脚本的输出，取值规则要读 result——交给 AI 按材料写"
+            )
             row["need_ai"] = True
             fields.append(row)
             continue
         try:
             if kind == "text":
-                candidates = (candidates_mod.find_candidates(html, kind, limit=limit)
-                              or _head_text_candidates(html, limit))
+                candidates = candidates_mod.find_candidates(
+                    html, kind, limit=limit
+                ) or _head_text_candidates(html, limit)
             else:
                 candidates = candidates_mod.find_candidates(html, kind, limit=limit)
         except Exception as e:  # 单字段失败不带整批（同 matched/structured 的纪律）
@@ -335,7 +492,7 @@ def autofill_detail(html: str, structured: Dict[str, Any],
             row["reason"] = _no_rule_reason("", False)
             fields.append(row)
             continue
-        pick = preselect(candidates, basis, html, step=step, kind=kind)
+        pick = preselect(candidates, basis, html, kind=kind)
         ranked = pick.get("ranked") or []
         # preselect 的 picked 是**完整的 rank 条目**（rule/score/samples 一起带），
         # 不是字符串——直接摊开，别再从 ranked 里反查一遍
@@ -357,8 +514,7 @@ def autofill_detail(html: str, structured: Dict[str, Any],
     return {"fields": fields, "free_ok": True}
 
 
-def _anchor_from_list(structured: Dict[str, Any],
-                      anchor: Tuple[str, str]) -> List[str]:
+def _anchor_from_list(structured: Dict[str, Any], anchor: Tuple[str, str]) -> List[str]:
     """列表形状 structured 的锚点取法：``(items, book_url)`` = items[0].book_url。
     空列表/缺键都返回空（没有锚——与 _engine_values 同一纪律）。"""
     container, key = anchor

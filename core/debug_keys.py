@@ -56,6 +56,40 @@ def build_key(target: str, query: str, explore_url: str = "", keyword: str = "")
     return q or _search_start(keyword)      # search：空则用默认关键词
 
 
+#: 步骤名 → 调试目标（`core.debug_keys` 自己那套词表）。渲染升级要按步拼 key，
+#: 而「详情」那一步的目标叫 `info`——两套词表不能靠调用方各自记。
+STEP_TARGET = {"search": "search", "explore": "explore", "bookUrl": "info",
+               "toc": "toc", "content": "content"}
+
+#: URL 规则上的 **webView 选项**（上游 `AnalyzeUrl` 读它，写法与用户手填的完全一样）。
+#: 加上它以后这一次取数走 App 的后台 WebView（本机是它的真浏览器 shadow）——页面脚本
+#: 因此真的跑一遍：渲染后的 DOM、运行时对象形状、XHR 摘要都是那时才有的事实。
+#: 实测 2026-10-28 发发漫画正文页：不带它时 `#commicBox` 里只有 `pic_loading.gif`；
+#: 带上以后同一容器里是 34 张真图，引擎取到的正文从 357 字符变成 2000 字符。
+WEBVIEW_OPTION = '{"webView":true}'
+
+
+def render_key(step: str, url: str) -> str:
+    """按步骤拼一个**强制走 WebView** 的调试 key（渲染升级用）。
+
+    URL 是**原文**，选项直接拼在它后面——与用户在源里写 `,{"webView":true}` 同一套语法，
+    不是我们另发明的一种「渲染参数」：上游按这条语法解析，所以同一条 URL 在调试里与在
+    阅读时行为一致。
+    """
+    target = STEP_TARGET.get(str(step or ""))
+    if not target:
+        raise ValueError("未知的步骤名：%s（只能是 %s）"
+                         % (step or "未提供", " / ".join(sorted(STEP_TARGET))))
+    base = str(url or "").strip()
+    if not base:
+        raise ValueError("没有 URL 就渲染不了——那一步的结果里没有取到页面地址")
+    # 已经带过选项就以原样为准（用户/AI 自己加过）：再拼一次会出现两个 `,{...}`，
+    # 上游只认最后一个，反而把前面的选项吃掉
+    if ",{" in base:
+        return build_key(target, base)
+    return build_key(target, "%s,%s" % (base, WEBVIEW_OPTION))
+
+
 def is_content_key(key: str) -> bool:
     """这个调试 key 是不是「从章节点起跑」（= 正文步）。
 

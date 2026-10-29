@@ -92,6 +92,84 @@ def page_stats(html: str) -> Dict[str, int]:
     }
 
 
+#: 材料**能回答什么**（消费侧只认这个，不读 `layer` 码自己解释）。
+#:
+#: 为什么要有这一层：`layer` 判的是**页面原文的特征**（「藏了负载」「在调接口」），
+#: 不是「这份材料里有没有目标」。消费侧把两者当同一件事，就会按自己的理解给字段加
+#: 语义——而那个理解可能比判据更强。实测 2026-10-28：把 `L3` 读成「目标不在 DOM 里」，
+#: 于是在一个渲染后已有 34 张真图的 DOM 上砍掉大纲、告诉模型「这里没有」，模型给出的
+#: 候选比改动前更差。判据一处，答案一处，消费侧不许自己解释。
+VERDICT_READABLE = "readable"
+VERDICT_NEEDS_RENDER = "needs_render"
+VERDICT_BLOCKED = "blocked"
+VERDICT_UNKNOWN = "unknown"
+
+#: 目标**只在运行时/接口里**的那几层（原文里没有它）。L1 = 原文里就有；
+#: L2 = 容器在但空（内容由渲染补进去）；L3 = 加密负载；L4 = 接口取数。
+_TARGET_OUTSIDE_SOURCE_LAYERS = ("L2", "L3", "L4")
+
+
+def material_verdict(page_layer: Any, material_kind: str = "") -> str:
+    """这份材料**能回答什么** —— 消费侧的唯一入口（不读层码自己解释）。
+
+    四档：
+      - ``readable``      目标就在这份材料里 → 照验、照压大纲；
+      - ``needs_render``  目标只在运行时/接口里，而**这份材料还没渲染** → 先渲染再读；
+      - ``blocked``       这份材料不是站点本身（拦截页 / 浏览器错误页）→ 别用它配规则；
+      - ``unknown``       判不出来 → 照跑（同 `unfaithful_reason` 的「说不清就照跑」）。
+
+    **两个条件缺一不可**：层的结论（原文里没有目标）+ 材料还没渲染。少了第二个，
+    就会在渲染后的 DOM 上说「这里没有目标」——那段负载的证据写在 `<script>` 里，
+    渲染不会让它消失。
+    """
+    from core.material import is_post_render
+
+    if not isinstance(page_layer, dict) or not page_layer:
+        return VERDICT_UNKNOWN
+    # 拦截页 / 错误页：层是空的并带 `unsure`（见 `core.app_debug` 判层处）
+    if not str(page_layer.get("layer") or "") and page_layer.get("unsure"):
+        return VERDICT_BLOCKED
+    if is_post_render(material_kind):
+        # 渲染过：DOM 已经是脚本的产物，层那条（关于原文的）结论不再说明目标在不在
+        return VERDICT_READABLE
+    if str(page_layer.get("layer") or "").upper() in _TARGET_OUTSIDE_SOURCE_LAYERS:
+        return VERDICT_NEEDS_RENDER
+    if str(page_layer.get("layer") or ""):
+        return VERDICT_READABLE
+    return VERDICT_UNKNOWN
+
+
+def layer_evidence(page_layer: Any, limit: int = 4) -> List[Dict[str, str]]:
+    """层的证据里**能给人看**的那几句（`why` 判据名 + `note` 人话）。
+
+    `snippet` 不带：它是页面原文的一段，几十上百字符，进提示词只会挤掉大纲。
+    """
+    if not isinstance(page_layer, dict):
+        return []
+    seen, out = set(), []
+    for item in (page_layer.get("evidence") or [])[:limit]:
+        if not isinstance(item, dict):
+            continue
+        key = str(item.get("why") or "")
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append({"why": key, "note": str(item.get("note") or "")[:120]})
+    return out
+
+
+def material_facts(page_layer: Any, material_kind: str = "") -> Dict[str, Any]:
+    """消费侧要的那一小份：**答案 + 证据**（不带层码、不带 `snippet`）。
+
+    一个调用点、一份形状：各个消费方自己从 `page_layer` 里挑字段，就会挑出不同的东西
+    并各自解释（AGENTS #7/#8 的同一条）。空 dict = 这一页判不出什么。
+    """
+    verdict = material_verdict(page_layer, material_kind)
+    if verdict == VERDICT_UNKNOWN and not isinstance(page_layer, dict):
+        return {}
+    return {"verdict": verdict, "evidence": layer_evidence(page_layer)}
+
+
 def has_wanted(stats: Optional[Dict[str, int]], want: str) -> Optional[bool]:
     """这一页上有没有「你要的那个东西」（门槛取粗：只用来挡住「怎么改选择器都取不到」）。"""
     if not stats or not want:

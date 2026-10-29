@@ -52,6 +52,7 @@ def _rate_key(source) -> Tuple[str, int]:
         return "", 0
     return str(source.get("bookSourceUrl", "") or "").strip(), interval
 
+
 def parse_source_header(raw: str) -> tuple:
     """解析 Legado 书源的 ``header`` 字段，返回 ``(请求头, 不可用原因)``。
 
@@ -92,8 +93,11 @@ def parse_source_header(raw: str) -> tuple:
     # 注意 `null` / `true` / `false` 是合法 JSON 字面量，但首字符既不特殊也不是
     # 数字——漏掉它们会被当换行写法处理，语义错位（例如 `null` 既非对象也无原因，
     # 变成静默空头）。别删这个子条件。
-    if (text[:1] in ("{", "[", '"', "-") or text[:1].isdigit()
-            or text in ("null", "true", "false")):
+    if (
+        text[:1] in ("{", "[", '"', "-")
+        or text[:1].isdigit()
+        or text in ("null", "true", "false")
+    ):
         try:
             obj = json.loads(text)
         except Exception:
@@ -125,16 +129,16 @@ def parse_source_header(raw: str) -> tuple:
 # 少校验：
 #   本模块   **页面**：进程内、5 分钟、不落盘，与源是否已保存无关
 #   checker  **结论**：落盘、14 / 7 / 1 天，按 fingerprint + probe_depth 比有效性
-PAGE_CACHE_TTL = 300                 # 秒
-PAGE_CACHE_MAX_PAGES = 200           # 按页数计的 LRU 上限
-PAGE_CACHE_MAX_BYTES = 1024 * 1024   # 单页上限；**超出的不缓存**（理由见 _cache_put）
+PAGE_CACHE_TTL = 300  # 秒
+PAGE_CACHE_MAX_PAGES = 200  # 按页数计的 LRU 上限
+PAGE_CACHE_MAX_BYTES = 1024 * 1024  # 单页上限；**超出的不缓存**（理由见 _cache_put）
 #: 一个页面至少该有这么大。**低于它就当「没抓到页面」**（不是「没搜到结果」）——
 #: 实测反爬站回的是 2 字节的 `CN`；判据与理由见 `_too_small_to_be_a_page`。
 MIN_PAGE_BYTES = 200
 
 #: 每次抓取用哪种缓存策略（``fetch_ex(cache=...)``）
-CACHE_AUTO = "auto"        # 命中就用，缺失/过期就抓（默认）
-CACHE_ONLY = "only"        # **完全不发请求**，缺失就抛 CacheMiss
+CACHE_AUTO = "auto"  # 命中就用，缺失/过期就抓（默认）
+CACHE_ONLY = "only"  # **完全不发请求**，缺失就抛 CacheMiss
 CACHE_REFRESH = "refresh"  # 忽略已有缓存，重抓并回填
 CACHE_MODES = (CACHE_AUTO, CACHE_ONLY, CACHE_REFRESH)
 
@@ -170,8 +174,14 @@ def _charset_key(charset: Any) -> str:
     return charset.strip().lower() if isinstance(charset, str) else ""
 
 
-def _cache_key(url: str, headers: dict, charset: Any, proxy: str,
-               method: str = "GET", body: str = "") -> str:
+def _cache_key(
+    url: str,
+    headers: dict,
+    charset: Any,
+    proxy: str,
+    method: str = "GET",
+    body: str = "",
+) -> str:
     """缓存键 = **请求身份**（URL + 请求头 + charset + 代理 + 方法 + body）。
 
     只按 URL 做键会把两种身份的内容串在一起（同一类坑）：带登录态
@@ -184,14 +194,18 @@ def _cache_key(url: str, headers: dict, charset: Any, proxy: str,
     ``url`` 传的是**编码后**的那份（见下面的 quote）：`?q=我` 与 `?q=%E6%88%91`
     是同一个请求，不该各占一格。
     """
-    ident = "\x00".join([
-        url,
-        "\x01".join("%s=%s" % (str(k).lower(), v) for k, v in sorted(headers.items())),
-        _charset_key(charset),
-        str(proxy or "").strip(),
-        method.upper(),
-        body,
-    ])
+    ident = "\x00".join(
+        [
+            url,
+            "\x01".join(
+                "%s=%s" % (str(k).lower(), v) for k, v in sorted(headers.items())
+            ),
+            _charset_key(charset),
+            str(proxy or "").strip(),
+            method.upper(),
+            body,
+        ]
+    )
     return hashlib.sha1(ident.encode("utf-8")).hexdigest()
 
 
@@ -202,7 +216,7 @@ def _cache_get(key: str):
             return None
         html, stamp, at = item
         if time.time() - at > PAGE_CACHE_TTL:
-            del _page_cache[key]      # 过期即删：TTL 一到就必须回源，留着只占内存
+            del _page_cache[key]  # 过期即删：TTL 一到就必须回源，留着只占内存
             return None
         _page_cache.move_to_end(key)
         return html, stamp
@@ -218,7 +232,7 @@ def _cache_put(key: str, html: str, stamp: str) -> None:
         _page_cache[key] = (html, stamp, time.time())
         _page_cache.move_to_end(key)
         while len(_page_cache) > PAGE_CACHE_MAX_PAGES:
-            _page_cache.popitem(last=False)      # LRU：最久没用过的先走
+            _page_cache.popitem(last=False)  # LRU：最久没用过的先走
 
 
 def page_cache_clear() -> None:
@@ -232,9 +246,14 @@ def page_cache_size() -> int:
         return len(_page_cache)
 
 
-def fetch(url: str, timeout: int = 15,
-          headers: dict = None, charset: str = "", proxy: str = "",
-          source: Optional[Dict[str, Any]] = None) -> str:
+def fetch(
+    url: str,
+    timeout: int = 15,
+    headers: dict = None,
+    charset: str = "",
+    proxy: str = "",
+    source: Optional[Dict[str, Any]] = None,
+) -> str:
     """抓取页面 HTML——``fetch_ex`` 的薄包装，只把 HTML 本身交出去。
 
     **缓存默认生效**（``CACHE_AUTO``）：同一份请求 5 分钟内不会再联网。需要知道
@@ -278,16 +297,24 @@ def _decompress(raw: bytes, resp: Any) -> bytes:
                 return zlib.decompress(raw, -zlib.MAX_WBITS)
     except Exception as e:
         if looks_gzip:
-            raise ValueError("正文是 gzip 压缩的但解不开（Content-Encoding=%r）：%s"
-                             % (enc, e))
+            raise ValueError(
+                "正文是 gzip 压缩的但解不开（Content-Encoding=%r）：%s" % (enc, e)
+            )
         return raw
     return raw
 
 
-def fetch_ex(url: str, timeout: int = 15,
-             headers: dict = None, charset: str = "", proxy: str = "",
-             source: Optional[Dict[str, Any]] = None,
-             cache: str = CACHE_AUTO, method: str = "GET", body: str = "") -> Fetched:
+def fetch_ex(
+    url: str,
+    timeout: int = 15,
+    headers: dict = None,
+    charset: str = "",
+    proxy: str = "",
+    source: Optional[Dict[str, Any]] = None,
+    cache: str = CACHE_AUTO,
+    method: str = "GET",
+    body: str = "",
+) -> Fetched:
     """抓取页面，返回 ``Fetched(html, cached, fetched_at)``。
 
     与 Legado 的 ``AnalyzeUrl`` 对齐的部分：
@@ -313,8 +340,9 @@ def fetch_ex(url: str, timeout: int = 15,
     if cache not in CACHE_MODES:
         # 不认识的策略要显式报错，别静默退回默认：用户以为在「只读不联网」，
         # 实际每次都在联网，而界面上看不出任何区别
-        raise ValueError("未知的缓存策略：%r（只能是 %s）"
-                         % (cache, " / ".join(CACHE_MODES)))
+        raise ValueError(
+            "未知的缓存策略：%r（只能是 %s）" % (cache, " / ".join(CACHE_MODES))
+        )
     method = str(method or "GET").strip().upper()
     if method not in ("GET", "POST"):
         # 显式拒绝而不是当 GET 发：调用方以为发的是 PUT，实际是 GET，
@@ -322,22 +350,29 @@ def fetch_ex(url: str, timeout: int = 15,
         raise ValueError("不支持的请求方法：%r（只能 GET / POST）" % method)
     body = str(body or "")
     if method == "GET":
-        body = ""          # GET 不带 body（与 App 一致：选项里 body 仅 POST 生效）
+        body = ""  # GET 不带 body（与 App 一致：选项里 body 仅 POST 生效）
 
-    h = {"User-Agent": DEFAULT_UA,
-         "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
-         "Accept-Language": "zh-CN,zh;q=0.9",
-         # 与浏览器 / OkHttp 一样要 gzip：**不是可选优化**——站点回压缩正文时，
-         # 不解压拿到的是 gzip 字节被当文本强解的一屏乱码（urllib 认
-         # `Content-Encoding` 但**不替我们解**），而它看起来像「源的内容就这样」。
-         # 要了就得自己解，见 `_decompress`
-         "Accept-Encoding": "gzip, deflate"}
+    h = {
+        "User-Agent": DEFAULT_UA,
+        "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
+        "Accept-Language": "zh-CN,zh;q=0.9",
+        # 与浏览器 / OkHttp 一样要 gzip：**不是可选优化**——站点回压缩正文时，
+        # 不解压拿到的是 gzip 字节被当文本强解的一屏乱码（urllib 认
+        # `Content-Encoding` 但**不替我们解**），而它看起来像「源的内容就这样」。
+        # 要了就得自己解，见 `_decompress`
+        "Accept-Encoding": "gzip, deflate",
+    }
     if headers:
         # 值为空（含纯空白）的键不覆盖默认值。用 if v 挡不住 " "，而 urllib 发送前
         # 会 strip，结果服务端收到空 UA —— 与换行写法（已 strip）行为不一致。
         # None 单独挡：str(None) 是 "None"，会被当成真值把默认 UA 覆盖成字面量 "None"
-        h.update({str(k): str(v) for k, v in headers.items()
-                  if v is not None and str(v).strip()})
+        h.update(
+            {
+                str(k): str(v)
+                for k, v in headers.items()
+                if v is not None and str(v).strip()
+            }
+        )
     if method == "POST" and body and not any(k.lower() == "content-type" for k in h):
         low = body.lstrip()[:1]
         if low not in ("{", "<"):
@@ -409,29 +444,96 @@ def fetch_ex(url: str, timeout: int = 15,
     # 走到这一行说明请求已经成功：4xx/5xx 由 urllib 抛异常，不会到这里
     _cache_put(key, html, stamp)
     return Fetched(html, False, stamp)
+
+
 def extract_keyword(url: str) -> str:
     """从搜索 URL 中解出真实关键词（优先 q/keyboard 等常见参数）。"""
     parsed = urllib.parse.urlparse(url)
     query = urllib.parse.parse_qs(parsed.query)
-    for key in ("q", "keyboard", "key", "search", "keyword", "wd", "kw", "searchkey", "searchword", "query", "title", "s"):
+    for key in (
+        "q",
+        "keyboard",
+        "key",
+        "search",
+        "keyword",
+        "wd",
+        "kw",
+        "searchkey",
+        "searchword",
+        "query",
+        "title",
+        "s",
+    ):
         if key in query and query[key][0].strip():
             return query[key][0].strip()
     return ""
+
+
+def _placeholder_first_param(url: str) -> str:
+    """关键词解不出来时，把 query 里的**第一个参数值**换成 `{{key}}`。
+
+    搜索页的第一个 query 参数几乎总是关键词（`?searchString=x`、`?wd=…`）——这比
+    维护一张参数名词表更省，而且词表本来就不全（`searchString` 就不在里面）。
+    没有 query 就原样返回，让调用方看到「推不出来」而不是一个坏模板。
+    """
+    parts = urllib.parse.urlsplit(url)
+    if not parts.query:
+        return url
+    pairs = urllib.parse.parse_qsl(parts.query, keep_blank_values=True)
+    if not pairs:
+        return url
+    name = pairs[0][0]
+    # 手工拼：`urlencode` 会把 `{}` 转义成 `%7B%7Bkey%7D%7D`，而 App 只认原样的 `{{key}}`
+    rest = "&".join("%s=%s" % (urllib.parse.quote(k, safe=""),
+                               urllib.parse.quote(v, safe="")) for k, v in pairs[1:])
+    query = "%s={{key}}" % urllib.parse.quote(name, safe="")
+    return urllib.parse.urlunsplit(parts._replace(query=query + ("&" + rest if rest else "")))
+
+
 def make_search_url_template(url: str, keyword: str) -> str:
     """把真实关键词替换为 {{key}} 占位符，得到 searchUrl 模板。
 
     兼容 URL 中关键词为 URL 编码（%E7%BB%8D%E5%AE%8B）或明文（绍宋）两种形态。
+
+    **空关键词必须早退**：`"".replace("", "{{key}}")` 会在**每个字符间隙**插一个
+    占位符，产出 `{{key}}h{{key}}t{{key}}t{{key}}p…` 这种垃圾（实测 2026-10-27
+    `?searchString=x`：参数名不在常见词表里 → 关键词解不出 → 模板被搅碎）。
     """
+    if not str(keyword or "").strip():
+        return _placeholder_first_param(url)
     template = url
-    for candidate in (urllib.parse.quote(keyword), urllib.parse.quote(keyword, safe=""), keyword):
-        if candidate in template:
-            # 全量替换，避免多个相同词残留
-            template = template.replace(candidate, "{{key}}")
-            break
+    # 只替换 **query 部分**，而且只替换**参数值**：整串 `replace` 会把短关键词
+    # 在别处的偶然出现也换掉——实测 `?wd=a&page=2` 时 `page` 被换成 `p{{key}}ge`
+    # （关键词 `a`）。参数值是关键词出现位置的唯一合理范围。
+    parts = urllib.parse.urlsplit(url)
+    for candidate in (
+        urllib.parse.quote(keyword, safe=""),
+        urllib.parse.quote(keyword),
+        keyword,
+    ):
+        if not candidate or candidate not in parts.query:
+            continue
+        pairs = urllib.parse.parse_qsl(parts.query, keep_blank_values=True)
+        if not any(v == urllib.parse.unquote(candidate) for _, v in pairs):
+            continue
+        replaced = [(k, "{{key}}" if urllib.parse.unquote(v) == urllib.parse.unquote(candidate) else v)
+                    for k, v in pairs]
+        rest = "&".join("%s=%s" % (urllib.parse.quote(k, safe=""),
+                                   urllib.parse.quote(v, safe=""))
+                        for k, v in replaced)
+        template = urllib.parse.urlunsplit(parts._replace(query=rest))
+        template = template.replace("%7B%7Bkey%7D%7D", "{{key}}")
+        break
     # 若 q= 后没替换成功，用正则兜底
     if "{{key}}" not in template:
-        template = re.sub(r"([?&](?:q|key|search|keyword|wd|kw|searchkey)=)[^&#]*", r"\1{{key}}", template)
+        template = re.sub(
+            r"([?&](?:q|key|search|keyword|wd|kw|searchkey)=)[^&#]*",
+            r"\1{{key}}",
+            template,
+        )
     return template
+
+
 def _too_small_to_be_a_page(html: str) -> bool:
     """这份材料小得**不可能是一个页面**（不是「没搜到结果」，是「压根没抓到页面」）。
 
@@ -493,6 +595,7 @@ def probe_search_endpoint(domain: str, keyword: str, timeout: int = 12) -> tuple
     返回 (template_url, 实际命中URL, 参数名)；全部失败返回 (None, None, None)。
     """
     from urllib.parse import quote
+
     base = f"https://{domain}"
     kw_encoded = quote(keyword, safe="")
     attempts = 0

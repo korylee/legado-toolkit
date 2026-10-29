@@ -64,11 +64,25 @@ def rule_try_budget(field_count: int) -> int:
     """
     return max(RULE_TRY_PER_TURN, int(field_count or 0) * RULE_TRY_PER_FIELD)
 
-#: 每轮模型调用上限（agent-evidence-budget 的判据位：超限转用户动作）。
-#: **口径是「一族一次」**：提议按取样类型分族（text / media / link），一族一次调用，
-#: 所以 3 = 详情组三族各提一次。写死成 1 的后果是「点一次 AI 补全只有 text 那族被
-#: 提议」——用户看到的是「点了没反应」，而原因藏在族边界里。
+#: 每轮模型调用的**下限**（agent-evidence-budget 的判据位：超限转用户动作）。
+#: **口径是「一族一次」**：提议按取样类型分族（list / link / text / media），一族一次调用。
+#: 写死成 1 的后果是「点一次 AI 补全只有 text 那族被提议」——用户看到的是「点了没反应」。
+#:
+#: 但**写死 3 也不对**：那是按详情步的三族定的，而搜索步有**四族**（多了 `list`），
+#: 超限的那一族静默不提议。实测 2026-10-27：搜索段补全只出 `book_list`/`book_url`，
+#: `name` 所在的 `text` 族压根没被问到 → 引擎 `total=0`（`BookList` 没书名就不建条目）
+#: → 整段判失败。所以预算按**实际族数**给（:func:`model_calls_budget`），这个常量只是下限。
 MODEL_CALLS_PER_TURN = 3
+
+
+def model_calls_budget(field_kinds: Any) -> int:
+    """这一轮的模型调用预算：按**实际要问的族数**给，下限是 ``MODEL_CALLS_PER_TURN``。
+
+    ``field_kinds`` 是这一轮要提议的字段各自的取样类型。族数就是调用次数——**多一个
+    字段族不该因此丢掉一整族**：丢掉的那族永远补不上，而界面只显示「模型没给候选」。
+    """
+    groups = {str(k) for k in (field_kinds or []) if str(k or "").strip()}
+    return max(MODEL_CALLS_PER_TURN, len(groups))
 
 def _steps() -> tuple:
     """调试**步骤名**的白名单：派生自 `core.app_debug.SEGMENT_NAMES` 的取值

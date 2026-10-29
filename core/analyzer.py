@@ -2,9 +2,9 @@
 """由 services/add_source.py 拆分而来。"""
 
 from core.constants import *
+from core.fetch import fetch
 from core.page_layer import WANT_MEDIA
 from core.urls import abs_url as _abs_url
-from core.fetch import fetch
 
 #: 书名上的「装饰」：实测 samsbook 的搜索结果标题写成 `[历史]绍宋` / `【言情】绍宋之后`，
 #: 文本**永远不会**恰好等于关键词——这一类站点原来必然失配。
@@ -29,7 +29,11 @@ def _strip_title_decor(text: str) -> str:
 def _first_class_of(el) -> str:
     """元素的第一个 class（比对同形兄弟用）；没有就返回空串。"""
     raw = (el.get("class") or "") if el is not None else ""
-    parts = raw.split() if isinstance(raw, str) else [c for t in raw for c in str(t).split()]
+    parts = (
+        raw.split()
+        if isinstance(raw, str)
+        else [c for t in raw for c in str(t).split()]
+    )
     return parts[0] if parts else ""
 
 
@@ -49,6 +53,7 @@ def _leaf_text_elems(soup, keyword: str):
     即使恰好等于关键词，也没有独立的详情 URL，不能成为结果项。
     """
     from core.html import make_soup
+
     tiers = {1: [], 2: [], 3: []}
     seen_detail_urls = set()
 
@@ -59,7 +64,7 @@ def _leaf_text_elems(soup, keyword: str):
         「不是静态资源/导航链接」接受。这是**兜底那一趟**才开的宽松口，见函数末尾的
         说明——实测有站点的详情链接长成 `/html/1287420/asc-1/`，路径里一个词表词都没有。
         """
-        links = ([el] if getattr(el, "name", None) == "a" else [])
+        links = [el] if getattr(el, "name", None) == "a" else []
         links += list(el.find_parents("a"))
         for link in links:
             href = (link.get("href") or "").strip()
@@ -72,8 +77,17 @@ def _leaf_text_elems(soup, keyword: str):
 
     def is_noise(el):
         noise_classes = {
-            "nav", "navbar", "breadcrumb", "pagination", "pager", "menu",
-            "search-box", "search-form", "searchbar", "suggest", "autocomplete",
+            "nav",
+            "navbar",
+            "breadcrumb",
+            "pagination",
+            "pager",
+            "menu",
+            "search-box",
+            "search-form",
+            "searchbar",
+            "suggest",
+            "autocomplete",
         }
         for parent in [el] + list(el.parents):
             if getattr(parent, "name", None) in ("h1", "title", "input"):
@@ -93,8 +107,11 @@ def _leaf_text_elems(soup, keyword: str):
         while getattr(node, "parent", None) is not None:
             parent = node.parent
             key = (str(node.name or "").lower(), _first_class_of(node))
-            same = sum(1 for child in parent.find_all(recursive=False)
-                       if (str(child.name or "").lower(), _first_class_of(child)) == key)
+            same = sum(
+                1
+                for child in parent.find_all(recursive=False)
+                if (str(child.name or "").lower(), _first_class_of(child)) == key
+            )
             if same >= 3:
                 return True
             node = parent
@@ -112,7 +129,7 @@ def _leaf_text_elems(soup, keyword: str):
             if el.name in ("title", "script", "style", "meta"):
                 continue
             txt = el.get_text(strip=True)
-            if not txt or el.find_all(True):        # 空文本 / 非叶子
+            if not txt or el.find_all(True):  # 空文本 / 非叶子
                 continue
             if is_noise(el):
                 continue
@@ -142,11 +159,19 @@ def _leaf_text_elems(soup, keyword: str):
                 tiers[3].append(el)
         if any(tiers.values()):
             break
-    for tier, why in ((1, ""),
-                      (2, "书名带前缀装饰（如「[历史]绍宋」）：按「去掉开头的 [分类] 后"
-                          "等于关键词」认出来的。"),
-                      (3, "书名里含关键词而非恰好相等：按「含关键词的链接」认出来的，"
-                          "页面上可能不止一本。")):
+    for tier, why in (
+        (1, ""),
+        (
+            2,
+            "书名带前缀装饰（如「[历史]绍宋」）：按「去掉开头的 [分类] 后"
+            "等于关键词」认出来的。",
+        ),
+        (
+            3,
+            "书名里含关键词而非恰好相等：按「含关键词的链接」认出来的，"
+            "页面上可能不止一本。",
+        ),
+    ):
         if tiers[tier]:
             return tiers[tier], why
     return [], ""
@@ -182,10 +207,29 @@ def _nearest_list_item(name_elem):
 
 #: 能当「结果卡片 / 列表容器」的标签。BS4 的根对象 `[document]` 的 `name` 就是
 #: `"[document]"`——它进不了 CSS，一旦落到选择器里就是一条**永远选不中**的坏规则。
-_CONTAINER_TAGS = frozenset((
-    "li", "div", "ul", "ol", "tr", "td", "section", "article", "dl", "dd", "dt",
-    "p", "span", "a", "body", "table", "tbody", "main", "nav",
-))
+_CONTAINER_TAGS = frozenset(
+    (
+        "li",
+        "div",
+        "ul",
+        "ol",
+        "tr",
+        "td",
+        "section",
+        "article",
+        "dl",
+        "dd",
+        "dt",
+        "p",
+        "span",
+        "a",
+        "body",
+        "table",
+        "tbody",
+        "main",
+        "nav",
+    )
+)
 
 
 def _container_selector(list_item, container):
@@ -198,8 +242,9 @@ def _container_selector(list_item, container):
     卡片连 class 都没有就返回空——让调用方按「没推断出列表规则」如实说（AGENTS #4），
     而不是落一条「选中整页链接」的假规则。
     """
-    usable = (lambda el: el is not None
-              and str(getattr(el, "name", "") or "").lower() in _CONTAINER_TAGS)
+    usable = lambda el: (
+        el is not None and str(getattr(el, "name", "") or "").lower() in _CONTAINER_TAGS
+    )
     if not usable(list_item):
         # 连卡片都不是真标签（理论上到不了，兜一下别让选择器里出现 [document]）
         return ""
@@ -227,12 +272,18 @@ def _path_selector(el, list_item):
     while cur is not None and cur is not list_item:
         cls = cur.get("class", []) or []
         # 忽略纯布局 class（lazy/img-wrapper 等）与 Tailwind 变体（hover: 等含冒号）
-        cls = [c for c in cls if c not in ("lazy", "img-wrapper", "text-overflow", "clearfix")
-               and ":" not in c]
+        cls = [
+            c
+            for c in cls
+            if c not in ("lazy", "img-wrapper", "text-overflow", "clearfix")
+            and ":" not in c
+        ]
         parts.append(f".{cls[0]}" if cls else (cur.name or "div"))
         cur = cur.parent
     parts.reverse()
     return " ".join(parts) if parts else (el.name or "div")
+
+
 def _elem_self_selector(el) -> str:
     """生成单个元素自身的选择器：拼全部非布局 class（最多3个，提升唯一性），否则 tag。
 
@@ -240,14 +291,21 @@ def _elem_self_selector(el) -> str:
     """
     if el is None:
         return ""
-    cls = [c for c in (el.get("class", []) or [])
-           if c not in ("lazy", "img-wrapper", "text-overflow", "clearfix") and ":" not in c]
+    cls = [
+        c
+        for c in (el.get("class", []) or [])
+        if c not in ("lazy", "img-wrapper", "text-overflow", "clearfix")
+        and ":" not in c
+    ]
     if cls:
         return "".join(f".{c}" for c in cls[:3])
     return el.name or "div"
+
+
 def analyze_search_page(html: str, keyword: str) -> dict:
     """分析搜索页，返回自动推断的 Legado 规则。"""
     from core.html import make_soup
+
     soup = make_soup(html)
     anchors, match_why = _leaf_text_elems(soup, keyword)
     result = {
@@ -266,8 +324,10 @@ def analyze_search_page(html: str, keyword: str) -> dict:
         "note": "",
     }
     if not anchors:
-        result["note"] = ("未找到含关键词的书名链接：可能真没有这本书，也可能书名写法特殊，"
-                          "或结果要 JS 渲染（这类页面先看抽屉里的「层」）。")
+        result["note"] = (
+            "未找到含关键词的书名链接：可能真没有这本书，也可能书名写法特殊，"
+            "或结果要 JS 渲染（这类页面先看抽屉里的「层」）。"
+        )
         return result
     if match_why:
         result["note"] = match_why
@@ -295,17 +355,27 @@ def analyze_search_page(html: str, keyword: str) -> dict:
         result["name"] = _path_selector(named_elem, list_item)
 
     # bookUrl 规则：优先详情页特征链接
-    links = [a for a in list_item.find_all("a", href=True)
-             if not _is_static_link(a.get("href") or "")]
+    links = [
+        a
+        for a in list_item.find_all("a", href=True)
+        if not _is_static_link(a.get("href") or "")
+    ]
     detail = None
     for a in links:
         href = (a.get("href") or "").lower()
         if any(h in href for h in DETAIL_LINK_HINTS):
             detail = a
             break
-    named_href = (named_elem.get("href") or "").strip() if getattr(named_elem, "name", None) == "a" else ""
-    target = named_elem if named_href and any(h in named_href.lower() for h in DETAIL_LINK_HINTS) \
+    named_href = (
+        (named_elem.get("href") or "").strip()
+        if getattr(named_elem, "name", None) == "a"
+        else ""
+    )
+    target = (
+        named_elem
+        if named_href and any(h in named_href.lower() for h in DETAIL_LINK_HINTS)
         else (detail or (links[0] if links else None))
+    )
     if target is not None:
         result["bookUrl"] = _path_selector(target, list_item) + "@href"
         result["sampleBookUrl"] = (target.get("href") or "").strip()
@@ -314,7 +384,14 @@ def analyze_search_page(html: str, keyword: str) -> dict:
     # 兼容两种形态：<img data-original=...> 与 <div style/class=... data-original=...>（背景懒加载）
     candidates = []
     for el in list_item.find_all(True):
-        for attr in ("data-original", "data-src", "src", "data-lazy-src", "data-url", "data-background"):
+        for attr in (
+            "data-original",
+            "data-src",
+            "src",
+            "data-lazy-src",
+            "data-url",
+            "data-background",
+        ):
             val = el.get(attr) or ""
             if val and any(h in val.lower() for h in COVER_URL_HINTS):
                 candidates.append((el, attr, val))
@@ -328,7 +405,13 @@ def analyze_search_page(html: str, keyword: str) -> dict:
     if chosen:
         el, attr = chosen
         result["coverUrl"] = _path_selector(el, list_item) + f"@{attr}"
-        if attr in ("data-original", "data-src", "data-lazy-src", "data-url", "data-background"):
+        if attr in (
+            "data-original",
+            "data-src",
+            "data-lazy-src",
+            "data-url",
+            "data-background",
+        ):
             result["note"] += f" 封面为懒加载属性 {attr}（div背景图），已自动处理。"
 
     # author 规则：列表项内找 p/span/div 中短文本（排除含状态词/数字占比高者）
@@ -343,7 +426,9 @@ def analyze_search_page(html: str, keyword: str) -> dict:
             if txt == name_text or el is named_elem or el in named_elem.parents:
                 continue
             # 排除"214 鹰扬"这类状态文本（含数字或已知状态词）
-            if re.search(r"\d", txt) or any(w in txt for w in ("话", "章", "连载", "完结", "更新", "状态")):
+            if re.search(r"\d", txt) or any(
+                w in txt for w in ("话", "章", "连载", "完结", "更新", "状态")
+            ):
                 continue
             if any(ch.isalpha() or "\u4e00" <= ch <= "\u9fff" for ch in txt):
                 result["author"] = _path_selector(el, list_item) + "@text"
@@ -352,6 +437,8 @@ def analyze_search_page(html: str, keyword: str) -> dict:
             break
 
     return result
+
+
 def _text_content_rule(soup) -> tuple:
     """文本正文：取文本量最大的块（>200 字）。返回 `(规则, 字数)`。"""
     best_len, best_el = 0, None
@@ -363,6 +450,8 @@ def _text_content_rule(soup) -> tuple:
     if best_el is None:
         return "", 0
     return f"{_elem_self_selector(best_el)}@textNodes", best_len
+
+
 def _image_content_rule(soup) -> tuple:
     """图片正文：含真实图片最多的容器（>=3 张）。返回 `(规则, 张数)`。
 
@@ -373,15 +462,21 @@ def _image_content_rule(soup) -> tuple:
     mark = re.compile(r"\.(jpg|jpeg|png|webp|avif|gif)", re.I)
     best_n, best_el = 0, None
     for el in soup.find_all(["div", "section", "article", "ul", "p"]):
-        imgs_in = [i for i in el.find_all("img") if (i.get("src") or "") and
-                   mark.search(i.get("src") or "")]
+        imgs_in = [
+            i
+            for i in el.find_all("img")
+            if (i.get("src") or "") and mark.search(i.get("src") or "")
+        ]
         if len(imgs_in) > best_n:
             best_n, best_el = len(imgs_in), el
     if best_el is None or best_n < 3:
         return "", 0
     return f"{_elem_self_selector(best_el)} img@src", best_n
-def analyze_detail_page(html: str, book_url: str, page_fetcher=None,
-                        want: str = "", page_facts: dict = None) -> dict:
+
+
+def analyze_detail_page(
+    html: str, book_url: str, page_fetcher=None, want: str = "", page_facts: dict = None
+) -> dict:
     """
     从书籍详情页推断目录规则(ruleToc)和正文规则(ruleContent)。
 
@@ -406,6 +501,7 @@ def analyze_detail_page(html: str, book_url: str, page_fetcher=None,
     渲染后才有，规则照给，但要**配上让它可用的那个东西**（正文页 URL 带 `webView`）。
     """
     from core.html import make_soup
+
     toc: dict = {}
     content_rule = ""
     note = ""
@@ -427,8 +523,9 @@ def analyze_detail_page(html: str, book_url: str, page_fetcher=None,
         low = href.lower()
         is_chapter = any(h in low for h in CHAPTER_LINK_HINTS)
         # 数字序号章节：/detail/{id}/{n}.html、/{n}.html、/{id}/{n}.html 等纯数字尾段
-        if re.search(r'/\d+(?:\.html?)?$', href) and not any(
-                s in href for s in STATIC_LINK_HINTS):
+        if re.search(r"/\d+(?:\.html?)?$", href) and not any(
+            s in href for s in STATIC_LINK_HINTS
+        ):
             is_chapter = True
         if is_chapter:
             chapter_links.append((a, href))
@@ -437,8 +534,9 @@ def analyze_detail_page(html: str, book_url: str, page_fetcher=None,
         # 兜底：详情页内的纯数字路径（/12345/ 或 /12345.html）当章节
         for a in soup.find_all("a", href=True):
             href = a.get("href", "").strip()
-            if re.search(r'/\d+(?:/\d+)?(?:\.html?)?$', href) and not any(
-                    s in href for s in STATIC_LINK_HINTS):
+            if re.search(r"/\d+(?:/\d+)?(?:\.html?)?$", href) and not any(
+                s in href for s in STATIC_LINK_HINTS
+            ):
                 chapter_links.append((a, href))
 
     if not chapter_links:
@@ -451,7 +549,11 @@ def analyze_detail_page(html: str, book_url: str, page_fetcher=None,
         # 向上找祖先容器，统计覆盖度
         p = a.parent
         depth = 0
-        while p is not None and depth < 5 and getattr(p, "name", None) not in ("html", "body"):
+        while (
+            p is not None
+            and depth < 5
+            and getattr(p, "name", None) not in ("html", "body")
+        ):
             key = id(p)
             container_counts.setdefault(key, {"el": p, "count": 0})
             container_counts[key]["count"] += 1
@@ -527,7 +629,10 @@ def analyze_detail_page(html: str, book_url: str, page_fetcher=None,
         for a, href in chapter_links:
             node = a.parent
             inside = False
-            while node is not None and getattr(node, "name", None) not in ("html", "body"):
+            while node is not None and getattr(node, "name", None) not in (
+                "html",
+                "body",
+            ):
                 if node is container:
                     inside = True
                     break
@@ -565,14 +670,18 @@ def analyze_detail_page(html: str, book_url: str, page_fetcher=None,
             if img_rule:
                 note += f"；图片正文（检测到 {img_n} 张静态图，content 提取 img@src）"
             elif txt_rule:
-                note += ("；你选的是漫画 / 听书这类要媒体的源，但这一页上没找到图片列表，"
-                         f"正文规则按文本配的（{txt_len} 字）")
+                note += (
+                    "；你选的是漫画 / 听书这类要媒体的源，但这一页上没找到图片列表，"
+                    f"正文规则按文本配的（{txt_len} 字）"
+                )
         else:
             content_rule = txt_rule or img_rule
             if txt_rule:
                 if img_n >= 3:
-                    note += (f"；你选的是文本源，但这一页上还有 {img_n} 张图，"
-                             "正文规则按文本配的")
+                    note += (
+                        f"；你选的是文本源，但这一页上还有 {img_n} 张图，"
+                        "正文规则按文本配的"
+                    )
             elif img_rule:
                 note += f"；图片正文（检测到 {img_n} 张静态图，content 提取 img@src）"
         if not content_rule:
@@ -585,7 +694,9 @@ def analyze_detail_page(html: str, book_url: str, page_fetcher=None,
     return {"toc": toc, "content": content_rule, "note": note}
 
 
-def _apply_layer_guard(content_rule: str, toc: dict, note: str, page_facts: dict) -> tuple:
+def _apply_layer_guard(
+    content_rule: str, toc: dict, note: str, page_facts: dict
+) -> tuple:
     """按**这一页的档位**决定这条 CSS 正文规则给不给（十-5 编排的收口）。
 
     判据一句话：**给出去的规则必须在 App 的默认链路上真能取到值。**
@@ -603,20 +714,41 @@ def _apply_layer_guard(content_rule: str, toc: dict, note: str, page_facts: dict
     why = str(facts.get("why") or "")
     where = "（%s）" % why if why else ""
     if layer in ("L3", "L4") and not facts.get("challenge"):
-        action = ("用「网页视图」里的点选读那个全局对象，写成 webJs" if layer == "L3"
-                  else "抓那个接口 + JSONPath")
-        return "", toc, (note + "；正文规则先不给：这一页判到 %s%s，数据要%s才有，"
-                               "CSS 规则取不到东西" % (layer, where, action))
+        action = (
+            "用「网页视图」里的点选读那个全局对象，写成 webJs"
+            if layer == "L3"
+            else "抓那个接口 + JSONPath"
+        )
+        return (
+            "",
+            toc,
+            (
+                note + "；正文规则先不给：这一页判到 %s%s，数据要%s才有，"
+                "CSS 规则取不到东西" % (layer, where, action)
+            ),
+        )
     mark = str(facts.get("challenge") or "")
     if mark and content_rule:
         toc, paired = _with_webview(toc)
-        return content_rule, toc, (note + "；这一页有反爬验证（%s），正文页 URL %s"
-                                          "——App 渲染时自己会再过一次那道验证"
-                                          % (mark, "已带 webView" if paired else "已经带过 webView"))
+        return (
+            content_rule,
+            toc,
+            (
+                note + "；这一页有反爬验证（%s），正文页 URL %s"
+                "——App 渲染时自己会再过一次那道验证"
+                % (mark, "已带 webView" if paired else "已经带过 webView")
+            ),
+        )
     if layer == "L2" and content_rule:
         toc, paired = _with_webview(toc)
-        return content_rule, toc, (note + "；正文页 URL 已带 webView——这一页判到 L2%s，"
-                                          "数据要页面脚本跑起来才有" % where)
+        return (
+            content_rule,
+            toc,
+            (
+                note + "；正文页 URL 已带 webView——这一页判到 L2%s，"
+                "数据要页面脚本跑起来才有" % where
+            ),
+        )
     return content_rule, toc, note
 
 

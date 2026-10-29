@@ -23,8 +23,13 @@ SYSTEM_TYPE_TAGS = {"📖小说", "🎧听书", "🎨漫画", "📥下载"}
 #: （用户可见、可编辑，且源修好之后不会自动清掉，导出分组会变成
 #: 「📖小说,可用,证书问题」这种自相矛盾的状态）。`organizer.STATUS_GROUP_NAMES`
 #: 是写出去的那一侧，两张表必须同集合——`tests/test_tags.py` 有一致性用例钉着。
-SYSTEM_STATUS_TAG_ORDER: Tuple[str, ...] = ("可用", "待验证", "已失效", "需登录",
-                                            "需翻墙")
+SYSTEM_STATUS_TAG_ORDER: Tuple[str, ...] = (
+    "可用",
+    "待验证",
+    "已失效",
+    "需登录",
+    "需翻墙",
+)
 RULE_INCOMPLETE_TAG = "规则不完整"
 SYSTEM_QUALITY_TAG_ORDER: Tuple[str, ...] = (RULE_INCOMPLETE_TAG,)
 SYSTEM_STATUS_TAGS = set(SYSTEM_STATUS_TAG_ORDER)
@@ -49,8 +54,8 @@ RETIRED_STATUS_TAG_RENAMES = {
     #: 站点本身的问题仍在（`err_desc("cert")` 那句留作失败原因），只是不再单独成档。
     "证书问题": "待验证",
     "需验证": "需登录",
-    "需代理复检": "需翻墙",     # copy-ok: 换词表的键，逐字保留（AGENTS #17/#18）
-    "代理复检": "需翻墙",       # copy-ok: 同上
+    "需代理复检": "需翻墙",  # copy-ok: 换词表的键，逐字保留（AGENTS #17/#18）
+    "代理复检": "需翻墙",  # copy-ok: 同上
 }
 
 # 用户标签别名映射：新源带进来的别名先归一，再按已有标签过滤。
@@ -144,7 +149,9 @@ def _is_legacy_system_segment(segment: str) -> bool:
     # 漏认的后果不是显示错，而是被 `extract_user_tags_from_group` 当成
     # 用户标签写进 user_tags 且不再纠正。「需登录/需翻墙」虽已是现役名，
     # 也可能是旧数据里的写法，一并留在遗留集合。
-    if stripped in {"失效", "需登录", "需翻墙", "被墙"} | set(RETIRED_STATUS_TAG_RENAMES):
+    if stripped in {"失效", "需登录", "需翻墙", "被墙"} | set(
+        RETIRED_STATUS_TAG_RENAMES
+    ):
         return True
     if any(tag.startswith(prefix) for prefix in SYSTEM_TYPE_TAGS):
         return True
@@ -172,7 +179,9 @@ def split_system_user(tags) -> Tuple[List[str], List[str]]:
 
 def merge_group(system_tags, user_tags) -> str:
     """合并系统标签和用户标签，保序去重。"""
-    ordered = _dedupe(list(normalize_tags(system_tags)) + list(normalize_tags(user_tags)))
+    ordered = _dedupe(
+        list(normalize_tags(system_tags)) + list(normalize_tags(user_tags))
+    )
     return ",".join(ordered)
 
 
@@ -193,4 +202,3 @@ def normalize_group(group: str) -> str:
     """把任意历史分组规范化为系统标签在前、用户标签在后。"""
     system, user = split_system_user(parse_group_tags(group))
     return merge_group(system, user)
-

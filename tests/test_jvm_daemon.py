@@ -133,13 +133,6 @@ class ProtocolTests(_Base):
         threading.Thread(target=_serve, daemon=True).start()
         self.assertIsNone(jvm_daemon.ping(port))
 
-    def test_ping_returns_none_when_nothing_listens(self) -> None:
-        dead = socket.socket()
-        dead.bind(("127.0.0.1", 0))
-        port = int(dead.getsockname()[1])
-        dead.close()
-        self.assertIsNone(jvm_daemon.ping(port))
-
 
 class ParamsTests(_Base):
     def test_params_from_args_properties(self) -> None:

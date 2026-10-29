@@ -10,6 +10,7 @@ URL 规则的 ``{{key}}`` 求值、JS 规则的全局对象都不在它手上。
 优先常驻 daemon（op=rule_try，秒级）；daemon 不可用回落一次性 Gradle（先编译，
 一定跑得对，但慢）。执行体与协议见 Kotlin 侧 ``RuleTry.kt`` / ``AppServiceDaemon.kt``。
 """
+
 from __future__ import annotations
 
 import json
@@ -19,7 +20,7 @@ import re
 import uuid
 from typing import Any, Dict, Optional
 
-from core.jvm_daemon import DaemonError, ensure, _exchange
+from core.jvm_daemon import DaemonError, _exchange, ensure
 
 #: 页面 HTML / 源 JSON 的临时文件放这（daemon 从文件读：几百 KB 的正文不该挤一行 JSON）。
 #: 单独一个子目录：`app_probe/runs/` 归批量运行的目录，两边混放会让「运行目录保留策略」
@@ -42,19 +43,34 @@ UNFAITHFUL_PAGE_VARS_ABSENT = "page_vars_absent"
 #: 先按 `book_list` 切条目再逐条目取。单跑一条完整链验的是「整页第一个元素」，
 #: 答案与引擎不一致——那正是「快验说通过、落源后列表为空」（2026-10-26 实测）。
 UNFAITHFUL_NEEDS_CONTAINER = "needs_container"
-#: 容器只选中 1 条：列表容器该是「一个条目一条」，选中 1 条通常意味着规则写成了
-#: **整块容器**（`#chapterList_ul_1` 而不是 `#chapterList_ul_1 li`），引擎会把整块
-#: 当一个条目、把所有章节名挤进一条（实测 2026-10-26 发发漫画目录页：整块 count=1，
-#: 按条目 count=233）。**只提醒、不否决**：真实存在只有一条结果的页面。
-UNFAITHFUL_SINGLE_ITEM = "single_item"
-UNFAITHFUL_CODES = (UNFAITHFUL_RULE_EMPTY, UNFAITHFUL_MATERIAL_IS_SCRIPT,
-                    UNFAITHFUL_RESULT_ABSENT, UNFAITHFUL_PAGE_VARS_ABSENT,
-                    UNFAITHFUL_NEEDS_CONTAINER, UNFAITHFUL_SINGLE_ITEM)
+#: 这一页的目标**不在静态材料里**（层 L3/L4：运行时对象 / 接口取数）。取值类规则在这种
+#: 材料上跑出「取到空」，与「规则没选中」是两个方向相反的结论——前者说明材料读不到，
+#: 后者才说明规则错。实测 2026-10-28 发发漫画正文页：目标由 JS 从 base64 负载拼出来，
+#: DOM 里只有一张 `pic_loading.gif`，而快验报「取到空」，人会去改一条正确的规则。
+UNFAITHFUL_TARGET_IN_RUNTIME = "target_in_runtime"
+UNFAITHFUL_CODES = (
+    UNFAITHFUL_RULE_EMPTY,
+    UNFAITHFUL_MATERIAL_IS_SCRIPT,
+    UNFAITHFUL_RESULT_ABSENT,
+    UNFAITHFUL_PAGE_VARS_ABSENT,
+    UNFAITHFUL_NEEDS_CONTAINER,
+    UNFAITHFUL_TARGET_IN_RUNTIME,
+)
+
+#: 验**容器规则**时用的条目内探测规则：容器只要「选中几条」，条目里取什么不重要，
+#: 但必须能取到东西——空 `item_rule` 在 Kotlin 侧的缺省是 `text`，那是 DOM 的口径，
+#: JSON 元素没有 text（`{name=绍宋}` 是对象），恒取空会把**正确的**容器判成没选中。
+#: `@this` 是上游对「当前节点自身」的取值动作，DOM 与 JSON 都认。
+_PROBE_ITEM = "@this"
 
 
 def rule_shape(rule: str) -> str:
-    """规则形态：`container` / `selector` / `js_result`（`@js:` 且读 `result`）/
+    """规则形态：`container` / `selector` / `jsonpath` / `js_result`（`@js:` 且读 `result`）/
     `js_other` / `empty`。
+
+    `jsonpath` 是 `$.` 前缀（JSONPath 一族）。它**与材料无关**——不读 DOM，与
+    `container` / `js_other` 同理（进 `material.ALWAYS_VERIFIABLE`），所以要排在
+    选择器判断之前：`$.data.list[*]` 里没有 `@` 段，落到下面会被当成普通选择器。
 
     前端 `debugMaterial.js` 的 `ruleShape` 与这份同构——它只为显隐按钮，判据在后端。
     """
@@ -63,8 +79,13 @@ def rule_shape(rule: str) -> str:
         return "empty"
     if text.startswith("@js:"):
         return "js_result" if "result" in text else "js_other"
+    # JSONPath：`$.` / `$[` / `@json:`（上游 AnalyzeRule 的 `$` 分支）
+    if text.startswith(("$.", "$[", "@json:")):
+        return "jsonpath"
     # 列表容器规则（`class.list@tag.a`）：末段仍是选择器，不是取值；与 `getElements` 同一口径
-    if re.search(r"@(tag|class|id)\.", text) and not re.search(r"@(text|href|src|textNodes|ownText|html)$", text):
+    if re.search(r"@(tag|class|id)\.", text) and not re.search(
+        r"@(text|href|src|textNodes|ownText|html)$", text
+    ):
         return "container"
     return "selector"
 
@@ -84,19 +105,52 @@ def unfaithful_reason(material_kind: str, rule: str) -> str:
         return UNFAITHFUL_RULE_EMPTY
     if can_fast_verify(material_kind, shape):
         return ""
-    return (UNFAITHFUL_RESULT_ABSENT if shape == "js_result"
-            else UNFAITHFUL_MATERIAL_IS_SCRIPT)
+    return (
+        UNFAITHFUL_RESULT_ABSENT
+        if shape == "js_result"
+        else UNFAITHFUL_MATERIAL_IS_SCRIPT
+    )
+
+
+def unfaithful_after_run(out: Optional[Dict[str, Any]], verdict: str = "") -> str:
+    """跑完引擎**仍取到空**时，这个「空」是不是材料本身读不到目标：返回原因码，空串 = 结论可信。
+
+    入参是 `core.page_layer.material_verdict` 的**答案**，不是层码——「目标在不在
+    这份材料里」的判据只有那一份（消费侧自己解释层码，就会按自己的理解给它加语义：
+    实测 2026-10-28 把 `L3`（页面藏了负载）读成「目标不在 DOM 里」，于是对着一个渲染后
+    已有 34 张真图的 DOM 砍掉大纲、告诉模型「这里没有」）。
+
+    只在**否定结论**上改判：取到了东西就是取到了——材料够不够读，不影响已经读到的值。
+    """
+    from core.page_layer import VERDICT_NEEDS_RENDER
+
+    if str(verdict or "") != VERDICT_NEEDS_RENDER:
+        return ""
+    if out and (out.get("ok") or int(out.get("count") or 0) > 0):
+        return ""
+    return UNFAITHFUL_TARGET_IN_RUNTIME
 
 
 def refusal_result(reason_code: str) -> Dict[str, Any]:
     """快验「答不了」的返回体：**没跑引擎**。消费侧按码取词（AGENTS #24④）。"""
-    return {"ok": False, "unfaithful": True, "reason_code": reason_code,
-            "count": 0, "values": [], "error": ""}
+    return {
+        "ok": False,
+        "unfaithful": True,
+        "reason_code": reason_code,
+        "count": 0,
+        "values": [],
+        "error": "",
+    }
 
 
-def refusal_code(step: str, field: str, material_kind: str, rule: str,
-                 runtime: Optional[Dict[str, Any]] = None,
-                 source: Optional[Dict[str, Any]] = None) -> str:
+def refusal_code(
+    step: str,
+    field: str,
+    material_kind: str,
+    rule: str,
+    runtime: Optional[Dict[str, Any]] = None,
+    source: Optional[Dict[str, Any]] = None,
+) -> str:
     """这条快验**跑不跑得了**：返回原因码，空串 = 可以跑。**不跑引擎、不发请求。**
 
     三半判据（原先 HTTP 端点与 `agent_loop` 各写一遍，两处还会给出相反结论）：
@@ -109,14 +163,24 @@ def refusal_code(step: str, field: str, material_kind: str, rule: str,
     kind = field_kind(step, field) if field else "text"
     if kind == "script":
         return "" if (runtime or {}).get("page_vars") else UNFAITHFUL_PAGE_VARS_ABSENT
-    if kind != "list" and container_field(step) and not container_rule(source or {}, step):
+    if (
+        kind != "list"
+        and container_field(step)
+        and not container_rule(source or {}, step)
+    ):
         return UNFAITHFUL_NEEDS_CONTAINER
     return unfaithful_reason(material_kind, rule)
 
-def rule_try(source: Dict[str, Any], step: str, body: str, base_url: str,
-             rule: str, daemon_info: Optional[Dict[str, Any]] = None,
-             item_rule: str = "",
-             ) -> Dict[str, Any]:
+
+def rule_try(
+    source: Dict[str, Any],
+    step: str,
+    body: str,
+    base_url: str,
+    rule: str,
+    daemon_info: Optional[Dict[str, Any]] = None,
+    item_rule: str = "",
+) -> Dict[str, Any]:
     """跑一条规则。返回引擎的 ``{ok, values, count, error}``（形状闸门后）。
 
     ``item_rule`` 是**条目内规则**（相对条目元素，如 ``tag.a@href``）：引擎对
@@ -134,8 +198,15 @@ def rule_try(source: Dict[str, Any], step: str, body: str, base_url: str,
         try:
             daemon_info = ensure()
         except DaemonError as e:
-            return _gradle_fallback(src_path, body_path, step, rule, base_url,
-                                    "常驻引擎没就绪（%s）" % e, item_rule)
+            return _gradle_fallback(
+                src_path,
+                body_path,
+                step,
+                rule,
+                base_url,
+                "常驻引擎没就绪（%s）" % e,
+                item_rule,
+            )
     try:
         payload = {
             "id": int(uuid.uuid4().int % 1_000_000_000),
@@ -149,22 +220,41 @@ def rule_try(source: Dict[str, Any], step: str, body: str, base_url: str,
         }
         r = _exchange(payload, int(daemon_info["port"]), _DAEMON_TIMEOUT_SEC)
     except DaemonError as e:
-        return _gradle_fallback(src_path, body_path, step, rule, base_url,
-                                "常驻引擎没应答（%s）" % e, item_rule)
+        return _gradle_fallback(
+            src_path,
+            body_path,
+            step,
+            rule,
+            base_url,
+            "常驻引擎没应答（%s）" % e,
+            item_rule,
+        )
     finally:
         _cleanup(body_path, src_path)
     result = _gate(r.get("result"))
     if result is None:
         # daemon 跑了但应答形状不对：不是「规则失败」，是我们自己的协议问题——
         # 如实说，不回落（回落重跑大概率同样形状，白付一次编译）
-        return {"ok": False, "values": [], "count": 0,
-                "error": "引擎应答形状不对，轻量验证没跑成", "via": "daemon"}
+        return {
+            "ok": False,
+            "values": [],
+            "count": 0,
+            "error": "引擎应答形状不对，轻量验证没跑成",
+            "via": "daemon",
+        }
     result["via"] = "daemon"
     return result
 
 
-def _gradle_fallback(src_path: str, body_path: str, step: str, rule: str,
-                     base_url: str, note: str, item_rule: str = "") -> Dict[str, Any]:
+def _gradle_fallback(
+    src_path: str,
+    body_path: str,
+    step: str,
+    rule: str,
+    base_url: str,
+    note: str,
+    item_rule: str = "",
+) -> Dict[str, Any]:
     """一次性 Gradle 路径（`--try` 分派）：先编译再跑，慢但一定跑得对。
 
     参数文件写独立路径（不碰批量校验共用的 args.properties——那会被正在跑的
@@ -179,35 +269,69 @@ def _gradle_fallback(src_path: str, body_path: str, step: str, rule: str,
     # ↑ 依赖 src_path 恰好是「单后缀 .json」的文件名约定（_write_source 造的）：
     # with_suffix 会把 .json 整个换掉。src_path 形状变了这里要跟着改（契约测试
     # 钉着 _write_source 的命名）。
-    args_path = pathlib.Path(_try_dir()) / ("rule-try-%s.properties" % uuid.uuid4().hex[:12])
+    args_path = pathlib.Path(_try_dir()) / (
+        "rule-try-%s.properties" % uuid.uuid4().hex[:12]
+    )
     jvm_debug._write_args(
-        src_path, "try", out_path, timeout=60, args_path=args_path,
-        extra=[("try_body", pathlib.Path(body_path).as_posix()),
-               ("try_step", step),
-               ("try_rule", rule),
-               ("try_item", item_rule),
-               ("try_base", base_url)])
+        src_path,
+        "try",
+        out_path,
+        timeout=60,
+        args_path=args_path,
+        extra=[
+            ("try_body", pathlib.Path(body_path).as_posix()),
+            ("try_step", step),
+            ("try_rule", rule),
+            ("try_item", item_rule),
+            ("try_base", base_url),
+        ],
+    )
     try:
         env = {**os.environ, "LEGADO_APPSERVICE_ARGS": str(args_path)}
         p = subprocess.run(
-            ["cmd", "/c", str(jvm_debug.LAUNCHER), ":app:testAppDebugUnitTest",
-             "--tests", "io.legado.app.service.DebugServiceLauncher", "--rerun"],
-            cwd=str(jvm_debug.AGSVC), env=env, capture_output=True,
-            text=True, errors="replace", timeout=_GRADLE_TIMEOUT_MIN * 60)
+            [
+                "cmd",
+                "/c",
+                str(jvm_debug.LAUNCHER),
+                ":app:testAppDebugUnitTest",
+                "--tests",
+                "io.legado.app.service.DebugServiceLauncher",
+                "--rerun",
+            ],
+            cwd=str(jvm_debug.AGSVC),
+            env=env,
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=_GRADLE_TIMEOUT_MIN * 60,
+        )
         if p.returncode != 0:
-            return {"ok": False, "values": [], "count": 0,
-                    "error": "%s；慢速方式也没跑成（exit %s）" % (note, p.returncode),
-                    "via": "gradle"}
+            return {
+                "ok": False,
+                "values": [],
+                "count": 0,
+                "error": "%s；慢速方式也没跑成（exit %s）" % (note, p.returncode),
+                "via": "gradle",
+            }
         result = _gate(json.loads(pathlib.Path(out_path).read_text(encoding="utf-8")))
         if result is None:
-            return {"ok": False, "values": [], "count": 0,
-                    "error": note + "；引擎应答形状不对", "via": "gradle"}
+            return {
+                "ok": False,
+                "values": [],
+                "count": 0,
+                "error": note + "；引擎应答形状不对",
+                "via": "gradle",
+            }
         result["via"] = "gradle"
         return result
     except Exception as e:
-        return {"ok": False, "values": [], "count": 0,
-                "error": "%s；慢速方式失败：%s: %s" % (note, type(e).__name__, e),
-                "via": "gradle"}
+        return {
+            "ok": False,
+            "values": [],
+            "count": 0,
+            "error": "%s；慢速方式失败：%s: %s" % (note, type(e).__name__, e),
+            "via": "gradle",
+        }
     finally:
         _cleanup(body_path, src_path)
         pathlib.Path(out_path).unlink(missing_ok=True)
@@ -250,8 +374,14 @@ def synth_params(page_vars: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
-def webjs_check(source: Dict[str, Any], step: str, body: str, base_url: str, script: str,
-                page_vars: Dict[str, Any]) -> Dict[str, Any]:
+def webjs_check(
+    source: Dict[str, Any],
+    step: str,
+    body: str,
+    base_url: str,
+    script: str,
+    page_vars: Dict[str, Any],
+) -> Dict[str, Any]:
     """快验一段 webJs：把页面变量**合成**成 `params` 注入规则环境跑一遍。
 
     为什么能这样验：`webJs` 在引擎里跑在页面环境（读页面变量），而**页面变量的形状**
@@ -272,26 +402,39 @@ def webjs_check(source: Dict[str, Any], step: str, body: str, base_url: str, scr
     # 关键：**各只转一次**。多套一层会得到双重转义，Rhino 报
     # `unterminated string literal`（2026-10-23；真实材料带转义字符时才暴露）。
     params_literal = json.dumps(
-        json.dumps(synth_params(page_vars), ensure_ascii=False), ensure_ascii=False)
+        json.dumps(synth_params(page_vars), ensure_ascii=False), ensure_ascii=False
+    )
     # 脚本字面量要**多转一层反斜杠**：整条 `@js:` 文本在到达 Rhino 前会经过一次
     # JSON 传输（payload 的 rule 字段），那层会把两个反斜杠还原成一个。不补偿时
     # `join('\n')` 到引擎里变成真实换行，报 `unterminated string literal`
     # （2026-10-23 实测：`String.fromCharCode(10)` 能过、含反斜杠的写法不能）。
-    script_literal = json.dumps(str(script or ""), ensure_ascii=False).replace("\\\\", "\\\\\\\\")
+    script_literal = json.dumps(str(script or ""), ensure_ascii=False).replace(
+        "\\\\", "\\\\\\\\"
+    )
     inject = "var params=JSON.parse(%s);" % params_literal
     # 用 `new Function` 而不是 `eval`：`eval` 里顶层 `return` 是语法错（有些 webJs 写
     # `if (!x) return '';`），而 `new Function` 的 body 是函数体，`return` 合法，
     # 且 `result` 作为返回值拿出——与上游 `webJs` 的语义一致。
-    rule = ("@js:" + inject + " (new Function('var result; ' + %s + '; return result;'))()"
-            % script_literal)
+    rule = (
+        "@js:"
+        + inject
+        + " (new Function('var result; ' + %s + '; return result;'))()" % script_literal
+    )
     result = rule_try(source, step, body, base_url, rule)
-    result["synthetic"] = True       # 产出基于合成快照：语法验证，不是内容验证
+    result["synthetic"] = True  # 产出基于合成快照：语法验证，不是内容验证
     return result
 
 
-def fast_verify(source: Dict[str, Any], step: str, field: str, body: str, base_url: str,
-                rule: str, material_kind: str,
-                runtime: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def fast_verify(
+    source: Dict[str, Any],
+    step: str,
+    field: str,
+    body: str,
+    base_url: str,
+    rule: str,
+    material_kind: str,
+    runtime: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     """快验的**唯一执行入口**：HTTP `/rule-try` 与 `agent_loop._try` 都调它。
 
     调用方应先问 :func:`refusal_code`（不跑引擎、不受试次预算约束）。页面脚本那一路
@@ -315,8 +458,17 @@ def fast_verify(source: Dict[str, Any], step: str, field: str, body: str, base_u
     if container and field_kind(step, field) != "list":
         item = _entry_rule(rule, container)
         checked = rule_try(source, step, body, base_url, container, item_rule=item)
-        checked["rule"] = item          # 落规则用实际验过的那条（已剥掉重复前缀）
+        checked["rule"] = item  # 落规则用实际验过的那条（已剥掉重复前缀）
         return checked
+    if field and field_kind(step, field) == "list":
+        # 列表型字段自己就是容器：要的是「选中几条」，走单条路径等于把它当一个取值规则
+        # ——`$.data.list[*]` 在列表里是 2 条、在单条里是一个字符串化的整体（2026-10-27）。
+        # 条目内规则给 `@js:result`（取条目自身）：Kotlin 侧空 `item_rule` 的缺省是
+        # `text`，那是 DOM 的口径，**JSON 元素没有 text**（`{name=绍宋}` 是对象）→
+        # 恒取空，会把一条正确的容器规则判成「选中 2 条但没取到值」。
+        # `@js:result` 两种材料都取得到（DOM 拿到元素 HTML、JSON 拿到对象），
+        # 而验容器只需要「取到了没」。
+        return rule_try(source, step, body, base_url, rule, item_rule="@js:result")
     return rule_try(source, step, body, base_url, rule)
 
 
@@ -326,7 +478,7 @@ def untag(rule: str) -> str:
     别用 `str.lstrip("div ")`——它剥的是字符集，`division@tag.a` 会变成 `sion@tag.a`。
     """
     m = re.match(r"^[A-Za-z][A-Za-z0-9]*(?=[.#\[])", str(rule or ""))
-    return str(rule or "")[m.end():] if m else str(rule or "")
+    return str(rule or "")[m.end() :] if m else str(rule or "")
 
 
 def _entry_rule(rule: str, container: str) -> str:
@@ -340,7 +492,7 @@ def _entry_rule(rule: str, container: str) -> str:
         return text
     for head in (container, untag(container)):
         if head and text.startswith(head + "@"):
-            return text[len(head) + 1:]
+            return text[len(head) + 1 :]
     return text
 
 
@@ -356,8 +508,9 @@ def _write_source(source: Dict[str, Any]) -> str:
     p = pathlib.Path(_try_dir())
     p.mkdir(parents=True, exist_ok=True)
     f = p / ("rule-try-src-%s.json" % uuid.uuid4().hex[:12])
-    f.write_text(json.dumps([source], ensure_ascii=False), encoding="utf-8",
-                 newline="\n")
+    f.write_text(
+        json.dumps([source], ensure_ascii=False), encoding="utf-8", newline="\n"
+    )
     return str(f)
 
 
@@ -371,6 +524,7 @@ def _cleanup(*paths: str) -> None:
 
 def _try_dir() -> pathlib.Path:
     from core.paths import data_path
+
     return data_path(*_TRY_DIR)
 
 
@@ -384,7 +538,11 @@ def _gate(raw: Any) -> Optional[Dict[str, Any]]:
     ok = raw.get("ok")
     if not isinstance(ok, bool):
         return None
-    return {"ok": ok,
-            "values": [v[:200] for v in values[:5]],
-            "count": int(raw.get("count") or 0) if isinstance(raw.get("count"), (int, float)) else 0,
-            "error": str(raw.get("error") or "")[:200]}
+    return {
+        "ok": ok,
+        "values": [v[:200] for v in values[:5]],
+        "count": int(raw.get("count") or 0)
+        if isinstance(raw.get("count"), (int, float))
+        else 0,
+        "error": str(raw.get("error") or "")[:200],
+    }

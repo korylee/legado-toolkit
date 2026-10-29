@@ -81,7 +81,7 @@ _VALID_RESULT = "CASE WHEN json_valid(result_json) THEN result_json END"
 _VALID_PAYLOAD = "CASE WHEN json_valid(payload) THEN payload END"
 
 _JOB_LIGHT_COLUMNS = (
-    "id, kind, status, phase, progress, total, retry_of, expires_at,"
+    "id, kind, status, phase, progress_kind, progress, total, retry_of, expires_at,"
     " created_at, updated_at,"
     " json_extract(%s, '$.checked') AS result_checked,"
     " json_extract(%s, '$.dist.ok') AS result_ok,"
@@ -96,8 +96,13 @@ _JOB_LIGHT_COLUMNS = (
     # 单独冻结在 `payload.timeline_dir`。SQL 侧一次抽好，观测端不解析大块 payload/result。
     " COALESCE(json_extract(%s, '$.run_dir'),"
     " json_extract(%s, '$.manifest.run_dir')) AS result_run_dir,"
-    " json_extract(%s, '$.timeline_dir') AS result_timeline_dir"
-    % ((_VALID_RESULT,) * 6 + (_VALID_PAYLOAD,) * 3)
+    " json_extract(%s, '$.timeline_dir') AS result_timeline_dir,"
+    # 调试任务带的是**它当时用的那份源**（`payload.source.bookSourceUrl`）。抽出来是为了
+    # 按源找「最近一次调试」——编辑页要用它的页面材料做快验，而 `result_json` 上百 KB，
+    # 逐条 `get_job` 去解析等于让一次查询拖着几十份大对象。
+    # 它**不是**归一化过的（AGENTS #5）：比对时两侧都要走 `_normalize_url`。
+    " json_extract(%s, '$.source.bookSourceUrl') AS source_url_raw"
+    % ((_VALID_RESULT,) * 6 + (_VALID_PAYLOAD,) * 4)
 )
 DB_NAME = "sources.sqlite3"
 
@@ -315,6 +320,11 @@ class Store:
         # 任务阶段与 status 分开：status 表示生命周期，phase 表示当前执行位置。
         # 旧库补列后默认 queued，避免历史任务被误报成正在执行。
         ("phase", "TEXT NOT NULL DEFAULT 'queued'"),
+        # 进度数字的**语义**：'' = 未标（按 count 处理，与加这列之前完全一致）、
+        # "count" = 等量计数（已处理条数，百分比有意义）、
+        # "step" = 流水线段（一键生成的四段，各段时长不等，画百分比就是假的）。
+        # 界面据此决定「画百分比还是第 N/M 段」，不必按 kind 特判。
+        ("progress_kind", "TEXT NOT NULL DEFAULT ''"),
     ]}
 
     #: v_sources 视图每次重建：CREATE VIEW IF NOT EXISTS 不会更新已存在的视图定义
@@ -1317,7 +1327,7 @@ class Store:
                  expires, ts, ts))
 
     def update_job(self, job_id: str, status=None, progress=None, total=None,
-                   result=None, phase=None) -> None:
+                   result=None, phase=None, progress_kind=None) -> None:
         sets, args = ["updated_at = ?"], [now()]
         if status is not None:
             sets.append("status = ?")
@@ -1342,6 +1352,9 @@ class Store:
         if phase is not None:
             sets.append("phase = ?")
             args.append(str(phase))
+        if progress_kind is not None:
+            sets.append("progress_kind = ?")
+            args.append(str(progress_kind))
         args.append(job_id)
         with self.conn:
             self.conn.execute("UPDATE jobs SET %s WHERE id = ?" % ", ".join(sets), args)

@@ -25,7 +25,8 @@ import subprocess
 import threading
 import urllib.parse
 import time
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from collections.abc import Callable
+from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
 
 from core.app_debug import (build_steps, engine_pages, fetch_debug_pages, matched_map,
@@ -420,6 +421,28 @@ MATERIAL_UNKNOWN = "unknown"
 #: 所以它一定是没跑过页面脚本的静态 HTML——这不是「读不到」，是知道。
 #: 判据用它把「`@js:` 读 result」的规则拦掉（那种材料里没有 result，拿到的会是整页 HTML）。
 MATERIAL_FETCHED = "fetched_html"
+#: 整页就是一份 JSON（接口站：`searchUrl` 指向 `/api/search?...`，响应体直接是数据）。
+#: 判据是**内容本身能不能整页解析**（`_looks_like_json`），不是看 `Content-Type`——
+#: 侧车没带那个头，而「解析得动」正是我们唯一真正需要的事实（AGENTS #12：读不到就不猜）。
+MATERIAL_JSON = "json_body"
+
+
+def _looks_like_json(text: str) -> bool:
+    """整页是不是一份 JSON（首字符 `{` / `[` 且能整页解析）。
+
+    要**整页**解析成功，不是「里面有 `{`」：HTML 页里常嵌着 JSON（`<script>var d={...}`），
+    按「出现 `{`」判会把普通网页说成接口响应，然后拿 JSON 大纲去喂一份 DOM。
+    """
+    import json as _json
+
+    t = str(text or "").strip()
+    if not t or t[:1] not in ("{", "["):
+        return False
+    try:
+        _json.loads(t)
+    except (ValueError, TypeError):
+        return False
+    return True
 
 
 def material_kind(page: Any) -> str:
@@ -431,10 +454,15 @@ def material_kind(page: Any) -> str:
     两者都没有时看 `page.origin`：**我们另抓的**（`fetch`）一定是静态页（浏览器没参与），
     其余（引擎交回的、来源未知）只能说 `unknown`。
 
+    **JSON 先判**：接口站的响应体渲染与否都还是那份 JSON，按 DOM 那条链往下走会把
+    它当 HTML 喂大纲（`.html` 里只有一个 `<pre>`）。所以先看内容能不能整页解析。
+
     **不读源配置**：源里配了 `webJs` 但 URL 没开 `webView` 时那段脚本压根不生效、材料仍是
     真 DOM，按源判会把 DOM 说成脚本输出（AGENTS #12）。
     """
     page = page if isinstance(page, dict) else {}
+    if _looks_like_json(str(page.get("html") or "")):
+        return MATERIAL_JSON
     rendered = page.get("rendered")
     if rendered is False:
         return MATERIAL_STATIC
@@ -689,6 +717,15 @@ def run_jvm_debug(source: Dict[str, Any],
     #: None：「读不到传没传 JS」不是「没传 JS」（AGENTS #12）。
     out["render_js"] = (int(meta.get("shadow_last_js_len") or 0) > 0
                         if "shadow_last_js_len" in meta else None)
+    #: 页面**填完数据没**（侧车采样「图片地址指纹」判的）。False = 交回的材料是填充中的
+    #: 快照：实测 2026-10-28 发发漫画正文页 25 张图里 22 张还是 `pic_loading.gif`，
+    #: 而**两次张数都是 25**——任何计数类判据都看不出它没填完。老侧车没有这个键 → None
+    #: （「读不到」不许写成「没稳定」，AGENTS #12）。
+    out["settled"] = (bool(meta.get("shadow_last_settled"))
+                      if "shadow_last_settled" in meta else None)
+    #: 等待期采样了几次（诊断：1 = 第一次就一致，没白等）。
+    out["settle_samples"] = (int(meta.get("shadow_settle_samples") or 0)
+                             if "shadow_settle_samples" in meta else None)
     out["hint"] = str(meta.get("hint") or "")
     # 源级的**静态错配**（与这次抓取结果无关，读 Legado 源码才知道的那些）。
     # 判据一份在 `core.quality.static_misconfig_notes`——这里只是把它**接到用户眼前**：

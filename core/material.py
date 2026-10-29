@@ -25,12 +25,13 @@ from __future__ import annotations
 
 from typing import Dict, FrozenSet
 
-from core.jvm_debug import (MATERIAL_FETCHED, MATERIAL_RENDERED_DOM, MATERIAL_STATIC,
-                            MATERIAL_UNKNOWN, MATERIAL_WEBJS_OUTPUT)
+from core.jvm_debug import (MATERIAL_FETCHED, MATERIAL_JSON, MATERIAL_RENDERED_DOM,
+                            MATERIAL_STATIC, MATERIAL_UNKNOWN, MATERIAL_WEBJS_OUTPUT)
 
 #: 规则形态的取值域由 `core.rule_try.rule_shape` 产出。容器规则（`class.list@tag.a`，
-#: 列表型字段）与不读 `result` 的 JS 在任何材料上都成立——它们要的不是页面内容本身。
-ALWAYS_VERIFIABLE: FrozenSet[str] = frozenset({"container", "js_other"})
+#: 列表型字段）、JSONPath 与不读 `result` 的 JS 在任何材料上都成立——它们要的不是
+#: 页面内容本身（JSONPath 读的是响应体里的数据，不是 DOM 结构）。
+ALWAYS_VERIFIABLE: FrozenSet[str] = frozenset({"container", "js_other", "jsonpath"})
 
 
 #: 「这一步想干什么」。同一个材料种类对**两种目的**的答案可以相反——
@@ -77,6 +78,10 @@ MATERIALS: Dict[str, _Material] = {
         next_step={INTENT_STRUCTURE: "render_first", INTENT_CONTENT: "render_first"}),
     MATERIAL_UNKNOWN: _Material(MATERIAL_UNKNOWN, dom=True,
                                 allows=frozenset({"selector"})),
+    # 整页 JSON（接口站响应体）：**没有 DOM**，读选择器必然取空。能验的是 `$.` / `@json:`
+    # 那族（`rule_try.rule_shape` 给 `jsonpath`）与页面脚本——两者都不依赖 HTML 结构。
+    MATERIAL_JSON: _Material(MATERIAL_JSON, dom=False,
+                             allows=frozenset({"jsonpath", "js_result"})),
 }
 
 #: 认不出的种类（对端多了一种材料 / 空串）按最宽松的一档给：宁可多试一次，
@@ -91,6 +96,21 @@ def _material(kind: str) -> _Material:
 def can_fill_dom(kind: str) -> bool:
     """能不能在这份材料上当 DOM 用（找候选 / 压大纲）。"""
     return _material(kind).dom
+
+
+def is_post_render(kind: str) -> bool:
+    """这份材料是**渲染之后**的事实吗（页面脚本已经在真浏览器 / WebView 里跑过）。
+
+    为什么要单独问这一句：**页面的层**（`core.page_layer`）判的是**页面原文**的特征。
+    `L3` 的证据是「页面里藏了一段 base64 负载」——那段负载写在 `<script>` 里，**渲染后
+    依然在**（实测 2026-10-28 发发漫画：渲染后 DOM 里 34 张真图已就位，层照旧是 L3）。
+    所以「层说目标在运行时」这条结论**只在非渲染材料上成立**，消费侧必须两问一起问，
+    否则会对着已经有目标的 DOM 说「这里没有」。
+
+    `unknown` **不算**渲染过：侧车只记最后一次渲染的事实，判不了就是不渲染的默认——
+    宁可多渲染一次，也不要把「判不了」当成「已经渲染了」。
+    """
+    return str(kind or "") == MATERIAL_RENDERED_DOM
 
 
 def can_fast_verify(kind: str, shape: str) -> bool:

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""批量提议（suggest_many）的离线测试：一次调用出多字段、单字段失败不塌整批。
+"""批量提议（suggest.suggest）的离线测试：一次调用出多字段、单字段失败不塌整批。
 
 假客户端注入（不真调模型）；提示词是纯函数直接断言。
 """
@@ -8,7 +8,10 @@ from __future__ import annotations
 import asyncio
 import unittest
 
-from core.repair.suggest import build_batch_prompt, suggest_many
+from core.repair.suggest import build_batch_prompt, suggest
+from core.jvm_debug import MATERIAL_UNKNOWN
+from core.material import is_post_render
+from core.page_layer import VERDICT_NEEDS_RENDER, VERDICT_READABLE
 
 HTML = """<html><body>
 <h1 class="title">甲书</h1>
@@ -108,6 +111,37 @@ class SuggestManyTests(unittest.TestCase):
         self.assertIn("- name：书名", prompt)
         self.assertIn("- author：作者", prompt)
         self.assertIn("甲书", prompt)
+
+    def test_prompt_follows_the_material_verdict(self):
+        """材料答案说「先渲染」时：说清为什么，并且**不给 DOM 大纲**。
+
+        两件事同一条判据的两个面，所以合成一条：
+          - 明说是**否定性线索**：模型不知道自己的处境，就会给出语法完全成立、
+            却只取到占位物的规则（实测 2026-10-28 发发漫画正文页：材料是未渲染的静态页，
+            模型提 `#commicBox@html`，取到的正是容器里那张 `pic_loading.gif`）；
+          - 大纲要撤掉：目标不在这份材料里，2240 字符大纲只会让它在不存在的东西里找
+            （实测那次模型卡了 90 秒超时）。
+
+        而材料够读时两件事都反过来——上半条是**否定性**线索，没有它可说的就不许出。
+        """
+        stats = {"images": 10, "images_with_src": 10, "links": 30}
+        needs = build_batch_prompt({
+            "html": HTML, "step": "content", "step_label": "正文", "fields": [],
+            "material_kind": MATERIAL_UNKNOWN, "page_stats": stats,
+            "material_verdict": VERDICT_NEEDS_RENDER,
+            "page_layer_evidence": [
+                {"why": "长 base64 负载", "note": "页面把一大段负载藏在一个字符串里（base64）"}]})
+        self.assertIn("目标不在这一份材料里", needs)
+        self.assertIn("长 base64 负载", needs)
+        self.assertNotIn("页面 DOM 大纲", needs,
+                         "目标不在这份材料里时送大纲，等于让模型在不存在的东西里找")
+        # 材料里有目标：大纲是它的**主证据**，不许被这条顺手砍掉
+        readable = build_batch_prompt({
+            "html": HTML, "step": "content", "step_label": "正文", "fields": [],
+            "material_kind": MATERIAL_UNKNOWN, "page_stats": stats,
+            "material_verdict": VERDICT_READABLE})
+        self.assertNotIn("目标不在这一份材料里", readable)
+        self.assertIn("页面 DOM 大纲", readable)
 
     def test_prompt_carries_page_globals_when_given(self):
         """给了候选数据源就列出来（名字 + 类型 + 长度/键名），**绝不带值**。
@@ -214,7 +248,7 @@ class SuggestManyTests(unittest.TestCase):
     def test_parse_keeps_independent_fields(self):
         """多字段一次解析；某字段没给候选就缺席（不塌整批、不编默认）。"""
         client = FakeLLM(_ok_body())
-        out = asyncio.run(suggest_many(
+        out = asyncio.run(suggest(
             {"html": HTML, "step": "bookUrl", "step_label": "详情",
              "fields": FIELDS}, client=client))
         self.assertEqual(out["llm"], "ok")
@@ -225,7 +259,7 @@ class SuggestManyTests(unittest.TestCase):
     def test_bad_json_reports_original_text(self):
         """输出不是 JSON：llm=error、原因带原文前 200 字（AGENTS #4）。"""
         client = FakeLLM("我觉得应该是 class.title@text")
-        out = asyncio.run(suggest_many(
+        out = asyncio.run(suggest(
             {"html": HTML, "step": "bookUrl", "step_label": "详情",
              "fields": FIELDS}, client=client))
         self.assertEqual(out["llm"], "error")
